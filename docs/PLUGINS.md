@@ -100,7 +100,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 
 | Feature | Bare MCP | Plugin + setup |
 |---------|----------|----------------|
-| MCP tools available | 22 default (`engram mcp`) | 18 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 23 default (`engram mcp`) | 19 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
@@ -307,7 +307,7 @@ For the full HTTP API reference and CLI flag details, see [DOCS.md](../DOCS.md).
 
 ### HTTP endpoints
 
-All six `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
+All eight `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
 
 | Route | Purpose |
 |-------|---------|
@@ -315,6 +315,8 @@ All six `/conflicts/*` endpoints are served by `engram serve` on the local runti
 | `GET /conflicts/{relation_id}` | Single relation detail |
 | `GET /conflicts/stats` | Aggregate counts |
 | `POST /conflicts/scan` | Run scan (dry-run or apply) |
+| `POST /conflicts/judge` | Record a verdict on an existing pending relation surfaced by conflict detection |
+| `POST /conflicts/compare` | Persist an agent-supplied semantic verdict for two observation IDs |
 | `GET /conflicts/deferred` | List deferred queue |
 | `POST /conflicts/deferred/replay` | Trigger ReplayDeferred cycle |
 

@@ -13,6 +13,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | Section                                                   | What you'll find                                             |
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
+| [Documentation Authority](#documentation-authority)       | Which doc owns each contract and what must change together   |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
 | [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
@@ -38,6 +39,25 @@ For other docs:
 
 ---
 
+## Documentation Authority
+
+When documentation and code disagree, this table says which doc surface is canonical for each contract, where the code-level authority lives, and which sibling docs must change together with it.
+
+| Contract                               | Canonical doc surface               | Code authority                                                               | Must change together                                                                                                                       |
+| -------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| MCP tool inventory                     | DOCS.md "MCP Tools"                 | `internal/mcp/mcp.go` registrations + `ProfileAgent`/`ProfileAdmin`          | `docs/ARCHITECTURE.md` tool table; `docs/AGENT-SETUP.md` setup claims; `docs/PLUGINS.md` comparison table; README.md intent table (subset) |
+| Tool input schemas                     | DOCS.md per-tool sections           | `internal/mcp/testdata/tool-contract-v1.json` (test-enforced, additive-only) | (none)                                                                                                                                     |
+| SQLite schema                          | DOCS.md "Database Schema"           | `internal/store/store.go` `Store.migrate`                                    | (none)                                                                                                                                     |
+| Memory Protocol                        | `DOCS.md#memory-protocol-full-text` | (none; prose contract)                                                       | `skills/memory-protocol/SKILL.md`; `memoryProtocolMarkdown` embedded in `internal/setup`; `plugin/*/skills/memory/SKILL.md`                |
+| Setup instructions and per-agent paths | docs/AGENT-SETUP.md                 | `internal/setup/agents.go` + `setup.go`                                      | README.md setup table                                                                                                                      |
+| Plugin contracts                       | docs/PLUGINS.md                     | `plugin/*` assets, `internal/setup/plugins/`                                 | `docs/AGENT-SETUP.md` per-agent sections                                                                                                   |
+| HTTP API and CLI                       | DOCS.md HTTP API / CLI sections     | `internal/server/server.go` routes; `cmd/engram`                             | `docs/PLUGINS.md` conflicts table (subset)                                                                                                 |
+| Package ownership boundaries           | docs/CODEBASE-GUIDE.md              | (none; prose contract)                                                       | (none)                                                                                                                                     |
+
+Code and tests beat docs: `internal/mcp` owns agent-facing tool schemas, `internal/store` owns the durable schema, `internal/setup` owns install surfaces, and `plugin/*` translates host events without duplicating durable policy.
+
+---
+
 ## Database Schema
 
 ### Tables
@@ -51,6 +71,7 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
 - **sync_state** — one row per `target_key`, with lifecycle, sequence, retry/backoff, lease, error, success, and update metadata; **sync_mutations** — ordered mutation queue with target, project, entity, operation, payload, source, acknowledgement, and disposition metadata
+- **sync_delete_tombstones** — one row per deleted entity (PK `entity`, `entity_key`) with `session_id`, `project`, `deleted_at`, `hard_delete`, `active`, and `last_mutation_seq` metadata; the stored sequence marks how far the delete intent has already been emitted, so backfill re-emits a tombstone only when no newer delete mutation supersedes it. Applying a pulled upsert deactivates the tombstone without comparing sequences — apply is last-writer-wins
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
 - **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
