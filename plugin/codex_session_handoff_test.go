@@ -46,6 +46,8 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 				{name: "missing ID response", id: "runtime-session", body: `{"status":"created"}`},
 				{name: "unsuccessful response", id: "runtime-session", body: `{"id":"runtime-session","status":"failed"}`},
 				{name: "multiple responses", id: "runtime-session", body: `{} {"id":"runtime-session","status":"created"}`},
+				{name: "success with error", id: "runtime-session", body: `{"id":"runtime-session","status":"created","error":"denied"}`},
+				{name: "success with error code", id: "runtime-session", body: `{"id":"runtime-session","status":"created","error_code":"denied"}`},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					cwd := t.TempDir()
@@ -158,7 +160,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						if err := json.Unmarshal([]byte(line), &binding); err != nil || binding["session_id"] != tc.id {
 							t.Fatalf("identity did not round-trip exactly: %q (%v)", line, err)
 						}
-						for _, want := range []string{"mem_save", "mem_save_prompt", "mem_session_summary", "mem_session_end", "mem_capture_passive", "Reuse this exact", "across compaction"} {
+						for _, want := range []string{"mem_save", "mem_save_prompt", "mem_session_summary", "For mem_session_end, pass this same value as id.", "mem_capture_passive", "Reuse this exact", "across compaction"} {
 							if !strings.Contains(identity, want) {
 								t.Errorf("missing identity reuse instruction %q", want)
 							}
