@@ -214,8 +214,15 @@ func TestCmdMCPStdioFinalToolCallDrainsBeforeEOFShutdown(t *testing.T) {
 			"clientInfo":      map[string]any{"name": "test-client", "version": "1.0.0"},
 		},
 	})
-	if !scanner.Scan() {
-		t.Fatal("initialize response was not written")
+	initializeResponse := make(chan bool, 1)
+	go func() { initializeResponse <- scanner.Scan() }()
+	select {
+	case ok := <-initializeResponse:
+		if !ok {
+			t.Fatal("initialize response was not written")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for initialize response")
 	}
 
 	writeRequest(map[string]any{
