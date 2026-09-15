@@ -338,6 +338,133 @@ func TestBootstrapCompletionAuditsPersistBooleanIssuedToken(t *testing.T) {
 	}
 }
 
+func TestRecoverStrandedAdminTokenWithAuditReplacesUnusedActiveTokenWithOptIn(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+
+	admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "stranded-admin", DisplayName: "Stranded Admin"})
+	if err != nil {
+		t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+	}
+	if _, err := cs.CreateProjectGrant(ctx, CreateProjectGrantParams{PrincipalID: admin.PrincipalID, Project: "recovery-project", GrantedByPrincipalID: admin.PrincipalID}); err != nil {
+		t.Fatalf("CreateProjectGrant: %v", err)
+	}
+	orphaned, err := cs.CreatePrincipalToken(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_orphaned", TokenHash: "hmac-sha256:v1:orphaned", Name: "bootstrap", CreatedByPrincipalID: admin.PrincipalID})
+	if err != nil {
+		t.Fatalf("CreatePrincipalToken orphaned: %v", err)
+	}
+
+	replacement, err := cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_replacement", TokenHash: "hmac-sha256:v1:replacement", Name: "recovered", RevokeExisting: true}, AuthAuditEvent{
+		ActorSource: "bootstrap_cli",
+		Action:      "bootstrap.cli",
+		Outcome:     "success",
+		ReasonCode:  "stranded_admin_token_recovered",
+		Metadata:    map[string]any{"recovered": true, "token_prefix": "egc_live_replacement"},
+	})
+	if err != nil {
+		t.Fatalf("RecoverStrandedAdminTokenWithAudit: %v", err)
+	}
+	tokens, err := cs.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListPrincipalTokens: %v", err)
+	}
+	if len(tokens) != 2 || tokens[0].ID != orphaned.ID || tokens[0].RevokedAt == nil || tokens[0].LastUsedAt != nil || tokens[0].RevokedByPrincipalID != admin.PrincipalID || tokens[0].RevocationReason != "stranded_admin_token_replaced" || tokens[1].ID != replacement.ID || tokens[1].RevokedAt != nil {
+		t.Fatalf("expected revoked unused orphan and active replacement, got %+v", tokens)
+	}
+	grants, err := cs.ListProjectGrants(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListProjectGrants: %v", err)
+	}
+	assertProjects(t, grants, []string{"recovery-project"})
+	events, err := cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAuthAuditEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].TargetPrincipalID != admin.PrincipalID || events[0].ReasonCode != "stranded_admin_token_recovered" {
+		t.Fatalf("expected an atomic replacement recovery audit, got %+v", events)
+	}
+
+	nextReplacement, err := cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_second", TokenHash: "hmac-sha256:v1:second", Name: "second", RevokeExisting: true}, AuthAuditEvent{})
+	if err != nil {
+		t.Fatalf("retry after lost replacement output: %v", err)
+	}
+	tokens, err = cs.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListPrincipalTokens after retry: %v", err)
+	}
+	if len(tokens) != 3 || tokens[1].ID != replacement.ID || tokens[1].RevokedAt == nil || tokens[2].ID != nextReplacement.ID || tokens[2].RevokedAt != nil {
+		t.Fatalf("retry must revoke the lost replacement and create one active token, got %+v", tokens)
+	}
+	events, err = cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAuthAuditEvents after retry: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("retry must write a second canonical recovery audit, got %+v", events)
+	}
+	canonicalAudits := 0
+	for _, event := range events {
+		if event.ActorPrincipalID == "" && event.ActorSource == "bootstrap_cli" && event.TargetPrincipalID == admin.PrincipalID && event.Project == "" && event.Action == "bootstrap.cli" && event.Outcome == "success" && event.ReasonCode == "stranded_admin_token_recovered" {
+			canonicalAudits++
+		}
+	}
+	if canonicalAudits != 2 {
+		t.Fatalf("retry must write two canonical recovery audits, got %+v", events)
+	}
+	if _, err := cs.db.ExecContext(ctx, `UPDATE cloud_principal_tokens SET last_used_at = NOW() WHERE id = $1`, nextReplacement.ID); err != nil {
+		t.Fatalf("mark latest replacement used: %v", err)
+	}
+	_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_third", TokenHash: "hmac-sha256:v1:third", Name: "third", RevokeExisting: true}, AuthAuditEvent{})
+	if !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {
+		t.Fatalf("used replacement must not be recoverable, got %v", err)
+	}
+}
+
+func TestRecoverStrandedAdminTokenWithAuditIgnoresLookalikeAuditMarker(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+
+	admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "lookalike-admin", DisplayName: "Lookalike Admin"})
+	if err != nil {
+		t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+	}
+	other, err := cs.CreateHumanUser(ctx, CreateHumanUserParams{Username: "lookalike-member", DisplayName: "Lookalike Member", Role: PrincipalRoleMember})
+	if err != nil {
+		t.Fatalf("CreateHumanUser: %v", err)
+	}
+	if _, err := cs.CreatePrincipalToken(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_lookalike", TokenHash: "hmac-sha256:v1:lookalike", Name: "bootstrap", CreatedByPrincipalID: admin.PrincipalID}); err != nil {
+		t.Fatalf("CreatePrincipalToken orphaned: %v", err)
+	}
+	if err := cs.InsertAuthAuditEvent(ctx, AuthAuditEvent{ActorSource: "manual_test", TargetPrincipalID: other.PrincipalID, Action: "bootstrap.cli", Outcome: "success", ReasonCode: "stranded_admin_token_recovered"}); err != nil {
+		t.Fatalf("InsertAuthAuditEvent lookalike: %v", err)
+	}
+
+	_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_lookalike-replacement", TokenHash: "hmac-sha256:v1:lookalike-replacement", Name: "recovered", RevokeExisting: true}, AuthAuditEvent{
+		ActorPrincipalID: other.PrincipalID,
+		ActorSource:      "caller_supplied",
+		Project:          "caller-project",
+		Action:           "caller.action",
+		Outcome:          "denied",
+		ReasonCode:       "caller_reason",
+	})
+	if err != nil {
+		t.Fatalf("lookalike audit must not block the first explicit recovery: %v", err)
+	}
+	events, err := cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAuthAuditEvents: %v", err)
+	}
+	canonicalMarkers := 0
+	for _, event := range events {
+		if event.ActorPrincipalID == "" && event.ActorSource == "bootstrap_cli" && event.TargetPrincipalID == admin.PrincipalID && event.Project == "" && event.Action == "bootstrap.cli" && event.Outcome == "success" && event.ReasonCode == "stranded_admin_token_recovered" {
+			canonicalMarkers++
+		}
+	}
+	if canonicalMarkers != 1 {
+		t.Fatalf("expected exactly one canonical recovery marker, got %+v", events)
+	}
+}
+
 func TestRecoverStrandedAdminTokenWithAuditPreservesGrants(t *testing.T) {
 	ctx := context.Background()
 	cs := openIsolatedCloudStore(t)
@@ -420,7 +547,23 @@ func TestRecoverStrandedAdminTokenWithAuditRejectsUnsafeOrRepeatedState(t *testi
 			wantTokenCount: 1,
 		},
 		{
-			name: "revoked token row",
+			name: "used token row with opt-in",
+			setup: func(t *testing.T, cs *CloudStore, admin HumanUser) {
+				t.Helper()
+				token, err := cs.CreatePrincipalToken(context.Background(), CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_used", TokenHash: "hmac-sha256:v1:used", Name: "used", CreatedByPrincipalID: admin.PrincipalID})
+				if err != nil {
+					t.Fatalf("CreatePrincipalToken setup: %v", err)
+				}
+				if _, err := cs.db.ExecContext(context.Background(), `UPDATE cloud_principal_tokens SET last_used_at = NOW() WHERE id = $1`, token.ID); err != nil {
+					t.Fatalf("mark token used: %v", err)
+				}
+			},
+			params:         RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_rejected", TokenHash: "hmac-sha256:v1:rejected", RevokeExisting: true},
+			wantErr:        ErrStrandedAdminRecoveryIneligible.Error(),
+			wantTokenCount: 1,
+		},
+		{
+			name: "revoked token row with opt-in",
 			setup: func(t *testing.T, cs *CloudStore, admin HumanUser) {
 				t.Helper()
 				token, err := cs.CreatePrincipalToken(context.Background(), CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_revoked", TokenHash: "hmac-sha256:v1:revoked", Name: "revoked", CreatedByPrincipalID: admin.PrincipalID})
@@ -431,8 +574,23 @@ func TestRecoverStrandedAdminTokenWithAuditRejectsUnsafeOrRepeatedState(t *testi
 					t.Fatalf("RevokePrincipalToken setup: %v", err)
 				}
 			},
+			params:         RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_rejected", TokenHash: "hmac-sha256:v1:rejected", RevokeExisting: true},
 			wantErr:        ErrStrandedAdminRecoveryIneligible.Error(),
 			wantTokenCount: 1,
+		},
+		{
+			name: "multiple token rows with opt-in",
+			setup: func(t *testing.T, cs *CloudStore, admin HumanUser) {
+				t.Helper()
+				for _, suffix := range []string{"one", "two"} {
+					if _, err := cs.CreatePrincipalToken(context.Background(), CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_" + suffix, TokenHash: "hmac-sha256:v1:" + suffix, Name: suffix, CreatedByPrincipalID: admin.PrincipalID}); err != nil {
+						t.Fatalf("CreatePrincipalToken %s setup: %v", suffix, err)
+					}
+				}
+			},
+			params:         RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_rejected", TokenHash: "hmac-sha256:v1:rejected", RevokeExisting: true},
+			wantErr:        ErrStrandedAdminRecoveryIneligible.Error(),
+			wantTokenCount: 2,
 		},
 		{
 			name:    "empty token prefix",
@@ -536,8 +694,12 @@ func TestRecoverStrandedAdminTokenWithAuditRollsBackTokenWhenAuditFails(t *testi
 	if _, err := cs.CreateProjectGrant(ctx, CreateProjectGrantParams{PrincipalID: admin.PrincipalID, Project: "preserved-project", GrantedByPrincipalID: admin.PrincipalID}); err != nil {
 		t.Fatalf("CreateProjectGrant: %v", err)
 	}
+	orphaned, err := cs.CreatePrincipalToken(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_audit-orphaned", TokenHash: "hmac-sha256:v1:audit-orphaned", Name: "bootstrap", CreatedByPrincipalID: admin.PrincipalID})
+	if err != nil {
+		t.Fatalf("CreatePrincipalToken orphaned: %v", err)
+	}
 
-	_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_audit", TokenHash: "hmac-sha256:v1:audit"}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"raw_token": "must-not-persist"}})
+	_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_audit", TokenHash: "hmac-sha256:v1:audit", RevokeExisting: true}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"raw_token": "must-not-persist"}})
 	if !errors.Is(err, ErrSensitiveAuditMetadata) {
 		t.Fatalf("expected sensitive audit metadata error, got %v", err)
 	}
@@ -545,8 +707,8 @@ func TestRecoverStrandedAdminTokenWithAuditRollsBackTokenWhenAuditFails(t *testi
 	if err != nil {
 		t.Fatalf("ListPrincipalTokens: %v", err)
 	}
-	if len(tokens) != 0 {
-		t.Fatalf("failed recovery audit must roll back token creation, got %+v", tokens)
+	if len(tokens) != 1 || tokens[0].ID != orphaned.ID || tokens[0].RevokedAt != nil {
+		t.Fatalf("failed recovery audit must roll back the replacement and orphan revocation, got %+v", tokens)
 	}
 	grants, err := cs.ListProjectGrants(ctx, admin.PrincipalID)
 	if err != nil {
@@ -607,6 +769,84 @@ func TestPrincipalTokenIssuanceSerializesWithStrandedRecoveryEligibility(t *test
 			_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_recovery-race", TokenHash: "hmac-sha256:v1:recovery-race"}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
 			if !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {
 				t.Fatalf("recovery must see the serialized normal issuance and refuse, got %v", err)
+			}
+		})
+	}
+}
+
+func TestHumanCreationSerializesWithStrandedRecoveryEligibility(t *testing.T) {
+	cases := []struct {
+		name       string
+		role       string
+		serialized bool
+	}{
+		{name: "admin creation waits for recovery eligibility", role: PrincipalRoleAdmin, serialized: true},
+		{name: "member creation does not wait for recovery eligibility", role: PrincipalRoleMember},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := openIsolatedCloudStore(t)
+			if _, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "recovery-target", DisplayName: "Recovery Target"}); err != nil {
+				t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+			}
+
+			recovery, err := cs.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin recovery eligibility tx: %v", err)
+			}
+			defer func() { _ = recovery.Rollback() }()
+			if _, err := lockedEnabledHumanAdminIDsTx(ctx, recovery); err != nil {
+				t.Fatalf("lock recovery admin rows: %v", err)
+			}
+			if _, err := recovery.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+				t.Fatalf("acquire recovery eligibility guard: %v", err)
+			}
+			adminIDs, err := lockedEnabledHumanAdminIDsTx(ctx, recovery)
+			if err != nil {
+				t.Fatalf("final recovery eligibility read: %v", err)
+			}
+			if len(adminIDs) != 1 {
+				t.Fatalf("expected one admin at final recovery eligibility read, got %d", len(adminIDs))
+			}
+
+			created := make(chan error, 1)
+			go func() {
+				_, err := cs.CreateHumanUser(ctx, CreateHumanUserParams{Username: "concurrent-" + tt.role, DisplayName: "Concurrent " + tt.role, Role: tt.role})
+				created <- err
+			}()
+			if tt.serialized {
+				waitForActiveAdminGuardWaiter(t, cs.db)
+				select {
+				case err := <-created:
+					t.Fatalf("admin creation committed while recovery held final eligibility guard: %v", err)
+				default:
+				}
+			} else {
+				select {
+				case err := <-created:
+					if err != nil {
+						t.Fatalf("member creation while recovery held guard: %v", err)
+					}
+				case <-time.After(lockOrderOperationTimeout):
+					t.Fatal("member creation was unnecessarily serialized by recovery eligibility guard")
+				}
+			}
+
+			if err := recovery.Commit(); err != nil {
+				t.Fatalf("release recovery eligibility guard: %v", err)
+			}
+			if tt.serialized {
+				if err := <-created; err != nil {
+					t.Fatalf("admin creation after recovery guard release: %v", err)
+			}
+			}
+			_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_recovery-race-" + tt.role, TokenHash: "hmac-sha256:v1:recovery-race-" + tt.role}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
+			if tt.serialized && !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {
+				t.Fatalf("recovery must see the serialized admin creation and refuse, got %v", err)
+			}
+			if !tt.serialized && err != nil {
+				t.Fatalf("recovery must remain eligible after concurrent member creation, got %v", err)
 			}
 		})
 	}

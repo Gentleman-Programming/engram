@@ -66,7 +66,8 @@ type cloudBootstrapAdminArgs struct {
 }
 
 type cloudBootstrapRecoverTokenArgs struct {
-	name string
+	name           string
+	revokeExisting bool
 }
 
 func cmdCloudBootstrap() {
@@ -92,9 +93,10 @@ func cmdCloudBootstrap() {
 
 func printCloudBootstrapUsage() {
 	fmt.Println("usage: engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]")
-	fmt.Println("       engram cloud bootstrap recover-token [--name <name>]")
+	fmt.Println("       engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]")
 	fmt.Println("admin creates the first managed admin for a self-hosted cloud deployment")
 	fmt.Println("recover-token issues one token for the eligible stranded managed admin")
+	fmt.Println("--revoke-existing replaces exactly one unused active bootstrap token")
 }
 
 func cmdCloudBootstrapAdmin() {
@@ -265,8 +267,10 @@ func cmdCloudBootstrapAdmin() {
 
 // cmdCloudBootstrapRecoverToken repairs only the partial bootstrap state where
 // the sole enabled managed human admin has no token anywhere in the deployment.
-// Eligibility and token-plus-audit atomicity are enforced by cloudstore; this
-// command only generates and hashes the one-time credential before that call.
+// --revoke-existing explicitly permits replacement of exactly one unused active
+// bootstrap token. Eligibility and token-plus-audit atomicity are enforced by
+// cloudstore; this command only generates and hashes the one-time credential
+// before that call.
 func cmdCloudBootstrapRecoverToken() {
 	args, err := parseCloudBootstrapRecoverTokenArgs(os.Args[4:])
 	if err != nil {
@@ -311,9 +315,10 @@ func cmdCloudBootstrapRecoverToken() {
 		name = "cli-bootstrap-recovery"
 	}
 	_, err = cs.RecoverStrandedAdminTokenWithAudit(context.Background(), cloudstore.RecoverStrandedAdminTokenParams{
-		TokenPrefix: managedToken.Prefix,
-		TokenHash:   tokenHash,
-		Name:        name,
+		TokenPrefix:    managedToken.Prefix,
+		TokenHash:      tokenHash,
+		Name:           name,
+		RevokeExisting: args.revokeExisting,
 	}, cloudstore.AuthAuditEvent{
 		ActorSource: string(cloudauth.PrincipalSourceBootstrapCLI),
 		Action:      cloudBootstrapAuditAction,
@@ -427,6 +432,8 @@ func parseCloudBootstrapRecoverTokenArgs(args []string) (cloudBootstrapRecoverTo
 			if out.name == "" {
 				return out, fmt.Errorf("--name requires a non-empty value")
 			}
+		case "--revoke-existing":
+			out.revokeExisting = true
 		default:
 			return out, fmt.Errorf("unknown flag: %s", args[i])
 		}

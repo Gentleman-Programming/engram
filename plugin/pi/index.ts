@@ -133,6 +133,7 @@ interface SessionBody {
   id: string;
   project: string;
   directory: string;
+  ownership_mode: "project_owned";
 }
 
 interface PromptBody {
@@ -194,6 +195,34 @@ class EngramHttpError extends Error {
     this.status = status;
     this.data = data;
   }
+}
+
+class SessionProjectConflictError extends Error {
+  readonly sessionId: string;
+  readonly ownerProject: string;
+  readonly requestedProject: string;
+
+  constructor(sessionId: string, ownerProject: string, requestedProject: string) {
+    super(`Pi runtime session ${sessionId} belongs to Engram project ${ownerProject}, not ${requestedProject}. Start a fresh Pi session in ${requestedProject} before capturing memory.`);
+    this.name = "SessionProjectConflictError";
+    this.sessionId = sessionId;
+    this.ownerProject = ownerProject;
+    this.requestedProject = requestedProject;
+  }
+}
+
+function sessionProjectConflictFromResponse(error: unknown, sessionId: string, requestedProject: string): SessionProjectConflictError | undefined {
+  if (!(error instanceof EngramHttpError) || error.status !== 409 || !error.data || typeof error.data !== "object") return undefined;
+  const data = error.data as Record<string, unknown>;
+  const ownerProject = typeof data.owner_project === "string" ? data.owner_project : "";
+  if (
+    data.code !== "session_project_conflict"
+    || data.session_id !== sessionId
+    || data.requested_project !== requestedProject
+    || ownerProject.length === 0
+    || ownerProject === requestedProject
+  ) return undefined;
+  return new SessionProjectConflictError(sessionId, ownerProject, requestedProject);
 }
 
 // Node rejects an AbortSignal.timeout() fetch with a DOMException named "TimeoutError",
@@ -344,10 +373,14 @@ function projectCurrentUnsupportedError(cwd: string): CurrentProjectResponse {
   };
 }
 
-async function ensureSessionBestEffort(sessionId: string, sessionProject = project): Promise<void> {
+async function ensureSessionBestEffort(sessionId: string, sessionProject = project): Promise<boolean> {
   try {
     await ensureSession(sessionId, sessionProject);
-  } catch {}
+    return true;
+  } catch (error) {
+    warnSessionProjectConflictOnce(error);
+    return false;
+  }
 }
 
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
@@ -733,31 +766,63 @@ const observedRuntimeSessionIDs = new Set<string>();
 let runtimeSessionIdentityAmbiguous = false;
 
 const knownSessions = new Set<string>();
+const registeredSessionProjects = new Map<string, string>();
 const sessionRegistrationsInFlight = new Map<string, Promise<void>>();
+const sessionRegistrationProjects = new Map<string, string>();
+const sessionEndingsInFlight = new Map<string, Promise<unknown>>();
+const warnedSessionProjectConflicts = new Set<string>();
 const toolCounts = new Map<string, number>();
+
+function sessionProjectConflict(sessionId: string, sessionProject: string): SessionProjectConflictError | undefined {
+  const ownerProject = registeredSessionProjects.get(sessionId) || sessionRegistrationProjects.get(sessionId);
+  return ownerProject && ownerProject !== sessionProject
+    ? new SessionProjectConflictError(sessionId, ownerProject, sessionProject)
+    : undefined;
+}
+
+function warnSessionProjectConflictOnce(error: unknown): void {
+  if (!(error instanceof SessionProjectConflictError)) return;
+  const key = `${error.sessionId}\u0000${error.ownerProject}\u0000${error.requestedProject}`;
+  if (warnedSessionProjectConflicts.has(key)) return;
+  warnedSessionProjectConflicts.add(key);
+  warnEngramFailure("/sessions", error);
+}
 
 async function ensureSession(sessionId: string, sessionProject = project, fetch: EngramFetcher = engramFetch): Promise<void> {
   const key = `${sessionProject}:${sessionId}`;
-  if (!sessionId || knownSessions.has(key)) return;
+  if (!sessionId) return;
+  if (knownSessions.has(`\u0000closing:${sessionId}`)) throw new Error(`Pi runtime session ${sessionId} is closing`);
+  const conflict = sessionProjectConflict(sessionId, sessionProject);
+  if (conflict) throw conflict;
+  if (knownSessions.has(key)) return;
 
   const existingRegistration = sessionRegistrationsInFlight.get(key);
   if (existingRegistration) return existingRegistration;
 
   const registration = (async () => {
-    const body: SessionBody = { id: sessionId, project: sessionProject, directory };
-    const acknowledgement = await fetch("/sessions", { method: "POST", body });
+    const body: SessionBody = { id: sessionId, project: sessionProject, directory, ownership_mode: "project_owned" };
+    let acknowledgement: unknown;
+    try {
+      acknowledgement = await fetch("/sessions", { method: "POST", body });
+    } catch (error) {
+      throw sessionProjectConflictFromResponse(error, sessionId, sessionProject) || error;
+    }
     if (acknowledgement === null) {
       throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${sessionId}`);
     }
+    if (knownSessions.has(`\u0000closing:${sessionId}`)) throw new Error(`Pi runtime session ${sessionId} is closing`);
+    registeredSessionProjects.set(sessionId, sessionProject);
     knownSessions.add(key);
   })();
   sessionRegistrationsInFlight.set(key, registration);
+  sessionRegistrationProjects.set(sessionId, sessionProject);
 
   try {
     await registration;
   } finally {
     if (sessionRegistrationsInFlight.get(key) === registration) {
       sessionRegistrationsInFlight.delete(key);
+      if (!registeredSessionProjects.has(sessionId)) sessionRegistrationProjects.delete(sessionId);
     }
   }
 }
@@ -814,10 +879,49 @@ async function refreshProjectDetection(cwd: string, fetch: EngramFetcher = engra
   applyDetectedProject(await detectServerProject(cwd, fetch, signal));
 }
 
+function hasKnownSession(sessionId: string): boolean {
+  return [...knownSessions].some((key) => key !== `\u0000closing:${sessionId}` && key.endsWith(`:${sessionId}`));
+}
+
 function forgetKnownSession(sessionId: string): void {
   knownSessions.delete(sessionId);
+  registeredSessionProjects.delete(sessionId);
+  sessionRegistrationProjects.delete(sessionId);
   for (const key of knownSessions) {
-    if (key.endsWith(`:${sessionId}`)) knownSessions.delete(key);
+    if (key !== `\u0000closing:${sessionId}` && key.endsWith(`:${sessionId}`)) knownSessions.delete(key);
+  }
+}
+
+function hasSessionRegistrationInFlight(sessionId: string): boolean {
+  return [...sessionRegistrationsInFlight.keys()].some((key) => key.endsWith(`:${sessionId}`));
+}
+
+async function waitForSessionRegistration(sessionId: string): Promise<void> {
+  const registrations = [...sessionRegistrationsInFlight.entries()]
+    .filter(([key]) => key.endsWith(`:${sessionId}`))
+    .map(([, registration]) => registration.catch(() => undefined));
+  await Promise.all(registrations);
+}
+
+async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>): Promise<unknown> {
+  const existing = sessionEndingsInFlight.get(sessionId);
+  if (existing) return existing;
+
+  const registrationWasInFlight = hasSessionRegistrationInFlight(sessionId);
+  const ending = (async () => {
+    await waitForSessionRegistration(sessionId);
+    if (!registrationWasInFlight && !hasKnownSession(sessionId)) return null;
+    try {
+      return await end();
+    } finally {
+      forgetKnownSession(sessionId);
+    }
+  })();
+  sessionEndingsInFlight.set(sessionId, ending);
+  try {
+    return await ending;
+  } finally {
+    if (sessionEndingsInFlight.get(sessionId) === ending) sessionEndingsInFlight.delete(sessionId);
   }
 }
 
@@ -1176,11 +1280,18 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         method: "POST",
         body: { id: params.id, project, directory: params.directory || directory || ctx.cwd },
       });
-    case "mem_session_end":
-      return fetch(`/sessions/${encodeURIComponent(String(params.id))}/end`, {
+    case "mem_session_end": {
+      const endedSessionID = String(params.id);
+      const pendingEnd = sessionEndingsInFlight.get(endedSessionID);
+      if (pendingEnd) return pendingEnd;
+      const end = () => fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
         method: "POST",
         body: { summary: params.summary || "" },
       });
+      return endedSessionID === sessionId && (hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID))
+        ? endRegisteredSessionOnce(endedSessionID, end)
+        : end();
+    }
     case "mem_current_project": {
       const cwd = String(params.cwd || ctx.cwd);
       try {
@@ -1275,6 +1386,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch), signal);
     const timedOutMethod = transport.timedOutMethod();
     if (timedOutMethod) throw new Error(unreachableMessage(timedOutMethod));
+
     const result = { content: [{ type: "text" as const, text: textResult(data, toolName) }], details: { data } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
       const errorResult = { ...result, isError: true };
@@ -1321,7 +1433,8 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 export default function registerEngram(pi: ExtensionAPI) {
   registerMemoryTools(pi);
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
-    observeRuntimeSessionID(ctx);
+    const sessionId = observeRuntimeSessionID(ctx);
+    if (sessionId) knownSessions.delete(`\u0000closing:${sessionId}`);
     const ready = await initOnceForHook(ctx.cwd);
     try {
       (ctx as MemoryToolContext).ui?.setStatus?.("engram", `🧠 ${project} · ${ready ? "ready" : "offline"}`);
@@ -1331,6 +1444,15 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event: unknown, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
     if (!sessionId) return;
+    knownSessions.add(`\u0000closing:${sessionId}`);
+    try {
+      await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
+        `/sessions/${encodeURIComponent(sessionId)}/end`,
+        { method: "POST", body: { summary: "" } },
+      ));
+    } catch (error) {
+      warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error);
+    }
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
     forgetSelfHealContext(sessionId);
@@ -1359,10 +1481,12 @@ export default function registerEngram(pi: ExtensionAPI) {
       warnEngramFailure("/sessions", error);
       return;
     }
-    if (soleActiveRuntimeSessionID() !== sessionId) return;
+    if (soleActiveRuntimeSessionID() !== sessionId || knownSessions.has(`\u0000closing:${sessionId}`)) return;
 
     const outcome = await archiveCompactionSummary(sessionId, summary);
-    const context = soleActiveRuntimeSessionID() === sessionId ? await loadCompactionRecoveryContext(sessionId) : undefined;
+    const context = !knownSessions.has(`\u0000closing:${sessionId}`) && soleActiveRuntimeSessionID() === sessionId
+      ? await loadCompactionRecoveryContext(sessionId)
+      : undefined;
     pendingRecoveryNotice = { sessionId, content: buildRecoveryNotice(project, context, outcome) };
   });
 
@@ -1383,7 +1507,7 @@ export default function registerEngram(pi: ExtensionAPI) {
       return { systemPrompt };
     }
     if (sessionId && finalContent && finalContent.length > 10) {
-      await ensureSessionBestEffort(sessionId);
+      if (!(await ensureSessionBestEffort(sessionId)) || knownSessions.has(`\u0000closing:${sessionId}`)) return { systemPrompt };
       const body: PromptBody = {
         session_id: sessionId,
         content: stripPrivateTags(truncate(finalContent, 2000)),
@@ -1404,7 +1528,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     await refreshProjectDetection(ctx.cwd);
     if (!sessionId || projectDetectionPending || projectResolutionError) return;
 
-    await ensureSessionBestEffort(sessionId);
+    if (!(await ensureSessionBestEffort(sessionId)) || knownSessions.has(`\u0000closing:${sessionId}`)) return;
     toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1);
 
     if (event.result === undefined) return;
@@ -1414,7 +1538,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     } catch {
       return;
     }
-    if (!content || content.length <= 50) return;
+    if (!content || content.length <= 50 || knownSessions.has(`\u0000closing:${sessionId}`)) return;
 
     const body: PassiveCaptureBody = {
       session_id: sessionId,

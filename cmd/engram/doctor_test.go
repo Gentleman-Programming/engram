@@ -222,6 +222,88 @@ func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
 	assertDoctorRepairProject(t, cfg, "repair-s1", "engram")
 }
 
+func TestCmdDoctorRepairCleansForeignSyncTargetsWithoutDroppingJournal(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("valid"); err != nil {
+		t.Fatalf("enroll valid project: %v", err)
+	}
+	if err := s.CreateSession("foreign-target-session", "valid", "/work/valid"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	observationID, err := s.AddObservation(store.AddObservationParams{SessionID: "foreign-target-session", Type: "decision", Title: "preserve", Content: "local data", Project: "valid", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO sync_state (target_key, lifecycle, updated_at) VALUES ('satellite:stale', 'idle', datetime('now'));
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES ('satellite:stale', 'observation', 'foreign-journal', 'upsert', '{"sync_id":"foreign-journal","project":"valid"}', 'local', 'valid');`); err != nil {
+		t.Fatalf("seed foreign target: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seeded store: %v", err)
+	}
+
+	run := func(args ...string) map[string]any {
+		t.Helper()
+		withArgs(t, args...)
+		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatalf("doctor stderr=%q", stderr)
+		}
+		return decodeRepairPlan(t, stdout)
+	}
+	withArgs(t, "engram", "doctor", "--json", "--check", "sync_target_closed_space")
+	beforeOut, beforeErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if beforeErr != "" || decodeDoctorReport(t, beforeOut)["status"] != "error" {
+		t.Fatalf("before repair stderr=%q report=%s", beforeErr, beforeOut)
+	}
+
+	for _, mode := range []string{"--plan", "--dry-run"} {
+		plan := run("engram", "doctor", "repair", "--project", "valid", "--check", "sync_target_closed_space", mode)
+		if plan["status"] == "noop" || len(plan["target_actions"].([]any)) != 1 {
+			t.Fatalf("%s plan=%v", mode, plan)
+		}
+	}
+	applied := run("engram", "doctor", "repair", "--project", "valid", "--check", "sync_target_closed_space", "--apply")
+	if applied["status"] != "applied" || len(applied["target_actions"].([]any)) != 1 {
+		t.Fatalf("apply=%v", applied)
+	}
+	actual := applied["target_actions"].([]any)[0].(map[string]any)
+	if actual["retargeted_mutations"] != float64(1) || actual["retained_mutations"] != float64(0) || actual["state_removed"] != true {
+		t.Fatalf("apply action=%v", actual)
+	}
+	withArgs(t, "engram", "doctor", "--json", "--check", "sync_target_closed_space")
+	afterOut, afterErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if afterErr != "" || decodeDoctorReport(t, afterOut)["status"] != "ok" {
+		t.Fatalf("after repair stderr=%q report=%s", afterErr, afterOut)
+	}
+
+	reopened, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened store: %v", err)
+		}
+	})
+	if _, err := reopened.GetObservation(observationID); err != nil {
+		t.Fatalf("cleanup removed observation: %v", err)
+	}
+	var target, payload string
+	if err := reopened.DB().QueryRow(`SELECT target_key, payload FROM sync_mutations WHERE entity_key = 'foreign-journal'`).Scan(&target, &payload); err != nil {
+		t.Fatalf("read preserved journal: %v", err)
+	}
+	if target != store.DefaultSyncTargetKey || payload != `{"sync_id":"foreign-journal","project":"valid"}` {
+		t.Fatalf("journal changed target=%q payload=%q", target, payload)
+	}
+}
+
 func TestCmdDoctorRepairInvalidSessionIdentityReportsExplicitImpossibility(t *testing.T) {
 	cfg := testConfig(t)
 	s, err := store.New(cfg)
@@ -423,12 +505,12 @@ func TestCmdDoctorInvalidCheckFailsLoudly(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorJSONMatchesMemDoctorEnvelope(t *testing.T) {
+func TestCmdDoctorJSONMatchesMemDoctorEnvelopeForAmbiguousRuntimeSessions(t *testing.T) {
 	cfg := testConfig(t)
-	otherRepo := newDoctorGitRepo(t, "other")
-	seedDoctorSession(t, cfg, "manual-save-engram", "engram", otherRepo)
+	seedDoctorSession(t, cfg, "runtime-a", "engram", "/work/engram")
+	seedDoctorSession(t, cfg, "runtime-b", "engram", "/work/engram")
 
-	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "session_project_directory_mismatch")
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "ambiguous_active_runtime_sessions")
 	cliStdout, cliStderr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if cliStderr != "" {
 		t.Fatalf("cli stderr=%q", cliStderr)
@@ -436,6 +518,9 @@ func TestCmdDoctorJSONMatchesMemDoctorEnvelope(t *testing.T) {
 	var cliEnvelope map[string]any
 	if err := json.Unmarshal([]byte(cliStdout), &cliEnvelope); err != nil {
 		t.Fatalf("cli json invalid: %v\n%s", err, cliStdout)
+	}
+	if cliEnvelope["status"] != "warning" {
+		t.Fatalf("cli envelope=%v, want ambiguous-session warning", cliEnvelope)
 	}
 
 	s, err := store.New(cfg)
@@ -445,7 +530,7 @@ func TestCmdDoctorJSONMatchesMemDoctorEnvelope(t *testing.T) {
 	defer s.Close()
 	mcpRes, err := engrammcp.DoctorToolHandler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
-		"check":   "session_project_directory_mismatch",
+		"check":   "ambiguous_active_runtime_sessions",
 	}}})
 	if err != nil {
 		t.Fatalf("mem_doctor handler: %v", err)
@@ -588,6 +673,22 @@ func TestCmdDoctorRepairDefaultsSourceObservationRepairToDryRun(t *testing.T) {
 	}
 }
 
+func TestCmdDoctorRepairApplyNoOpReportsNoAction(t *testing.T) {
+	cfg := testConfig(t)
+	withArgs(t, "engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--apply")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	report := decodeRepairPlan(t, stdout)
+	if report["applied"] != false || len(report["actions"].([]any)) != 0 || len(report["repairs"].([]any)) != 0 || len(report["source_repairs"].([]any)) != 0 {
+		t.Fatalf("no-op apply report=%v", report)
+	}
+	if _, ok := report["source_repair_backup_path"]; ok {
+		t.Fatalf("no-op apply created source repair backup: %v", report)
+	}
+}
+
 func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 	cfg := testConfig(t)
 	s, err := store.New(cfg)
@@ -641,6 +742,12 @@ func TestCmdDoctorRepairRepairsTitleOnlyObservationMutation(t *testing.T) {
 	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("engram"); err != nil {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close store after failed enrollment: %v", closeErr)
+		}
+		t.Fatalf("enroll project: %v", err)
 	}
 	if err := s.CreateSession("title-repair", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create session: %v", err)

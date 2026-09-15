@@ -657,6 +657,19 @@ func TestCmdSaveResolvesConfiguredProjectWithoutFlag(t *testing.T) {
 		t.Fatalf("write project config: %v", err)
 	}
 	withCwd(t, cwd)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store to enroll project: %v", err)
+	}
+	if err := s.EnrollProject("configured-project"); err != nil {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close store after failed enrollment: %v", closeErr)
+		}
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close enrolled store: %v", err)
+	}
 	withArgs(t, "engram", "save", "resolved-title", "resolved-content")
 
 	stdout, stderr := captureOutput(t, func() { cmdSave(cfg) })
@@ -664,7 +677,7 @@ func TestCmdSaveResolvesConfiguredProjectWithoutFlag(t *testing.T) {
 		t.Fatalf("cmdSave output = stdout %q stderr %q", stdout, stderr)
 	}
 
-	s, err := store.New(cfg)
+	s, err = store.New(cfg)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

@@ -135,6 +135,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 - `POST /sessions` — Create session. Body: `{id, project, directory, ownership_mode?}`
   - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
+  - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
@@ -602,7 +603,7 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud upgrade rollback --project <project>` — restore pre-upgrade local snapshot before `bootstrap_verified`; blocked afterwards
 - `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
-- `engram cloud bootstrap recover-token [--name <name>]` — recover the one stranded managed admin token state described below
+- `engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below
 
 `engram sync --cloud --import --project <project>` runs in the foreground and prints plain-text import progress that is safe for non-interactive logs. It emits an initial snapshot, bounded event-count-throttled updates, and a final `100%` / `0 pending` snapshot before the normal import summary. Each snapshot includes local, remote, and pending chunk counts; percentage is based on the pending work captured at import start, so retries do not inflate completion.
 
@@ -665,6 +666,14 @@ engram cloud bootstrap recover-token --name replacement
 ```
 
 It requires `ENGRAM_CLOUD_TOKEN_PEPPER`, preserves existing grants, and prints the recovered raw token exactly once only after the token and its `bootstrap.cli` recovery audit event commit together. It refuses all other states, including multiple enabled managed human admins or any existing principal token; it does not create users, grants, or partial tokens.
+
+If the bootstrap token was persisted but its one-time output was lost, explicitly opt in to replacement:
+
+```bash
+engram cloud bootstrap recover-token --name replacement --revoke-existing
+```
+
+This path requires exactly one enabled managed human admin and exactly one active principal token. That token must be unrevoked, never used, and owned by the sole enabled admin; the command atomically revokes it and creates the replacement while preserving grants. Earlier revoked recovery tokens may remain as audit history. If the replacement output is lost again, retry `--revoke-existing` while the current token remains unused; once it has been used, this escape hatch never replaces it. The command refuses used, revoked/inactive, ambiguous, or multiple-active-token states.
 
 **Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync and `ENGRAM_CLOUD_ADMIN` for dashboard access), on every `/sync/*`, `/admin/*`, and dashboard-login request. Authentication does not grant managed-user mutation authority: only a managed-token admin principal may create or enable/disable users, create or revoke tokens, or create or revoke project grants.
 
@@ -810,6 +819,12 @@ Engram resolves the project at MCP tool call time. The default source is the **s
 Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dirs and noise dirs (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `.idea`, `.vscode`).
 
 The Git binding is private to each clone and shared by that clone's linked worktrees. Independent clones and forks establish fresh opaque bindings. Cross-clone identity sharing and alias propagation are not currently supported.
+
+### Initialize an explicit project identity
+
+Use `engram init [project_name] [--force]` to write `.engram/config.json` in the current directory. When `project_name` is omitted, Engram uses the current directory basename. `--force` replaces an existing config; without it, init stops and tells you that the config already exists.
+
+This is the explicit resolution path for a non-Git aggregator workspace that contains multiple child repositories. Run `engram init aggregator-name` at the aggregator root so its config resolves the workspace identity before child-repository scanning reports ambiguity.
 
 ### Response envelope
 

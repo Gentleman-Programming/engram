@@ -5,7 +5,10 @@
 # the agent to persist the compacted summary via mem_session_summary.
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_EXTERNAL_URL="${ENGRAM_URL:-}"
+ENGRAM_EXTERNAL_URL="${ENGRAM_EXTERNAL_URL#"${ENGRAM_EXTERNAL_URL%%[![:space:]]*}"}"
+ENGRAM_EXTERNAL_URL="${ENGRAM_EXTERNAL_URL%"${ENGRAM_EXTERNAL_URL##*[![:space:]]}"}"
+ENGRAM_URL="${ENGRAM_EXTERNAL_URL:-http://127.0.0.1:${ENGRAM_PORT}}"
 
 # Load shared helpers
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,19 +16,11 @@ source "${SCRIPT_DIR}/_helpers.sh"
 
 # Read hook input from stdin
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
-# Ensure session exists
-if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/sessions" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir}')" \
-    > /dev/null 2>&1
-fi
+# Register and retain only the server-confirmed runtime identity.
+SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD")
 
 # Fetch context from previous sessions
 CONTEXT=""
@@ -35,6 +30,7 @@ if [ -n "$PROJECT" ]; then
 fi
 
 # Inject Memory Protocol + compaction instruction + context
+printf '%s\n' "$SESSION_HANDOFF"
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
