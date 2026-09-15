@@ -116,7 +116,7 @@ Homebrew remains on the stable v1.20.0 line:
 brew install gentleman-programming/tap/engram
 ```
 
-For Windows, Linux, source builds, and all installation methods, see [Installation](docs/INSTALLATION.md).
+For Windows, Linux, [mise](https://mise.jdx.dev), source builds, and all installation methods, see [Installation](docs/INSTALLATION.md).
 
 ### Set up your agent
 
