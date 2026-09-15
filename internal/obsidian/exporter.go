@@ -14,6 +14,7 @@ import (
 type ExportConfig struct {
 	VaultPath   string          // --vault (required): path to the Obsidian vault root
 	Project     string          // --project (optional): filter export to a single project
+	Org         string          // --org (optional): filter export to a single org (#776)
 	Limit       int             // --limit (0 = no limit)
 	Since       time.Time       // --since (zero = use state file)
 	Force       bool            // --force: ignore state, full re-export
@@ -36,6 +37,30 @@ type Exporter struct {
 // NewExporter constructs an Exporter. Validation happens in Export().
 func NewExporter(s StoreReader, cfg ExportConfig) *Exporter {
 	return &Exporter{store: s, config: cfg}
+}
+
+// matchesFilters reports whether obs is in scope for the current export's
+// Project and Org filters. An empty filter matches everything for that axis.
+func (e *Exporter) matchesFilters(obs store.Observation) bool {
+	if e.config.Project != "" {
+		proj := ""
+		if obs.Project != nil {
+			proj = *obs.Project
+		}
+		if proj != e.config.Project {
+			return false
+		}
+	}
+	if e.config.Org != "" {
+		org := ""
+		if obs.Org != nil {
+			org = *obs.Org
+		}
+		if org != e.config.Org {
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizePathComponent strips path separators and dot-dot sequences from a
@@ -166,6 +191,29 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 	}
 
+	// ── Handle filter exclusions: clean up files for observations that no
+	// longer match the current Project/Org filters ───────────────────────────
+	// The exporter is documented as a live mirror of the selected filters, so
+	// a previously-tracked observation that drops out of scope (e.g. a
+	// narrower --org on a later run) must lose its file too — otherwise it
+	// lingers as an orphan the filter can never reach again to clean up.
+	for _, obs := range data.Observations {
+		if obs.DeletedAt != nil {
+			continue // already handled above
+		}
+		relPath, tracked := state.Files[obs.ID]
+		if !tracked || e.matchesFilters(obs) {
+			continue
+		}
+		absPath := filepath.Join(engRoot, relPath)
+		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", absPath, err))
+		} else {
+			result.Deleted++
+			delete(state.Files, obs.ID)
+		}
+	}
+
 	// ── Build session map for hub generation ─────────────────────────────────
 	sessionMap := make(map[string]store.Session)
 	for _, s := range data.Sessions {
@@ -184,15 +232,8 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 
-		// Project filter
-		if e.config.Project != "" {
-			proj := ""
-			if obs.Project != nil {
-				proj = *obs.Project
-			}
-			if proj != e.config.Project {
-				continue
-			}
+		if !e.matchesFilters(obs) {
+			continue
 		}
 
 		// Incremental filter: skip if updated_at <= cutoff AND already in state
@@ -288,6 +329,12 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	// ── Generate session hub notes ────────────────────────────────────────────
+	// Rebuilt fresh from the current selection every run, same as state.Files:
+	// a hub whose session drops out of scope (filtered out, or its ref count
+	// falls below the hub threshold) must lose its tracked entry and file too,
+	// not linger pointing at content the current run no longer selects.
+	previousSessionHubs := state.SessionHubs
+	state.SessionHubs = make(map[string]string, len(sessionObsRefs))
 	for sessionID, refs := range sessionObsRefs {
 		if len(refs) == 0 {
 			continue
@@ -307,8 +354,21 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		state.SessionHubs[sessionID] = filepath.Join("_sessions", sessionID+".md")
 		result.HubsCreated++
 	}
+	for sessionID, relPath := range previousSessionHubs {
+		if _, stillSelected := state.SessionHubs[sessionID]; stillSelected {
+			continue
+		}
+		absPath := filepath.Join(engRoot, relPath)
+		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+			result.Errors = append(result.Errors, fmt.Errorf("delete stale session hub %s: %w", absPath, err))
+		} else {
+			result.Deleted++
+		}
+	}
 
 	// ── Generate topic hub notes ──────────────────────────────────────────────
+	previousTopicHubs := state.TopicHubs
+	state.TopicHubs = make(map[string]string, len(topicObsRefs))
 	for prefix, refs := range topicObsRefs {
 		if !ShouldCreateTopicHub(len(refs)) {
 			continue
@@ -322,6 +382,17 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 		state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
 		result.HubsCreated++
+	}
+	for prefix, relPath := range previousTopicHubs {
+		if _, stillSelected := state.TopicHubs[prefix]; stillSelected {
+			continue
+		}
+		absPath := filepath.Join(engRoot, relPath)
+		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+			result.Errors = append(result.Errors, fmt.Errorf("delete stale topic hub %s: %w", absPath, err))
+		} else {
+			result.Deleted++
+		}
 	}
 
 	// ── Persist updated state ─────────────────────────────────────────────────
