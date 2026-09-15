@@ -46,6 +46,9 @@ jobs:
         with:
           go-version: "1.25.10"
 
+      - name: Verify mise pins
+        run: ./scripts/verify-mise-pins.sh
+
       - name: Verify generated templ output
         run: |
           make templ
