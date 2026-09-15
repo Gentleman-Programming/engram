@@ -266,12 +266,28 @@ type startableAutosyncManager interface {
 	Stop()
 }
 
+// autosyncStartHandshake is the optional capability that starts the autosync
+// run loop through a startup handshake: Start launches Run in a goroutine and
+// guarantees the manager signals readiness only once the run loop registered
+// with its wait group, so a subsequent Stop cannot race the not-yet-scheduled
+// goroutine when the stdio pipe closes immediately after startup (CodeRabbit
+// PR #1189).
+type autosyncStartHandshake interface {
+	Start(context.Context)
+}
+
 type autosyncManagerAdapter struct {
 	manager *autosync.Manager
 }
 
 func (a autosyncManagerAdapter) Run(ctx context.Context) {
 	a.manager.Run(ctx)
+}
+
+// Start forwards to the wrapped manager's handshake start, satisfying the
+// optional autosyncStartHandshake capability used by tryStartAutosync.
+func (a autosyncManagerAdapter) Start(ctx context.Context) {
+	a.manager.Start(ctx)
 }
 
 func (a autosyncManagerAdapter) NotifyDirty() {
@@ -990,7 +1006,16 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	// so tests can stub the factory and avoid real goroutine/network side effects.
 	mgr := newAutosyncManager(s, transport, mgrCfg)
 
-	go mgr.Run(ctx)
+	// Startup handshake (CodeRabbit PR #1189): when the manager supports the
+	// Start handshake, launch through it so Stop always waits until the run
+	// loop registered with its wait group — an immediate-EOF shutdown can
+	// otherwise return before the goroutine is even scheduled. Deterministic
+	// test fakes without Start keep the plain goroutine launch.
+	if starter, ok := mgr.(autosyncStartHandshake); ok {
+		starter.Start(ctx)
+	} else {
+		go mgr.Run(ctx)
+	}
 	log.Printf("[autosync] started (server=%s)", serverURL)
 	return mgr, mgr.Stop
 }
@@ -1115,19 +1140,46 @@ func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error 
 // underlying stream reports EOF or a read error — the parent closed its end
 // of the pipe — it runs the graceful shutdown sequence before propagating the
 // result, so Listen unwinds through the same path as a signal shutdown.
-// onUnwind must be once-guarded because bufio may issue further reads after
-// the stream has ended.
+// A read that returns data together with io.EOF is special: the EOF is
+// retained (pendingEOF) and the graceful sequence runs only when that retained
+// EOF is surfaced on a later zero-byte read, after bufio has served the final
+// buffered request. onUnwind must be once-guarded because bufio may issue
+// further reads after the stream has ended.
 type eofShutdownReader struct {
-	inner    io.Reader
-	onUnwind func()
+	inner      io.Reader
+	onUnwind   func()
+	pendingEOF bool
 }
 
 func (r *eofShutdownReader) Read(p []byte) (int, error) {
-	n, err := r.inner.Read(p)
-	if err != nil {
+	if r.pendingEOF {
+		// The retained EOF is all that is left: the transport consumed the
+		// buffered bytes, so it is safe to unwind and surface the real
+		// end of stream. pendingEOF stays set — EOF is sticky, and onUnwind
+		// is once-guarded by the caller.
 		r.onUnwind()
+		return 0, io.EOF
 	}
-	return n, err
+	n, err := r.inner.Read(p)
+	switch {
+	case err == io.EOF && n > 0:
+		// Data arrived together with EOF. Returning the EOF now would let a
+		// cancelled context abandon the final buffered request inside mcp-go
+		// (readNextLine/processMessage), and bufio would cache the EOF so
+		// this wrapper would never be called again — the shutdown would race
+		// the last request. Retaining the EOF and returning nil forces bufio
+		// to call back once its buffer drains; that next call surfaces the
+		// retained EOF and unwinds.
+		r.pendingEOF = true
+		return n, nil
+	case err != nil:
+		// Immediate EOF (n == 0) or a real read error: unwind before the
+		// transport sees it.
+		r.onUnwind()
+		return n, err
+	default:
+		return n, err
+	}
 }
 
 func cmdTUI(cfg store.Config) {
