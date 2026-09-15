@@ -134,16 +134,13 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 	}
 
 	command := strings.ReplaceAll(codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`), "${PLUGIN_ROOT}", pluginRoot)
-	started := time.Now()
 	stdout, stderr, code := runCodexWindowsManifestCommand(t, command, input, "")
+	// The fixture sleeps before exiting, so its exit code proves the dispatcher waited for Bash.
 	if code != 23 {
 		t.Fatalf("exit=%d stdout=%q stderr=%q, want child exit 23", code, stdout, stderr)
 	}
 	if stdout != wantWorkingDir.String()+wantStdout || stderr != wantStderr {
 		t.Fatalf("stdout=%q stderr=%q, want current directory and Unicode hook output preserved", stdout, stderr)
-	}
-	if elapsed := time.Since(started); elapsed < time.Second {
-		t.Fatalf("dispatcher returned after %v, want it to wait for Bash", elapsed)
 	}
 
 	t.Run("rejects unapproved hook names without output", func(t *testing.T) {
