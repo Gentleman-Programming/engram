@@ -644,7 +644,7 @@ This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes
 
 > **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
-> **Memory Protocol:** Setup writes the protocol to `~/.cursor/engram-memory-protocol.md` as an informational file — Cursor does not load it automatically. Open it, copy the contents, and paste them into Cursor's **Customize → Rules → User Rules**. Recent Cursor versions also read global user-rule files under `~/.cursor/rules/*.mdc`; that location is not officially documented, so pasting into User Rules remains the supported path.
+> **Memory Protocol:** Setup writes the protocol to `~/.cursor/engram-memory-protocol.md` as an informational file — Cursor does not load it automatically. Open it, copy the contents, and paste them into Cursor's **Customize → Rules → User Rules**.
 >
 > See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
 >
