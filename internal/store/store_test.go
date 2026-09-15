@@ -4430,6 +4430,99 @@ func TestApplyRemoteMutationIdempotent(t *testing.T) {
 	}
 }
 
+// TestStoreHasObservationBySyncIDAnyState pins the tombstone-inclusive
+// existence contract that relation imports rely on: HasObservationBySyncIDAnyState
+// must see live and soft-deleted (tombstoned) rows alike, while
+// GetObservationBySyncID keeps excluding deleted ones.
+func TestStoreHasObservationBySyncIDAnyState(t *testing.T) {
+	s := newTestStore(t)
+
+	create := SyncMutation{
+		Seq:       41,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-session",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-session","project":"engram","directory":"/remote"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, create); err != nil {
+		t.Fatalf("apply session mutation: %v", err)
+	}
+
+	obsMutation := SyncMutation{
+		Seq:       42,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-remote-1",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-remote-1","session_id":"remote-session","type":"decision","title":"Remote","content":"Pulled from cloud","project":"engram","scope":"project"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, obsMutation); err != nil {
+		t.Fatalf("apply observation mutation: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-remote-1")
+	if err != nil {
+		t.Fatalf("check live observation: %v", err)
+	}
+	if !known {
+		t.Fatalf("expected live observation to be visible in any state")
+	}
+
+	absent, err := s.HasObservationBySyncIDAnyState("obs-never-pulled")
+	if err != nil {
+		t.Fatalf("check absent observation: %v", err)
+	}
+	if absent {
+		t.Fatalf("expected absent observation to be invisible in any state")
+	}
+
+	deleteMutation := SyncMutation{
+		Seq:       43,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-remote-1",
+		Op:        SyncOpDelete,
+		Payload:   `{"sync_id":"obs-remote-1","deleted":true}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, deleteMutation); err != nil {
+		t.Fatalf("apply delete mutation: %v", err)
+	}
+	if _, err := s.GetObservationBySyncID("obs-remote-1"); err == nil {
+		t.Fatalf("expected pulled delete to hide observation from GetObservationBySyncID")
+	}
+
+	tombstoned, err := s.HasObservationBySyncIDAnyState("obs-remote-1")
+	if err != nil {
+		t.Fatalf("check tombstoned observation: %v", err)
+	}
+	if !tombstoned {
+		t.Fatalf("expected tombstoned observation to stay visible in any state")
+	}
+}
+
+// TestStoreHasObservationBySyncIDAnyStateClosedStore pins the error path: on a
+// closed store the lookup must fail with the wrapped, identifiable message so
+// callers can tell an infrastructure fault apart from a genuinely absent
+// sync_id instead of reading an error as "not found".
+func TestStoreHasObservationBySyncIDAnyStateClosedStore(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-after-close")
+	if err == nil {
+		t.Fatal("expected HasObservationBySyncIDAnyState on a closed store to fail")
+	}
+	if known {
+		t.Fatal("expected no observation to be reported when the lookup fails")
+	}
+	if !strings.Contains(err.Error(), "check observation sync_id") {
+		t.Fatalf("error = %v, want it to contain %q", err, "check observation sync_id")
+	}
+}
+
 func TestApplyPulledMutationClearsDegradedReasonFields(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.MarkSyncBlocked(DefaultSyncTargetKey, "blocked_unenrolled", "project not enrolled"); err != nil {
@@ -7349,22 +7442,31 @@ func TestEnqueueSessionMutationRejectsBlankKeyAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestInboundSessionDirectoryAdmissionRejectsBlankValues(t *testing.T) {
-	t.Run("pulled mutation", func(t *testing.T) {
-		s := newTestStore(t)
-		err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
-			Seq: 1, Entity: SyncEntitySession, EntityKey: "blank-directory", Op: SyncOpUpsert,
-			Payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`,
+func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		id      string
+		payload string
+	}{
+		{name: "pulled mutation with blank directory", id: "blank-directory", payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`},
+		{name: "pulled mutation with omitted directory", id: "omitted-directory", payload: `{"id":"omitted-directory","project":"engram"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+				Seq: 1, Entity: SyncEntitySession, EntityKey: tc.id, Op: SyncOpUpsert,
+				Payload: tc.payload,
+			})
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
+			}
+			if _, err := s.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid pulled session persisted: %v", err)
+			}
 		})
-		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-			t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
-		}
-		if _, err := s.GetSession("blank-directory"); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("blank pulled session persisted: %v", err)
-		}
-	})
+	}
 
-	t.Run("direct import", func(t *testing.T) {
+	t.Run("direct import with blank directory", func(t *testing.T) {
 		s := newTestStore(t)
 		_, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "engram", Directory: " "}}})
 		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
