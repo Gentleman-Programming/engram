@@ -10656,7 +10656,6 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 		  AND entity_key = payload_sync_id
 		  AND op = ?
 		ORDER BY first_seen_at
-		LIMIT 50
 	`, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
 	if err != nil {
 		return 0, fmt.Errorf("rearm eligible dead relations: list: %w", err)
@@ -10673,6 +10672,13 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 			return 0, fmt.Errorf("rearm eligible dead relations: scan: %w", err)
 		}
 		candidates = append(candidates, row)
+	}
+	// A driver iteration error stops rows.Next early; without this check the
+	// candidates read before the error would be re-armed and the call would
+	// report success over an incomplete eligible set.
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("rearm eligible dead relations: iterate: %w", err)
 	}
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("rearm eligible dead relations: close: %w", err)

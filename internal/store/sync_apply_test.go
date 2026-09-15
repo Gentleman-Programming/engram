@@ -812,6 +812,49 @@ func TestRearmEligibleDeadRelationsForScope(t *testing.T) {
 	}
 }
 
+// TestRearmEligibleDeadRelationsForScopeDrainsAllEligibleRows pins that one call
+// re-arms every eligible satisfiable relation, not only the first query batch:
+// finalizeImport invokes this once per import, so a batch limit would strand
+// rows 51+ as dead until an unrelated later import.
+func TestRearmEligibleDeadRelationsForScopeDrainsAllEligibleRows(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	const targetKey = DefaultSyncTargetKey
+	const project = "proj-apply"
+	const eligibleCount = 55 // deliberately above the historical batch size of 50
+
+	for i := 0; i < eligibleCount; i++ {
+		syncID := fmt.Sprintf("rel-rearm-drain-%02d", i)
+		raw, err := json.Marshal(syncRelationPayload{
+			SyncID: syncID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged, Project: project,
+		})
+		if err != nil {
+			t.Fatalf("marshal payload %s: %v", syncID, err)
+		}
+		if _, err := s.db.Exec(`
+			INSERT INTO sync_apply_deferred
+				(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, last_error, first_seen_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scoped', 'dead', 5, ?, datetime('now', '+' || ? || ' seconds'))
+		`, syncID, SyncEntityRelation, string(raw), targetKey, syncID, SyncOpUpsert, syncID, project, ErrRelationFKMissing.Error(), i); err != nil {
+			t.Fatalf("insert dead row %q: %v", syncID, err)
+		}
+	}
+
+	rearmed, err := s.RearmEligibleDeadRelationsForScope(targetKey, project)
+	if err != nil {
+		t.Fatalf("RearmEligibleDeadRelationsForScope: %v", err)
+	}
+	if rearmed != eligibleCount {
+		t.Fatalf("rearmed = %d, want %d (a single call must drain every eligible row)", rearmed, eligibleCount)
+	}
+	for i := 0; i < eligibleCount; i++ {
+		syncID := fmt.Sprintf("rel-rearm-drain-%02d", i)
+		if status, retries := getDeferredRow(t, s, syncID); status != "deferred" || retries != 0 {
+			t.Fatalf("row %q = (%q, %d), want (deferred, 0)", syncID, status, retries)
+		}
+	}
+}
+
 // TestReplayDeferred_DeadRowSkipped: a dead row must not be retried.
 func TestReplayDeferred_DeadRowSkipped(t *testing.T) {
 	s, syncA, _ := setupSyncApplyStore(t)
