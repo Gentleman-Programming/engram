@@ -648,11 +648,11 @@ This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes
 
 > **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
-> **Memory Protocol:** Cursor does **not** read global rule files from the filesystem — `.mdc` files outside a project are silently ignored, so no global rule path works. Setup therefore writes the protocol to `~/.cursor/engram-memory-protocol.md` as an informational file: open it, copy the contents, and paste them into Cursor's **Settings → Rules → User Rules**.
+> **Memory Protocol:** Setup writes the protocol to `~/.cursor/engram-memory-protocol.md` as an informational file — Cursor does not load it automatically. Open it, copy the contents, and paste them into Cursor's **Customize → Rules → User Rules**. Recent Cursor versions also read global user-rule files under `~/.cursor/rules/*.mdc`; that location is not officially documented, so pasting into User Rules remains the supported path.
 >
 > See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
 >
-> **Note:** To share the protocol with a team, commit an in-repo `.cursor/rules/*.mdc` file — unlike global paths, files inside the project are not silently ignored. The legacy `.cursorrules` file at the project root is still recognized but deprecated.
+> **Note:** To share the protocol with a team, commit an in-repo `.cursor/rules/*.mdc` file; project rules must use the `.mdc` extension with frontmatter — a plain `.md` file there is ignored. The legacy `.cursorrules` file at the project root is still recognized but deprecated.
 
 ---
 
@@ -782,7 +782,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 - After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
-**For Cursor** (Settings → Rules → User Rules — Cursor does not read global rule files from the filesystem):
+**For Cursor** (Customize → Rules → User Rules; the generated `~/.cursor/engram-memory-protocol.md` is informational and is not loaded automatically):
 
 ```text
 You have access to Engram persistent memory (mem_save, mem_search, mem_context, mem_session_summary).
