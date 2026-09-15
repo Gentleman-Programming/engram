@@ -205,6 +205,11 @@ type Manager struct {
 	disabled  bool // set by StopForUpgrade, cleared by ResumeAfterUpgrade
 	wg        sync.WaitGroup
 	cancelFn  context.CancelFunc
+
+	// runReady closes once a Run launched via Start has registered with wg
+	// and is ready to serve. It stays nil until the first Start call, so
+	// managers driven by a bare Run keep their original Stop semantics.
+	runReady chan struct{}
 }
 
 // New creates a new background sync manager.
@@ -270,9 +275,50 @@ func (m *Manager) Status() Status {
 	return st
 }
 
+// Start launches the manager's Run loop in a background goroutine and returns
+// immediately. It installs the startup/shutdown handshake: the readiness
+// channel closes only after Run has registered with the wait group, so a
+// concurrent Stop always waits for the run loop to be schedulable before
+// tearing it down. Calling Start again reuses the existing channel; the
+// spawned Run hits the re-entry guard and never closes it a second time.
+//
+// Start on an already-running manager — including one launched by a bare Run
+// call that owns registration — is a no-op: it returns without touching
+// runReady and without spawning another Run, preserving the existing run
+// state. This keeps the bare Run-then-Start sequence returnable: previously a
+// late Start installed a fresh readiness channel no Run would ever close,
+// stranding a subsequent Stop on the handshake wait.
+func (m *Manager) Start(ctx context.Context) {
+	m.mu.Lock()
+	if m.cancelFn != nil {
+		// Already running (possibly via a bare Run that owns registration):
+		// do not install a readiness channel no Run will close.
+		m.mu.Unlock()
+		return
+	}
+	if m.runReady == nil {
+		m.runReady = make(chan struct{})
+	}
+	m.mu.Unlock()
+	go m.Run(ctx)
+}
+
 // Stop cancels the internal context and waits for all goroutines to exit.
-// Safe to call before Run — returns immediately in that case.
+// Safe to call before Run/Start — returns immediately in that case.
+// When Start was used, Stop first waits for the startup handshake so the run
+// loop has registered with the wait group (and set cancelFn) before shutdown.
 func (m *Manager) Stop() {
+	m.mu.Lock()
+	ready := m.runReady
+	m.mu.Unlock()
+
+	// Wait for the run loop to finish registering before reading cancelFn:
+	// a pre-wait read could see nil while the registering Run sets it right
+	// after the handshake closes.
+	if ready != nil {
+		<-ready
+	}
+
 	m.mu.Lock()
 	fn := m.cancelFn
 	m.mu.Unlock()
@@ -339,12 +385,20 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 	innerCtx, cancel := context.WithCancel(ctx)
 	m.cancelFn = cancel
+	// Startup handshake: only the Run that wins registration captures the
+	// readiness channel; a rejected re-entry Run must never close it.
+	ready := m.runReady
 	m.mu.Unlock()
 
 	m.wg.Add(1)
 	defer m.wg.Done()
 	defer cancel()
 	defer m.releaseLease()
+
+	// Registration is complete: release any Stop waiting for the handshake.
+	if ready != nil {
+		close(ready)
+	}
 
 	debounce := time.NewTimer(m.cfg.DebounceDuration)
 	if !debounce.Stop() {

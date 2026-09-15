@@ -105,15 +105,15 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			wantSkip: "manual_name_unknown_project",
 		},
 		{
-			name: "trusted directory contradiction skipped",
+			name: "known manual target beats trusted third project directory",
 			sessions: []store.DiagnosticSessionEvidence{
-				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/engram"},
+				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/third-project"},
 				{ID: "known", Name: "known", Project: "engram", Directory: "/work/engram"},
 			},
 			detect: func(string) (DetectedProject, bool) {
-				return DetectedProject{Project: "other", Source: "git_root", Path: "/work/other"}, true
+				return DetectedProject{Project: "third-project", Source: "git_root", Path: "/work/third-project"}, true
 			},
-			wantSkip: "trusted_directory_contradicts_manual_name",
+			wantAction: true,
 		},
 	}
 
