@@ -98,6 +98,9 @@ jobs:
       - name: Run Windows-specific setup test
         run: go test ./internal/setup/ -run TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath -count=1
 
+      - name: Run Windows MCP parent-lifetime tests
+        run: go test ./cmd/engram/ -run '^TestMCPJobObject' -count=1
+
   wrapper-tests-windows:
     name: Cloud Sync Wrapper Tests (Windows)
     runs-on: windows-latest

@@ -1023,6 +1023,13 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 }
 
 func cmdMCP(cfg store.Config) {
+	// On Windows, arrange parent-owned process lifetime before opening any
+	// resources. Setup is best-effort to preserve existing MCP startup behavior
+	// when parent wrappers, nested jobs, or process permissions reject it.
+	if err := retainMCPProcessUntilParentExit(); err != nil {
+		log.Printf("[mcp] WARNING: parent-lifetime job setup unavailable: %v", err)
+	}
+
 	toolsFilter := ""
 	// The --project flag below is the explicit process argument of the shared
 	// override rule; project.ProcessOverride supplies the ENGRAM_PROJECT step.
