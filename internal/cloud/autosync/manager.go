@@ -281,10 +281,21 @@ func (m *Manager) Status() Status {
 // concurrent Stop always waits for the run loop to be schedulable before
 // tearing it down. Calling Start again reuses the existing channel; the
 // spawned Run hits the re-entry guard and never closes it a second time.
-// Start is the launch path for the handshake contract — mixing it with a bare
-// Run call that already owns registration would leave the channel unclosed.
+//
+// Start on an already-running manager — including one launched by a bare Run
+// call that owns registration — is a no-op: it returns without touching
+// runReady and without spawning another Run, preserving the existing run
+// state. This keeps the bare Run-then-Start sequence returnable: previously a
+// late Start installed a fresh readiness channel no Run would ever close,
+// stranding a subsequent Stop on the handshake wait.
 func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
+	if m.cancelFn != nil {
+		// Already running (possibly via a bare Run that owns registration):
+		// do not install a readiness channel no Run will close.
+		m.mu.Unlock()
+		return
+	}
 	if m.runReady == nil {
 		m.runReady = make(chan struct{})
 	}

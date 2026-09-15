@@ -1846,6 +1846,68 @@ func TestManagerRunReentryAfterStartDoesNotRecloseReady(t *testing.T) {
 	mgr.Stop()
 }
 
+// TestManagerStartAfterBareRunKeepsStopReturnable pins the bare Run-then-Start
+// sequence: when a bare Run already owns registration (cancelFn set), a later
+// Start must be a no-op — it must not install a stranded readiness channel,
+// because the re-entry Run returns at the guard without closing it and a
+// subsequent Stop blocks forever on that channel.
+func TestManagerStartAfterBareRunKeepsStopReturnable(t *testing.T) {
+	ls := newFakeLocalStore()
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.PollInterval = 10 * time.Second
+	cfg.DebounceDuration = 10 * time.Second
+
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Bare Run: launched directly, NOT via Start. This Run owns registration.
+	go mgr.Run(ctx)
+
+	// Wait for the bare Run to complete registration (cancelFn set under the
+	// lock) with a bounded poll loop so the test can never hang the suite.
+	deadline := time.After(2 * time.Second)
+	for {
+		mgr.mu.RLock()
+		registered := mgr.cancelFn != nil
+		mgr.mu.RUnlock()
+		if registered {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("bare Run did not register (cancelFn) within 2 seconds")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Start on an already-running manager must not install a readiness
+	// channel that the rejected re-entry Run would strand.
+	mgr.Start(ctx)
+
+	mgr.mu.RLock()
+	runReady := mgr.runReady
+	mgr.mu.RUnlock()
+	if runReady != nil {
+		t.Errorf("Start after bare Run installed a stranded runReady channel; it must stay nil")
+	}
+
+	// Stop must return: the bare Run owns registration, so Stop has no
+	// handshake to wait for and nothing strands its teardown.
+	stopped := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop blocked after bare Run-then-Start: stranded runReady channel")
+	}
+}
+
 func TestManagerPanicSetsBackoff(t *testing.T) {
 	ls := newFakeLocalStore()
 	tr := newFakeTransport()
