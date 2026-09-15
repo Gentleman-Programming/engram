@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -23,10 +25,12 @@ func stubMCPStdioLifecycle(t *testing.T) {
 	t.Helper()
 	oldInput := mcpStdioInput
 	oldStopAutosync := mcpStdioStopAutosync
+	oldEOFCancelAfter := mcpStdioEOFCancelAfter
 	oldListen := listenMCPStdio
 	t.Cleanup(func() {
 		mcpStdioInput = oldInput
 		mcpStdioStopAutosync = oldStopAutosync
+		mcpStdioEOFCancelAfter = oldEOFCancelAfter
 		listenMCPStdio = oldListen
 	})
 }
@@ -93,8 +97,8 @@ func requireGracefulOutcome(t *testing.T, stderr string, recovered any, runStart
 // closes its end of the stdio pipe, the EOF must trigger the same graceful
 // shutdown sequence as a signal (autosync lease release before Listen
 // unwinds) and cmdMCP must return cleanly instead of hanging or exiting
-// fatal. This test spends the single real StdioServer.Listen allowed per test
-// process (mcp-go registers a package-singleton stdio session inside Listen).
+// fatal. The real mcp-go transport is covered by the final-tool regression
+// below; this focused command test keeps the autosync/store lifecycle isolated.
 func TestCmdMCPStdioEOFRunsGracefulShutdown(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
@@ -103,9 +107,13 @@ func TestCmdMCPStdioEOFRunsGracefulShutdown(t *testing.T) {
 	enableAutosyncEnv(t)
 	runStarted, stopCalled := stubAutosyncManager(t)
 
-	// Unlike the sibling TestCmdMCP subtests, serveMCP must stay real: this
-	// test exercises the actual stdio lifecycle end to end.
+	// Consume through the production EOF wrapper while keeping mcp-go's
+	// package-singleton stdio session available to the transport regression.
 	serveMCP = runMCPStdio
+	listenMCPStdio = func(_ context.Context, _ *mcpserver.MCPServer, stdin io.Reader, _ io.Writer) error {
+		_, err := io.Copy(io.Discard, stdin)
+		return err
+	}
 
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
@@ -130,6 +138,161 @@ func TestCmdMCPStdioEOFRunsGracefulShutdown(t *testing.T) {
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 
 	requireGracefulOutcome(t, stderr, recovered, runStarted, stopCalled)
+}
+
+// TestCmdMCPStdioFinalToolCallDrainsBeforeEOFShutdown proves the behavior that
+// mcp-go's stdio transport requires: an EOF after the final tools/call lets
+// Listen drain its worker queue before autosync stops, then cancels a
+// context-aware stuck handler after the bounded deadline.
+func TestCmdMCPStdioFinalToolCallDrainsBeforeEOFShutdown(t *testing.T) {
+	stubMCPStdioLifecycle(t)
+	mcpStdioEOFCancelAfter = 250 * time.Millisecond
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+	})
+
+	oldStdout := os.Stdout
+	os.Stdout = stdoutW
+	t.Cleanup(func() { os.Stdout = oldStdout })
+	mcpStdioInput = stdinR
+
+	autosyncStopped := make(chan struct{}, 1)
+	mcpStdioStopAutosync = func() { autosyncStopped <- struct{}{} }
+	allowResponse := make(chan struct{})
+	stuckStarted := make(chan struct{}, 1)
+	stuckExited := make(chan struct{}, 1)
+	mcpSrv := mcpserver.NewMCPServer("test", "1.0.0", mcpserver.WithToolCapabilities(true))
+	mcpSrv.AddTool(mcp.NewTool("final_tool"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		<-allowResponse
+		if ctx.Err() != nil {
+			return nil, nil
+		}
+		return mcp.NewToolResultText("final response"), nil
+	})
+	mcpSrv.AddTool(mcp.NewTool("stuck_tool"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		stuckStarted <- struct{}{}
+		<-ctx.Done()
+		stuckExited <- struct{}{}
+		return nil, ctx.Err()
+	})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- runMCPStdio(mcpSrv) }()
+
+	writeRequest := func(request map[string]any) {
+		t.Helper()
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		if _, err := stdinW.Write(append(encoded, '\n')); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+	}
+
+	scanner := bufio.NewScanner(stdoutR)
+	writeRequest(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"clientInfo":      map[string]any{"name": "test-client", "version": "1.0.0"},
+		},
+	})
+	if !scanner.Scan() {
+		t.Fatal("initialize response was not written")
+	}
+
+	writeRequest(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params":  map[string]any{"name": "final_tool"},
+	})
+	writeRequest(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params":  map[string]any{"name": "stuck_tool"},
+	})
+	waitForSignal(t, stuckStarted, "stuck tool to start")
+	if err := stdinW.Close(); err != nil {
+		t.Fatalf("close stdin writer: %v", err)
+	}
+	select {
+	case <-autosyncStopped:
+		t.Fatal("autosync stopped before the final tools/call response completed")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(allowResponse)
+
+	response := make(chan []byte, 1)
+	go func() {
+		if scanner.Scan() {
+			response <- append([]byte(nil), scanner.Bytes()...)
+			return
+		}
+		response <- nil
+	}()
+
+	select {
+	case line := <-response:
+		if line == nil {
+			t.Fatal("final tools/call response was not written before runMCPStdio returned")
+		}
+		var payload struct {
+			ID     int64 `json:"id"`
+			Result struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(line, &payload); err != nil {
+			t.Fatalf("unmarshal final response: %v", err)
+		}
+		if payload.ID != 2 || len(payload.Result.Content) != 1 || payload.Result.Content[0].Text != "final response" {
+			t.Fatalf("unexpected final tools/call response: %s", line)
+		}
+	case <-time.After(5 * time.Second):
+		select {
+		case err := <-runDone:
+			t.Fatalf("runMCPStdio returned without final tools/call response: %v", err)
+		default:
+			t.Fatal("timed out waiting for final tools/call response")
+		}
+	}
+	select {
+	case <-autosyncStopped:
+		t.Fatal("autosync stopped before the final tools/call response completed")
+	default:
+	}
+
+	waitForSignal(t, stuckExited, "stuck tool to exit after EOF's cancellation deadline")
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("runMCPStdio returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMCPStdio did not return after EOF cancelled the stuck handler")
+	}
+	waitForSignal(t, autosyncStopped, "autosync stop after runMCPStdio returns")
 }
 
 // TestCmdMCPStdioSIGTERMRunsGracefulShutdown pins the signal half of the

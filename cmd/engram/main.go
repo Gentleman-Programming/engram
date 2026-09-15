@@ -82,11 +82,13 @@ var (
 	mcpStdioInput io.Reader = os.Stdin
 
 	// mcpStdioStopAutosync publishes cmdMCP's once-guarded autosync stop to
-	// runMCPStdio so the graceful shutdown sequence (cancel + lease release)
-	// runs when the parent closes the stdio pipe or SIGINT/SIGTERM arrives.
+	// runMCPStdio so the graceful shutdown sequence releases the sync lease
+	// when the parent closes the stdio pipe or SIGINT/SIGTERM arrives.
 	// It is read once when runMCPStdio starts serving. The fixed serveMCP
 	// signature leaves no other way to hand the stop closure over.
 	mcpStdioStopAutosync = func() {}
+
+	mcpStdioEOFCancelAfter = 5 * time.Second
 
 	// listenMCPStdio runs the mcp-go stdio transport on the given streams.
 	// Injectable for testing: mcp-go's StdioServer.Listen registers a
@@ -1090,22 +1092,36 @@ func cmdMCP(cfg store.Config) {
 
 // runMCPStdio serves server over stdio with engram-owned lifecycle handling.
 // It replaces mcp-go's ServeStdio (issue #886): when the parent closes its
-// end of the stdio pipe, the EOF surfaces through eofShutdownReader, which
-// runs the same graceful shutdown sequence as SIGINT/SIGTERM — cancel the
-// transport context and release the autosync sync lease — before Listen
-// unwinds. A signal-initiated shutdown makes the transport return
-// context.Canceled, which is translated to nil so cmdMCP exits cleanly via
-// its own defers instead of fatal.
+// end of the stdio pipe, EOF surfaces through eofShutdownReader, which starts
+// a bounded cancellation deadline while mcp-go drains queued tool calls. SIGINT and
+// SIGTERM still cancel the transport context. A signal-initiated shutdown
+// makes the transport return context.Canceled, which is translated to nil so
+// cmdMCP exits cleanly via its own defers instead of fatal.
 func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	eofCancelTimer := time.AfterFunc(time.Hour, cancel)
+	eofCancelTimer.Stop()
+	var eofCancelOnce sync.Once
+	scheduleEOFCancel := func() {
+		eofCancelOnce.Do(func() { eofCancelTimer.Reset(mcpStdioEOFCancelAfter) })
+	}
+	defer eofCancelTimer.Stop()
+
 	// shutdown is the graceful sequence shared by the signal watcher and the
-	// stdin wrapper; once-guarded so either trigger runs it exactly once.
-	stopAutosync := mcpStdioStopAutosync
-	var shutdownOnce sync.Once
-	shutdown := func() {
-		shutdownOnce.Do(func() {
+	// return path; once-guarded so either trigger runs it exactly once.
+	var stopAutosyncOnce sync.Once
+	stopAutosync := func() {
+		stopAutosyncOnce.Do(mcpStdioStopAutosync)
+	}
+	defer stopAutosync()
+
+	// shutdownTransport is reserved for signal handling. EOF must reach
+	// Listen with ctx still active so its worker queue drains normally.
+	var shutdownTransportOnce sync.Once
+	shutdownTransport := func() {
+		shutdownTransportOnce.Do(func() {
 			cancel()
 			stopAutosync()
 		})
@@ -1121,12 +1137,12 @@ func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error 
 		select {
 		case <-sigCh:
 			log.Println("[engram] shutting down...")
-			shutdown()
+			shutdownTransport()
 		case <-done:
 		}
 	}()
 
-	err := listenMCPStdio(ctx, server, &eofShutdownReader{inner: mcpStdioInput, onUnwind: shutdown}, os.Stdout)
+	err := listenMCPStdio(ctx, server, &eofShutdownReader{inner: mcpStdioInput, onUnwind: scheduleEOFCancel}, os.Stdout)
 	if errors.Is(err, context.Canceled) {
 		// Signal-initiated shutdown is graceful: exit cleanly instead of fatal.
 		return nil
@@ -1138,13 +1154,12 @@ func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error 
 // the process stdin: the SDK's bufio.Reader sits on top of it, so no second
 // raw reader ever touches the stream. Bytes pass through untouched; when the
 // underlying stream reports EOF or a read error — the parent closed its end
-// of the pipe — it runs the graceful shutdown sequence before propagating the
-// result, so Listen unwinds through the same path as a signal shutdown.
-// A read that returns data together with io.EOF is special: the EOF is
-// retained (pendingEOF) and the graceful sequence runs only when that retained
-// EOF is surfaced on a later zero-byte read, after bufio has served the final
-// buffered request. onUnwind must be once-guarded because bufio may issue
-// further reads after the stream has ended.
+// of the pipe — it starts a bounded cancellation deadline while mcp-go drains
+// queued tool calls before Listen unwinds. A read that returns data together
+// with io.EOF is special: the EOF is retained (pendingEOF) and the graceful
+// sequence runs only when that retained EOF is surfaced on a later zero-byte
+// read, after bufio has served the final buffered request. onUnwind must be
+// once-guarded because bufio may issue further reads after the stream has ended.
 type eofShutdownReader struct {
 	inner      io.Reader
 	onUnwind   func()
