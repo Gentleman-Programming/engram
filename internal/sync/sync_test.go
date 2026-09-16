@@ -2101,6 +2101,7 @@ func TestExportErrors(t *testing.T) {
 				CreatedAt: "2000-01-01T00:00:00Z",
 			}},
 		})
+		writeLocalChunkFile(t, sy.syncDir, chunkID, *chunk)
 
 		res, err := sy.Export("alice", "")
 		if err != nil {
@@ -3408,6 +3409,177 @@ func TestCloudExportUsesMutationJournalForUpdatesAndDeletes(t *testing.T) {
 	}
 }
 
+func TestLocalSyncPropagatesDelayedSessionClosureAfterNewerUnrelatedChunk(t *testing.T) {
+	source := newTestStore(t)
+	syncDir := t.TempDir()
+	if err := source.CreateSession("session-archive", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create source session: %v", err)
+	}
+	if _, err := source.AddObservation(store.AddObservationParams{
+		SessionID: "session-archive",
+		Type:      "decision",
+		Title:     "Preserve this observation",
+		Content:   "Archive must not delete memory",
+		Project:   "proj-a",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := source.AddPrompt(store.AddPromptParams{
+		SessionID: "session-archive",
+		Content:   "What should survive archive?",
+		Project:   "proj-a",
+	}); err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	exporter := New(source, syncDir)
+	if result, err := exporter.Export("source", ""); err != nil || result.IsEmpty {
+		t.Fatalf("initial export: result=%+v err=%v", result, err)
+	}
+	if err := source.EndSession("session-archive", ""); err != nil {
+		t.Fatalf("close source session: %v", err)
+	}
+
+	unrelated := newTestStore(t)
+	manifest := NewFileTransport(syncDir)
+	currentManifest, err := manifest.ReadManifest()
+	if err != nil {
+		t.Fatalf("read manifest before unrelated export: %v", err)
+	}
+	currentManifest.Chunks[0].CreatedAt = "2000-01-01T00:00:00Z"
+	if err := manifest.WriteManifest(currentManifest); err != nil {
+		t.Fatalf("write initial manifest cutoff: %v", err)
+	}
+	if err := unrelated.CreateSession("session-unrelated", "proj-b", "/tmp/proj-b"); err != nil {
+		t.Fatalf("create unrelated session: %v", err)
+	}
+	if unrelatedExport, err := New(unrelated, syncDir).Export("other", ""); err != nil || unrelatedExport.IsEmpty {
+		t.Fatalf("unrelated export: result=%+v err=%v", unrelatedExport, err)
+	}
+	currentManifest, err = manifest.ReadManifest()
+	if err != nil {
+		t.Fatalf("read manifest after unrelated export: %v", err)
+	}
+	archiveSession, err := source.GetSession("session-archive")
+	if err != nil || archiveSession.EndedAt == nil {
+		t.Fatalf("read archived session: session=%+v err=%v", archiveSession, err)
+	}
+	endedAt, err := time.Parse("2006-01-02 15:04:05", normalizeTime(*archiveSession.EndedAt))
+	if err != nil {
+		t.Fatalf("parse ended_at: %v", err)
+	}
+	newerCutoff := endedAt.Add(time.Second).UTC().Format(time.RFC3339)
+	currentManifest.Chunks[len(currentManifest.Chunks)-1].CreatedAt = newerCutoff
+	if err := manifest.WriteManifest(currentManifest); err != nil {
+		t.Fatalf("write newer unrelated manifest cutoff: %v", err)
+	}
+
+	closureExport, err := exporter.Export("source", "")
+	if err != nil {
+		t.Fatalf("closure export: %v", err)
+	}
+	if closureExport.IsEmpty {
+		t.Fatal("expected ended_at change to create a follow-up chunk")
+	}
+	closureRaw, err := NewFileTransport(syncDir).ReadChunk(closureExport.ChunkID)
+	if err != nil {
+		t.Fatalf("read closure chunk: %v", err)
+	}
+	var closureChunk ChunkData
+	if err := json.Unmarshal(closureRaw, &closureChunk); err != nil {
+		t.Fatalf("decode closure chunk: %v", err)
+	}
+	if len(closureChunk.Sessions) != 1 || closureChunk.Sessions[0].ID != "session-archive" || closureChunk.Sessions[0].EndedAt == nil {
+		t.Fatalf("expected closure chunk to carry only the ended session, got %+v", closureChunk)
+	}
+	if len(closureChunk.Observations) != 0 || len(closureChunk.Prompts) != 0 {
+		t.Fatalf("expected delayed closure export not to duplicate memory, got observations=%d prompts=%d", len(closureChunk.Observations), len(closureChunk.Prompts))
+	}
+	secondClosureExport, err := exporter.Export("source", "")
+	if err != nil {
+		t.Fatalf("repeat closure export: %v", err)
+	}
+	if !secondClosureExport.IsEmpty {
+		t.Fatalf("expected exported closure state to suppress duplicate chunks, got %+v", secondClosureExport)
+	}
+
+	destination := newTestStore(t)
+	importer := New(destination, syncDir)
+	firstImport, err := importer.Import()
+	if err != nil {
+		t.Fatalf("import source chunks: %v", err)
+	}
+	if firstImport.ChunksImported != 3 {
+		t.Fatalf("expected initial, unrelated, and closure chunks to import, got %+v", firstImport)
+	}
+	secondImport, err := importer.Import()
+	if err != nil {
+		t.Fatalf("repeat import: %v", err)
+	}
+	if secondImport.ChunksImported != 0 || secondImport.ChunksSkipped != 3 {
+		t.Fatalf("expected idempotent repeat import, got %+v", secondImport)
+	}
+
+	session, err := destination.GetSession("session-archive")
+	if err != nil {
+		t.Fatalf("get imported session: %v", err)
+	}
+	if session.EndedAt == nil || session.Summary != nil {
+		t.Fatalf("expected ended session with no fabricated summary, got %+v", session)
+	}
+	observations, err := destination.SessionObservations("session-archive", 10)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("expected one preserved observation, observations=%d err=%v", len(observations), err)
+	}
+	var promptCount int
+	if err := destination.DB().QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE session_id = ?`, "session-archive").Scan(&promptCount); err != nil {
+		t.Fatalf("count imported prompts: %v", err)
+	}
+	if promptCount != 1 {
+		t.Fatalf("expected one preserved prompt, got %d", promptCount)
+	}
+}
+
+func TestLocalSyncRecreatesManifestChunkMissingFromActiveTransport(t *testing.T) {
+	source := newTestStore(t)
+	syncDir := t.TempDir()
+	if err := source.CreateSession("session-missing-chunk", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := source.EndSession("session-missing-chunk", "closed"); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+
+	exporter := New(source, syncDir)
+	first, err := exporter.Export("source", "")
+	if err != nil || first.IsEmpty {
+		t.Fatalf("initial closure export: result=%+v err=%v", first, err)
+	}
+	chunkPath := filepath.Join(syncDir, "chunks", first.ChunkID+".jsonl.gz")
+	if err := os.Remove(chunkPath); err != nil {
+		t.Fatalf("remove manifest chunk: %v", err)
+	}
+
+	recreated, err := exporter.Export("source", "")
+	if err != nil {
+		t.Fatalf("recreate missing chunk: %v", err)
+	}
+	if recreated.IsEmpty || recreated.ChunkID != first.ChunkID {
+		t.Fatalf("expected deterministic re-export of missing chunk, first=%+v recreated=%+v", first, recreated)
+	}
+	if _, err := os.Stat(chunkPath); err != nil {
+		t.Fatalf("expected missing chunk to be recreated: %v", err)
+	}
+	manifest, err := exporter.readManifest()
+	if err != nil {
+		t.Fatalf("read manifest after recreation: %v", err)
+	}
+	if len(manifest.Chunks) != 1 {
+		t.Fatalf("recreating a manifest chunk must not append a duplicate entry: %+v", manifest.Chunks)
+	}
+}
+
 func TestCloudExportWritesMutationOnlyChunkForHardDeletes(t *testing.T) {
 	s := newTestStore(t)
 	transport := newFakeCloudTransport()
@@ -4586,6 +4758,19 @@ func TestFilterNewDataIncludesEditedObservations(t *testing.T) {
 	}
 	if !found3 {
 		t.Fatalf("filterNewData excluded observation ID 3 (created after cutoff) — should have been included; ids=%v", ids)
+	}
+}
+
+func TestFilterNewDataIncludesSessionClosureAtCutoff(t *testing.T) {
+	endedAt := "2025-01-01 10:30:00"
+	data := &store.ExportData{Sessions: []store.Session{
+		{ID: "ended-at-cutoff", Project: "proj-a", StartedAt: "2025-01-01 09:00:00", EndedAt: &endedAt},
+		{ID: "still-active", Project: "proj-a", StartedAt: "2025-01-01 09:00:00"},
+	}}
+
+	filtered := New(nil, t.TempDir()).filterNewData(data, "2025-01-01T10:30:00Z")
+	if len(filtered.Sessions) != 1 || filtered.Sessions[0].ID != "ended-at-cutoff" {
+		t.Fatalf("expected closure at cutoff to be included without active stale session, got %+v", filtered.Sessions)
 	}
 }
 

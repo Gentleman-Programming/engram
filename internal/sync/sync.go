@@ -451,8 +451,10 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 
 	// Also consider chunks in the manifest as known
+	manifestChunkIDs := make(map[string]struct{}, len(manifest.Chunks))
 	for _, c := range manifest.Chunks {
 		knownChunks[c.ID] = true
+		manifestChunkIDs[c.ID] = struct{}{}
 	}
 
 	// Export data from DB (project-scoped in cloud mode/project syncs to avoid global dumps)
@@ -489,6 +491,13 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 
 	// Get the timestamp of the last chunk to filter "new" data
 	lastChunkTime := sy.lastChunkTime(manifest)
+	exportedSessionClosures := make(map[string]map[sessionClosureState]struct{})
+	if lastChunkTime != "" {
+		exportedSessionClosures, err = sy.exportedSessionClosureStates(manifest)
+		if err != nil {
+			return nil, fmt.Errorf("scan exported session closures: %w", err)
+		}
+	}
 
 	// Relations are filtered by chunk presence, not timestamp; see the
 	// rationale on filterRelationMutationsForExport and issue #353.
@@ -496,7 +505,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("scan exported relations: %w", err)
 	}
-	chunk := sy.filterNewData(data, lastChunkTime)
+	chunk := sy.filterNewDataWithSessionClosures(data, lastChunkTime, exportedSessionClosures)
 	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
 	includeObservationParentSessions(chunk, data.Sessions)
 	chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
@@ -518,8 +527,20 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	// Generate chunk ID from content hash
 	chunkID := chunkcodec.ChunkID(chunkJSON)
 
-	// Check if this exact chunk already exists
+	recreateMissingManifestChunk := false
 	if _, exists := knownChunks[chunkID]; exists {
+		if !sy.cloudMode {
+			if _, inManifest := manifestChunkIDs[chunkID]; inManifest {
+				if _, readErr := sy.transport.ReadChunk(chunkID); readErr != nil {
+					if !errors.Is(readErr, ErrChunkNotFound) {
+						return nil, fmt.Errorf("check existing chunk %s: %w", chunkID, readErr)
+					}
+					recreateMissingManifestChunk = true
+				}
+			}
+		}
+	}
+	if _, exists := knownChunks[chunkID]; exists && !recreateMissingManifestChunk {
 		if !locallySyncedChunks[chunkID] {
 			if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
 				return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
@@ -544,7 +565,9 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 
 	// Update manifest
-	manifest.Chunks = append(manifest.Chunks, entry)
+	if _, alreadyListed := manifestChunkIDs[chunkID]; !alreadyListed {
+		manifest.Chunks = append(manifest.Chunks, entry)
+	}
 
 	if err := sy.writeManifest(manifest); err != nil {
 		return nil, fmt.Errorf("write manifest: %w", err)
@@ -1971,9 +1994,92 @@ func (sy *Syncer) lastChunkTime(m *Manifest) string {
 
 // ─── Filtering ───────────────────────────────────────────────────────────────
 
+type sessionClosureState struct {
+	endedAt string
+	summary string
+}
+
+func (sy *Syncer) exportedSessionClosureStates(m *Manifest) (map[string]map[sessionClosureState]struct{}, error) {
+	states := make(map[string]map[sessionClosureState]struct{})
+	if m == nil {
+		return states, nil
+	}
+
+	for _, entry := range m.Chunks {
+		raw, err := sy.transport.ReadChunk(entry.ID)
+		if err != nil {
+			if errors.Is(err, ErrChunkNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+		}
+
+		var chunk ChunkData
+		if err := json.Unmarshal(raw, &chunk); err != nil {
+			return nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+		}
+		for _, session := range chunk.Sessions {
+			addExportedSessionClosure(states, session)
+		}
+		for _, mutation := range chunk.Mutations {
+			if mutation.Entity != store.SyncEntitySession || mutation.Op != store.SyncOpUpsert {
+				continue
+			}
+			var session store.Session
+			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &session); err != nil {
+				return nil, fmt.Errorf("decode session closure in chunk %s: %w", entry.ID, err)
+			}
+			if strings.TrimSpace(session.ID) == "" {
+				session.ID = strings.TrimSpace(mutation.EntityKey)
+			}
+			addExportedSessionClosure(states, session)
+		}
+	}
+	return states, nil
+}
+
+func addExportedSessionClosure(states map[string]map[sessionClosureState]struct{}, session store.Session) {
+	state, ok := getSessionClosureState(session)
+	sessionID := strings.TrimSpace(session.ID)
+	if !ok || sessionID == "" {
+		return
+	}
+	if states[sessionID] == nil {
+		states[sessionID] = make(map[sessionClosureState]struct{})
+	}
+	states[sessionID][state] = struct{}{}
+}
+
+func getSessionClosureState(session store.Session) (sessionClosureState, bool) {
+	if session.EndedAt == nil || strings.TrimSpace(*session.EndedAt) == "" {
+		return sessionClosureState{}, false
+	}
+	summary := ""
+	if session.Summary != nil {
+		summary = *session.Summary
+	}
+	return sessionClosureState{
+		endedAt: normalizeTime(*session.EndedAt),
+		summary: summary,
+	}, true
+}
+
+func hasExportedSessionClosure(states map[string]map[sessionClosureState]struct{}, session store.Session) bool {
+	state, ok := getSessionClosureState(session)
+	if !ok {
+		return false
+	}
+	_, exported := states[strings.TrimSpace(session.ID)][state]
+	return exported
+}
+
 // filterNewData returns only data created after the given timestamp.
 // If lastChunkTime is empty, returns everything (first sync).
 func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
+	return sy.filterNewDataWithSessionClosures(data, lastChunkTime, nil)
+}
+
+func (sy *Syncer) filterNewDataWithSessionClosures(data *store.ExportData, lastChunkTime string, exportedClosures map[string]map[sessionClosureState]struct{}) *ChunkData {
 	chunk := &ChunkData{}
 
 	if lastChunkTime == "" {
@@ -1990,7 +2096,15 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	cutoff := normalizeTime(lastChunkTime)
 
 	for _, s := range data.Sessions {
-		if normalizeTime(s.StartedAt) > cutoff {
+		include := normalizeTime(s.StartedAt) > cutoff
+		if !include && exportedClosures == nil {
+			include = s.EndedAt != nil && normalizeTime(*s.EndedAt) >= cutoff
+		}
+		if !include && exportedClosures != nil {
+			_, closed := getSessionClosureState(s)
+			include = closed && !hasExportedSessionClosure(exportedClosures, s)
+		}
+		if include {
 			chunk.Sessions = append(chunk.Sessions, s)
 		}
 	}
@@ -2016,7 +2130,7 @@ func filterObservationsForExport(observations []store.Observation, historical ma
 	}
 
 	cutoff := normalizeTime(lastChunkTime)
-	filtered := make([]store.Observation, 0, len(observations))
+	var filtered []store.Observation
 	for _, observation := range observations {
 		_, present := historical[observation.SyncID]
 		if !present || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
