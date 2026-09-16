@@ -1574,6 +1574,29 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	if firstResult["topic_key"] != "bugfix/parser-panic" {
 		t.Fatalf("expected search result topic_key, got %v", firstResult["topic_key"])
 	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-mcp",
+		Type:      "bugfix",
+		Title:     "No topic key",
+		Content:   "Normal search omits absent topic keys.",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation without topic key: %v", err)
+	}
+	noTopicKeyRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "absent topic keys", "project": "engram", "scope": "project",
+	}}})
+	if err != nil || noTopicKeyRes.IsError {
+		t.Fatalf("search observation without topic key: err=%v result=%s", err, callResultText(t, noTopicKeyRes))
+	}
+	noTopicKeyResults, ok := callResultJSON(t, noTopicKeyRes)["results"].([]any)
+	if !ok || len(noTopicKeyResults) != 1 {
+		t.Fatalf("expected one result without topic key, got %#v", noTopicKeyResults)
+	}
+	if _, ok := noTopicKeyResults[0].(map[string]any)["topic_key"]; ok {
+		t.Fatalf("search result with no topic key included topic_key: %#v", noTopicKeyResults[0])
+	}
 
 	update := handleUpdate(s, MCPConfig{})
 	updateReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -8334,6 +8357,9 @@ func TestHandleSearch_CompactResponseUsesBoundedPreviewAndRelations(t *testing.T
 			foundPreview = true
 		}
 		if entry["id"] == float64(newID) {
+			if _, ok := entry["topic_key"]; ok {
+				t.Fatalf("compact result with no topic key included topic_key: %#v", entry)
+			}
 			relations := entry["relations"].(map[string]any)
 			asSource := relations["as_source"].([]any)
 			if len(asSource) == 0 || asSource[0].(map[string]any)["relation"] != store.RelationSupersedes {

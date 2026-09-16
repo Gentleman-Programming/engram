@@ -14352,6 +14352,23 @@ func TestSearchPreviewsContextIncludesTopicKey(t *testing.T) {
 			}
 		})
 	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview without topic key",
+		Content:   "Search previews retain nil topic keys.",
+		Project:   project,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation without topic key: %v", err)
+	}
+	results, err := s.SearchPreviewsContext(context.Background(), "without topic", SearchOptions{Project: project, Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews without topic key: %v", err)
+	}
+	if len(results) != 1 || results[0].TopicKey != nil {
+		t.Fatalf("topic key = %#v, want nil; results=%+v", results, results)
+	}
 }
 
 func TestSearch_WeightedBM25Ranking(t *testing.T) {
