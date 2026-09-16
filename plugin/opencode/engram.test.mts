@@ -64,35 +64,33 @@ interface RuntimeOptions {
   sessionGet?: (request: { path: { id: string } }) => any
   sessionRegistration?: (sessionID: string) => any
   sessionEnd?: (sessionID: string) => any
+  healthOK?: boolean | (() => boolean)
+  manifestExists?: boolean
 }
 
-async function createRuntime(t: any, { sessionGet, sessionRegistration, sessionEnd }: RuntimeOptions = {}) {
+interface RecordedSpawn {
+  command: string
+  args: string[]
+  options?: { cwd?: string }
+}
+
+async function createRuntime(
+  t: any,
+  { sessionGet, sessionRegistration, sessionEnd, healthOK = true, manifestExists = false }: RuntimeOptions = {},
+) {
   const originalFetch = globalThis.fetch
-  const originalBun = (globalThis as any).Bun
   const originalEngramURL = process.env.ENGRAM_URL
   delete process.env.ENGRAM_URL
   const requests: RecordedRequest[] = []
   const registeredIDs: string[] = []
-  const bun = globalThis as any
-  bun.Bun = {
-    spawnSync(args: string[]) {
-      if (args[1] === "instance-id")
-        return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
-      return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
-    },
-    spawn() {},
-    file() {
-      return {
-        async exists() {
-          return false
-        },
-      }
-    },
-  }
+  const spawns: RecordedSpawn[] = []
   globalThis.fetch = (async (url: any, init?: any) => {
     const path = new URL(url).pathname
     if (path === "/health")
-      return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" })
+      return httpResponse(
+        { status: "ok", instance_id: "00000000000000000000000000000000" },
+        typeof healthOK === "function" ? healthOK() : healthOK,
+      )
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, method: init?.method, body })
     if (path === "/project/current")
@@ -110,14 +108,25 @@ async function createRuntime(t: any, { sessionGet, sessionRegistration, sessionE
 
   t.after(() => {
     globalThis.fetch = originalFetch
-    bun.Bun = originalBun
     if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
     else process.env.ENGRAM_URL = originalEngramURL
   })
 
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?lifecycle=${runtimeImport}`, import.meta.url)
-  const { Engram } = await import(moduleURL.href)
+  const module = (await import(moduleURL.href)) as any
+  // Issue #1218: drive the Node runtime seam directly; the host has no Bun global.
+  module.nodeRuntime.spawnSync = async (command: string, args: string[]) => {
+    if (args[0] === "instance-id")
+      return { status: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
+    return { status: 0, stdout: Buffer.from("/work/engram\n") }
+  }
+  module.nodeRuntime.spawn = async (command: string, args: string[], options?: { cwd?: string }) => {
+    spawns.push({ command, args, options })
+    return true
+  }
+  module.nodeRuntime.fileExists = async () => manifestExists
+  const { Engram } = module
   const plugin: any = await Engram({
     directory: "/work/engram",
     project: { id: PROJECT_ID },
@@ -136,8 +145,78 @@ async function createRuntime(t: any, { sessionGet, sessionRegistration, sessionE
     after: plugin["tool.execute.after"],
     requests,
     registeredIDs,
+    spawns,
   }
 }
+
+// ─── Node runtime host (#1218) ───────────────────────────────────────────────
+
+test("#1218 spawns serve through the Node seam on a host without a Bun global", async (t) => {
+  assert.equal((globalThis as any).Bun, undefined, "the regression host must not provide a Bun global")
+  let healthChecks = 0
+  const runtime = await createRuntime(t, { healthOK: () => ++healthChecks > 1 })
+
+  const serve = runtime.spawns.find(({ args }) => args[0] === "serve")
+  assert.ok(serve, "the plugin must spawn `engram serve` through the Node seam")
+  assert.equal(serve.command, "engram")
+  assert.deepEqual(serve.args, ["serve"])
+
+  await runtime.event("session.created", sessionInfo("sess-root"))
+  assert.deepEqual(runtime.registeredIDs, ["sess-root"])
+})
+
+test("#1218 an unavailable Node seam keeps the controlled identity error instead of a Bun crash", async (t) => {
+  const originalFetch = globalThis.fetch
+  const originalEngramURL = process.env.ENGRAM_URL
+  delete process.env.ENGRAM_URL
+  globalThis.fetch = (async () => {
+    throw new Error("no engram server in this scenario")
+  }) as typeof fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
+    else process.env.ENGRAM_URL = originalEngramURL
+  })
+
+  runtimeImport += 1
+  const moduleURL = new URL(`./engram.ts?lifecycle=${runtimeImport}`, import.meta.url)
+  const { Engram, nodeRuntime } = (await import(moduleURL.href)) as any
+  nodeRuntime.spawnSync = async () => null
+
+  await assert.rejects(
+    Engram({
+      directory: "/work/engram",
+      project: { id: PROJECT_ID },
+      client: {
+        session: {
+          async get() {
+            throw new Error("unused: the server is never reachable")
+          },
+        },
+      },
+    } as any),
+    /could not resolve its local server identity/,
+  )
+})
+
+test("#1218 the default Node seam resolves real Node builtins and degrades silently", async (t) => {
+  runtimeImport += 1
+  const moduleURL = new URL(`./engram.ts?default-seam=${runtimeImport}`, import.meta.url)
+  const { nodeRuntime } = (await import(moduleURL.href)) as any
+
+  const echo = await nodeRuntime.spawnSync(process.execPath, ["-p", "'engram-seam-echo'"])
+  assert.equal(echo?.status, 0)
+  assert.match(Buffer.from(echo.stdout).toString(), /engram-seam-echo/)
+
+  const missing = await nodeRuntime.spawnSync("engram-binary-missing-for-1218", ["instance-id"])
+  assert.notEqual(missing?.status, 0)
+
+  assert.equal(await nodeRuntime.spawn(process.execPath, ["-p", "process.exit(0)"]), true)
+  assert.equal(await nodeRuntime.spawn("engram-binary-missing-for-1218", ["serve"]), true)
+
+  assert.equal(await nodeRuntime.fileExists(new URL("./engram.ts", import.meta.url).pathname), true)
+  assert.equal(await nodeRuntime.fileExists("/nonexistent/engram-1218/manifest.json"), false)
+})
 
 test("#1131 ends a root registration in Engram when a later event reveals a parentID", async (t) => {
   const runtime = await createRuntime(t)

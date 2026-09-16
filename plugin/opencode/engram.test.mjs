@@ -118,7 +118,6 @@ async function createRuntime(t, {
     nudgeObservationsError,
 } = {}) {
 	const originalFetch = globalThis.fetch
-	const originalBun = globalThis.Bun
 	const originalEngramURL = process.env.ENGRAM_URL
   const registeredIDs = []
   const sessionGetIDs = []
@@ -127,19 +126,7 @@ async function createRuntime(t, {
 	const startupEvents = []
 	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
 	else process.env.ENGRAM_URL = configuredEngramURL
-  globalThis.Bun = {
-    spawnSync(args) {
-      if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
-			if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
-      return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
-    },
-		spawn(args, options) {
-			spawns.push({ args, options })
-			if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
-		},
-		file() { return { async exists() { return manifestExists } } },
-  }
-  globalThis.fetch = async (url, init) => {
+	globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
 		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
     const body = init?.body ? JSON.parse(init.body) : undefined
@@ -167,13 +154,23 @@ async function createRuntime(t, {
 
 	t.after(() => {
 		globalThis.fetch = originalFetch
-		globalThis.Bun = originalBun
 		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
 		else process.env.ENGRAM_URL = originalEngramURL
 	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
-  const { Engram } = await import(moduleURL.href)
+  const { Engram, nodeRuntime } = await import(moduleURL.href)
+  // Issue #1218: drive the Node runtime seam directly; the host has no Bun global.
+  nodeRuntime.spawnSync = async (command, args) => {
+    if (args[0] === "instance-id") return { status: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
+    return { status: 0, stdout: Buffer.from("/work/engram\n") }
+  }
+  nodeRuntime.spawn = async (command, args, options) => {
+    spawns.push({ args, options })
+    if (args[0] === "sync" && args[1] === "--import") startupEvents.push("import:spawn")
+    return true
+  }
+  nodeRuntime.fileExists = async () => manifestExists
   const plugin = await Engram({
     directory,
     project: { id: PROJECT_ID },
@@ -327,7 +324,7 @@ test("startup import requires a resolved project identity", async (t) => {
 				projectCurrentOK: scenario.ok ?? true,
 				manifestExists: true,
 			})
-			const imports = runtime.spawns.filter(({ args }) => args[1] === "sync" && args[2] === "--import")
+			const imports = runtime.spawns.filter(({ args }) => args[0] === "sync" && args[1] === "--import")
 			assert.equal(imports.length, scenario.imports)
 			assert.deepEqual(runtime.startupEvents, scenario.startupEvents)
 		})

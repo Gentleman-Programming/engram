@@ -140,6 +140,51 @@ If you see a message about compaction or context reset, or if you see "FIRST ACT
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
 `
 
+// ─── Node Runtime Seam (#1218) ───────────────────────────────────────────────
+// opencode 1.18.x hosts plugins on Node, where no Bun global exists. Every
+// process and filesystem access goes through these lazily-imported Node
+// builtins; tests may replace the members with stubs. A failed import
+// degrades to null/false so every caller keeps its existing silent fallback
+// — a missing runtime never breaks module load.
+
+type RuntimeSpawnSyncResult = { status: number | null; stdout: Buffer | string }
+
+export const nodeRuntime: {
+  spawnSync: (command: string, args: string[]) => Promise<RuntimeSpawnSyncResult | null>
+  spawn: (command: string, args: string[], options?: { cwd?: string }) => Promise<boolean>
+  fileExists: (path: string) => Promise<boolean>
+} = {
+  async spawnSync(command, args) {
+    try {
+      const { spawnSync } = await import("node:child_process")
+      return spawnSync(command, args)
+    } catch {
+      return null
+    }
+  },
+  async spawn(command, args, options = {}) {
+    try {
+      const { spawn } = await import("node:child_process")
+      const child = spawn(command, args, { ...options, detached: true, stdio: "ignore" })
+      // Without this handler Node escalates a missing binary into an
+      // uncaught host crash instead of the silent no-op path.
+      child.on("error", () => {})
+      child.unref()
+      return true
+    } catch {
+      return false
+    }
+  },
+  async fileExists(path) {
+    try {
+      const { existsSync } = await import("node:fs")
+      return existsSync(path)
+    } catch {
+      return false
+    }
+  },
+}
+
 // ─── HTTP Client ─────────────────────────────────────────────────────────────
 
 async function engramFetch(
@@ -166,9 +211,10 @@ async function engramFetch(
   }
 }
 
-function localInstanceID(): string {
-  const result = Bun.spawnSync([ENGRAM_BIN, "instance-id"]); const id = Buffer.from(result.stdout).toString().trim()
-  if (result.exitCode !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
+async function localInstanceID(): Promise<string> {
+  const result = await nodeRuntime.spawnSync(ENGRAM_BIN, ["instance-id"])
+  const id = result ? Buffer.from(result.stdout).toString().trim() : ""
+  if (!result || result.status !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
   return id
 }
 
@@ -185,7 +231,7 @@ async function isEngramRunning(expectedID = ""): Promise<boolean> {
 }
 
 async function ensureLocalReady(): Promise<boolean> {
-	if (!localReady) localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
+	if (!localReady) localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : await localInstanceID())
 	return localReady
 }
 
@@ -530,16 +576,13 @@ export const Engram: Plugin = async (ctx) => {
 
   // Try to start engram server if not running
 	try {
-		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
+		const expectedID = CONFIGURED_ENGRAM_URL ? "" : await localInstanceID()
 		localReady = await isEngramRunning(expectedID)
 		if (!localReady && !CONFIGURED_ENGRAM_URL) {
-			Bun.spawn([ENGRAM_BIN, "serve"], {
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-			})
-			await new Promise((r) => setTimeout(r, 500))
-			localReady = await isEngramRunning(expectedID)
+			if (await nodeRuntime.spawn(ENGRAM_BIN, ["serve"])) {
+				await new Promise((r) => setTimeout(r, 500))
+				localReady = await isEngramRunning(expectedID)
+			}
 		}
 	} catch {}
 
@@ -550,14 +593,8 @@ export const Engram: Plugin = async (ctx) => {
 		// pulling changes. Each chunk is imported only once (tracked by ID).
 		try {
 			const manifestFile = `${ctx.directory}/.engram/manifest.json`
-			const file = Bun.file(manifestFile)
-			if (await file.exists()) {
-				Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
-					cwd: ctx.directory,
-					stdout: "ignore",
-					stderr: "ignore",
-					stdin: "ignore",
-				})
+			if (await nodeRuntime.fileExists(manifestFile)) {
+				await nodeRuntime.spawn(ENGRAM_BIN, ["sync", "--import"], { cwd: ctx.directory })
 			}
 		} catch {
 			// Manifest doesn't exist or binary not found — silently skip
