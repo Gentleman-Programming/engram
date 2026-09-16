@@ -607,6 +607,76 @@ func TestCmdSyncCloudRegressionPreservesLegacyBehaviorWithUpgradeStatePresent(t 
 	}
 }
 
+func TestParseSaveArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    saveArgs
+		wantErr string
+	}{
+		{
+			name: "flags before positionals",
+			args: []string{"--project", "myproject", "title", "content"},
+			want: saveArgs{title: "title", content: "content", typ: "manual", projectName: "myproject", scope: "project"},
+		},
+		{
+			name: "positional first remains supported",
+			args: []string{"title", "content", "--type", "bugfix", "--project", "alpha", "--scope", "personal", "--topic", "auth/token"},
+			want: saveArgs{title: "title", content: "content", typ: "bugfix", projectName: "alpha", scope: "personal", topicKey: "auth/token"},
+		},
+		{
+			name: "flags between positionals",
+			args: []string{"title", "--scope", "global", "content"},
+			want: saveArgs{title: "title", content: "content", typ: "manual", scope: "global"},
+		},
+		{
+			name: "end of options permits dash-prefixed positionals",
+			args: []string{"--project", "myproject", "--", "--title", "--content"},
+			want: saveArgs{title: "--title", content: "--content", typ: "manual", projectName: "myproject", scope: "project"},
+		},
+		{name: "missing flag value", args: []string{"title", "content", "--project"}, wantErr: "--project requires a value"},
+		{name: "flag cannot consume following flag", args: []string{"--project", "--scope", "global", "title", "content"}, wantErr: "--project requires a value"},
+		{name: "unknown flag", args: []string{"title", "content", "--unknown"}, wantErr: "unknown save flag: --unknown"},
+		{name: "missing positionals", args: []string{"--project", "myproject"}, wantErr: "save requires exactly two positional arguments"},
+		{name: "extra positional", args: []string{"title", "content", "extra"}, wantErr: "save requires exactly two positional arguments"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSaveArgs(tc.args)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseSaveArgs(%v) error = %v, want %q", tc.args, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseSaveArgs(%v): %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseSaveArgs(%v) = %#v, want %#v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCmdSaveRejectsFlagOnlyArgumentsBeforeOpeningStore(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	withArgs(t, "engram", "save", "--project", "myproject")
+
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("cmdSave panic = %v, want exitCode", recovered)
+	}
+	if !strings.Contains(stderr, "usage: engram save") || !strings.Contains(stderr, "save requires exactly two positional arguments") {
+		t.Fatalf("cmdSave stderr = %q, want usage error", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid save opened store or left state: %v", err)
+	}
+}
+
 func TestCmdSaveAndSearch(t *testing.T) {
 	cfg := testConfig(t)
 
