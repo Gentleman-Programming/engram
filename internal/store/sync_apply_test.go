@@ -136,6 +136,51 @@ func TestApplyPulledMutation_UpsertRespectsActiveDeleteTombstoneFloor(t *testing
 	}
 }
 
+func TestApplyPulledMutation_TombstoneFloorLookupFailureRejectsSessionUpsert(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "session-tombstone-floor-lookup-error"
+
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_delete_tombstones (entity, entity_key, project, active, last_mutation_seq)
+		VALUES (?, ?, '', 1, ?)
+	`, SyncEntitySession, sessionID, "not-a-sequence"); err != nil {
+		t.Fatalf("insert active tombstone: %v", err)
+	}
+	payload, err := json.Marshal(syncSessionPayload{
+		ID: sessionID, Project: "project-tombstone", Directory: "/tmp/tombstone", StartedAt: "2026-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal session payload: %v", err)
+	}
+
+	err = s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{
+			Seq: 101, Entity: SyncEntitySession, EntityKey: sessionID, Op: SyncOpUpsert, Payload: string(payload), Source: SyncSourceRemote,
+		})
+	})
+	if err == nil {
+		t.Fatal("apply pulled mutation succeeded, want tombstone floor lookup error")
+	}
+
+	var sessionCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, sessionID).Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Fatalf("session rows = %d, want 0", sessionCount)
+	}
+
+	var active int
+	if err := s.db.QueryRow(`
+		SELECT active FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?
+	`, SyncEntitySession, sessionID).Scan(&active); err != nil {
+		t.Fatalf("read tombstone: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("tombstone active = %d, want 1", active)
+	}
+}
+
 func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-pulled-project-storage", "engram", "/tmp/engram"); err != nil {
