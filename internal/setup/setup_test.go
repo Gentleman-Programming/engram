@@ -1382,6 +1382,40 @@ func TestRunCommandHelperProcess(t *testing.T) {
 	}
 }
 
+func TestInstallClaudeCodeRequiresHookDependencies(t *testing.T) {
+	tests := []struct {
+		name    string
+		missing string
+	}{
+		{name: "jq missing", missing: "jq"},
+		{name: "curl missing", missing: "curl"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			lookPathFn = func(file string) (string, error) {
+				if file == tt.missing {
+					return "", errors.New("not found")
+				}
+				return "/test/" + file, nil
+			}
+			runCommand = func(string, ...string) ([]byte, error) {
+				t.Fatal("Claude plugin installation must not run when a hook dependency is unavailable")
+				return nil, nil
+			}
+
+			_, err := installClaudeCode()
+			if err == nil {
+				t.Fatalf("expected missing %s error", tt.missing)
+			}
+			if !strings.Contains(err.Error(), tt.missing) || !strings.Contains(err.Error(), "PATH") || !strings.Contains(err.Error(), "rerun") {
+				t.Fatalf("expected actionable missing %s error, got %v", tt.missing, err)
+			}
+		})
+	}
+}
+
 func TestInstallClaudeCodeBranches(t *testing.T) {
 	t.Run("cli missing", func(t *testing.T) {
 		resetSetupSeams(t)

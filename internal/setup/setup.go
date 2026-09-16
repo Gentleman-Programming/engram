@@ -1023,6 +1023,13 @@ func installClaudeCode() (*Result, error) {
 		return nil, fmt.Errorf("claude CLI not found in PATH — install Claude Code first: https://docs.anthropic.com/en/docs/claude-code")
 	}
 
+	// Claude's shared Bash hooks need both tools before installation can succeed.
+	for _, dependency := range []string{"jq", "curl"} {
+		if _, err := lookPathFn(dependency); err != nil {
+			return nil, fmt.Errorf("Claude Code plugin requires %s in PATH — install jq and curl, ensure both are available in your shell (on Windows, install jq and use curl.exe or a curl distribution), then rerun engram setup claude-code", dependency)
+		}
+	}
+
 	// Step 1: Add marketplace (idempotent — if already added, claude will say so)
 	addOut, err := runCommand(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
 	addOutputStr := strings.TrimSpace(string(addOut))
