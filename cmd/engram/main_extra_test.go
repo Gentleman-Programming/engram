@@ -744,6 +744,7 @@ func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
 		{name: "help short", args: []string{"-h"}},
 		{name: "help long", args: []string{"--help"}},
 		{name: "tui", args: []string{"tui"}},
+		{name: "doctor", args: []string{"doctor"}},
 		{name: "regular command", args: []string{"search", "query"}, want: true},
 	}
 
