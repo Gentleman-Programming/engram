@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,13 +27,44 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+const (
+	windowsTempDirCleanupAttempts = 10
+	windowsTempDirCleanupDelay    = 10 * time.Millisecond
+)
+
+func testTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return t.TempDir()
+	}
+
+	dir, err := os.MkdirTemp("", "engram-test-")
+	if err != nil {
+		t.Fatalf("create test temp directory: %v", err)
+	}
+	t.Cleanup(func() {
+		var cleanupErr error
+		for attempt := 1; attempt <= windowsTempDirCleanupAttempts; attempt++ {
+			cleanupErr = os.RemoveAll(dir)
+			if cleanupErr == nil {
+				return
+			}
+			if attempt < windowsTempDirCleanupAttempts {
+				time.Sleep(windowsTempDirCleanupDelay)
+			}
+		}
+		t.Fatalf("remove test temp directory %q after %d attempts: %v", dir, windowsTempDirCleanupAttempts, cleanupErr)
+	})
+	return dir
+}
+
 func testConfig(t *testing.T) store.Config {
 	t.Helper()
 	cfg, err := store.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)
 	}
-	cfg.DataDir = t.TempDir()
+	cfg.DataDir = testTempDir(t)
 	return cfg
 }
 
