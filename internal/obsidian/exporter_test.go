@@ -1315,9 +1315,6 @@ func makeObs(id int64, sessionID, project, obsType, title, topicKey, ts string) 
 // ─── Stale hub deletion failure keeps state entries for retry ────────────────
 
 func TestStaleHubDeletionFailureKeepsStateEntries(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("read-only directories do not block root")
-	}
 	dir := t.TempDir()
 	ms := &mockStore{
 		exportData: &store.ExportData{
@@ -1363,17 +1360,17 @@ func TestStaleHubDeletionFailureKeepsStateEntries(t *testing.T) {
 		t.Fatalf("expected globex hubs after unfiltered export: %s, %s", staleSessionHub, staleTopicHub)
 	}
 
-	// Make both hub directories read-only so os.Remove fails with a real
-	// error (not IsNotExist) when the second export prunes stale hubs.
-	for _, d := range []string{sessionsDir, topicsDir} {
-		if err := os.Chmod(d, 0o555); err != nil {
-			t.Fatalf("chmod 0555 %s: %v", d, err)
+	// Replace each stale hub file with a non-empty directory so os.Remove
+	// fails with a real error (not IsNotExist) on any OS and any euid —
+	// root-owned CI included — when the second export prunes stale hubs.
+	for _, hub := range []string{staleSessionHub, staleTopicHub} {
+		if err := os.Remove(hub); err != nil {
+			t.Fatalf("replace hub %s: %v", hub, err)
+		}
+		if err := os.MkdirAll(filepath.Join(hub, "marker"), 0o755); err != nil {
+			t.Fatalf("create blocking dir %s: %v", hub, err)
 		}
 	}
-	t.Cleanup(func() {
-		_ = os.Chmod(sessionsDir, 0o755)
-		_ = os.Chmod(topicsDir, 0o755)
-	})
 
 	// Second export, scoped to acme-corp: both globex hubs fall out of the
 	// selection, deletion fails, and the state must keep both entries so a
@@ -1397,10 +1394,13 @@ func TestStaleHubDeletionFailureKeepsStateEntries(t *testing.T) {
 		t.Errorf("state.TopicHubs lost billing after failed deletion; retry is impossible")
 	}
 
-	// Third export with writable directories: the retry succeeds, files go
-	// away, and the state entries are pruned.
-	_ = os.Chmod(sessionsDir, 0o755)
-	_ = os.Chmod(topicsDir, 0o755)
+	// Empty the blocking directories: the retry can now delete them, files
+	// go away, and the state entries are pruned.
+	for _, hub := range []string{staleSessionHub, staleTopicHub} {
+		if err := os.Remove(filepath.Join(hub, "marker")); err != nil {
+			t.Fatalf("clear blocking dir %s: %v", hub, err)
+		}
+	}
 	third, err := NewExporter(ms, ExportConfig{VaultPath: dir, Org: "acme-corp"}).Export()
 	if err != nil {
 		t.Fatalf("third Export() error: %v", err)
