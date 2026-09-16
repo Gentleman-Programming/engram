@@ -1308,47 +1308,81 @@ func cmdSearch(cfg store.Config) {
 	}
 }
 
-func cmdSave(cfg store.Config) {
-	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
-		exitFunc(1)
-	}
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
 
-	title := os.Args[2]
-	content := os.Args[3]
-	typ := "manual"
-	projectName := ""
-	scope := "project"
-	topicKey := ""
+type saveArgs struct {
+	title       string
+	content     string
+	typ         string
+	projectName string
+	scope       string
+	topicKey    string
+}
 
-	for i := 4; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--type":
-			if i+1 < len(os.Args) {
-				typ = os.Args[i+1]
-				i++
+// parseSaveArgs accepts save flags anywhere around the two required positionals.
+// A conventional -- ends option parsing so titles and content may begin with --.
+func parseSaveArgs(args []string) (saveArgs, error) {
+	parsed := saveArgs{typ: "manual", scope: "project"}
+	positionals := make([]string, 0, 2)
+	endOfOptions := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !endOfOptions && arg == "--" {
+			endOfOptions = true
+			continue
+		}
+		if !endOfOptions && strings.HasPrefix(arg, "-") {
+			if arg != "--type" && arg != "--project" && arg != "--scope" && arg != "--topic" {
+				return saveArgs{}, fmt.Errorf("unknown save flag: %s", arg)
 			}
-		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
-				i++
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || strings.HasPrefix(args[i+1], "-") {
+				return saveArgs{}, fmt.Errorf("%s requires a value", arg)
 			}
-		case "--scope":
-			if i+1 < len(os.Args) {
-				scope = os.Args[i+1]
-				i++
+			i++
+			switch arg {
+			case "--type":
+				parsed.typ = args[i]
+			case "--project":
+				parsed.projectName = args[i]
+			case "--scope":
+				parsed.scope = args[i]
+			case "--topic":
+				parsed.topicKey = args[i]
 			}
-		case "--topic":
-			if i+1 < len(os.Args) {
-				topicKey = os.Args[i+1]
-				i++
-			}
+			continue
+		}
+		positionals = append(positionals, arg)
+		if len(positionals) > 2 {
+			return saveArgs{}, errors.New("save requires exactly two positional arguments")
 		}
 	}
 
+	if len(positionals) != 2 {
+		return saveArgs{}, errors.New("save requires exactly two positional arguments")
+	}
+	parsed.title = positionals[0]
+	parsed.content = positionals[1]
+	return parsed, nil
+}
+
+func cmdSave(cfg store.Config) {
+	args, err := parseSaveArgs(os.Args[2:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, saveUsage)
+		fatal(err)
+		return
+	}
+	title := args.title
+	content := args.content
+	typ := args.typ
+	projectName := args.projectName
+	scope := args.scope
+	topicKey := args.topicKey
+
 	// Reject titleless saves before opening the store or creating a session
 	// (#459). The store applies the same rule as a backstop.
-	if err := store.ValidateObservationTitle(title); err != nil {
+	if err := store.ValidateObservationTitle(args.title); err != nil {
 		fatal(err)
 		return
 	}
