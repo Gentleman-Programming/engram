@@ -46,6 +46,7 @@ The plugin:
 - **Resolves project identity** through the server's canonical resolver, so configured projects and repository worktrees keep their shared project identity
 - **Auto-imports** git-synced memories from `.engram/manifest.json` if present in the project
 - **Creates sessions** on-demand via `ensureSession()` (resilient to restarts/reconnects)
+- **Handles archive lifecycle** by checking OpenCode's active session status before ending only the existing same-project session identified by OpenCode; busy or unavailable status defers closure until `session.idle`, while inactive sessions close promptly. Archived data is preserved, and resumed work uses a new native session ID
 - **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
 - **Injects session-only runtime context** into the compaction prompt; manual `mem_context` and `GET /context` remain project/scope-scoped
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
@@ -53,6 +54,12 @@ The plugin:
 - **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `engram setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
 
 **No raw tool call recording** — the agent handles memory through curated saves such as `mem_save` and `mem_session_summary`. `mem_save` may best-effort attach prompt context, but only when that prompt was already fed to the same MCP process lifecycle.
+
+Archive safety is explicit: `session.updated` archive metadata does not prove
+inactivity. The plugin uses `client.session.status` when available and
+defers busy, failed, or unavailable checks until the matching `session.idle`
+event. If a session is unarchived first, its pending closure is canceled; an
+Engram session that was already ended is not reopened.
 
 ### Memory Protocol (injected via system prompt)
 

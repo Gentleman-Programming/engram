@@ -47,6 +47,22 @@ Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Nex
 Next session starts → Previous session context is injected automatically
 ```
 
+### OpenCode archive lifecycle
+
+OpenCode archive is a metadata update (`session.updated` with
+`info.time.archived`), not proof that work has stopped. The adapter checks the
+runtime's `client.session.status` result: idle or absent sessions close
+promptly; busy, retrying, unavailable, or failed status checks defer closure
+until the matching `session.idle` event. If the runtime does not expose that
+query, the adapter uses the same conservative idle-event-only policy.
+
+Deferred IDs are held in plugin memory and never create Engram sessions.
+Closure verifies an existing same-project top-level session, preserves its
+summary, and retries one transient 409/5xx failure. `session.deleted` clears
+pending state. Unarchiving before `session.idle` cancels pending closure; an
+already-ended Engram session is not reopened, and resumed work uses a new
+native session ID.
+
 ---
 
 ## MCP Tools

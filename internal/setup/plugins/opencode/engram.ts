@@ -24,6 +24,7 @@ const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
 const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
 let localReady = CONFIGURED_ENGRAM_URL !== undefined
+const SESSION_END_RETRY_DELAY_MS = 50
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
 const ENGRAM_TOOLS = new Set([
@@ -264,6 +265,79 @@ export function shouldNudgeForObservations(
   return lastObsEpoch !== null && nowSecs - lastObsEpoch >= 900
 }
 
+function asRecord(value: unknown): Record<string, any> | undefined {
+  return value !== null && typeof value === "object"
+    ? value as Record<string, any>
+    : undefined
+}
+
+type SessionArchiveState = "archived" | "unarchived" | "unknown"
+type ArchivedSessionCloseResult = "closed" | "terminal" | "deferred"
+
+function sessionArchiveState(info: unknown): SessionArchiveState {
+  const time = asRecord(asRecord(info)?.time)
+  if (!time) return "unknown"
+  if (!Object.prototype.hasOwnProperty.call(time, "archived")) return "unarchived"
+
+  const archived = time.archived
+  if (typeof archived === "number") return archived > 0 ? "archived" : "unarchived"
+  if (typeof archived === "string") {
+    return archived.length > 0 && archived !== "0" && archived.toLowerCase() !== "false"
+      ? "archived"
+      : "unarchived"
+  }
+  return archived ? "archived" : "unarchived"
+}
+
+function comparableProjectName(value: unknown): string {
+  if (typeof value !== "string") return ""
+  return value.trim().toLowerCase().replace(/--+/g, "-").replace(/__+/g, "_")
+}
+
+function isTransientSessionEndFailure(status: number): boolean {
+  return status === 409 || status >= 500
+}
+
+function sessionStatusData(value: unknown): Record<string, any> | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  if (Object.prototype.hasOwnProperty.call(record, "data")) {
+    if (record.error !== undefined && record.error !== null) return undefined
+    return asRecord(record.data)
+  }
+  return record
+}
+
+function isSessionActive(statuses: Record<string, any> | undefined, sessionID: string): boolean | undefined {
+  if (!statuses) return undefined
+
+  const status = asRecord(statuses[sessionID])
+  if (!status) return false
+  if (status.type === "idle") return false
+  if (status.type === "busy" || status.type === "retry") return true
+  return undefined
+}
+
+async function endArchivedSessionRequest(sessionId: string): Promise<void> {
+  const path = `/sessions/${encodeURIComponent(sessionId)}/end`
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${ENGRAM_URL}${path}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(3000),
+    })
+
+    if (response.ok) return
+
+    if (attempt === 0 && isTransientSessionEndFailure(response.status)) {
+      await new Promise((resolve) => setTimeout(resolve, SESSION_END_RETRY_DELAY_MS))
+      continue
+    }
+
+    throw new Error(`Failed to close archived session ${sessionId}: HTTP ${response.status}`)
+  }
+}
+
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
@@ -314,6 +388,10 @@ export const Engram: Plugin = async (ctx) => {
   const closeRequestedSessions = new Set<string>()
   const closedSessions = new Set<string>()
   const closingSessions = new Map<string, Promise<boolean>>()
+  const pendingArchivedSessions = new Set<string>()
+  const closingArchivedSessions = new Set<string>()
+  const closedArchivedSessions = new Set<string>()
+  const sessionEventQueues = new Map<string, Promise<void>>()
 
   function invalidateSessionTree(sessionId: string): void {
     const invalidated = new Set([sessionId])
@@ -537,6 +615,99 @@ export const Engram: Plugin = async (ctx) => {
     return await registration && !invalidSessions.has(sessionId) && !closeRequestedSessions.has(sessionId)
   }
 
+  async function isOpenCodeSessionActive(sessionID: string): Promise<boolean | undefined> {
+    try {
+      const result = await ctx.client.session.status({
+        query: { directory: ctx.directory },
+      })
+      return isSessionActive(sessionStatusData(result), sessionID)
+    } catch {
+      return undefined
+    }
+  }
+
+  async function closeArchivedSession(sessionId: string): Promise<ArchivedSessionCloseResult> {
+    if (
+      !sessionId ||
+      invalidSessions.has(sessionId) ||
+      subAgentSessions.has(sessionId) ||
+      parentSessions.get(sessionId) !== null
+    ) return "terminal"
+    if (!await ensureResolvedProject()) return "deferred"
+
+    let response: Response
+    try {
+      response = await fetch(`${ENGRAM_URL}/sessions/${encodeURIComponent(sessionId)}`, {
+        signal: AbortSignal.timeout(3000),
+      })
+    } catch {
+      return "deferred"
+    }
+
+    if (response.status === 404) return "terminal"
+    if (!response.ok) return "deferred"
+
+    let existing: any
+    try {
+      existing = await response.json()
+    } catch {
+      return "deferred"
+    }
+
+    if (!existing || existing.error) return "deferred"
+    if (existing.id !== sessionId) return "terminal"
+    if (typeof existing.project !== "string" || !comparableProjectName(existing.project)) {
+      return "deferred"
+    }
+    if (comparableProjectName(existing.project) !== comparableProjectName(project)) return "terminal"
+
+    await endArchivedSessionRequest(sessionId)
+    closedSessions.add(sessionId)
+    for (const sessions of [knownSessions, registrationAttempts, deletedRootSessions, closeRequestedSessions]) {
+      sessions.delete(sessionId)
+    }
+    return "closed"
+  }
+
+  function enqueueSessionEvent(sessionID: string, operation: () => Promise<void>): Promise<void> {
+    const previous = sessionEventQueues.get(sessionID) ?? Promise.resolve()
+    const next = previous.catch(() => undefined).then(operation)
+    sessionEventQueues.set(sessionID, next)
+    return next.finally(() => {
+      if (sessionEventQueues.get(sessionID) === next) sessionEventQueues.delete(sessionID)
+    })
+  }
+
+  async function closePendingArchivedSession(sessionID: string): Promise<void> {
+    if (!pendingArchivedSessions.has(sessionID) || closingArchivedSessions.has(sessionID)) return
+
+    closingArchivedSessions.add(sessionID)
+    try {
+      const result = await closeArchivedSession(sessionID)
+      if (result === "closed" || result === "terminal") {
+        pendingArchivedSessions.delete(sessionID)
+        closedArchivedSessions.add(sessionID)
+      }
+    } finally {
+      closingArchivedSessions.delete(sessionID)
+    }
+  }
+
+  async function handleArchivedSession(sessionID: string): Promise<void> {
+    if (
+      !sessionID ||
+      subAgentSessions.has(sessionID) ||
+      pendingArchivedSessions.has(sessionID) ||
+      closedArchivedSessions.has(sessionID)
+    ) return
+
+    pendingArchivedSessions.add(sessionID)
+    const active = await isOpenCodeSessionActive(sessionID)
+    if (active !== false) return
+
+    await closePendingArchivedSession(sessionID)
+  }
+
   // Try to start engram server if not running
 	try {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
@@ -613,6 +784,24 @@ export const Engram: Plugin = async (ctx) => {
         if (event.type === "session.created" && sessionId && !isSubAgent) {
           await ensureSession(sessionId)
         }
+
+        if (event.type === "session.updated" && sessionId) {
+          const archiveState = sessionArchiveState(info)
+          if (archiveState === "archived") {
+            await enqueueSessionEvent(sessionId, () => handleArchivedSession(sessionId))
+          } else if (archiveState === "unarchived") {
+            await enqueueSessionEvent(sessionId, async () => {
+              pendingArchivedSessions.delete(sessionId)
+            })
+          }
+        }
+      }
+
+      if (event.type === "session.idle") {
+        const sessionId = (event.properties as any)?.sessionID
+        if (typeof sessionId === "string") {
+          await enqueueSessionEvent(sessionId, () => closePendingArchivedSession(sessionId))
+        }
       }
 
       // --- Session Deleted ---
@@ -621,11 +810,16 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          // Any registration attempt owns an Engram lifecycle (#1131):
-          // confirmed roots keep the deletedRootSessions retry discipline.
-          // Await an in-flight registration before invalidating local ownership.
-          await closeKnownSession(sessionId)
-          invalidateSessionTree(sessionId)
+          await enqueueSessionEvent(sessionId, async () => {
+            pendingArchivedSessions.delete(sessionId)
+            closingArchivedSessions.delete(sessionId)
+            closedArchivedSessions.delete(sessionId)
+            // Any registration attempt owns an Engram lifecycle (#1131):
+            // confirmed roots keep the deletedRootSessions retry discipline.
+            // Await an in-flight registration before invalidating local ownership.
+            await closeKnownSession(sessionId)
+            invalidateSessionTree(sessionId)
+          })
         }
       }
 
