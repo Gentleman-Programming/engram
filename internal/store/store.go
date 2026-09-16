@@ -10039,16 +10039,16 @@ func NormalizeProject(project string) (normalized string, warning string) {
 // a normalized segment from title/content for stable cross-session keys.
 func SuggestTopicKey(typ, title, content string) string {
 	family := inferTopicFamily(typ, title, content)
-	cleanTitle := stripPrivateTags(title)
-	segment := normalizeTopicSegment(cleanTitle)
+	segmentSource := stripPrivateTags(title)
+	segment := normalizeTopicSegment(segmentSource)
 
 	if segment == "" {
-		cleanContent := stripPrivateTags(content)
-		words := strings.Fields(strings.ToLower(cleanContent))
+		words := strings.Fields(stripPrivateTags(content))
 		if len(words) > 8 {
 			words = words[:8]
 		}
-		segment = normalizeTopicSegment(strings.Join(words, " "))
+		segmentSource = strings.Join(words, " ")
+		segment = normalizeTopicSegment(segmentSource)
 	}
 
 	if segment == "" {
@@ -10062,6 +10062,7 @@ func SuggestTopicKey(typ, title, content string) string {
 		segment = "general"
 	}
 
+	segment = appendUnicodeTopicIdentity(segment, segmentSource, 120-len(family)-1)
 	return family + "/" + segment
 }
 
@@ -10123,6 +10124,27 @@ func hasAny(text string, words ...string) bool {
 		}
 	}
 	return false
+}
+
+// appendUnicodeTopicIdentity distinguishes automatic suggestions whose source
+// contains characters normalizeTopicSegment cannot retain. It leaves ASCII-only
+// suggestions unchanged and keeps the segment within the existing key limits.
+func appendUnicodeTopicIdentity(segment, source string, maxLen int) string {
+	for _, r := range source {
+		if r <= unicode.MaxASCII {
+			continue
+		}
+		hash := sha256.Sum256([]byte(source))
+		suffix := "-u-" + hex.EncodeToString(hash[:6])
+		if maxLen > 100 {
+			maxLen = 100
+		}
+		if len(segment) > maxLen-len(suffix) {
+			segment = segment[:maxLen-len(suffix)]
+		}
+		return segment + suffix
+	}
+	return segment
 }
 
 func normalizeTopicSegment(s string) string {
