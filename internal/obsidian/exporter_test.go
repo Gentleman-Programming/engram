@@ -1311,3 +1311,114 @@ func makeObs(id int64, sessionID, project, obsType, title, topicKey, ts string) 
 	}
 	return obs
 }
+
+// ─── Stale hub deletion failure keeps state entries for retry ────────────────
+
+func TestStaleHubDeletionFailureKeepsStateEntries(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("read-only directories do not block root")
+	}
+	dir := t.TempDir()
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{
+				{ID: "sess-1", Project: "eng"},
+				{ID: "sess-2", Project: "eng"},
+			},
+			Observations: []store.Observation{
+				{
+					ID: 1, SessionID: "sess-1", Type: "bugfix", Title: "Acme fix",
+					Content: "acme fix content", Scope: "project",
+					CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+					Project: strPtr("eng"), Org: strPtr("acme-corp"),
+				},
+				{
+					ID: 2, SessionID: "sess-2", Type: "decision", Title: "Globex one",
+					Content: "globex one content", Scope: "project",
+					CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+					Project: strPtr("eng"), Org: strPtr("globex-inc"),
+					TopicKey: strPtr("billing/one"),
+				},
+				{
+					ID: 3, SessionID: "sess-2", Type: "decision", Title: "Globex two",
+					Content: "globex two content", Scope: "project",
+					CreatedAt: "2026-01-03T10:00:00Z", UpdatedAt: "2026-01-03T10:00:00Z",
+					Project: strPtr("eng"), Org: strPtr("globex-inc"),
+					TopicKey: strPtr("billing/two"),
+				},
+			},
+			Prompts: []store.Prompt{},
+		},
+	}
+
+	// First export, unfiltered: sess-2 session hub and billing topic hub exist.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("first Export() error: %v", err)
+	}
+	sessionsDir := filepath.Join(dir, "engram", "_sessions")
+	topicsDir := filepath.Join(dir, "engram", "_topics")
+	staleSessionHub := filepath.Join(sessionsDir, "sess-2.md")
+	staleTopicHub := filepath.Join(topicsDir, "billing.md")
+	if !fileExists(staleSessionHub) || !fileExists(staleTopicHub) {
+		t.Fatalf("expected globex hubs after unfiltered export: %s, %s", staleSessionHub, staleTopicHub)
+	}
+
+	// Make both hub directories read-only so os.Remove fails with a real
+	// error (not IsNotExist) when the second export prunes stale hubs.
+	for _, d := range []string{sessionsDir, topicsDir} {
+		if err := os.Chmod(d, 0o555); err != nil {
+			t.Fatalf("chmod 0555 %s: %v", d, err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(sessionsDir, 0o755)
+		_ = os.Chmod(topicsDir, 0o755)
+	})
+
+	// Second export, scoped to acme-corp: both globex hubs fall out of the
+	// selection, deletion fails, and the state must keep both entries so a
+	// later export can retry.
+	second, err := NewExporter(ms, ExportConfig{VaultPath: dir, Org: "acme-corp"}).Export()
+	if err != nil {
+		t.Fatalf("second Export() error: %v", err)
+	}
+	if len(second.Errors) < 2 {
+		t.Fatalf("second export Errors: got %d, want >= 2 (session hub + topic hub): %v", len(second.Errors), second.Errors)
+	}
+	stateFile := filepath.Join(dir, "engram", ".engram-sync-state.json")
+	state, err := ReadState(stateFile)
+	if err != nil {
+		t.Fatalf("ReadState after failed prune: %v", err)
+	}
+	if _, kept := state.SessionHubs["sess-2"]; !kept {
+		t.Errorf("state.SessionHubs lost sess-2 after failed deletion; retry is impossible")
+	}
+	if _, kept := state.TopicHubs["billing"]; !kept {
+		t.Errorf("state.TopicHubs lost billing after failed deletion; retry is impossible")
+	}
+
+	// Third export with writable directories: the retry succeeds, files go
+	// away, and the state entries are pruned.
+	_ = os.Chmod(sessionsDir, 0o755)
+	_ = os.Chmod(topicsDir, 0o755)
+	third, err := NewExporter(ms, ExportConfig{VaultPath: dir, Org: "acme-corp"}).Export()
+	if err != nil {
+		t.Fatalf("third Export() error: %v", err)
+	}
+	if len(third.Errors) != 0 {
+		t.Fatalf("third export Errors: got %v, want none", third.Errors)
+	}
+	if fileExists(staleSessionHub) || fileExists(staleTopicHub) {
+		t.Errorf("stale hubs still present after retry export: %s, %s", staleSessionHub, staleTopicHub)
+	}
+	state, err = ReadState(stateFile)
+	if err != nil {
+		t.Fatalf("ReadState after retry: %v", err)
+	}
+	if _, kept := state.SessionHubs["sess-2"]; kept {
+		t.Errorf("state.SessionHubs still tracks sess-2 after successful retry deletion")
+	}
+	if _, kept := state.TopicHubs["billing"]; kept {
+		t.Errorf("state.TopicHubs still tracks billing after successful retry deletion")
+	}
+}
