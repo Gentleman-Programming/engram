@@ -51,10 +51,11 @@ func TestApplyPulledMutation_CloudUpsertRespectsRemoteTombstoneFloor(t *testing.
 		remoteFloor  *int64
 		seq          int64
 		wantApplied  bool
+		inactive     bool
 	}{
 		{name: "session unknown floor", entity: SyncEntitySession, seq: 1},
 		{name: "session below floor", entity: SyncEntitySession, remoteFloor: &floor, seq: floor - 1},
-		{name: "session equal floor", entity: SyncEntitySession, remoteFloor: &floor, seq: floor},
+		{name: "session inactive equal floor", entity: SyncEntitySession, remoteFloor: &floor, seq: floor, inactive: true},
 		{name: "session above floor", entity: SyncEntitySession, remoteFloor: &floor, seq: floor + 1, wantApplied: true},
 		{name: "observation unknown floor", entity: SyncEntityObservation, seq: 1},
 		{name: "observation below floor", entity: SyncEntityObservation, remoteFloor: &floor, seq: floor - 1},
@@ -70,10 +71,14 @@ func TestApplyPulledMutation_CloudUpsertRespectsRemoteTombstoneFloor(t *testing.
 					t.Fatalf("create observation parent: %v", err)
 				}
 			}
+			tombstoneActive := 1
+			if tt.inactive {
+				tombstoneActive = 0
+			}
 			if _, err := s.db.Exec(`
 				INSERT INTO sync_delete_tombstones (entity, entity_key, project, active, last_remote_mutation_seq)
-				VALUES (?, ?, 'remote-floor', 1, ?)
-			`, tt.entity, key, tt.remoteFloor); err != nil {
+				VALUES (?, ?, 'remote-floor', ?, ?)
+			`, tt.entity, key, tombstoneActive, tt.remoteFloor); err != nil {
 				t.Fatalf("insert tombstone: %v", err)
 			}
 			project := "remote-floor"
@@ -104,7 +109,7 @@ func TestApplyPulledMutation_CloudUpsertRespectsRemoteTombstoneFloor(t *testing.
 			if err := s.db.QueryRow(`SELECT active FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, tt.entity, key).Scan(&active); err != nil {
 				t.Fatalf("read tombstone: %v", err)
 			}
-			wantActive := 1
+			wantActive := tombstoneActive
 			if tt.wantApplied {
 				wantActive = 0
 			}
@@ -215,6 +220,17 @@ func TestApplyPulledMutation_NonDefaultTombstoneFloorsStayIsolated(t *testing.T)
 	}
 	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, sessionID); got != 1 {
 		t.Fatalf("target B session rows = %d, want 1", got)
+	}
+	if _, err := s.CleanupForeignSyncTargets(true); err != nil {
+		t.Fatal(err)
+	}
+	stalePayload := fmt.Sprintf(`{"id":%q,"project":"target-floor","directory":"/tmp/stale-target-a"}`, sessionID)
+	if err := s.ApplyPulledMutation("cloud:target-a", SyncMutation{Seq: 100, Entity: SyncEntitySession, EntityKey: sessionID, Op: SyncOpUpsert, Payload: stalePayload}); err != nil {
+		t.Fatal(err)
+	}
+	var directory string
+	if err := s.db.QueryRow(`SELECT directory FROM sessions WHERE id = ?`, sessionID).Scan(&directory); err != nil || directory != "/tmp/target-floor" {
+		t.Fatalf("directory after stale target A upsert = %q, want %q (err=%v)", directory, "/tmp/target-floor", err)
 	}
 	if err := s.withTx(func(tx *sql.Tx) error {
 		return s.recordSyncDeleteTombstoneTx(tx, SyncEntitySession, sessionID, "", "target-floor", Now())

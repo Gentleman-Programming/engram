@@ -7836,19 +7836,23 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 
 func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
 	if targetKey == DefaultSyncTargetKey {
+		var active int
 		var floor sql.NullInt64
-		err := tx.QueryRow(`SELECT last_remote_mutation_seq FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ? AND active = 1`, entity, entityKey).Scan(&floor)
+		err := tx.QueryRow(`SELECT active, last_remote_mutation_seq FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&active, &floor)
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
 		}
-		return !floor.Valid || seq <= floor.Int64, nil
+		if floor.Valid {
+			return seq <= floor.Int64, nil
+		}
+		return active == 1, nil
 	}
 	var active int
 	err := tx.QueryRow(`SELECT active FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&active)
-	if errors.Is(err, sql.ErrNoRows) || active == 0 {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -7857,9 +7861,12 @@ func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, e
 	var floor int64
 	err = tx.QueryRow(`SELECT last_mutation_seq FROM sync_delete_tombstone_remote_floors WHERE target_key = ? AND entity = ? AND entity_key = ?`, targetKey, entity, entityKey).Scan(&floor)
 	if errors.Is(err, sql.ErrNoRows) {
-		return true, nil
+		return active == 1, nil
 	}
-	return err == nil && seq <= floor, err
+	if err != nil {
+		return false, err
+	}
+	return seq <= floor, nil
 }
 
 func (s *Store) recordCloudDeleteTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey, sessionID, project string, deletedAt *string, hardDelete bool, seq int64) error {
