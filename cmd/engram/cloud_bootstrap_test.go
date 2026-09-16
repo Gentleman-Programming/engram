@@ -165,6 +165,23 @@ func fakePrincipalToken(params cloudstore.CreatePrincipalTokenParams) cloudstore
 	}
 }
 
+type bootstrapManagedTokenLookup struct {
+	token     cloudstore.PrincipalToken
+	principal cloudauth.Principal
+}
+
+func (l bootstrapManagedTokenLookup) FindManagedTokenByHash(_ context.Context, hash string) (cloudauth.ManagedTokenRecord, cloudauth.Principal, error) {
+	if hash != l.token.TokenHash {
+		return cloudauth.ManagedTokenRecord{}, cloudauth.Principal{}, cloudauth.ErrUnknownToken
+	}
+	return cloudauth.ManagedTokenRecord{
+		ID:          l.token.ID,
+		PrincipalID: l.token.PrincipalID,
+		Hash:        l.token.TokenHash,
+		RevokedAt:   l.token.RevokedAt,
+	}, l.principal, nil
+}
+
 func (s *fakeCloudBootstrapStore) CreateProjectGrant(_ context.Context, params cloudstore.CreateProjectGrantParams) (cloudstore.ProjectGrant, error) {
 	s.createGrantCalls++
 	if s.createGrantErr != nil {
@@ -493,9 +510,9 @@ func TestCloudBootstrapAdminAuditFailureStillCreatesAdminAndExitsNonZero(t *test
 	}
 }
 
-// TestCloudBootstrapAdminIssuesTokenExactlyOnce proves --issue-token prints
-// the raw token exactly once, never persists/audits it, and requires the
-// dedicated cloud token pepper to be configured.
+// TestCloudBootstrapAdminIssuesTokenExactlyOnce proves --issue-token atomically
+// persists a resolvable token hash with its completion audit before disclosing
+// the raw token exactly once.
 func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	stubExitWithPanic(t)
 	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
@@ -538,6 +555,41 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 				t.Fatalf("audit metadata key %q leaked the raw token secret: %q", key, s)
 			}
 		}
+	}
+
+	if len(store.auditEvents) != 2 {
+		t.Fatalf("expected admin-created and token completion audit events, got %+v", store.auditEvents)
+	}
+	completion := store.auditEvents[1]
+	if completion.ActorPrincipalID != "" || completion.ActorSource != string(cloudauth.PrincipalSourceBootstrapCLI) || completion.TargetPrincipalID != store.tokens[0].PrincipalID || completion.Action != cloudBootstrapAuditAction || completion.Outcome != cloudBootstrapAuditOutcomeSuccess || completion.ReasonCode != "bootstrap_completed" {
+		t.Fatalf("unexpected bootstrap token completion audit: %+v", completion)
+	}
+	if completion.Metadata["issued_token"] != true || completion.Metadata["created_admin"] != true || completion.Metadata["token_prefix"] != store.tokens[0].TokenPrefix {
+		t.Fatalf("expected complete, non-secret bootstrap token audit metadata, got %+v", completion.Metadata)
+	}
+
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte("dedicated-cloud-token-pepper-for-tests"))
+	if err != nil {
+		t.Fatalf("new managed token hasher: %v", err)
+	}
+	resolver := cloudauth.NewPrincipalResolver(cloudauth.ResolverConfig{
+		Hasher: hasher,
+		ManagedTokens: bootstrapManagedTokenLookup{
+			token: store.tokens[0],
+			principal: cloudauth.Principal{
+				ID:      store.tokens[0].PrincipalID,
+				Kind:    cloudauth.PrincipalKindHuman,
+				Role:    cloudauth.RoleAdmin,
+				Enabled: true,
+			},
+		},
+	})
+	principal, err := resolver.ResolveBearerToken(context.Background(), rawToken)
+	if err != nil {
+		t.Fatalf("bootstrap-issued token must resolve through the managed token resolver: %v", err)
+	}
+	if principal.ID != store.tokens[0].PrincipalID || principal.TokenID != store.tokens[0].ID || principal.Source != cloudauth.PrincipalSourceManagedToken {
+		t.Fatalf("unexpected resolved principal for bootstrap-issued token: %+v", principal)
 	}
 }
 

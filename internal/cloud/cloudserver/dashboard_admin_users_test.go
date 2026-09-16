@@ -85,6 +85,27 @@ func TestDashboardCreateManagedUserRequiresManagedAdmin(t *testing.T) {
 	}
 }
 
+// TestDashboardCreateManagedTokenRequiresManagedAdmin proves a managed-member
+// login establishes a valid dashboard session but cannot issue a token through
+// the protected dashboard mutation route.
+func TestDashboardCreateManagedTokenRequiresManagedAdmin(t *testing.T) {
+	store := newLoginAuditTestStore()
+	store.principals["p-member"] = dashboardStoredPrincipal("p-member", cloudstore.PrincipalRoleMember, true)
+	store.users = append(store.users, cloudstore.HumanUser{PrincipalID: "p-target", Username: "target-user", Role: cloudstore.PrincipalRoleMember, Enabled: true})
+	member := dashboardManagedPrincipal("p-member", cloudstore.PrincipalRoleMember, true)
+	authn := resolvingAuth{principals: map[string]cloudauth.Principal{"member-token": member}}
+	srv := New(store, authn, 0, WithAdminIdentityStore(store))
+	cookie := managedDashboardLogin(t, srv, "member-token", false)
+
+	rec := performDashboardForm(srv, http.MethodPost, "/dashboard/admin/users/p-target/tokens", "name=laptop", cookie, false)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected managed member token issuance to be forbidden, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if store.createTokenCalls != 0 || len(store.tokens) != 0 {
+		t.Fatalf("forbidden managed member token issuance must not persist a token, calls=%d tokens=%+v", store.createTokenCalls, store.tokens)
+	}
+}
+
 // TestDashboardCreateManagedUserSucceedsRedirectsAndAudits proves a managed
 // admin dashboard session can create a managed user via the dashboard form,
 // is redirected back to the managed users shell, and the mutation is
