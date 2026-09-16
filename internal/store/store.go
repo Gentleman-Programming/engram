@@ -335,6 +335,12 @@ const (
 
 	SyncSessionIdentityInvalidReasonCode = "sync_session_identity_invalid"
 
+	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
+	// relation carried a non-blank outer mutation project. Unmarked legacy rows
+	// retain payload-scoped replay semantics while this marker preserves #1200's
+	// project-scoped endpoint validation for newly deferred authoritative mutations.
+	relationDeferredOuterProjectAuthoritativeReasonCode = "relation_outer_project_authoritative"
+
 	// Decay defaults — months added to now() to compute review_after on new inserts.
 	// expires_at is NULL for all types in Phase 1.
 	decayDecisionMonths   = 6
@@ -6153,11 +6159,15 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 	var payload syncRelationPayload
 	payloadDecoded := decodeSyncPayload([]byte(mutation.Payload), &payload) == nil
 
-	project := strings.TrimSpace(mutation.Project)
+	outerProject, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	project := outerProject
 	if project == "" && payloadDecoded {
-		project = strings.TrimSpace(payload.Project)
+		project, _ = NormalizeProject(strings.TrimSpace(payload.Project))
 	}
-	project, _ = NormalizeProject(project)
+	reasonCode := ""
+	if outerProject != "" {
+		reasonCode = relationDeferredOuterProjectAuthoritativeReasonCode
+	}
 	scopeClass := "target_scoped"
 	if project != "" {
 		scopeClass = "scoped"
@@ -6197,13 +6207,14 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 
 	if _, err := s.execHook(tx, `
 		INSERT INTO sync_apply_deferred
-			(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, first_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+			(sync_id, entity, payload, target_key, entity_key, op, reason_code, payload_sync_id, project, scope_class, apply_status, retry_count, first_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
 		ON CONFLICT(sync_id) DO UPDATE SET
 			payload           = excluded.payload,
 			target_key        = excluded.target_key,
 			entity_key        = excluded.entity_key,
 			op                = excluded.op,
+			reason_code       = excluded.reason_code,
 			payload_sync_id   = excluded.payload_sync_id,
 			project           = excluded.project,
 			scope_class       = excluded.scope_class,
@@ -6212,7 +6223,7 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 				ELSE sync_apply_deferred.apply_status
 			END,
 			last_attempted_at = datetime('now')
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status); err != nil {
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status); err != nil {
 		return false, fmt.Errorf("write relation apply failure: %w", err)
 	}
 
@@ -9136,6 +9147,7 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	p.Relation = strings.TrimSpace(p.Relation)
 	p.JudgmentStatus = strings.TrimSpace(p.JudgmentStatus)
 	p.Project, _ = NormalizeProject(strings.TrimSpace(p.Project))
+	outerProject, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
 	if p.MarkedByActor != nil {
 		actor := strings.TrimSpace(*p.MarkedByActor)
 		p.MarkedByActor = &actor
@@ -9171,18 +9183,26 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	}
 
 	// Step 2: FK precondition — both observations must exist locally (by sync_id).
-	// A project-scoped payload may only use endpoints in that project. Legacy
-	// payloads omit project, so retain their historical global lookup behavior.
+	// A non-blank mutation project is authoritative for pulled relations: both
+	// endpoints must use its normalized project scope. Blank outer projects retain
+	// the legacy payload-scoped (or global) lookup behavior.
+	effectiveProject := p.Project
+	if outerProject != "" {
+		effectiveProject = outerProject
+	}
 	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
 	observationArgs := []any{p.SourceID, p.TargetID}
-	if p.Project != "" {
+	if effectiveProject != "" {
 		observationQuery = `
 			SELECT count(DISTINCT o.sync_id)
 			FROM observations o
 			LEFT JOIN sessions sess ON sess.id = o.session_id
 			WHERE o.sync_id IN (?, ?)
 			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
-		observationArgs = append(observationArgs, p.Project)
+		observationArgs = append(observationArgs, effectiveProject)
+		if outerProject != "" {
+			observationQuery += "\n\t\t\t  AND o.scope = 'project'"
+		}
 	}
 	var obsCount int
 	if err := tx.QueryRow(observationQuery, observationArgs...).Scan(&obsCount); err != nil {
@@ -10484,7 +10504,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 	project, _ = NormalizeProject(strings.TrimSpace(project))
 
 	query := `
-		SELECT sync_id, entity, payload, entity_key, op, retry_count
+		SELECT sync_id, entity, payload, entity_key, op, project, reason_code, retry_count
 		FROM sync_apply_deferred
 		WHERE apply_status = 'deferred'`
 	args := []any{}
@@ -10510,13 +10530,15 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		payload    string
 		entityKey  string
 		op         string
+		project    string
+		reasonCode string
 		retryCount int
 	}
 
 	var pending []deferredRow
 	for rows.Next() {
 		var r deferredRow
-		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.entityKey, &r.op, &r.retryCount); err != nil {
+		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.entityKey, &r.op, &r.project, &r.reasonCode, &r.retryCount); err != nil {
 			rows.Close()
 			return result, fmt.Errorf("ReplayDeferred: scan: %w", err)
 		}
@@ -10539,6 +10561,10 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		if op == "" {
 			op = SyncOpUpsert
 		}
+		outerProject := ""
+		if row.reasonCode == relationDeferredOuterProjectAuthoritativeReasonCode {
+			outerProject = row.project
+		}
 		mut := SyncMutation{
 			Entity:    row.entity,
 			EntityKey: entityKey,
@@ -10546,7 +10572,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 			Payload:   row.payload,
 			Source:    SyncSourceRemote,
 			TargetKey: targetKey,
-			Project:   project,
+			Project:   outerProject,
 		}
 
 		applyErr := s.withTx(func(tx *sql.Tx) error {
