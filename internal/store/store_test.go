@@ -14459,6 +14459,58 @@ func TestSearchCompositeLexicalReranking(t *testing.T) {
 	})
 }
 
+func TestSearchPreviewsContextIncludesTopicKey(t *testing.T) {
+	s := newTestStore(t)
+	const (
+		sessionID = "preview-topic-key-session"
+		project   = "engram"
+		topicKey  = "bugfix/preview-topic-key"
+	)
+	if err := s.CreateSession(sessionID, project, "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview tk topic key",
+		Content:   "Search previews must retain topic keys.",
+		Project:   project,
+		Scope:     "project",
+		TopicKey:  topicKey,
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	for _, query := range []string{"preview topic", "tk", topicKey} {
+		t.Run(query, func(t *testing.T) {
+			results, err := s.SearchPreviewsContext(context.Background(), query, SearchOptions{Project: project, Limit: 10})
+			if err != nil {
+				t.Fatalf("search previews: %v", err)
+			}
+			if len(results) != 1 || results[0].TopicKey == nil || *results[0].TopicKey != topicKey {
+				t.Fatalf("topic key = %#v, want %q; results=%+v", results, topicKey, results)
+			}
+		})
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview without topic key",
+		Content:   "Search previews retain nil topic keys.",
+		Project:   project,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation without topic key: %v", err)
+	}
+	results, err := s.SearchPreviewsContext(context.Background(), "without topic", SearchOptions{Project: project, Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews without topic key: %v", err)
+	}
+	if len(results) != 1 || results[0].TopicKey != nil {
+		t.Fatalf("topic key = %#v, want nil; results=%+v", results, results)
+	}
+}
+
 func TestSearch_WeightedBM25Ranking(t *testing.T) {
 	s := newTestStore(t)
 

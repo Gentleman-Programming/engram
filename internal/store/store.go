@@ -194,6 +194,7 @@ type SearchPreviewResult struct {
 	Preview     string  `json:"preview"`
 	Truncated   bool    `json:"truncated"`
 	Project     *string `json:"project,omitempty"`
+	TopicKey    *string `json:"topic_key,omitempty"`
 	Scope       string  `json:"scope"`
 	ReviewAfter *string `json:"review_after,omitempty"`
 	Pinned      bool    `json:"-"`
@@ -4279,7 +4280,7 @@ func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts Se
 		tkSQL := `
 			SELECT id, ifnull(sync_id, '') as sync_id, type, title,
 			       substr(content, 1, 300) as preview, length(content) > 300 as truncated,
-			       project, scope, review_after, pinned, created_at
+			       project, topic_key, scope, review_after, pinned, created_at
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
@@ -4405,7 +4406,7 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
 	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
-	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
+	       o.project, o.topic_key, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
 }
 
 func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions, limit int) (string, []any) {
@@ -4492,7 +4493,7 @@ func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, 
 func buildSearchPreviewLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
 	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
-	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
+	       o.project, o.topic_key, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
 }
 
 func buildSearchLIKEQueryWithColumns(columns, query string, opts SearchOptions, limit int) (string, []any) {
@@ -9705,7 +9706,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 func scanSearchPreviewRow(scanner observationScanner, r *SearchPreviewResult, withRank bool) error {
 	dest := []any{
 		&r.ID, &r.SyncID, &r.Type, &r.Title, &r.Preview, &r.Truncated,
-		&r.Project, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
+		&r.Project, &r.TopicKey, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
 	}
 	if withRank {
 		dest = append(dest, &r.Rank)
