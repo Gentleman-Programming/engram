@@ -1026,7 +1026,7 @@ func installClaudeCode() (*Result, error) {
 	// Claude's shared Bash hooks need both tools before installation can succeed.
 	for _, dependency := range []string{"jq", "curl"} {
 		if _, err := lookPathFn(dependency); err != nil {
-			return nil, fmt.Errorf("Claude Code plugin requires %s in PATH — install jq and curl, ensure both are available in your shell (on Windows, install jq and use curl.exe or a curl distribution), then rerun engram setup claude-code", dependency)
+			return nil, fmt.Errorf("the Claude Code plugin requires %s in PATH — install jq and curl, ensure both are available in your shell (on Windows, install jq and use curl.exe or a curl distribution), then rerun engram setup claude-code", dependency)
 		}
 	}
 
