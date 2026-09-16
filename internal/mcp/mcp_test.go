@@ -1533,6 +1533,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		Content:   "Fix panic in parser branch when args are missing",
 		Project:   "engram",
 		Scope:     "project",
+		TopicKey:  "bugfix/parser-panic",
 	})
 	if err != nil {
 		t.Fatalf("add observation: %v", err)
@@ -1569,6 +1570,9 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if firstResult["pinned"] != true {
 		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
+	}
+	if firstResult["topic_key"] != "bugfix/parser-panic" {
+		t.Fatalf("expected search result topic_key, got %v", firstResult["topic_key"])
 	}
 
 	update := handleUpdate(s, MCPConfig{})
@@ -8261,6 +8265,7 @@ func TestHandleSearch_CompactResponseUsesBoundedPreviewAndRelations(t *testing.T
 		Title:     "Older compact search decision",
 		Content:   content,
 		Project:   projectName,
+		TopicKey:  "decision/compact-search",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -8322,6 +8327,9 @@ func TestHandleSearch_CompactResponseUsesBoundedPreviewAndRelations(t *testing.T
 			}
 			if entry["truncated"] != true {
 				t.Fatalf("truncated = %#v, want true", entry["truncated"])
+			}
+			if entry["topic_key"] != "decision/compact-search" {
+				t.Fatalf("topic_key = %#v, want decision/compact-search", entry["topic_key"])
 			}
 			foundPreview = true
 		}
