@@ -1314,33 +1314,37 @@ func cmdSave(cfg store.Config) {
 		exitFunc(1)
 	}
 
-	title := os.Args[2]
-	content := os.Args[3]
+	rest := os.Args[2:]
+	positionals, next, ok := takeRequiredPositionals(rest, 2, "engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
+	if !ok {
+		return
+	}
+	title, content := positionals[0], positionals[1]
 	typ := "manual"
 	projectName := ""
 	scope := "project"
 	topicKey := ""
 
-	for i := 4; i < len(os.Args); i++ {
-		switch os.Args[i] {
+	for i := next; i < len(rest); i++ {
+		switch rest[i] {
 		case "--type":
-			if i+1 < len(os.Args) {
-				typ = os.Args[i+1]
+			if i+1 < len(rest) {
+				typ = rest[i+1]
 				i++
 			}
 		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
+			if i+1 < len(rest) {
+				projectName = rest[i+1]
 				i++
 			}
 		case "--scope":
-			if i+1 < len(os.Args) {
-				scope = os.Args[i+1]
+			if i+1 < len(rest) {
+				scope = rest[i+1]
 				i++
 			}
 		case "--topic":
-			if i+1 < len(os.Args) {
-				topicKey = os.Args[i+1]
+			if i+1 < len(rest) {
+				topicKey = rest[i+1]
 				i++
 			}
 		}
@@ -1479,6 +1483,42 @@ func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (
 	return flags, true
 }
 
+// takeRequiredPositionals extracts the first want required positional
+// operands from args, honoring a single "--" separator: tokens after "--" are
+// positional even when dash-prefixed (#1205). A flag-shaped token occupying a
+// required positional slot is rejected before any store access — the flag
+// loops only start after the positionals, so such a token used to be stored
+// verbatim ("engram save --project X" saved title "--project"). On rejection
+// it prints the offending token and the subcommand usage line to stderr,
+// calls exitFunc(1), and reports ok=false. The returned index points at the
+// first unconsumed token so callers can resume their flag parsing.
+func takeRequiredPositionals(args []string, want int, usage string) ([]string, int, bool) {
+	positionals := make([]string, 0, want)
+	afterSeparator := false
+	i := 0
+	for len(positionals) < want {
+		if i >= len(args) {
+			fmt.Fprintln(os.Stderr, "usage: "+usage)
+			exitFunc(1)
+			return nil, 0, false
+		}
+		arg := args[i]
+		switch {
+		case !afterSeparator && arg == "--":
+			afterSeparator = true
+		case !afterSeparator && strings.HasPrefix(arg, "-"):
+			fmt.Fprintf(os.Stderr, "error: flag-shaped argument %q cannot fill a required positional slot\n", arg)
+			fmt.Fprintln(os.Stderr, "usage: "+usage)
+			exitFunc(1)
+			return nil, 0, false
+		default:
+			positionals = append(positionals, arg)
+		}
+		i++
+	}
+	return positionals, i, true
+}
+
 // rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
 func rejectDeleteHelpTarget(target, usage string) bool {
 	if target != "--help" && target != "-h" {
@@ -1597,12 +1637,17 @@ func cmdDeleteProject(cfg store.Config) {
 		return
 	}
 
-	name := os.Args[3]
+	rest := os.Args[3:]
+	positionals, next, ok := takeRequiredPositionals(rest, 1, "engram delete project <name> [--hard]")
+	if !ok {
+		return
+	}
+	name := positionals[0]
 	if rejectDeleteHelpTarget(name, "engram delete project <name> [--hard]") {
 		return
 	}
 
-	flags, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete project <name> [--hard]", "--hard")
+	flags, ok := parseDeleteTrailingArgs(rest[next:], "engram delete project <name> [--hard]", "--hard")
 	if !ok {
 		return
 	}
@@ -3389,7 +3434,11 @@ func cmdProtocolMode(cfg store.Config) {
 		exitFunc(1)
 		return
 	}
-	slug := os.Args[2]
+	positionals, _, ok := takeRequiredPositionals(os.Args[2:], 1, "engram protocol-mode <slug>")
+	if !ok {
+		return
+	}
+	slug := positionals[0]
 
 	mode := setup.ReadProtocolMode(cfg.DataDir, slug)
 	if mode == setup.ProtocolModeSlim && meetsProtocolVersionFloor(version) {
