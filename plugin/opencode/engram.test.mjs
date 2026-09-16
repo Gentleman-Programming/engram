@@ -253,6 +253,13 @@ test("manifest import registers an error listener before detaching", async (t) =
   assert.deepEqual(imported?.child.events, ["error", "unref"])
 })
 
+test("server startup registers an error listener before detaching", async (t) => {
+  const runtime = await createRuntime(t, { healthOK: false })
+  const server = runtime.spawns.find(({ args }) => args[1] === "serve")
+
+  assert.deepEqual(server?.child.events, ["error", "unref"])
+})
+
 test("save nudge fails closed for malformed and non-array observation responses", async (t) => {
   for (const scenario of [
     { name: "malformed JSON", error: new SyntaxError("unexpected end of JSON input") },

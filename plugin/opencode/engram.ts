@@ -536,10 +536,12 @@ export const Engram: Plugin = async (ctx) => {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
 		localReady = await isEngramRunning(expectedID)
 		if (!localReady && !CONFIGURED_ENGRAM_URL) {
-      spawn(ENGRAM_BIN, ["serve"], {
+      const serverChild = spawn(ENGRAM_BIN, ["serve"], {
         detached: true,
         stdio: "ignore",
-      }).unref()
+      })
+      serverChild.on("error", () => {})
+      serverChild.unref()
 			await new Promise((r) => setTimeout(r, 500))
 			localReady = await isEngramRunning(expectedID)
 		}
