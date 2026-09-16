@@ -663,7 +663,11 @@ func TestCmdSaveReportsContentTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer s.Close()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 
 	var storedContent string
 	if err := s.DB().QueryRow(`SELECT content FROM observations WHERE title = ?`, "oversized-title").Scan(&storedContent); err != nil {
