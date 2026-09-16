@@ -123,14 +123,13 @@ func TestApplyPulledMutation_CloudUpsertRespectsRemoteTombstoneFloor(t *testing.
 func TestApplyPulledObservationNormalizesAndValidatesIdentity(t *testing.T) {
 	tests := []struct {
 		name, operation string
-		payloadSyncID   string
-		wantErr         bool
-		wantVisible     int
+		payloadSyncID string
+		wantVisible   int
 	}{
 		{name: "blank upsert falls back to mutation key", operation: SyncOpUpsert, wantVisible: 1},
 		{name: "blank delete falls back to mutation key", operation: SyncOpDelete, wantVisible: 0},
-		{name: "mismatched upsert is rejected", operation: SyncOpUpsert, payloadSyncID: "different-observation", wantErr: true},
-		{name: "mismatched delete is rejected", operation: SyncOpDelete, payloadSyncID: "different-observation", wantErr: true, wantVisible: 1},
+		{name: "mismatched upsert is quarantined", operation: SyncOpUpsert, payloadSyncID: "different-observation"},
+		{name: "mismatched delete is quarantined", operation: SyncOpDelete, payloadSyncID: "different-observation", wantVisible: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,12 +145,8 @@ func TestApplyPulledObservationNormalizesAndValidatesIdentity(t *testing.T) {
 				}
 			}
 			payload := fmt.Sprintf(`{"sync_id":%q,"session_id":%q,"type":"decision","title":"identity","content":"content","scope":"project"}`, tt.payloadSyncID, sessionID)
-			err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: syncID, Op: tt.operation, Payload: payload})
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("apply error = %v, want error=%t", err, tt.wantErr)
-			}
-			if tt.wantErr && !errors.Is(err, ErrPulledObservationIdentityInvalid) {
-				t.Fatalf("apply error = %v, want observation identity error", err)
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: syncID, Op: tt.operation, Payload: payload}); err != nil {
+				t.Fatalf("apply mutation: %v", err)
 			}
 			if got := scalarInt(t, s, `SELECT COUNT(*) FROM observations WHERE sync_id = ? AND deleted_at IS NULL`, syncID); got != tt.wantVisible {
 				t.Fatalf("visible observations = %d, want %d", got, tt.wantVisible)

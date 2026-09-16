@@ -7668,6 +7668,131 @@ func TestApplyPulledSessionInvalidIdentityDoesNotBlockLaterMutations(t *testing.
 	}
 }
 
+func TestPulledObservationIdentityInvalidQuarantinesDirectPull(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "observation-quarantine-parent"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/observation-quarantine"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	invalid := SyncMutation{
+		Seq:       1,
+		Entity:    SyncEntityObservation,
+		EntityKey: "observation-mutation-id",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"observation-payload-id","session_id":"observation-quarantine-parent","type":"decision","title":"invalid identity","content":"must be retained as evidence","project":"payload-project","scope":"project"}`,
+		Project:   " Engram ",
+	}
+	valid := SyncMutation{
+		Seq:       2,
+		Entity:    SyncEntityObservation,
+		EntityKey: "observation-valid-id",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"observation-valid-id","session_id":"observation-quarantine-parent","type":"decision","title":"valid identity","content":"must apply after the invalid mutation","project":"engram","scope":"project"}`,
+	}
+	for _, mutation := range []SyncMutation{invalid, valid} {
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+			t.Fatalf("ApplyPulledMutation seq=%d: %v", mutation.Seq, err)
+		}
+	}
+
+	if _, err := s.GetObservationBySyncID(invalid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("invalid observation persisted: %v", err)
+	}
+	if _, err := s.GetObservationBySyncID(valid.EntityKey); err != nil {
+		t.Fatalf("valid observation missing after quarantine: %v", err)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM observations`); got != 1 {
+		t.Fatalf("observations=%d, want only the later valid observation", got)
+	}
+
+	var payload, targetKey, entityKey, op, reasonCode, project, scopeClass, applyStatus string
+	var remoteSeq int64
+	if err := s.db.QueryRow(`
+		SELECT payload, target_key, remote_seq, entity_key, op, reason_code, project, scope_class, apply_status
+		FROM sync_apply_deferred
+		WHERE entity = ?`, SyncEntityObservation,
+	).Scan(&payload, &targetKey, &remoteSeq, &entityKey, &op, &reasonCode, &project, &scopeClass, &applyStatus); err != nil {
+		t.Fatalf("read observation evidence: %v", err)
+	}
+	if payload != invalid.Payload || targetKey != DefaultSyncTargetKey || remoteSeq != invalid.Seq || entityKey != invalid.EntityKey || op != invalid.Op {
+		t.Fatalf("observation evidence coordinates = payload=%q target=%q seq=%d entity_key=%q op=%q", payload, targetKey, remoteSeq, entityKey, op)
+	}
+	if reasonCode != SyncObservationIdentityInvalidReasonCode || project != "engram" || scopeClass != "scoped" || applyStatus != "dead" {
+		t.Fatalf("observation evidence metadata = reason=%q project=%q scope=%q status=%q", reasonCode, project, scopeClass, applyStatus)
+	}
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil || state.LastPulledSeq != valid.Seq {
+		t.Fatalf("sync state=%+v, err=%v; cursor must advance with evidence", state, err)
+	}
+}
+
+func TestApplyPulledChunkObservationIdentityInvalidQuarantinesAndContinues(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "observation-chunk-parent"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/observation-chunk"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	invalidA := SyncMutation{Entity: SyncEntityObservation, EntityKey: "shared-mutation-id", Op: SyncOpUpsert, Payload: `{"sync_id":"payload-id-a","session_id":"observation-chunk-parent","type":"decision","title":"invalid A","content":"first discarded payload","project":"engram","scope":"project"}`}
+	invalidB := SyncMutation{Entity: SyncEntityObservation, EntityKey: "shared-mutation-id", Op: SyncOpUpsert, Payload: `{"sync_id":"payload-id-b","session_id":"observation-chunk-parent","type":"decision","title":"invalid B","content":"second discarded payload","project":"engram","scope":"project"}`}
+	firstValid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "chunk-valid-one", Op: SyncOpUpsert, Payload: `{"sync_id":"chunk-valid-one","session_id":"observation-chunk-parent","type":"decision","title":"valid one","content":"applies after malformed observations","project":"engram","scope":"project"}`}
+	secondValid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "chunk-valid-two", Op: SyncOpUpsert, Payload: `{"sync_id":"chunk-valid-two","session_id":"observation-chunk-parent","type":"decision","title":"valid two","content":"applies after redelivery","project":"engram","scope":"project"}`}
+
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "observation-identity-one", []SyncMutation{invalidA, invalidB, firstValid}); err != nil {
+		t.Fatalf("ApplyPulledChunk first delivery: %v", err)
+	}
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "observation-identity-two", []SyncMutation{invalidA, secondValid}); err != nil {
+		t.Fatalf("ApplyPulledChunk redelivery: %v", err)
+	}
+
+	for _, syncID := range []string{firstValid.EntityKey, secondValid.EntityKey} {
+		if _, err := s.GetObservationBySyncID(syncID); err != nil {
+			t.Fatalf("valid observation %q missing after chunk quarantine: %v", syncID, err)
+		}
+	}
+	var evidenceCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_apply_deferred WHERE entity = ? AND reason_code = ?`, SyncEntityObservation, SyncObservationIdentityInvalidReasonCode).Scan(&evidenceCount); err != nil {
+		t.Fatalf("count observation evidence: %v", err)
+	}
+	if evidenceCount != 2 {
+		t.Fatalf("observation evidence rows=%d, want 2; distinct mutations must not collapse and redelivery must stay idempotent", evidenceCount)
+	}
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil || state.LastPulledSeq != 5 {
+		t.Fatalf("sync state=%+v, err=%v; chunks must advance after every mutation", state, err)
+	}
+}
+
+func TestApplyPulledChunkObservationFailuresRemainClosed(t *testing.T) {
+	valid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "closed-valid", Op: SyncOpUpsert, Payload: `{"sync_id":"closed-valid","session_id":"closed-parent","type":"decision","title":"valid","content":"must roll back","project":"engram","scope":"project"}`}
+	tests := []struct {
+		name string
+		bad  SyncMutation
+	}{
+		{name: "decode error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "decode-invalid", Op: SyncOpUpsert, Payload: "not JSON"}},
+		{name: "unrelated foreign key error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "missing-parent", Op: SyncOpUpsert, Payload: `{"sync_id":"missing-parent","session_id":"missing-parent-session","type":"decision","title":"missing parent","content":"must not quarantine","project":"engram","scope":"project"}`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid}); err == nil {
+				t.Fatal("ApplyPulledChunk succeeded for a fail-closed observation error")
+			}
+			if _, err := s.GetObservationBySyncID(valid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("valid observation applied despite rollback: %v", err)
+			}
+			if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_apply_deferred WHERE entity = ?`, SyncEntityObservation); got != 0 {
+				t.Fatalf("observation evidence rows=%d, want none for fail-closed errors", got)
+			}
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil || state.LastPulledSeq != 0 {
+				t.Fatalf("sync state=%+v, err=%v; fail-closed errors must not advance the cursor", state, err)
+			}
+		})
+	}
+}
+
 // TestPulledSessionDeadLetterKeepsDistinctMutationsWithEqualSequence pins the
 // dead-letter row identity to the mutation itself rather than to its position in
 // the pull.

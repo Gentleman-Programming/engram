@@ -336,7 +336,8 @@ const (
 	SyncSourceLocal  = "local"
 	SyncSourceRemote = "remote"
 
-	SyncSessionIdentityInvalidReasonCode = "sync_session_identity_invalid"
+	SyncSessionIdentityInvalidReasonCode     = "sync_session_identity_invalid"
+	SyncObservationIdentityInvalidReasonCode = "sync_observation_identity_invalid"
 
 	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
 	// relation carried a non-blank outer mutation project. Unmarked legacy rows
@@ -6067,15 +6068,14 @@ func (s *Store) MarkSyncPending(targetKey string) error {
 
 // ApplyPulledMutation applies one remote mutation and advances the pull cursor.
 //
-// Session-identity semantics are skip-plus-evidence, not fail-closed. A blank
-// or inconsistent session identity in a pulled mutation is quarantined through
-// deadLetterPulledSessionIdentityTx and the cursor still advances past it.
-// Failing closed here would be a permanent retry loop: servers that predate the
-// identity rule hold historical chunks with blank session IDs, and no local
-// action can ever make such a mutation valid, so halting would pin the cursor
-// forever and block every later mutation behind it. Quarantining keeps the
-// dropped data visible — `engram doctor --check invalid_session_identity`
-// reports it and `engram conflicts deferred` lists the raw row.
+// Session and observation identity semantics are skip-plus-evidence, not
+// fail-closed. A blank or inconsistent session identity, or an inconsistent
+// observation identity, in a pulled mutation is quarantined through
+// deadLetterPulledIdentityTx and the cursor still advances past it. Failing
+// closed here would be a permanent retry loop: immutable remote data cannot
+// become valid through local retries, so halting would pin the cursor forever
+// and block every later mutation behind it. Quarantining keeps the dropped data
+// visible in `engram conflicts deferred`.
 //
 // Every other apply failure keeps its existing fail-closed behavior.
 func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) error {
@@ -6094,8 +6094,8 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 				return err
 			} else if !handled {
-				if errors.Is(applyErr, ErrPulledSessionIdentityInvalid) {
-					if err := s.deadLetterPulledSessionIdentityTx(tx, targetKey, mutation); err != nil {
+				if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+					if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
 						return err
 					}
 				} else {
@@ -6251,8 +6251,9 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 // retry safety: a failed chunk import leaves no partial semantic mutations.
 //
 // It shares ApplyPulledMutation's skip-plus-evidence rule for invalid session
-// identities: such a mutation is quarantined and the rest of the chunk still
-// applies, so one historical blank identity cannot block the chunk forever.
+// and observation identities: such a mutation is quarantined and the rest of
+// the chunk still applies, so one permanently malformed identity cannot block
+// the chunk forever.
 // A payload that does not even decode stays fail-closed and rolls back the
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
@@ -6292,8 +6293,8 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 				if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 				} else if !handled {
-					if errors.Is(applyErr, ErrPulledSessionIdentityInvalid) {
-						if err := s.deadLetterPulledSessionIdentityTx(tx, targetKey, mutation); err != nil {
+					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
 							return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 						}
 					} else {
@@ -9129,8 +9130,8 @@ func validatePulledSessionDirectory(raw []byte) error {
 	return nil
 }
 
-// pulledSessionDeadLetterSyncID derives the identity of a quarantined pulled
-// session mutation from the mutation itself, never from its position in the pull.
+// pulledIdentityDeadLetterSyncID derives the identity of quarantined pulled
+// mutations from the mutation itself, never from their position in the pull.
 //
 // The row it identifies is the only record that remote data was discarded, and
 // the insert resolves conflicts with ON CONFLICT(sync_id) DO UPDATE, so the
@@ -9138,7 +9139,7 @@ func validatePulledSessionDirectory(raw []byte) error {
 // land on different rows, or the second silently erases the first and
 // skip-plus-evidence degrades into the silent drop it exists to prevent. One
 // dropped mutation redelivered must land on the same row, or a single discarded
-// session accumulates an evidence row per delivery and overstates the loss.
+// mutation accumulates an evidence row per delivery and overstates the loss.
 //
 // The pull sequence satisfies neither obligation. ApplyPulledChunk overwrites it
 // with the local cursor position, so it describes when a mutation was applied
@@ -9148,26 +9149,60 @@ func validatePulledSessionDirectory(raw []byte) error {
 // are what actually distinguish dropped data, so they are what the identity
 // hashes. Each field is length-prefixed so no field content can imitate a
 // separator and forge a collision.
-func pulledSessionDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
+func pulledIdentityDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
 	digest := sha256.New()
 	for _, field := range []string{targetKey, mutation.Entity, mutation.EntityKey, mutation.Op, mutation.Payload} {
 		digest.Write([]byte(strconv.Itoa(len(field))))
 		digest.Write([]byte(":"))
 		digest.Write([]byte(field))
 	}
-	return "pulled-session-" + hex.EncodeToString(digest.Sum(nil))
+	return "pulled-" + mutation.Entity + "-" + hex.EncodeToString(digest.Sum(nil))
 }
 
-func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
-	syncID := pulledSessionDeadLetterSyncID(targetKey, mutation)
+// pulledSessionDeadLetterSyncID retains the historical session evidence identity
+// for callers and rows created before observation identities were quarantined.
+func pulledSessionDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
+	return pulledIdentityDeadLetterSyncID(targetKey, mutation)
+}
+
+func pulledIdentityInvalidReasonCode(applyErr error) (string, bool) {
+	switch {
+	case errors.Is(applyErr, ErrPulledSessionIdentityInvalid):
+		return SyncSessionIdentityInvalidReasonCode, true
+	case errors.Is(applyErr, ErrPulledObservationIdentityInvalid):
+		return SyncObservationIdentityInvalidReasonCode, true
+	default:
+		return "", false
+	}
+}
+
+func pulledIdentityEvidenceProject(mutation SyncMutation) string {
 	project := strings.TrimSpace(mutation.Project)
 	if project == "" {
-		var payload syncSessionPayload
-		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
-			project = strings.TrimSpace(payload.Project)
+		switch mutation.Entity {
+		case SyncEntitySession:
+			var payload syncSessionPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(payload.Project)
+			}
+		case SyncEntityObservation:
+			var payload syncObservationPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(derefString(payload.Project))
+			}
 		}
 	}
 	project, _ = NormalizeProject(project)
+	return project
+}
+
+func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
+	return s.deadLetterPulledIdentityTx(tx, targetKey, mutation, SyncSessionIdentityInvalidReasonCode)
+}
+
+func (s *Store) deadLetterPulledIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation, reasonCode string) error {
+	syncID := pulledIdentityDeadLetterSyncID(targetKey, mutation)
+	project := pulledIdentityEvidenceProject(mutation)
 	scopeClass := "target_scoped"
 	if project != "" {
 		scopeClass = "scoped"
@@ -9181,10 +9216,10 @@ func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, 
 			remote_seq = excluded.remote_seq, entity_key = excluded.entity_key, op = excluded.op,
 			reason_code = excluded.reason_code, project = excluded.project, scope_class = excluded.scope_class,
 			apply_status = 'dead', last_attempted_at = datetime('now')`,
-		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op, SyncSessionIdentityInvalidReasonCode, project, scopeClass,
+		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op, reasonCode, project, scopeClass,
 	)
 	if err != nil {
-		return fmt.Errorf("write invalid pulled session evidence: %w", err)
+		return fmt.Errorf("write invalid pulled %s evidence: %w", mutation.Entity, err)
 	}
 	return nil
 }
