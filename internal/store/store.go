@@ -7863,13 +7863,20 @@ func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, e
 	}
 	var floor int64
 	err = tx.QueryRow(`SELECT last_mutation_seq FROM sync_delete_tombstone_remote_floors WHERE target_key = ? AND entity = ? AND entity_key = ?`, targetKey, entity, entityKey).Scan(&floor)
-	if errors.Is(err, sql.ErrNoRows) {
-		return active == 1, nil
+	if err == nil {
+		return seq <= floor, nil
 	}
-	if err != nil {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	return seq <= floor, nil
+	var hasTargetFloor bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstone_remote_floors WHERE entity = ? AND entity_key = ?)`, entity, entityKey).Scan(&hasTargetFloor); err != nil {
+		return false, err
+	}
+	if hasTargetFloor {
+		return false, nil
+	}
+	return active == 1, nil
 }
 
 func (s *Store) recordCloudDeleteTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey, sessionID, project string, deletedAt *string, hardDelete bool, seq int64) error {
