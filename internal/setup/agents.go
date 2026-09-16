@@ -21,6 +21,12 @@ func agentAdapters() []agentAdapter {
 			installDir:  openCodePluginDir,
 		},
 		{
+			slug:        "opencode-v2",
+			description: "OpenCode v2 — TypeScript plugin for the V2 plugin API (session tracking, compaction recovery, Memory Protocol)",
+			custom:      installOpenCodeV2,
+			installDir:  openCodePluginDir,
+		},
+		{
 			slug:        "pi",
 			description: "Pi — gentle-engram package plus pi-mcp-adapter MCP tools",
 			custom:      installPi,

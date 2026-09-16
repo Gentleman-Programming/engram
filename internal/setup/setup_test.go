@@ -34,6 +34,20 @@ func TestEmbeddedOpenCodePluginMatchesSourceByteForByte(t *testing.T) {
 	}
 }
 
+func TestEmbeddedOpenCodeV2PluginMatchesSourceByteForByte(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "plugin", "opencode-v2", "engram.ts"))
+	if err != nil {
+		t.Fatalf("read OpenCode v2 source plugin: %v", err)
+	}
+	embedded, err := os.ReadFile(filepath.Join("plugins", "opencode-v2", "engram.ts"))
+	if err != nil {
+		t.Fatalf("read embedded OpenCode v2 plugin: %v", err)
+	}
+	if !bytes.Equal(source, embedded) {
+		t.Fatal("embedded OpenCode v2 plugin drifted from plugin/opencode-v2/engram.ts; regenerate the embedded copy")
+	}
+}
+
 // resetSetupSeams saves every package-level seam this file overrides and
 // registers a t.Cleanup that restores each to its pre-test value.
 func resetSetupSeams(t *testing.T) {
@@ -998,6 +1012,117 @@ func TestInstallOpenCodeSuccessAndMCPRegistered(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected %q plugin registration", openCodeSubagentStatuslinePlugin)
+	}
+}
+
+func TestInstallOpenCodeV2UsesV2ConfigShape(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	// Pre-existing V2 config: unrelated keys and servers must survive the install.
+	configPath := filepath.Join(xdg, "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	initial := `{"$schema":"https://opencode.ai/config.json","mcp":{"servers":{"other":{"type":"remote","url":"https://example.com/mcp"}}}}`
+	if err := os.WriteFile(configPath, []byte(initial), 0644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	result, err := installOpenCodeV2()
+	if err != nil {
+		t.Fatalf("installOpenCodeV2 failed: %v", err)
+	}
+	if result.Files != 2 {
+		t.Fatalf("expected 2 files after plugin + MCP registration, got %d", result.Files)
+	}
+	if !result.MCPConfigured {
+		t.Fatal("expected successful OpenCode v2 install to report MCP configuration")
+	}
+	if result.TUIPluginEnabled {
+		t.Fatal("OpenCode v2 install must not touch the 1.x TUI plugin config")
+	}
+
+	pluginPath := filepath.Join(xdg, "opencode", "plugins", "engram.ts")
+	if _, err := os.Stat(pluginPath); err != nil {
+		t.Fatalf("expected plugin file to exist: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse opencode config: %v", err)
+	}
+	if got := cfg["$schema"]; got != "https://opencode.ai/config.json" {
+		t.Fatalf("expected unrelated top-level keys to survive, got %v", got)
+	}
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcp object in opencode.json")
+	}
+	if _, exists := mcp["engram"]; exists {
+		t.Fatal("V2 config must not register servers directly under mcp")
+	}
+	servers, ok := mcp["servers"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcp.servers object in opencode.json")
+	}
+	if _, ok := servers["other"]; !ok {
+		t.Fatal("expected unrelated MCP servers to survive")
+	}
+	entry, ok := servers["engram"].(map[string]any)
+	if !ok {
+		t.Fatal("expected mcp.servers.engram registration")
+	}
+	if entry["type"] != "local" {
+		t.Fatalf("expected local type, got %v", entry["type"])
+	}
+	if _, enabled := entry["enabled"]; enabled {
+		t.Fatal("V2 MCP entries must use disabled, not enabled")
+	}
+	if disabled, ok := entry["disabled"].(bool); !ok || disabled {
+		t.Fatalf("expected disabled=false, got %v", entry["disabled"])
+	}
+	command, ok := entry["command"].([]any)
+	if !ok || len(command) < 2 || command[1] != "mcp" {
+		t.Fatalf("expected engram mcp command, got %v", entry["command"])
+	}
+}
+
+func TestInstallOpenCodeV2IsIdempotent(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	if _, err := installOpenCodeV2(); err != nil {
+		t.Fatalf("first installOpenCodeV2 failed: %v", err)
+	}
+	configPath := filepath.Join(xdg, "opencode", "opencode.json")
+	first, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after first install: %v", err)
+	}
+
+	if _, err := installOpenCodeV2(); err != nil {
+		t.Fatalf("second installOpenCodeV2 failed: %v", err)
+	}
+	second, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after second install: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("re-running setup must not change the config:\nfirst:  %s\nsecond: %s", first, second)
+	}
+	if got := strings.Count(string(second), `"engram"`); got != 1 {
+		t.Fatalf("expected exactly one engram entry, got %d", got)
 	}
 }
 

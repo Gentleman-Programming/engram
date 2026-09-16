@@ -377,6 +377,18 @@ func TestPrintPostInstall(t *testing.T) {
 			notExpects: []string{mcpConfiguredMessage, "opencode-subagent-statusline", "engram serve &"},
 		},
 		{
+			name:       "opencode-v2 with MCP configured",
+			result:     &setup.Result{Agent: "opencode-v2", MCPConfigured: true},
+			expects:    []string{"OpenCode v2 plugin and Engram MCP registration (mcp.servers)", "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, mcpManualMessage, "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "opencode-v2 with incomplete MCP registration",
+			result:     &setup.Result{Agent: "opencode-v2", MCPConfigured: false},
+			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
 			name:       "pi",
 			result:     &setup.Result{Agent: "pi"},
 			expects:    []string{"Restart Pi", "pi list"},
