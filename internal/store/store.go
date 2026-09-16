@@ -6134,7 +6134,7 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 // overwrite the first through ON CONFLICT(sync_id) DO UPDATE, destroying the only
 // record that the first mutation's data was dropped. The identity is therefore
 // derived from the mutation's own distinguishing material, as
-// pulledSessionDeadLetterSyncID already does for discarded session mutations:
+// pulledIdentityDeadLetterSyncID does for discarded session mutations:
 // distinct mutations stay apart by construction, while a genuine redelivery of
 // the same mutation still lands on the same row. Each field is length-prefixed so
 // no field's content can imitate a separator and forge a collision.
@@ -9159,12 +9159,6 @@ func pulledIdentityDeadLetterSyncID(targetKey string, mutation SyncMutation) str
 	return "pulled-" + mutation.Entity + "-" + hex.EncodeToString(digest.Sum(nil))
 }
 
-// pulledSessionDeadLetterSyncID retains the historical session evidence identity
-// for callers and rows created before observation identities were quarantined.
-func pulledSessionDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
-	return pulledIdentityDeadLetterSyncID(targetKey, mutation)
-}
-
 func pulledIdentityInvalidReasonCode(applyErr error) (string, bool) {
 	switch {
 	case errors.Is(applyErr, ErrPulledSessionIdentityInvalid):
@@ -9194,10 +9188,6 @@ func pulledIdentityEvidenceProject(mutation SyncMutation) string {
 	}
 	project, _ = NormalizeProject(project)
 	return project
-}
-
-func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
-	return s.deadLetterPulledIdentityTx(tx, targetKey, mutation, SyncSessionIdentityInvalidReasonCode)
 }
 
 func (s *Store) deadLetterPulledIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation, reasonCode string) error {

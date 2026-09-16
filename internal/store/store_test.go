@@ -7814,7 +7814,7 @@ func TestPulledSessionDeadLetterKeepsDistinctMutationsWithEqualSequence(t *testi
 			}
 			if err := s.withTx(func(tx *sql.Tx) error {
 				for _, mutation := range mutations {
-					if err := s.deadLetterPulledSessionIdentityTx(tx, DefaultSyncTargetKey, mutation); err != nil {
+					if err := s.deadLetterPulledIdentityTx(tx, DefaultSyncTargetKey, mutation, SyncSessionIdentityInvalidReasonCode); err != nil {
 						return err
 					}
 				}
