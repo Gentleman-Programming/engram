@@ -1311,7 +1311,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.Project != nil {
 				entry["project"] = *r.Project
 			}
-			if r.TopicKey != nil {
+			if r.TopicKey != nil && *r.TopicKey != "" {
 				entry["topic_key"] = *r.TopicKey
 			}
 			if r.ReviewAfter != nil {

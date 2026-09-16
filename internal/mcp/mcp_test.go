@@ -1640,6 +1640,48 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 }
 
+func TestHandleSearchOmitsEmptyPulledTopicKey(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("pulled-empty-topic-key-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	const payload = `{"sync_id":"pulled-empty-topic-key","session_id":"pulled-empty-topic-key-session","type":"bugfix","title":"Pulled empty topic key","content":"Search must omit an empty pulled topic key.","project":"engram","scope":"project","topic_key":""}`
+	if err := s.ApplyPulledMutation(store.DefaultSyncTargetKey, store.SyncMutation{
+		Seq:       1,
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "pulled-empty-topic-key",
+		Op:        store.SyncOpUpsert,
+		Payload:   payload,
+		Source:    store.SyncSourceRemote,
+		Project:   "engram",
+	}); err != nil {
+		t.Fatalf("apply pulled observation: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	for _, tt := range []struct {
+		name, responseFormat string
+	}{{"normal", ""}, {"compact", "compact"}} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := map[string]any{"query": "pulled empty", "project": "engram"}
+			if tt.responseFormat != "" {
+				args["response_format"] = tt.responseFormat
+			}
+			res, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil || res.IsError {
+				t.Fatalf("search: err=%v result=%s", err, callResultText(t, res))
+			}
+			results, ok := callResultJSON(t, res)["results"].([]any)
+			if !ok || len(results) != 1 {
+				t.Fatalf("results = %#v, want one observation", results)
+			}
+			if _, ok := results[0].(map[string]any)["topic_key"]; ok {
+				t.Fatalf("empty pulled topic key must be omitted: %#v", results[0])
+			}
+		})
+	}
+}
+
 func TestHandleSearch_PropagatesCanceledContext(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-canceled-search", "engram", "/tmp/engram"); err != nil {
