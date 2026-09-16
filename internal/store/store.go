@@ -7817,6 +7817,24 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 	return err
 }
 
+// pulledUpsertBlockedByTombstoneFloorTx reports whether an active local delete
+// tombstone is newer than or equal to a pulled session or observation upsert.
+func (s *Store) pulledUpsertBlockedByTombstoneFloorTx(tx *sql.Tx, entity, entityKey string, seq int64) (bool, error) {
+	var floor int64
+	err := tx.QueryRow(`
+		SELECT last_mutation_seq
+		FROM sync_delete_tombstones
+		WHERE entity = ? AND entity_key = ? AND active = 1`, entity, entityKey,
+	).Scan(&floor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return seq <= floor, nil
+}
+
 func (s *Store) recordPromptTombstoneTx(tx *sql.Tx, syncID, sessionID string, project *string, deletedAt string) error {
 	if project != nil {
 		normalized, _ := NormalizeProject(strings.TrimSpace(*project))
@@ -8963,6 +8981,13 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 		if mutation.Op == SyncOpDelete || isSessionDeletePayload(payload) {
 			return s.applySessionDeleteTx(tx, payload)
 		}
+		blocked, err := s.pulledUpsertBlockedByTombstoneFloorTx(tx, SyncEntitySession, payload.ID, mutation.Seq)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return nil
+		}
 		if err := validatePulledSessionDirectory([]byte(mutation.Payload)); err != nil {
 			return err
 		}
@@ -8974,6 +8999,13 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 		}
 		if mutation.Op == SyncOpDelete {
 			return s.applyObservationDeleteTx(tx, payload)
+		}
+		blocked, err := s.pulledUpsertBlockedByTombstoneFloorTx(tx, SyncEntityObservation, payload.SyncID, mutation.Seq)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return nil
 		}
 		return s.applyObservationUpsertTx(tx, payload)
 	case SyncEntityPrompt:

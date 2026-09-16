@@ -44,6 +44,98 @@ func applyRelationMutation(t *testing.T, s *Store, m SyncMutation) error {
 	})
 }
 
+func TestApplyPulledMutation_UpsertRespectsActiveDeleteTombstoneFloor(t *testing.T) {
+	const floor int64 = 100
+
+	tests := []struct {
+		name        string
+		entity      string
+		seq         int64
+		wantApplied bool
+	}{
+		{name: "session stale", entity: SyncEntitySession, seq: floor - 1},
+		{name: "session equal", entity: SyncEntitySession, seq: floor},
+		{name: "session newer", entity: SyncEntitySession, seq: floor + 1, wantApplied: true},
+		{name: "observation stale", entity: SyncEntityObservation, seq: floor - 1},
+		{name: "observation equal", entity: SyncEntityObservation, seq: floor},
+		{name: "observation newer", entity: SyncEntityObservation, seq: floor + 1, wantApplied: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			syncID := tt.entity + "-tombstone-floor"
+
+			if tt.entity == SyncEntityObservation {
+				if err := s.CreateSession("session-tombstone-parent", "project-tombstone", "/tmp/tombstone-parent"); err != nil {
+					t.Fatalf("create observation parent session: %v", err)
+				}
+			}
+			if _, err := s.db.Exec(`
+				INSERT INTO sync_delete_tombstones (entity, entity_key, project, active, last_mutation_seq)
+				VALUES (?, ?, '', 1, ?)
+			`, tt.entity, syncID, floor); err != nil {
+				t.Fatalf("insert active tombstone: %v", err)
+			}
+
+			var payload string
+			switch tt.entity {
+			case SyncEntitySession:
+				encoded, err := json.Marshal(syncSessionPayload{
+					ID: syncID, Project: "project-tombstone", Directory: "/tmp/tombstone", StartedAt: "2026-01-01T00:00:00Z",
+				})
+				if err != nil {
+					t.Fatalf("marshal session payload: %v", err)
+				}
+				payload = string(encoded)
+			case SyncEntityObservation:
+				project := "project-tombstone"
+				encoded, err := json.Marshal(syncObservationPayload{
+					SyncID: syncID, SessionID: "session-tombstone-parent", Type: "decision", Title: "tombstone floor", Content: "must not resurrect stale data", Project: &project, Scope: "project",
+				})
+				if err != nil {
+					t.Fatalf("marshal observation payload: %v", err)
+				}
+				payload = string(encoded)
+			}
+
+			if err := s.withTx(func(tx *sql.Tx) error {
+				return s.applyPulledMutationTx(tx, SyncMutation{
+					Seq: tt.seq, Entity: tt.entity, EntityKey: syncID, Op: SyncOpUpsert, Payload: payload, Source: SyncSourceRemote,
+				})
+			}); err != nil {
+				t.Fatalf("apply pulled mutation: %v", err)
+			}
+
+			var entityCount int
+			if tt.entity == SyncEntitySession {
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, syncID).Scan(&entityCount); err != nil {
+					t.Fatalf("count sessions: %v", err)
+				}
+			} else if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = ?`, syncID).Scan(&entityCount); err != nil {
+				t.Fatalf("count observations: %v", err)
+			}
+			if got := entityCount == 1; got != tt.wantApplied {
+				t.Fatalf("entity applied = %t, want %t", got, tt.wantApplied)
+			}
+
+			var active int
+			if err := s.db.QueryRow(`
+				SELECT active FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?
+			`, tt.entity, syncID).Scan(&active); err != nil {
+				t.Fatalf("read tombstone: %v", err)
+			}
+			wantActive := 1
+			if tt.wantApplied {
+				wantActive = 0
+			}
+			if active != wantActive {
+				t.Fatalf("tombstone active = %d, want %d", active, wantActive)
+			}
+		})
+	}
+}
+
 func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-pulled-project-storage", "engram", "/tmp/engram"); err != nil {
