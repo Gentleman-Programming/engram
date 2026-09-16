@@ -4910,6 +4910,59 @@ func TestSessionSyncPayloadPreservesStartedAtOnApply(t *testing.T) {
 	}
 }
 
+func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, ?, ?)`,
+		"remote-existing", "original-project", "/original-directory", "2024-01-02 03:04:05",
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	endedAt := "2025-01-01 12:00:00"
+	summary := "pulled closure"
+	mutation := SyncMutation{
+		Seq:       2,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-existing",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-existing","project":"conflicting-project","directory":"/conflicting-directory","started_at":"2025-01-03 04:05:06","ended_at":"2025-01-01 12:00:00","summary":"pulled closure"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatalf("apply conflicting session mutation: %v", err)
+	}
+
+	updated, err := s.GetSession("remote-existing")
+	if err != nil {
+		t.Fatalf("get updated session: %v", err)
+	}
+	if updated.Project != "original-project" || updated.Directory != "/original-directory" || updated.StartedAt != "2024-01-02 03:04:05" {
+		t.Fatalf("pulled mutation changed session identity fields: %+v", updated)
+	}
+	if updated.EndedAt == nil || *updated.EndedAt != endedAt || updated.Summary == nil || *updated.Summary != summary {
+		t.Fatalf("pulled mutation did not apply closure fields: %+v", updated)
+	}
+
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+		Seq:       3,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-existing",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-existing","project":"stale-project","directory":"/stale-directory","started_at":"2025-01-04 05:06:07"}`,
+	}); err != nil {
+		t.Fatalf("reapply stale session mutation: %v", err)
+	}
+	replayed, err := s.GetSession("remote-existing")
+	if err != nil {
+		t.Fatalf("get replayed session: %v", err)
+	}
+	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
+		t.Fatalf("stale pulled mutation erased closure fields: %+v", replayed)
+	}
+}
+
 func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("remote-obs-session", "engram", "/tmp/engram"); err != nil {
@@ -5582,8 +5635,8 @@ func TestEndSessionEdgeCases(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	if err := s.EndSession("missing", "ignored"); err != nil {
-		t.Fatalf("end missing session should be no-op: %v", err)
+	if err := s.EndSession("missing", "ignored"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected missing session error, got %v", err)
 	}
 
 	if err := s.EndSession("s-edge", ""); err != nil {
@@ -5599,6 +5652,77 @@ func TestEndSessionEdgeCases(t *testing.T) {
 	}
 	if sess.Summary != nil {
 		t.Fatalf("expected empty summary to persist as NULL, got %q", *sess.Summary)
+	}
+}
+
+func TestEndSessionIsIdempotentAndPreservesSummary(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-idempotent", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("s-idempotent", "first summary"); err != nil {
+		t.Fatalf("first end: %v", err)
+	}
+
+	first, err := s.GetSession("s-idempotent")
+	if err != nil {
+		t.Fatalf("get first session: %v", err)
+	}
+	if first.EndedAt == nil || first.Summary == nil || *first.Summary != "first summary" {
+		t.Fatalf("unexpected first closure: %+v", first)
+	}
+	mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list mutations before retry: %v", err)
+	}
+
+	if err := s.EndSession("s-idempotent", "replacement summary"); err != nil {
+		t.Fatalf("replayed end: %v", err)
+	}
+	second, err := s.GetSession("s-idempotent")
+	if err != nil {
+		t.Fatalf("get second session: %v", err)
+	}
+	if second.EndedAt == nil || *second.EndedAt != *first.EndedAt {
+		t.Fatalf("replayed end changed ended_at: first=%v second=%v", first.EndedAt, second.EndedAt)
+	}
+	if second.Summary == nil || *second.Summary != "first summary" {
+		t.Fatalf("replayed end changed summary: %v", second.Summary)
+	}
+	mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list mutations after retry: %v", err)
+	}
+	if len(mutationsAfter) != len(mutationsBefore) {
+		t.Fatalf("replayed end enqueued a mutation: before=%d after=%d", len(mutationsBefore), len(mutationsAfter))
+	}
+}
+
+func TestEndSessionReturnsBusyWithoutClosing(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-busy", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	oldBackoffs := sqliteWriteRetryBackoffs
+	sqliteWriteRetryBackoffs = []time.Duration{0}
+	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
+	oldBegin := s.hooks.beginTx
+	s.hooks.beginTx = func(_ *sql.DB) (*sql.Tx, error) {
+		return nil, errors.New("database is locked")
+	}
+
+	err := s.EndSession("s-busy", "must not close")
+	if !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("expected ErrSessionBusy, got %v", err)
+	}
+
+	s.hooks.beginTx = oldBegin
+	session, err := s.GetSession("s-busy")
+	if err != nil {
+		t.Fatalf("get busy session: %v", err)
+	}
+	if session.EndedAt != nil {
+		t.Fatalf("busy closure changed ended_at: %v", session.EndedAt)
 	}
 }
 
@@ -6265,6 +6389,63 @@ func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
 	}
 }
 
+func TestImportUpdatesExistingSessionClosureWithoutReopeningIt(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("import-closure", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	original, err := s.GetSession("import-closure")
+	if err != nil {
+		t.Fatalf("get original session: %v", err)
+	}
+
+	endedAt := "2025-01-01 12:00:00"
+	summary := "imported archive"
+	data := &ExportData{Sessions: []Session{{
+		ID:        "import-closure",
+		Project:   "conflicting-project",
+		Directory: "/conflicting-directory",
+		StartedAt: "2025-01-01 11:00:00",
+		EndedAt:   &endedAt,
+		Summary:   &summary,
+	}}}
+	if result, err := s.Import(data); err != nil {
+		t.Fatalf("import closure update: %v", err)
+	} else if result.SessionsImported != 0 {
+		t.Fatalf("updating an existing session must not count as an insert, got %+v", result)
+	}
+
+	closed, err := s.GetSession("import-closure")
+	if err != nil {
+		t.Fatalf("get imported closure: %v", err)
+	}
+	if closed.EndedAt == nil || *closed.EndedAt != endedAt || closed.Summary == nil || *closed.Summary != summary {
+		t.Fatalf("expected imported closure state, got %+v", closed)
+	}
+	if closed.Project != original.Project || closed.Directory != original.Directory || closed.StartedAt != original.StartedAt {
+		t.Fatalf("import changed session identity fields: original=%+v imported=%+v", original, closed)
+	}
+
+	if _, err := s.Import(&ExportData{Sessions: []Session{{
+		ID:        "import-closure",
+		Project:   "stale-project",
+		Directory: "/stale-directory",
+		StartedAt: "2025-01-01 11:00:00",
+	}}}); err != nil {
+		t.Fatalf("replay stale session snapshot: %v", err)
+	}
+	replayed, err := s.GetSession("import-closure")
+	if err != nil {
+		t.Fatalf("get replayed closure: %v", err)
+	}
+	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
+		t.Fatalf("stale replay reopened or erased session: %+v", replayed)
+	}
+	if replayed.Project != original.Project || replayed.Directory != original.Directory || replayed.StartedAt != original.StartedAt {
+		t.Fatalf("stale replay changed session identity fields: original=%+v replayed=%+v", original, replayed)
+	}
+}
+
 func TestExportImportEdgeBranches(t *testing.T) {
 	t.Run("export fails when observations query fails", func(t *testing.T) {
 		s := newTestStore(t)
@@ -6634,7 +6815,7 @@ func TestImportExportSeamErrors(t *testing.T) {
 		s.hooks = defaultStoreHooks()
 		origExec := s.hooks.exec
 		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-			if strings.Contains(query, "INSERT OR IGNORE INTO sessions") {
+			if strings.Contains(query, "INSERT INTO sessions") {
 				return nil, errors.New("forced import session insert failure")
 			}
 			return origExec(db, query, args...)
