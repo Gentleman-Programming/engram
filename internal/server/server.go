@@ -558,6 +558,14 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&body)
 
 	if err := s.store.EndSession(id, body.Summary); err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, store.ErrSessionBusy) {
+			jsonError(w, http.StatusConflict, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

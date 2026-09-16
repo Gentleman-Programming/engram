@@ -2190,6 +2190,19 @@ func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 	}
 }
 
+func TestHandleEndSessionReturnsNotFound(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodPost, "/sessions/missing/end", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing session end, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
 	loadServerStats = func(s *store.Store) (*store.Stats, error) {
