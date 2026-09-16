@@ -1,6 +1,11 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
+
+const require = createRequire(import.meta.url)
+const childProcess = require("node:child_process")
+const fs = require("node:fs")
 
 const source = readFileSync(new URL("./engram.ts", import.meta.url), "utf8")
 
@@ -107,6 +112,7 @@ async function createRuntime(t, {
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
 	manifestExists = false,
+  installBun = true,
   configuredEngramURL,
   healthOK = true,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
@@ -120,6 +126,9 @@ async function createRuntime(t, {
 	const originalFetch = globalThis.fetch
 	const originalBun = globalThis.Bun
 	const originalEngramURL = process.env.ENGRAM_URL
+  const originalSpawnSync = childProcess.spawnSync
+  const originalSpawn = childProcess.spawn
+  const originalExistsSync = fs.existsSync
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
@@ -127,18 +136,41 @@ async function createRuntime(t, {
 	const startupEvents = []
 	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
 	else process.env.ENGRAM_URL = configuredEngramURL
-  globalThis.Bun = {
-    spawnSync(args) {
-      if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
-			if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
-      return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
-    },
-		spawn(args, options) {
-			spawns.push({ args, options })
-			if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
-		},
-		file() { return { async exists() { return manifestExists } } },
+  if (installBun) {
+    globalThis.Bun = {
+      spawnSync(args) {
+        if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
+        if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
+        return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
+      },
+      spawn(args, options) {
+        spawns.push({ args, options })
+        if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
+      },
+      file() { return { async exists() { return manifestExists } } },
+    }
+  } else {
+    delete globalThis.Bun
   }
+  childProcess.spawnSync = (_command, args) => ({
+    status: args[0] === "instance-id" ? 0 : 1,
+    stdout: args[0] === "instance-id" ? "00000000000000000000000000000000\n" : "",
+  })
+  childProcess.spawn = (command, args, options) => {
+    const child = {
+      events: [],
+      on(event, listener) {
+        if (event === "error" && typeof listener === "function") this.events.push(event)
+        return this
+      },
+      unref() { this.events.push("unref") },
+    }
+    spawns.push({ args: [command, ...args], options, child })
+    if (args[0] === "sync" && args[1] === "--import") startupEvents.push("import:spawn")
+    return child
+  }
+  fs.existsSync = () => manifestExists
+  syncBuiltinESMExports()
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
 		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
@@ -170,6 +202,10 @@ async function createRuntime(t, {
 		globalThis.Bun = originalBun
 		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
 		else process.env.ENGRAM_URL = originalEngramURL
+    childProcess.spawnSync = originalSpawnSync
+    childProcess.spawn = originalSpawn
+    fs.existsSync = originalExistsSync
+    syncBuiltinESMExports()
 	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
@@ -202,6 +238,20 @@ async function createRuntime(t, {
 		startupEvents,
   }
 }
+
+test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t) => {
+  const runtime = await createRuntime(t, { installBun: false })
+
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+test("manifest import registers an error listener before detaching", async (t) => {
+  const runtime = await createRuntime(t, { manifestExists: true })
+  const imported = runtime.spawns.find(({ args }) => args[1] === "sync" && args[2] === "--import")
+
+  assert.deepEqual(imported?.child.events, ["error", "unref"])
+})
 
 test("save nudge fails closed for malformed and non-array observation responses", async (t) => {
   for (const scenario of [
