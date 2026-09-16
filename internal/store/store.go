@@ -3905,7 +3905,15 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 
 func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		obs, err := s.getObservationTx(tx, id)
+		var (
+			obs *Observation
+			err error
+		)
+		if hardDelete {
+			obs, err = s.getObservationIncludingDeletedTx(tx, id)
+		} else {
+			obs, err = s.getObservationTx(tx, id)
+		}
 		if err == sql.ErrNoRows {
 			return ErrObservationNotFound
 		}
@@ -9127,7 +9135,7 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	p.TargetID = strings.TrimSpace(p.TargetID)
 	p.Relation = strings.TrimSpace(p.Relation)
 	p.JudgmentStatus = strings.TrimSpace(p.JudgmentStatus)
-	p.Project = strings.TrimSpace(p.Project)
+	p.Project, _ = NormalizeProject(strings.TrimSpace(p.Project))
 	if p.MarkedByActor != nil {
 		actor := strings.TrimSpace(*p.MarkedByActor)
 		p.MarkedByActor = &actor
@@ -9163,11 +9171,21 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	}
 
 	// Step 2: FK precondition — both observations must exist locally (by sync_id).
+	// A project-scoped payload may only use endpoints in that project. Legacy
+	// payloads omit project, so retain their historical global lookup behavior.
+	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
+	observationArgs := []any{p.SourceID, p.TargetID}
+	if p.Project != "" {
+		observationQuery = `
+			SELECT count(DISTINCT o.sync_id)
+			FROM observations o
+			LEFT JOIN sessions sess ON sess.id = o.session_id
+			WHERE o.sync_id IN (?, ?)
+			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
+		observationArgs = append(observationArgs, p.Project)
+	}
 	var obsCount int
-	if err := tx.QueryRow(
-		`SELECT count(*) FROM observations WHERE sync_id IN (?, ?)`,
-		p.SourceID, p.TargetID,
-	).Scan(&obsCount); err != nil {
+	if err := tx.QueryRow(observationQuery, observationArgs...).Scan(&obsCount); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
 	}
 	requiredObservations := 2
@@ -9271,6 +9289,20 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 	row := tx.QueryRow(
 		`SELECT `+observationSelectColumns+`
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
+	)
+	var o Observation
+	if err := scanObservationRow(row, &o); err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// getObservationIncludingDeletedTx is reserved for explicit destructive paths.
+// Ordinary reads and mutations must use getObservationTx so soft-deleted rows stay hidden.
+func (s *Store) getObservationIncludingDeletedTx(tx *sql.Tx, id int64) (*Observation, error) {
+	row := tx.QueryRow(
+		`SELECT `+observationSelectColumns+`
+		 FROM observations WHERE id = ?`, id,
 	)
 	var o Observation
 	if err := scanObservationRow(row, &o); err != nil {
