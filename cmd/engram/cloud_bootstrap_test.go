@@ -551,7 +551,7 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	}
 	for _, event := range store.auditEvents {
 		for key, value := range event.Metadata {
-			if s, ok := value.(string); ok && s == rawToken {
+			if s, ok := value.(string); ok && strings.Contains(s, rawToken) {
 				t.Fatalf("audit metadata key %q leaked the raw token secret: %q", key, s)
 			}
 		}
@@ -564,8 +564,8 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	if completion.ActorPrincipalID != "" || completion.ActorSource != string(cloudauth.PrincipalSourceBootstrapCLI) || completion.TargetPrincipalID != store.tokens[0].PrincipalID || completion.Action != cloudBootstrapAuditAction || completion.Outcome != cloudBootstrapAuditOutcomeSuccess || completion.ReasonCode != "bootstrap_completed" {
 		t.Fatalf("unexpected bootstrap token completion audit: %+v", completion)
 	}
-	if completion.Metadata["issued_token"] != true || completion.Metadata["created_admin"] != true || completion.Metadata["token_prefix"] != store.tokens[0].TokenPrefix {
-		t.Fatalf("expected complete, non-secret bootstrap token audit metadata, got %+v", completion.Metadata)
+	if len(completion.Metadata) != 4 || completion.Metadata["created_admin"] != true || completion.Metadata["username"] != "carol" || completion.Metadata["issued_token"] != true || completion.Metadata["token_prefix"] != store.tokens[0].TokenPrefix {
+		t.Fatalf("expected exactly the complete, non-secret bootstrap token audit metadata, got %+v", completion.Metadata)
 	}
 
 	hasher, err := cloudauth.NewManagedTokenHasher([]byte("dedicated-cloud-token-pepper-for-tests"))
@@ -588,7 +588,7 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap-issued token must resolve through the managed token resolver: %v", err)
 	}
-	if principal.ID != store.tokens[0].PrincipalID || principal.TokenID != store.tokens[0].ID || principal.Source != cloudauth.PrincipalSourceManagedToken {
+	if principal.ID != store.tokens[0].PrincipalID || principal.TokenID != store.tokens[0].ID || principal.Role != cloudauth.RoleAdmin || principal.Source != cloudauth.PrincipalSourceManagedToken {
 		t.Fatalf("unexpected resolved principal for bootstrap-issued token: %+v", principal)
 	}
 }
