@@ -162,6 +162,36 @@ func TestEstimateSessionProjectReclassificationDoesNotMutate(t *testing.T) {
 	assertRepairProjects(t, s, "repair-s1", "sias-app", "sias-app", "sias-app")
 }
 
+func TestSessionProjectReclassificationCountsAndPreservesSoftDeletedObservations(t *testing.T) {
+	s := newTestStore(t)
+	seedRepairRows(t, s, "repair-soft-deleted", "sias-app")
+	if _, err := s.DB().Exec(`UPDATE observations SET deleted_at = '2026-01-01 00:00:00' WHERE session_id = ?`, "repair-soft-deleted"); err != nil {
+		t.Fatalf("soft-delete observation: %v", err)
+	}
+	beforeDeletedAt := scalarString(t, s, `SELECT deleted_at FROM observations WHERE session_id = ?`, "repair-soft-deleted")
+	actions := []SessionProjectReclassification{{SessionID: "repair-soft-deleted", FromProject: "sias-app", ToProject: "engram"}}
+
+	estimate, err := s.EstimateSessionProjectReclassification(actions)
+	if err != nil {
+		t.Fatalf("EstimateSessionProjectReclassification: %v", err)
+	}
+	if estimate.Sessions != 1 || estimate.Observations != 1 || estimate.Prompts != 1 {
+		t.Fatalf("estimate=%+v", estimate)
+	}
+
+	result, err := s.ApplySessionProjectReclassification(actions)
+	if err != nil {
+		t.Fatalf("ApplySessionProjectReclassification: %v", err)
+	}
+	if result.Counts != estimate {
+		t.Fatalf("apply counts=%+v, want estimate=%+v", result.Counts, estimate)
+	}
+	assertRepairProjects(t, s, "repair-soft-deleted", "engram", "engram", "engram")
+	if got := scalarString(t, s, `SELECT deleted_at FROM observations WHERE session_id = ?`, "repair-soft-deleted"); got != beforeDeletedAt {
+		t.Fatalf("deleted_at=%q, want %q", got, beforeDeletedAt)
+	}
+}
+
 func TestApplySessionProjectReclassificationBacksUpAndUpdatesAllowedTables(t *testing.T) {
 	s := newTestStore(t)
 	seedRepairRows(t, s, "repair-s1", "sias-app")

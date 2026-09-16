@@ -2383,6 +2383,146 @@ func TestSuggestTopicKeyNormalizesDeterministically(t *testing.T) {
 	}
 }
 
+func TestSuggestTopicKeyPreservesDiscardedUnicodeIdentity(t *testing.T) {
+	tests := []struct {
+		name, typ, title, content, legacy, prefix string
+	}{
+		{"Japanese", "decision", "日本語の設計", "日本語の内容", "decision/general", "decision/general-u-"},
+		{"Korean", "decision", "한국어 설계", "한국어 내용", "decision/general", "decision/general-u-"},
+		{"mixed script", "architecture", "Auth 日本語", "content", "architecture/auth", "architecture/auth-u-"},
+		{"emoji", "config", "Deploy 🚀", "content", "config/deploy", "config/deploy-u-"},
+		{"combining mark", "manual", "Cafe\u0301", "content", "topic/cafe", "topic/cafe-u-"},
+	}
+
+	seen := make(map[string]struct{}, len(tests))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SuggestTopicKey(tt.typ, tt.title, tt.content)
+			if got != SuggestTopicKey(tt.typ, tt.title, tt.content) {
+				t.Fatalf("suggestion is not deterministic: %q", got)
+			}
+			if got == tt.legacy || !strings.HasPrefix(got, tt.prefix) {
+				t.Fatalf("suggestion = %q, want a distinct %q key", got, tt.prefix)
+			}
+			if len(got) > 120 {
+				t.Fatalf("suggestion length = %d, want at most 120", len(got))
+			}
+			for _, r := range got {
+				if r > unicode.MaxASCII {
+					t.Fatalf("suggestion must be ASCII-safe, got %q", got)
+				}
+			}
+			if _, duplicate := seen[got]; duplicate {
+				t.Fatalf("distinct input reused suggestion %q", got)
+			}
+			seen[got] = struct{}{}
+		})
+	}
+
+	t.Run("truncates ASCII residue before Unicode identity", func(t *testing.T) {
+		source := strings.Repeat("a", 100) + "🚀"
+		got := SuggestTopicKey("manual", source, "ignored")
+		if got != SuggestTopicKey("manual", source, "ignored") {
+			t.Fatalf("suggestion is not deterministic: %q", got)
+		}
+		if len(got) > 120 || !strings.HasPrefix(got, "topic/") {
+			t.Fatalf("suggestion = %q, want an in-limit topic key", got)
+		}
+		segment := strings.TrimPrefix(got, "topic/")
+		if len(segment) != 100 {
+			t.Fatalf("segment length = %d, want 100 after truncation", len(segment))
+		}
+		if !strings.HasPrefix(segment, strings.Repeat("a", 85)+"-u-") || strings.HasPrefix(segment, strings.Repeat("a", 86)) {
+			t.Fatalf("segment = %q, want truncated ASCII residue with Unicode identity suffix", segment)
+		}
+		for _, r := range got {
+			if r > unicode.MaxASCII {
+				t.Fatalf("suggestion must be ASCII-safe, got %q", got)
+			}
+		}
+	})
+
+	for _, tt := range []struct{ typ, title, content, want string }{
+		{"Architecture", "  Auth Model  ", "ignored", "architecture/auth-model"},
+		{"bugfix", "", "Fix nil panic in auth middleware on empty token", "bug/fix-nil-panic-in-auth-middleware-on-empty"},
+		{"manual", "!!!", "...", "topic/general"},
+	} {
+		if got := SuggestTopicKey(tt.typ, tt.title, tt.content); got != tt.want {
+			t.Fatalf("ASCII suggestion = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestSuggestedTopicKeysKeepDistinctObservationsAndSameKeyRevision(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("unicode-topic-keys", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	firstTitle, firstContent := "日本語の設計", "日本語の内容"
+	secondTitle, secondContent := "한국어 설계", "한국어 내용"
+	firstKey := SuggestTopicKey("decision", firstTitle, firstContent)
+	secondKey := SuggestTopicKey("decision", secondTitle, secondContent)
+	if firstKey == secondKey {
+		t.Fatalf("generated keys must differ, both were %q", firstKey)
+	}
+
+	add := func(title, content, key string) int64 {
+		t.Helper()
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "unicode-topic-keys",
+			Type:      "decision",
+			Title:     title,
+			Content:   content,
+			Project:   "engram",
+			Scope:     "project",
+			TopicKey:  key,
+		})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		return id
+	}
+
+	firstID := add(firstTitle, firstContent, firstKey)
+	secondID := add(secondTitle, secondContent, secondKey)
+	if firstID == secondID {
+		t.Fatalf("distinct generated keys reused observation ID %d", firstID)
+	}
+	for _, want := range []struct {
+		id             int64
+		title, content string
+	}{{firstID, firstTitle, firstContent}, {secondID, secondTitle, secondContent}} {
+		got, err := s.GetObservation(want.id)
+		if err != nil {
+			t.Fatalf("get observation %d: %v", want.id, err)
+		}
+		if got.Title != want.title || got.Content != want.content {
+			t.Fatalf("observation = %#v, want title/content %q/%q", got, want.title, want.content)
+		}
+	}
+
+	revisedID := add("日本語の更新", "updated Japanese content", firstKey)
+	if revisedID != firstID {
+		t.Fatalf("identical generated key created ID %d, want %d", revisedID, firstID)
+	}
+	first, err := s.GetObservation(firstID)
+	if err != nil {
+		t.Fatalf("get revised observation: %v", err)
+	}
+	if first.RevisionCount != 2 || first.Content != "updated Japanese content" {
+		t.Fatalf("same-key revision = %#v", first)
+	}
+
+	observations, err := s.AllObservations("engram", "project", 10)
+	if err != nil {
+		t.Fatalf("list observations: %v", err)
+	}
+	if len(observations) != 2 {
+		t.Fatalf("observation count = %d, want 2", len(observations))
+	}
+}
+
 func TestSuggestTopicKeyInfersFamilyFromTextWhenTypeIsGeneric(t *testing.T) {
 	bug := SuggestTopicKey("manual", "", "Fix regression in auth login flow")
 	if bug != "bug/fix-regression-in-auth-login-flow" {
@@ -4876,6 +5016,102 @@ func TestDeleteObservationHardDeleteEnqueuesProjectScopedMutationMetadata(t *tes
 	}
 	if payload["project"] != "engram" {
 		t.Fatalf("expected delete payload project metadata, got %#v", payload["project"])
+	}
+}
+
+func TestDeleteObservationHardDeleteAfterSoftDeleteCleansSessionReference(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
+	const sessionID = "s-soft-then-hard-delete"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     "to-delete",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	var syncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&syncID); err != nil {
+		t.Fatalf("load observation sync ID: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, false); err != nil {
+		t.Fatalf("soft delete observation: %v", err)
+	}
+	if _, err := s.GetObservation(obsID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetObservation after soft delete error = %v, want sql.ErrNoRows", err)
+	}
+	if err := s.DeleteSession(sessionID); !errors.Is(err, ErrSessionHasObservations) {
+		t.Fatalf("DeleteSession after soft delete error = %v, want ErrSessionHasObservations", err)
+	}
+
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("hard delete soft-deleted observation: %v", err)
+	}
+
+	var observations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id = ?`, obsID).Scan(&observations); err != nil {
+		t.Fatalf("count observation rows: %v", err)
+	}
+	if observations != 0 {
+		t.Fatalf("observation rows after hard delete = %d, want 0", observations)
+	}
+
+	var tombstoneEntity, tombstoneSessionID, tombstoneProject string
+	var tombstoneHardDelete, tombstoneActive int
+	if err := s.db.QueryRow(`
+		SELECT entity, session_id, project, hard_delete, active
+		FROM sync_delete_tombstones
+		WHERE entity = ? AND entity_key = ?`,
+		SyncEntityObservation, syncID,
+	).Scan(&tombstoneEntity, &tombstoneSessionID, &tombstoneProject, &tombstoneHardDelete, &tombstoneActive); err != nil {
+		t.Fatalf("load hard-delete tombstone: %v", err)
+	}
+	if tombstoneEntity != SyncEntityObservation || tombstoneSessionID != sessionID || tombstoneProject != "engram" || tombstoneHardDelete != 1 || tombstoneActive != 1 {
+		t.Fatalf("hard-delete tombstone = entity=%q session_id=%q project=%q hard_delete=%d active=%d", tombstoneEntity, tombstoneSessionID, tombstoneProject, tombstoneHardDelete, tombstoneActive)
+	}
+
+	var payloadRaw string
+	if err := s.db.QueryRow(`
+		SELECT payload FROM sync_mutations
+		WHERE entity = ? AND entity_key = ? AND op = ?
+		ORDER BY seq DESC LIMIT 1`,
+		SyncEntityObservation, syncID, SyncOpDelete,
+	).Scan(&payloadRaw); err != nil {
+		t.Fatalf("load hard-delete mutation: %v", err)
+	}
+	var payload syncObservationPayload
+	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
+		t.Fatalf("decode hard-delete mutation payload: %v", err)
+	}
+	if !payload.Deleted || !payload.HardDelete || payload.SessionID != sessionID || derefString(payload.Project) != "engram" {
+		t.Fatalf("hard-delete mutation payload = %+v", payload)
+	}
+
+	var mutationCountBefore int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&mutationCountBefore); err != nil {
+		t.Fatalf("count observation mutations before repeated hard delete: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, true); !errors.Is(err, ErrObservationNotFound) {
+		t.Fatalf("repeated hard delete error = %v, want ErrObservationNotFound", err)
+	}
+	var mutationCountAfter int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&mutationCountAfter); err != nil {
+		t.Fatalf("count observation mutations after repeated hard delete: %v", err)
+	}
+	if mutationCountAfter != mutationCountBefore {
+		t.Fatalf("observation mutations after repeated hard delete = %d, want %d", mutationCountAfter, mutationCountBefore)
+	}
+
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete unreferenced session: %v", err)
 	}
 }
 
@@ -14221,6 +14457,58 @@ func TestSearchCompositeLexicalReranking(t *testing.T) {
 			t.Fatalf("preview ordering = %+v, want search ordering %+v", previews, first)
 		}
 	})
+}
+
+func TestSearchPreviewsContextIncludesTopicKey(t *testing.T) {
+	s := newTestStore(t)
+	const (
+		sessionID = "preview-topic-key-session"
+		project   = "engram"
+		topicKey  = "bugfix/preview-topic-key"
+	)
+	if err := s.CreateSession(sessionID, project, "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview tk topic key",
+		Content:   "Search previews must retain topic keys.",
+		Project:   project,
+		Scope:     "project",
+		TopicKey:  topicKey,
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	for _, query := range []string{"preview topic", "tk", topicKey} {
+		t.Run(query, func(t *testing.T) {
+			results, err := s.SearchPreviewsContext(context.Background(), query, SearchOptions{Project: project, Limit: 10})
+			if err != nil {
+				t.Fatalf("search previews: %v", err)
+			}
+			if len(results) != 1 || results[0].TopicKey == nil || *results[0].TopicKey != topicKey {
+				t.Fatalf("topic key = %#v, want %q; results=%+v", results, topicKey, results)
+			}
+		})
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview without topic key",
+		Content:   "Search previews retain nil topic keys.",
+		Project:   project,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation without topic key: %v", err)
+	}
+	results, err := s.SearchPreviewsContext(context.Background(), "without topic", SearchOptions{Project: project, Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews without topic key: %v", err)
+	}
+	if len(results) != 1 || results[0].TopicKey != nil {
+		t.Fatalf("topic key = %#v, want nil; results=%+v", results, results)
+	}
 }
 
 func TestSearch_WeightedBM25Ranking(t *testing.T) {

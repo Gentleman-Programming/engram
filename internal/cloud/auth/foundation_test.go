@@ -184,11 +184,11 @@ func TestResolverRejectsUnsafeManagedTokenRecords(t *testing.T) {
 	if _, err := resolver.ResolveBearerToken(context.Background(), "disabled-token"); !errors.Is(err, ErrPrincipalDisabled) {
 		t.Fatalf("expected disabled principal rejection, got %v", err)
 	}
-	if _, err := resolver.ResolveBearerToken(context.Background(), "mismatch-token"); !errors.Is(err, ErrInvalidPrincipal) {
-		t.Fatalf("expected token/principal mismatch rejection, got %v", err)
+	if _, err := resolver.ResolveBearerToken(context.Background(), "mismatch-token"); !errors.Is(err, ErrTokenPrincipalMismatch) || errors.Is(err, ErrInvalidPrincipal) {
+		t.Fatalf("expected token/principal mismatch rejection with ErrTokenPrincipalMismatch (not ErrInvalidPrincipal), got %v", err)
 	}
-	if _, err := resolver.ResolveBearerToken(context.Background(), "invalid-token"); !errors.Is(err, ErrInvalidPrincipal) {
-		t.Fatalf("expected invalid stored principal rejection, got %v", err)
+	if _, err := resolver.ResolveBearerToken(context.Background(), "invalid-token"); !errors.Is(err, ErrInvalidPrincipal) || errors.Is(err, ErrTokenPrincipalMismatch) {
+		t.Fatalf("expected invalid stored principal rejection with ErrInvalidPrincipal (not ErrTokenPrincipalMismatch), got %v", err)
 	}
 }
 

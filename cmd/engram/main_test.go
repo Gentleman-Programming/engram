@@ -645,6 +645,39 @@ func TestCmdSaveAndSearch(t *testing.T) {
 	}
 }
 
+func TestCmdSaveReportsContentTruncation(t *testing.T) {
+	cfg := testConfig(t)
+	content := strings.Repeat("x", cfg.MaxObservationLength+1)
+	withArgs(t, "engram", "save", "oversized-title", content, "--project", "alpha")
+
+	stdout, stderr := captureOutput(t, func() { cmdSave(cfg) })
+	if !strings.Contains(stdout, "Memory saved:") {
+		t.Fatalf("save output = %q, want success", stdout)
+	}
+	wantWarning := fmt.Sprintf("WARNING: Content was truncated from %d to %d bytes", len(content), cfg.MaxObservationLength)
+	if !strings.Contains(stderr, wantWarning) {
+		t.Fatalf("save stderr = %q, want truncation warning %q", stderr, wantWarning)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	var storedContent string
+	if err := s.DB().QueryRow(`SELECT content FROM observations WHERE title = ?`, "oversized-title").Scan(&storedContent); err != nil {
+		t.Fatalf("load saved observation: %v", err)
+	}
+	if !strings.Contains(storedContent, "... [truncated]") {
+		t.Fatalf("stored content = %q, want truncation marker", storedContent)
+	}
+}
+
 func TestCmdSaveResolvesConfiguredProjectWithoutFlag(t *testing.T) {
 	stubExitWithPanic(t)
 	cfg := testConfig(t)

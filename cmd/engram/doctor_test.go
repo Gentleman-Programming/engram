@@ -172,12 +172,13 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
+func TestCmdDoctorRepairManualSessionNamePlanDryRunApplyJSON(t *testing.T) {
 	cfg := testConfig(t)
-	repo := newDoctorGitRepo(t, "engram")
-	seedDoctorRepairRows(t, cfg, "repair-s1", "sias-app", repo)
+	thirdProjectRepo := newDoctorGitRepo(t, "third-project")
+	seedDoctorRepairRows(t, cfg, "manual-save-engram", "sias-app", thirdProjectRepo)
+	seedDoctorSession(t, cfg, "known-engram", "engram", "/work/engram")
 
-	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--plan")
+	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "manual_session_name_project_mismatch", "--plan")
 	planOut, planErr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if planErr != "" {
 		t.Fatalf("plan stderr=%q", planErr)
@@ -186,13 +187,16 @@ func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
 	if plan["status"] != "planned" || plan["mode"] != "plan" || len(plan["actions"].([]any)) != 1 {
 		t.Fatalf("plan=%v", plan)
 	}
+	if action := plan["actions"].([]any)[0].(map[string]any); action["session_id"] != "manual-save-engram" || action["to_project"] != "engram" {
+		t.Fatalf("plan action=%v", action)
+	}
 	counts := plan["counts"].(map[string]any)
 	if counts["sessions_planned"] != float64(1) || counts["observations_planned"] != float64(1) || counts["prompts_planned"] != float64(1) {
 		t.Fatalf("plan counts=%v", counts)
 	}
-	assertDoctorRepairProject(t, cfg, "repair-s1", "sias-app")
+	assertDoctorRepairProject(t, cfg, "manual-save-engram", "sias-app")
 
-	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--dry-run")
+	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "manual_session_name_project_mismatch", "--dry-run")
 	dryOut, dryErr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if dryErr != "" {
 		t.Fatalf("dry-run stderr=%q", dryErr)
@@ -201,9 +205,9 @@ func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
 	if dry["status"] != "dry_run" || dry["mode"] != "dry_run" {
 		t.Fatalf("dry=%v", dry)
 	}
-	assertDoctorRepairProject(t, cfg, "repair-s1", "sias-app")
+	assertDoctorRepairProject(t, cfg, "manual-save-engram", "sias-app")
 
-	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--apply")
+	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "manual_session_name_project_mismatch", "--apply")
 	applyOut, applyErr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if applyErr != "" {
 		t.Fatalf("apply stderr=%q", applyErr)
@@ -219,7 +223,16 @@ func TestCmdDoctorRepairPlanDryRunApplyJSON(t *testing.T) {
 	if _, err := os.Stat(applied["backup_path"].(string)); err != nil {
 		t.Fatalf("backup missing: %v", err)
 	}
-	assertDoctorRepairProject(t, cfg, "repair-s1", "engram")
+	assertDoctorRepairProject(t, cfg, "manual-save-engram", "engram")
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "manual_session_name_project_mismatch", "--plan")
+	secondPlanOut, secondPlanErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if secondPlanErr != "" {
+		t.Fatalf("second plan stderr=%q", secondPlanErr)
+	}
+	if secondPlan := decodeRepairPlan(t, secondPlanOut); secondPlan["status"] != "noop" || len(secondPlan["actions"].([]any)) != 0 {
+		t.Fatalf("second plan=%v", secondPlan)
+	}
 }
 
 func TestCmdDoctorRepairCleansForeignSyncTargetsWithoutDroppingJournal(t *testing.T) {
@@ -406,7 +419,7 @@ func TestCmdDoctorJSONSingleCheckAndProjectScope(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
 		t.Fatalf("doctor json invalid: %v\n%s", err, stdout)
 	}
-	if report["status"] != "warning" || report["project"] != "engram" {
+	if report["status"] != "ok" || report["project"] != "engram" {
 		t.Fatalf("report=%v", report)
 	}
 	checks := report["checks"].([]any)
