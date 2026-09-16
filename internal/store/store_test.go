@@ -8385,7 +8385,13 @@ func TestUnenrolledHardDeletesReplayAfterReenrollment(t *testing.T) {
 		if err := s.AckSyncMutations(DefaultSyncTargetKey, firstDeleteSeq); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: syncID, Op: SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"unenrolled-hard-observation-session","type":"decision","title":"recreated","content":"body","project":%q,"scope":"project"}`, syncID, project)}); err != nil {
+		echoedDelete := mutations[1]
+		echoedDelete.Seq = 1
+		echoedDelete.Source = SyncSourceRemote
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, echoedDelete); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 2, Entity: SyncEntityObservation, EntityKey: syncID, Op: SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"unenrolled-hard-observation-session","type":"decision","title":"recreated","content":"body","project":%q,"scope":"project"}`, syncID, project)}); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.UnenrollProject(project); err != nil {
