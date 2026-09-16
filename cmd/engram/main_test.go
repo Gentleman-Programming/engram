@@ -635,6 +635,7 @@ func TestParseSaveArgs(t *testing.T) {
 			want: saveArgs{title: "--title", content: "--content", typ: "manual", projectName: "myproject", scope: "project"},
 		},
 		{name: "missing flag value", args: []string{"title", "content", "--project"}, wantErr: "--project requires a value"},
+		{name: "flag cannot consume following flag", args: []string{"--project", "--scope", "global", "title", "content"}, wantErr: "--project requires a value"},
 		{name: "unknown flag", args: []string{"title", "content", "--unknown"}, wantErr: "unknown save flag: --unknown"},
 		{name: "missing positionals", args: []string{"--project", "myproject"}, wantErr: "save requires exactly two positional arguments"},
 		{name: "extra positional", args: []string{"title", "content", "extra"}, wantErr: "save requires exactly two positional arguments"},
