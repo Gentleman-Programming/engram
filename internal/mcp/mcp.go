@@ -1159,6 +1159,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 func handleListProjects(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		org, _ := req.GetArguments()["org"].(string)
+		org = strings.TrimSpace(org)
 		projects, err := s.ListProjectsWithStats(org)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("List projects failed: %v", err)), nil
@@ -1227,6 +1228,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		org, _ := req.GetArguments()["org"].(string)
+		org = strings.TrimSpace(org)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
 		responseFormat, _ := req.GetArguments()["response_format"].(string)
 		allProjects := boolArg(req, "all_projects", false)
@@ -1489,6 +1491,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
 		org, _ := req.GetArguments()["org"].(string)
+		org = strings.TrimSpace(org)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)

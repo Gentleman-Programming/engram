@@ -374,6 +374,9 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		absPath := filepath.Join(engRoot, relPath)
 		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
 			result.Errors = append(result.Errors, fmt.Errorf("delete stale session hub %s: %w", absPath, err))
+			// Keep the entry so the next export retries the deletion instead
+			// of orphaning the file once the pruned state is persisted.
+			state.SessionHubs[sessionID] = relPath
 		} else {
 			result.Deleted++
 		}
@@ -403,6 +406,9 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		absPath := filepath.Join(engRoot, relPath)
 		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
 			result.Errors = append(result.Errors, fmt.Errorf("delete stale topic hub %s: %w", absPath, err))
+			// Keep the entry so the next export retries the deletion instead
+			// of orphaning the file once the pruned state is persisted.
+			state.TopicHubs[prefix] = relPath
 		} else {
 			result.Deleted++
 		}

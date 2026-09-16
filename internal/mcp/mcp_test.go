@@ -11432,3 +11432,29 @@ func TestHandleUpdateGlobalScope(t *testing.T) {
 		t.Fatalf("expected Scope=global after update, got %q", obs.Scope)
 	}
 }
+
+func TestHandleSave_TrimsExplicitOrgWhitespace(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Padded org save",
+		"content": "Whitespace around org must not create a distinct organization",
+		"project": "engram",
+		"org":     "  globex-inc  ",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Org == nil || *obs[0].Org != "globex-inc" {
+		t.Fatalf("expected padded org to be trimmed to globex-inc, got %#v", obs)
+	}
+}
