@@ -98,6 +98,8 @@ var (
 
 	// ErrPulledSessionIdentityInvalid identifies an invalid identity after successful decoding and legacy fallback.
 	ErrPulledSessionIdentityInvalid = errors.New("pulled session identity is invalid")
+	// ErrPulledObservationIdentityInvalid identifies a pulled observation whose payload and mutation identities disagree.
+	ErrPulledObservationIdentityInvalid = errors.New("pulled observation identity is invalid")
 	// ErrPulledSessionDirectoryInvalid identifies a pulled or imported session that
 	// has no concrete directory and therefore cannot be admitted as cloud state.
 	ErrPulledSessionDirectoryInvalid = errors.New("pulled session directory is invalid")
@@ -9071,6 +9073,14 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 		var payload syncObservationPayload
 		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
 			return err
+		}
+		entityKey := strings.TrimSpace(mutation.EntityKey)
+		payload.SyncID = strings.TrimSpace(payload.SyncID)
+		if payload.SyncID == "" {
+			payload.SyncID = entityKey
+		}
+		if payload.SyncID != entityKey {
+			return fmt.Errorf("%w: mutation entity_key %q does not match payload sync_id %q", ErrPulledObservationIdentityInvalid, entityKey, payload.SyncID)
 		}
 		if mutation.Op == SyncOpDelete {
 			if err := s.applyObservationDeleteTx(tx, payload); err != nil || !cloud {
