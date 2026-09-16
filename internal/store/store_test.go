@@ -2419,6 +2419,29 @@ func TestSuggestTopicKeyPreservesDiscardedUnicodeIdentity(t *testing.T) {
 		})
 	}
 
+	t.Run("truncates ASCII residue before Unicode identity", func(t *testing.T) {
+		source := strings.Repeat("a", 100) + "🚀"
+		got := SuggestTopicKey("manual", source, "ignored")
+		if got != SuggestTopicKey("manual", source, "ignored") {
+			t.Fatalf("suggestion is not deterministic: %q", got)
+		}
+		if len(got) > 120 || !strings.HasPrefix(got, "topic/") {
+			t.Fatalf("suggestion = %q, want an in-limit topic key", got)
+		}
+		segment := strings.TrimPrefix(got, "topic/")
+		if len(segment) != 100 {
+			t.Fatalf("segment length = %d, want 100 after truncation", len(segment))
+		}
+		if !strings.HasPrefix(segment, strings.Repeat("a", 85)+"-u-") || strings.HasPrefix(segment, strings.Repeat("a", 86)) {
+			t.Fatalf("segment = %q, want truncated ASCII residue with Unicode identity suffix", segment)
+		}
+		for _, r := range got {
+			if r > unicode.MaxASCII {
+				t.Fatalf("suggestion must be ASCII-safe, got %q", got)
+			}
+		}
+	})
+
 	for _, tt := range []struct{ typ, title, content, want string }{
 		{"Architecture", "  Auth Model  ", "ignored", "architecture/auth-model"},
 		{"bugfix", "", "Fix nil panic in auth middleware on empty token", "bug/fix-nil-panic-in-auth-middleware-on-empty"},
