@@ -92,6 +92,8 @@ engram setup claude-code
 claude --plugin-dir ./plugin/claude-code
 ```
 
+The supported plugin-and-hook setup requires `jq` and `curl` on `PATH` before installation. On Windows, `curl.exe` satisfies curl detection, but `jq` must also be installed and available to the shell Claude Code uses. Bare MCP is the MCP-only fallback: it does not install or run hooks when those prerequisites are unavailable.
+
 Each SessionStart delegates MCP registration to `engram setup claude-code --mcp-only`; the hook does not inspect, write, or delete Claude configuration. Claude CLI owns the user-scope `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`) or `$CLAUDE_CONFIG_DIR/.claude.json` when that override is set. Setup accepts only the exact expected stdio command and arguments as configured; mismatched or unreadable entries are visible conflicts and are never overwritten. Do not edit the plugin cache manually.
 
 The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After successful Claude Code setup, Engram checks `claude plugin list --json`; an unverifiable, disabled, or older plugin produces a warning but does not fail setup or replace the selected slim mode. Use your normal Claude Code plugin update path, then restart Claude Code. Plugins loaded with session-only `claude --plugin-dir ...` cannot be detected.
@@ -141,7 +143,7 @@ plugin/claude-code/
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
 
-If Git Bash itself is blocked by enterprise security tooling, `scripts/user-prompt-submit.ps1` is provided as a native PowerShell fallback for manual hook testing or local override.
+If Git Bash itself is blocked by enterprise security tooling, `scripts/user-prompt-submit.ps1` is provided as a native PowerShell fallback for manual hook testing or local override. It applies only to `UserPromptSubmit`; the complete plugin setup still requires `jq` and `curl` for shared Bash hooks.
 
 PowerShell local override/testing example for locked-down Windows endpoints:
 

@@ -228,6 +228,175 @@ func setupSyncApplyStore(t *testing.T) (s *Store, syncObsA, syncObsB string) {
 	return
 }
 
+func TestApplyPulledRelation_UsesOuterMutationProjectForEndpointValidation(t *testing.T) {
+	const projectA = "project-a"
+	const projectB = "project-b"
+	const rawOuterProject = " Project__A "
+	normalizedOuterProject, _ := NormalizeProject(rawOuterProject)
+
+	tests := []struct {
+		name                         string
+		outerProject                 string
+		payloadProject               string
+		sourceProject, targetProject string
+		sourceScope, targetScope     string
+		wantApplied                  bool
+	}{
+		{
+			name:          "outer project scopes blank payload project",
+			outerProject:  projectA,
+			sourceProject: projectB, targetProject: projectB,
+			sourceScope: "project", targetScope: "project",
+		},
+		{
+			name:           "outer project wins over conflicting payload project",
+			outerProject:   projectA,
+			payloadProject: projectB,
+			sourceProject:  projectB, targetProject: projectB,
+			sourceScope: "project", targetScope: "project",
+		},
+		{
+			name:           "cross project endpoint does not satisfy relation",
+			outerProject:   projectA,
+			payloadProject: projectA,
+			sourceProject:  projectA, targetProject: projectB,
+			sourceScope: "project", targetScope: "project",
+		},
+		{
+			name:           "personal scope endpoints do not satisfy project relation",
+			outerProject:   projectA,
+			payloadProject: projectA,
+			sourceProject:  projectA, targetProject: projectA,
+			sourceScope: "personal", targetScope: "personal",
+		},
+		{
+			name:          "normalized outer project accepts project scoped endpoints",
+			outerProject:  rawOuterProject,
+			sourceProject: normalizedOuterProject, targetProject: normalizedOuterProject,
+			sourceScope: "project", targetScope: "project",
+			wantApplied: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			addEndpoint := func(name, project, scope string) string {
+				sessionID := "session-" + name
+				if err := s.CreateSession(sessionID, project, "/tmp/"+name); err != nil {
+					t.Fatalf("CreateSession %s: %v", name, err)
+				}
+				_, syncID := addTestObsSession(t, s, sessionID, "Observation "+name, "decision", project, scope)
+				return syncID
+			}
+
+			sourceID := addEndpoint("source", tt.sourceProject, tt.sourceScope)
+			targetID := addEndpoint("target", tt.targetProject, tt.targetScope)
+			relationSyncID := newSyncID("rel-outer-project")
+			mutation := buildRelationMutation(t, syncRelationPayload{
+				SyncID:         relationSyncID,
+				SourceID:       sourceID,
+				TargetID:       targetID,
+				Relation:       RelationRelated,
+				JudgmentStatus: JudgmentStatusJudged,
+				Project:        tt.payloadProject,
+				CreatedAt:      "2026-04-26T10:00:00Z",
+				UpdatedAt:      "2026-04-26T10:00:00Z",
+			})
+			mutation.Project = tt.outerProject
+			mutation.Seq = 1
+
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+				t.Fatalf("ApplyPulledMutation: %v", err)
+			}
+			if got := countRelationRows(t, s, relationSyncID); (got == 1) != tt.wantApplied {
+				t.Fatalf("applied relation rows = %d, want applied=%t", got, tt.wantApplied)
+			}
+			if got := countDeferredRows(t, s, relationSyncID); (got == 0) != tt.wantApplied {
+				t.Fatalf("deferred relation rows = %d, want applied=%t", got, tt.wantApplied)
+			}
+		})
+	}
+}
+
+func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testing.T) {
+	const projectA = "project-a"
+	const projectB = "project-b"
+
+	tests := []struct {
+		name            string
+		outerProject    string
+		payloadProject  string
+		clearProvenance bool
+		wantApplied     bool
+	}{
+		{
+			name:            "unmarked legacy row replays payload scoped personal endpoints",
+			payloadProject:  projectA,
+			clearProvenance: true,
+			wantApplied:     true,
+		},
+		{
+			name:           "authoritative outer project remains enforced after replay",
+			outerProject:   projectA,
+			payloadProject: projectB,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			endpointProject := tt.payloadProject
+			if err := s.CreateSession("session-replay", endpointProject, "/tmp/replay"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			_, sourceID := addTestObsSession(t, s, "session-replay", "Personal source", "decision", endpointProject, "personal")
+			targetID := "obs-replay-target-" + newSyncID("personal")
+			relationSyncID := newSyncID("rel-replay-authority")
+			mutation := buildRelationMutation(t, syncRelationPayload{
+				SyncID:         relationSyncID,
+				SourceID:       sourceID,
+				TargetID:       targetID,
+				Relation:       RelationRelated,
+				JudgmentStatus: JudgmentStatusJudged,
+				Project:        tt.payloadProject,
+				CreatedAt:      "2026-04-26T10:00:00Z",
+				UpdatedAt:      "2026-04-26T10:00:00Z",
+			})
+			mutation.Project = tt.outerProject
+			mutation.Seq = 1
+
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+				t.Fatalf("ApplyPulledMutation: %v", err)
+			}
+			if got := countDeferredRows(t, s, relationSyncID); got != 1 {
+				t.Fatalf("initial deferred rows = %d, want 1", got)
+			}
+			if tt.clearProvenance {
+				if _, err := s.db.Exec(`UPDATE sync_apply_deferred SET reason_code = '' WHERE sync_id = ?`, relationSyncID); err != nil {
+					t.Fatalf("clear deferred provenance: %v", err)
+				}
+			}
+
+			targetObservationID, _ := addTestObsSession(t, s, "session-replay", "Personal target", "decision", endpointProject, "personal")
+			if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, targetID, targetObservationID); err != nil {
+				t.Fatalf("set target sync ID: %v", err)
+			}
+
+			result, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, projectA)
+			if err != nil {
+				t.Fatalf("ReplayDeferredForScope: %v", err)
+			}
+			if got := countRelationRows(t, s, relationSyncID); (got == 1) != tt.wantApplied {
+				t.Fatalf("replayed relation rows = %d, want applied=%t (result=%+v)", got, tt.wantApplied, result)
+			}
+			if got := countDeferredRows(t, s, relationSyncID); (got == 0) != tt.wantApplied {
+				t.Fatalf("replayed deferred rows = %d, want applied=%t (result=%+v)", got, tt.wantApplied, result)
+			}
+		})
+	}
+}
+
 // ─── Phase C.3 — Pull-side RED tests (REQ-002, REQ-009) ──────────────────────
 
 // C.3a — historical relation payloads without newer metadata still apply when

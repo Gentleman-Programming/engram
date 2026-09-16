@@ -194,6 +194,7 @@ type SearchPreviewResult struct {
 	Preview     string  `json:"preview"`
 	Truncated   bool    `json:"truncated"`
 	Project     *string `json:"project,omitempty"`
+	TopicKey    *string `json:"topic_key,omitempty"`
 	Scope       string  `json:"scope"`
 	ReviewAfter *string `json:"review_after,omitempty"`
 	Pinned      bool    `json:"-"`
@@ -334,6 +335,12 @@ const (
 	SyncSourceRemote = "remote"
 
 	SyncSessionIdentityInvalidReasonCode = "sync_session_identity_invalid"
+
+	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
+	// relation carried a non-blank outer mutation project. Unmarked legacy rows
+	// retain payload-scoped replay semantics while this marker preserves #1200's
+	// project-scoped endpoint validation for newly deferred authoritative mutations.
+	relationDeferredOuterProjectAuthoritativeReasonCode = "relation_outer_project_authoritative"
 
 	// Decay defaults — months added to now() to compute review_after on new inserts.
 	// expires_at is NULL for all types in Phase 1.
@@ -4273,7 +4280,7 @@ func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts Se
 		tkSQL := `
 			SELECT id, ifnull(sync_id, '') as sync_id, type, title,
 			       substr(content, 1, 300) as preview, length(content) > 300 as truncated,
-			       project, scope, review_after, pinned, created_at
+			       project, topic_key, scope, review_after, pinned, created_at
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
@@ -4399,7 +4406,7 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
 	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
-	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
+	       o.project, o.topic_key, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
 }
 
 func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions, limit int) (string, []any) {
@@ -4486,7 +4493,7 @@ func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, 
 func buildSearchPreviewLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
 	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
-	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
+	       o.project, o.topic_key, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
 }
 
 func buildSearchLIKEQueryWithColumns(columns, query string, opts SearchOptions, limit int) (string, []any) {
@@ -6183,11 +6190,15 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 	var payload syncRelationPayload
 	payloadDecoded := decodeSyncPayload([]byte(mutation.Payload), &payload) == nil
 
-	project := strings.TrimSpace(mutation.Project)
+	outerProject, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	project := outerProject
 	if project == "" && payloadDecoded {
-		project = strings.TrimSpace(payload.Project)
+		project, _ = NormalizeProject(strings.TrimSpace(payload.Project))
 	}
-	project, _ = NormalizeProject(project)
+	reasonCode := ""
+	if outerProject != "" {
+		reasonCode = relationDeferredOuterProjectAuthoritativeReasonCode
+	}
 	scopeClass := "target_scoped"
 	if project != "" {
 		scopeClass = "scoped"
@@ -6240,13 +6251,14 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 
 	if _, err := s.execHook(tx, `
 		INSERT INTO sync_apply_deferred
-			(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, first_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+			(sync_id, entity, payload, target_key, entity_key, op, reason_code, payload_sync_id, project, scope_class, apply_status, retry_count, first_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
 		ON CONFLICT(sync_id) DO UPDATE SET
 			payload           = excluded.payload,
 			target_key        = excluded.target_key,
 			entity_key        = excluded.entity_key,
 			op                = excluded.op,
+			reason_code       = excluded.reason_code,
 			payload_sync_id   = excluded.payload_sync_id,
 			project           = excluded.project,
 			scope_class       = excluded.scope_class,
@@ -6263,7 +6275,7 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 		WHERE sync_apply_deferred.apply_status <> 'dead'
 		   OR excluded.apply_status = 'dead'
 		   OR ?
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status, rearmFlag, rearmFlag, rearmFlag); err != nil {
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status, rearmFlag, rearmFlag, rearmFlag); err != nil {
 		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 
@@ -9229,6 +9241,7 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	p.Relation = strings.TrimSpace(p.Relation)
 	p.JudgmentStatus = strings.TrimSpace(p.JudgmentStatus)
 	p.Project, _ = NormalizeProject(strings.TrimSpace(p.Project))
+	outerProject, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
 	if p.MarkedByActor != nil {
 		actor := strings.TrimSpace(*p.MarkedByActor)
 		p.MarkedByActor = &actor
@@ -9264,18 +9277,26 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	}
 
 	// Step 2: FK precondition — both observations must exist locally (by sync_id).
-	// A project-scoped payload may only use endpoints in that project. Legacy
-	// payloads omit project, so retain their historical global lookup behavior.
+	// A non-blank mutation project is authoritative for pulled relations: both
+	// endpoints must use its normalized project scope. Blank outer projects retain
+	// the legacy payload-scoped (or global) lookup behavior.
+	effectiveProject := p.Project
+	if outerProject != "" {
+		effectiveProject = outerProject
+	}
 	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
 	observationArgs := []any{p.SourceID, p.TargetID}
-	if p.Project != "" {
+	if effectiveProject != "" {
 		observationQuery = `
 			SELECT count(DISTINCT o.sync_id)
 			FROM observations o
 			LEFT JOIN sessions sess ON sess.id = o.session_id
 			WHERE o.sync_id IN (?, ?)
 			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
-		observationArgs = append(observationArgs, p.Project)
+		observationArgs = append(observationArgs, effectiveProject)
+		if outerProject != "" {
+			observationQuery += "\n\t\t\t  AND o.scope = 'project'"
+		}
 	}
 	var obsCount int
 	if err := tx.QueryRow(observationQuery, observationArgs...).Scan(&obsCount); err != nil {
@@ -9778,7 +9799,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 func scanSearchPreviewRow(scanner observationScanner, r *SearchPreviewResult, withRank bool) error {
 	dest := []any{
 		&r.ID, &r.SyncID, &r.Type, &r.Title, &r.Preview, &r.Truncated,
-		&r.Project, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
+		&r.Project, &r.TopicKey, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
 	}
 	if withRank {
 		dest = append(dest, &r.Rank)
@@ -10111,16 +10132,16 @@ func NormalizeProject(project string) (normalized string, warning string) {
 // a normalized segment from title/content for stable cross-session keys.
 func SuggestTopicKey(typ, title, content string) string {
 	family := inferTopicFamily(typ, title, content)
-	cleanTitle := stripPrivateTags(title)
-	segment := normalizeTopicSegment(cleanTitle)
+	segmentSource := stripPrivateTags(title)
+	segment := normalizeTopicSegment(segmentSource)
 
 	if segment == "" {
-		cleanContent := stripPrivateTags(content)
-		words := strings.Fields(strings.ToLower(cleanContent))
+		words := strings.Fields(stripPrivateTags(content))
 		if len(words) > 8 {
 			words = words[:8]
 		}
-		segment = normalizeTopicSegment(strings.Join(words, " "))
+		segmentSource = strings.Join(words, " ")
+		segment = normalizeTopicSegment(segmentSource)
 	}
 
 	if segment == "" {
@@ -10134,6 +10155,7 @@ func SuggestTopicKey(typ, title, content string) string {
 		segment = "general"
 	}
 
+	segment = appendUnicodeTopicIdentity(segment, segmentSource, 120-len(family)-1)
 	return family + "/" + segment
 }
 
@@ -10195,6 +10217,27 @@ func hasAny(text string, words ...string) bool {
 		}
 	}
 	return false
+}
+
+// appendUnicodeTopicIdentity distinguishes automatic suggestions whose source
+// contains characters normalizeTopicSegment cannot retain. It leaves ASCII-only
+// suggestions unchanged and keeps the segment within the existing key limits.
+func appendUnicodeTopicIdentity(segment, source string, maxLen int) string {
+	for _, r := range source {
+		if r <= unicode.MaxASCII {
+			continue
+		}
+		hash := sha256.Sum256([]byte(source))
+		suffix := "-u-" + hex.EncodeToString(hash[:6])
+		if maxLen > 100 {
+			maxLen = 100
+		}
+		if len(segment) > maxLen-len(suffix) {
+			segment = segment[:maxLen-len(suffix)]
+		}
+		return segment + suffix
+	}
+	return segment
 }
 
 func normalizeTopicSegment(s string) string {
@@ -10577,7 +10620,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 	project, _ = NormalizeProject(strings.TrimSpace(project))
 
 	query := `
-		SELECT sync_id, entity, payload, entity_key, op, retry_count
+		SELECT sync_id, entity, payload, entity_key, op, project, reason_code, retry_count
 		FROM sync_apply_deferred
 		WHERE apply_status = 'deferred'`
 	args := []any{}
@@ -10603,13 +10646,15 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		payload    string
 		entityKey  string
 		op         string
+		project    string
+		reasonCode string
 		retryCount int
 	}
 
 	var pending []deferredRow
 	for rows.Next() {
 		var r deferredRow
-		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.entityKey, &r.op, &r.retryCount); err != nil {
+		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.entityKey, &r.op, &r.project, &r.reasonCode, &r.retryCount); err != nil {
 			rows.Close()
 			return result, fmt.Errorf("ReplayDeferred: scan: %w", err)
 		}
@@ -10632,6 +10677,10 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		if op == "" {
 			op = SyncOpUpsert
 		}
+		outerProject := ""
+		if row.reasonCode == relationDeferredOuterProjectAuthoritativeReasonCode {
+			outerProject = row.project
+		}
 		mut := SyncMutation{
 			Entity:    row.entity,
 			EntityKey: entityKey,
@@ -10639,7 +10688,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 			Payload:   row.payload,
 			Source:    SyncSourceRemote,
 			TargetKey: targetKey,
-			Project:   project,
+			Project:   outerProject,
 		}
 
 		applyErr := s.withTx(func(tx *sql.Tx) error {

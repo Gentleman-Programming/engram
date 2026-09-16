@@ -176,4 +176,8 @@ func TestPluginVersionsMatch(t *testing.T) {
 			plugin.Version,
 		)
 	}
+
+	if marketplaceVersion == "0.1.2" {
+		t.Error("Claude Code's corrected SessionStart hook contract must not ship under the collided 0.1.2 plugin identity")
+	}
 }
