@@ -1402,6 +1402,7 @@ func cmdSave(cfg store.Config) {
 	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
 	}
+	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      typ,
@@ -1416,6 +1417,9 @@ func cmdSave(cfg store.Config) {
 	}
 
 	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+	if truncation.Truncated {
+		fmt.Fprintf(os.Stderr, "⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.\n", truncation.OriginalBytes, truncation.LimitBytes)
+	}
 }
 
 func cmdDelete(cfg store.Config) {
