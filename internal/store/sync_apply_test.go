@@ -345,10 +345,11 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestStore(t)
-			if err := s.CreateSession("session-replay", projectA, "/tmp/replay"); err != nil {
+			endpointProject := tt.payloadProject
+			if err := s.CreateSession("session-replay", endpointProject, "/tmp/replay"); err != nil {
 				t.Fatalf("CreateSession: %v", err)
 			}
-			_, sourceID := addTestObsSession(t, s, "session-replay", "Personal source", "decision", projectA, "personal")
+			_, sourceID := addTestObsSession(t, s, "session-replay", "Personal source", "decision", endpointProject, "personal")
 			targetID := "obs-replay-target-" + newSyncID("personal")
 			relationSyncID := newSyncID("rel-replay-authority")
 			mutation := buildRelationMutation(t, syncRelationPayload{
@@ -376,7 +377,7 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 				}
 			}
 
-			targetObservationID, _ := addTestObsSession(t, s, "session-replay", "Personal target", "decision", projectA, "personal")
+			targetObservationID, _ := addTestObsSession(t, s, "session-replay", "Personal target", "decision", endpointProject, "personal")
 			if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, targetID, targetObservationID); err != nil {
 				t.Fatalf("set target sync ID: %v", err)
 			}
