@@ -97,9 +97,10 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage         = "npm:gentle-engram@0.1.12"
+	piGentleEngramPackage         = "npm:gentle-engram@0.1.13"
 	piLegacyGentleEngramPackage   = "npm:gentle-engram@0.1.8"
 	piPreviousGentleEngramPackage = "npm:gentle-engram@0.1.11"
+	piPriorGentleEngramPackage    = "npm:gentle-engram@0.1.12"
 	piMCPAdapterPackage           = "npm:pi-mcp-adapter"
 )
 
@@ -365,7 +366,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage:
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage:
 				changed = true
 				continue
 			case piGentleEngramPackage:
