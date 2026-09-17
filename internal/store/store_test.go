@@ -4864,7 +4864,7 @@ func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
 		Entity:    SyncEntitySession,
 		EntityKey: "remote-existing",
 		Op:        SyncOpUpsert,
-		Payload:   `{"id":"remote-existing","project":"stale-project","directory":"/stale-directory","started_at":"2025-01-04 05:06:07"}`,
+		Payload:   `{"id":"remote-existing","project":"stale-project","directory":"/stale-directory","started_at":"2025-01-04 05:06:07","ended_at":"2025-02-02 13:00:00","summary":"stale pulled closure"}`,
 	}); err != nil {
 		t.Fatalf("reapply stale session mutation: %v", err)
 	}
@@ -4873,7 +4873,7 @@ func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
 		t.Fatalf("get replayed session: %v", err)
 	}
 	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
-		t.Fatalf("stale pulled mutation erased closure fields: %+v", replayed)
+		t.Fatalf("stale pulled mutation changed closure fields: %+v", replayed)
 	}
 }
 
@@ -6340,11 +6340,15 @@ func TestImportUpdatesExistingSessionClosureWithoutReopeningIt(t *testing.T) {
 		t.Fatalf("import changed session identity fields: original=%+v imported=%+v", original, closed)
 	}
 
+	staleEndedAt := "2025-02-02 13:00:00"
+	staleSummary := "stale imported archive"
 	if _, err := s.Import(&ExportData{Sessions: []Session{{
 		ID:        "import-closure",
 		Project:   "stale-project",
 		Directory: "/stale-directory",
 		StartedAt: "2025-01-01 11:00:00",
+		EndedAt:   &staleEndedAt,
+		Summary:   &staleSummary,
 	}}}); err != nil {
 		t.Fatalf("replay stale session snapshot: %v", err)
 	}
@@ -6353,7 +6357,7 @@ func TestImportUpdatesExistingSessionClosureWithoutReopeningIt(t *testing.T) {
 		t.Fatalf("get replayed closure: %v", err)
 	}
 	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
-		t.Fatalf("stale replay reopened or erased session: %+v", replayed)
+		t.Fatalf("stale replay changed session closure fields: %+v", replayed)
 	}
 	if replayed.Project != original.Project || replayed.Directory != original.Directory || replayed.StartedAt != original.StartedAt {
 		t.Fatalf("stale replay changed session identity fields: original=%+v replayed=%+v", original, replayed)

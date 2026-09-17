@@ -5568,8 +5568,8 @@ func (s *Store) importSessionTx(tx *sql.Tx, sess Session) (bool, error) {
 	}
 	_, err = s.execHook(tx,
 		`UPDATE sessions
-			 SET ended_at = COALESCE(?, ended_at),
-			     summary = COALESCE(?, summary)
+			 SET ended_at = COALESCE(ended_at, ?),
+			     summary = COALESCE(summary, ?)
 			 WHERE id = ?`,
 		endedAt, sess.Summary,
 		sess.ID,
@@ -10107,8 +10107,8 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
 			 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
-			   ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
-			   summary = COALESCE(excluded.summary, sessions.summary)`,
+			   ended_at = COALESCE(sessions.ended_at, excluded.ended_at),
+			   summary = COALESCE(sessions.summary, excluded.summary)`,
 		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), endedAt, payload.Summary,
 	)
 	if err != nil {
