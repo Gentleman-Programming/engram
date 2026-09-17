@@ -119,6 +119,64 @@ func TestRemirrorProjectReplaysCurrentStateWithoutRewritingHistory(t *testing.T)
 	}
 }
 
+func TestBackfillSyncDeleteTombstonesReassertsUnknownRemoteFloorAfterAcknowledgement(t *testing.T) {
+	s := newTestStore(t)
+	const project = "reconcile-unknown-floor"
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_delete_tombstones (entity, entity_key, project, active, last_mutation_seq)
+		VALUES (?, ?, ?, 1, 100)
+	`, SyncEntitySession, "reconcile-session", project); err != nil {
+		t.Fatalf("insert tombstone: %v", err)
+	}
+	for range 2 {
+		if err := s.withTx(func(tx *sql.Tx) error {
+			return s.backfillSyncDeleteTombstonesTx(tx, project)
+		}); err != nil {
+			t.Fatalf("reconcile tombstone: %v", err)
+		}
+	}
+	if got := scalarInt(t, s, `
+		SELECT COUNT(*) FROM sync_mutations
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL
+	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 1 {
+		t.Fatalf("pending reconciliation deletes = %d, want 1", got)
+	}
+	var remoteFloor sql.NullInt64
+	if err := s.db.QueryRow(`SELECT last_remote_mutation_seq FROM sync_delete_tombstones WHERE entity_key = ?`, "reconcile-session").Scan(&remoteFloor); err != nil {
+		t.Fatalf("read remote floor: %v", err)
+	}
+	if remoteFloor.Valid {
+		t.Fatalf("remote floor = %d, want NULL before echo", remoteFloor.Int64)
+	}
+	var seq int64
+	if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = ? AND acked_at IS NULL`, "reconcile-session").Scan(&seq); err != nil {
+		t.Fatalf("read reconciliation delete: %v", err)
+	}
+	if err := s.AckSyncMutations(DefaultSyncTargetKey, seq); err != nil {
+		t.Fatalf("ack reconciliation delete: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.backfillSyncDeleteTombstonesTx(tx, project)
+	}); err != nil {
+		t.Fatalf("reconcile after acknowledgement: %v", err)
+	}
+	if got := scalarInt(t, s, `
+		SELECT COUNT(*) FROM sync_mutations
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ?
+	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 2 {
+		t.Fatalf("total reconciliation deletes after acknowledgement = %d, want 2", got)
+	}
+	if got := scalarInt(t, s, `
+		SELECT COUNT(*) FROM sync_mutations
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL
+	`, DefaultSyncTargetKey, SyncEntitySession, "reconcile-session", SyncOpDelete, SyncSourceLocal); got != 1 {
+		t.Fatalf("pending reconciliation deletes after acknowledgement = %d, want 1", got)
+	}
+}
+
 func TestRemirrorProjectRequiresAnEnrolledProject(t *testing.T) {
 	s := newTestStore(t)
 	for _, project := range []string{"", "not-enrolled"} {

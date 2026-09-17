@@ -98,6 +98,8 @@ var (
 
 	// ErrPulledSessionIdentityInvalid identifies an invalid identity after successful decoding and legacy fallback.
 	ErrPulledSessionIdentityInvalid = errors.New("pulled session identity is invalid")
+	// ErrPulledObservationIdentityInvalid identifies a pulled observation whose payload and mutation identities disagree.
+	ErrPulledObservationIdentityInvalid = errors.New("pulled observation identity is invalid")
 	// ErrPulledSessionDirectoryInvalid identifies a pulled or imported session that
 	// has no concrete directory and therefore cannot be admitted as cloud state.
 	ErrPulledSessionDirectoryInvalid = errors.New("pulled session directory is invalid")
@@ -334,7 +336,8 @@ const (
 	SyncSourceLocal  = "local"
 	SyncSourceRemote = "remote"
 
-	SyncSessionIdentityInvalidReasonCode = "sync_session_identity_invalid"
+	SyncSessionIdentityInvalidReasonCode     = "sync_session_identity_invalid"
+	SyncObservationIdentityInvalidReasonCode = "sync_observation_identity_invalid"
 
 	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
 	// relation carried a non-blank outer mutation project. Unmarked legacy rows
@@ -1084,9 +1087,18 @@ func (s *Store) migrate() error {
 				project     TEXT NOT NULL DEFAULT '',
 				deleted_at        TEXT NOT NULL DEFAULT (datetime('now')),
 				hard_delete       BOOLEAN NOT NULL DEFAULT 1,
-				active            BOOLEAN NOT NULL DEFAULT 1,
-				last_mutation_seq INTEGER NOT NULL DEFAULT 0,
+				active                   BOOLEAN NOT NULL DEFAULT 1,
+				last_mutation_seq        INTEGER NOT NULL DEFAULT 0,
+				last_remote_mutation_seq INTEGER,
 				PRIMARY KEY (entity, entity_key)
+			);
+
+			CREATE TABLE IF NOT EXISTS sync_delete_tombstone_remote_floors (
+				target_key        TEXT NOT NULL,
+				entity            TEXT NOT NULL,
+				entity_key        TEXT NOT NULL,
+				last_mutation_seq INTEGER NOT NULL,
+				PRIMARY KEY (target_key, entity, entity_key)
 			);
 
 		CREATE INDEX IF NOT EXISTS idx_prompts_session ON user_prompts(session_id);
@@ -1198,6 +1210,9 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sync_delete_tombstones", "last_remote_mutation_seq", "INTEGER"); err != nil {
 		return err
 	}
 	if err := s.migrateFTS(); err != nil {
@@ -6053,15 +6068,14 @@ func (s *Store) MarkSyncPending(targetKey string) error {
 
 // ApplyPulledMutation applies one remote mutation and advances the pull cursor.
 //
-// Session-identity semantics are skip-plus-evidence, not fail-closed. A blank
-// or inconsistent session identity in a pulled mutation is quarantined through
-// deadLetterPulledSessionIdentityTx and the cursor still advances past it.
-// Failing closed here would be a permanent retry loop: servers that predate the
-// identity rule hold historical chunks with blank session IDs, and no local
-// action can ever make such a mutation valid, so halting would pin the cursor
-// forever and block every later mutation behind it. Quarantining keeps the
-// dropped data visible — `engram doctor --check invalid_session_identity`
-// reports it and `engram conflicts deferred` lists the raw row.
+// Session and observation identity semantics are skip-plus-evidence, not
+// fail-closed. A blank or inconsistent session identity, or an inconsistent
+// observation identity, in a pulled mutation is quarantined through
+// deadLetterPulledIdentityTx and the cursor still advances past it. Failing
+// closed here would be a permanent retry loop: immutable remote data cannot
+// become valid through local retries, so halting would pin the cursor forever
+// and block every later mutation behind it. Quarantining keeps the dropped data
+// visible in `engram conflicts deferred`.
 //
 // Every other apply failure keeps its existing fail-closed behavior.
 func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) error {
@@ -6075,13 +6089,13 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			return nil
 		}
 
-		applyErr := s.applyPulledMutationTx(tx, mutation)
+		applyErr := s.applyCloudPulledMutationTx(tx, targetKey, mutation)
 		if applyErr != nil {
 			if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 				return err
 			} else if !handled {
-				if errors.Is(applyErr, ErrPulledSessionIdentityInvalid) {
-					if err := s.deadLetterPulledSessionIdentityTx(tx, targetKey, mutation); err != nil {
+				if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+					if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
 						return err
 					}
 				} else {
@@ -6120,7 +6134,7 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 // overwrite the first through ON CONFLICT(sync_id) DO UPDATE, destroying the only
 // record that the first mutation's data was dropped. The identity is therefore
 // derived from the mutation's own distinguishing material, as
-// pulledSessionDeadLetterSyncID already does for discarded session mutations:
+// pulledIdentityDeadLetterSyncID does for discarded session mutations:
 // distinct mutations stay apart by construction, while a genuine redelivery of
 // the same mutation still lands on the same row. Each field is length-prefixed so
 // no field's content can imitate a separator and forge a collision.
@@ -6237,8 +6251,9 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 // retry safety: a failed chunk import leaves no partial semantic mutations.
 //
 // It shares ApplyPulledMutation's skip-plus-evidence rule for invalid session
-// identities: such a mutation is quarantined and the rest of the chunk still
-// applies, so one historical blank identity cannot block the chunk forever.
+// and observation identities: such a mutation is quarantined and the rest of
+// the chunk still applies, so one permanently malformed identity cannot block
+// the chunk forever.
 // A payload that does not even decode stays fail-closed and rolls back the
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
@@ -6278,8 +6293,8 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 				if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 				} else if !handled {
-					if errors.Is(applyErr, ErrPulledSessionIdentityInvalid) {
-						if err := s.deadLetterPulledSessionIdentityTx(tx, targetKey, mutation); err != nil {
+					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
 							return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 						}
 					} else {
@@ -7769,10 +7784,9 @@ func backfillMutationSource(source []string) string {
 }
 
 func syncDeleteTombstoneNeedsBackfill(alias string) string {
-	return fmt.Sprintf(`%[1]s.active = 1 AND NOT EXISTS (
+	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.last_remote_mutation_seq IS NULL AND NOT EXISTS (
 		SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = %[1]s.entity
-		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ?
-		AND sm.seq > %[1]s.last_mutation_seq
+		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.acked_at IS NULL
 	)`, alias)
 }
 
@@ -7803,9 +7817,15 @@ func (s *Store) recordSyncDeleteTombstoneTx(tx *sql.Tx, entity, entityKey, sessi
 		VALUES (?, ?, ?, ?, ?, 1, 1, ?)
 		ON CONFLICT(entity, entity_key) DO UPDATE SET
 			session_id = excluded.session_id, project = excluded.project, deleted_at = excluded.deleted_at,
-			hard_delete = excluded.hard_delete, active = 1, last_mutation_seq = MAX(sync_delete_tombstones.last_mutation_seq, excluded.last_mutation_seq)`,
+			hard_delete = excluded.hard_delete, active = 1,
+			last_mutation_seq = MAX(sync_delete_tombstones.last_mutation_seq, excluded.last_mutation_seq),
+			last_remote_mutation_seq = NULL`,
 		entity, entityKey, nullableString(sessionID), project, deletedAt, floor,
 	)
+	if err != nil {
+		return err
+	}
+	_, err = s.execHook(tx, `DELETE FROM sync_delete_tombstone_remote_floors WHERE entity = ? AND entity_key = ?`, entity, entityKey)
 	return err
 }
 
@@ -7814,6 +7834,79 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 		return nil
 	}
 	_, err := s.execHook(tx, `UPDATE sync_delete_tombstones SET active = 0 WHERE entity = ? AND entity_key = ?`, entity, entityKey)
+	return err
+}
+
+func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
+	if targetKey == DefaultSyncTargetKey {
+		var active int
+		var floor sql.NullInt64
+		err := tx.QueryRow(`SELECT active, last_remote_mutation_seq FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&active, &floor)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if floor.Valid {
+			return seq <= floor.Int64, nil
+		}
+		return active == 1, nil
+	}
+	var active int
+	err := tx.QueryRow(`SELECT active FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var floor int64
+	err = tx.QueryRow(`SELECT last_mutation_seq FROM sync_delete_tombstone_remote_floors WHERE target_key = ? AND entity = ? AND entity_key = ?`, targetKey, entity, entityKey).Scan(&floor)
+	if err == nil {
+		return seq <= floor, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	var hasTargetFloor bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstone_remote_floors WHERE entity = ? AND entity_key = ?)`, entity, entityKey).Scan(&hasTargetFloor); err != nil {
+		return false, err
+	}
+	if hasTargetFloor {
+		return false, nil
+	}
+	return active == 1, nil
+}
+
+func (s *Store) recordCloudDeleteTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey, sessionID, project string, deletedAt *string, hardDelete bool, seq int64) error {
+	project, _ = NormalizeProject(strings.TrimSpace(project))
+	deleted := Now()
+	if deletedAt != nil && strings.TrimSpace(*deletedAt) != "" {
+		deleted = *deletedAt
+	}
+	_, err := s.execHook(tx, `
+		INSERT INTO sync_delete_tombstones (entity, entity_key, session_id, project, deleted_at, hard_delete, active)
+		VALUES (?, ?, ?, ?, ?, ?, 1)
+		ON CONFLICT(entity, entity_key) DO UPDATE SET
+			session_id = excluded.session_id, project = excluded.project, deleted_at = excluded.deleted_at,
+			hard_delete = excluded.hard_delete, active = 1`,
+		entity, entityKey, nullableString(sessionID), project, deleted, hardDelete,
+	)
+	if err != nil {
+		return err
+	}
+	if targetKey == DefaultSyncTargetKey {
+		_, err = s.execHook(tx, `UPDATE sync_delete_tombstones SET last_remote_mutation_seq = CASE WHEN last_remote_mutation_seq IS NULL OR ? > last_remote_mutation_seq THEN ? ELSE last_remote_mutation_seq END WHERE entity = ? AND entity_key = ?`, seq, seq, entity, entityKey)
+		return err
+	}
+	_, err = s.execHook(tx, `
+		INSERT INTO sync_delete_tombstone_remote_floors (target_key, entity, entity_key, last_mutation_seq)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(target_key, entity, entity_key) DO UPDATE SET
+			last_mutation_seq = MAX(sync_delete_tombstone_remote_floors.last_mutation_seq, excluded.last_mutation_seq)`,
+		targetKey, entity, entityKey, seq,
+	)
 	return err
 }
 
@@ -8945,6 +9038,14 @@ func (s *Store) adoptSessionOwnershipTx(tx *sql.Tx, sessionID, project string) e
 }
 
 func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
+	return s.applyPulledMutationForDomainTx(tx, mutation, false, "")
+}
+
+func (s *Store) applyCloudPulledMutationTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
+	return s.applyPulledMutationForDomainTx(tx, mutation, true, targetKey)
+}
+
+func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation, cloud bool, targetKey string) error {
 	switch mutation.Entity {
 	case SyncEntityRelation:
 		return s.applyRelationUpsertTx(tx, mutation)
@@ -8961,7 +9062,16 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 			return fmt.Errorf("%w: %v", ErrPulledSessionIdentityInvalid, err)
 		}
 		if mutation.Op == SyncOpDelete || isSessionDeletePayload(payload) {
-			return s.applySessionDeleteTx(tx, payload)
+			if err := s.applySessionDeleteTx(tx, payload); err != nil || !cloud {
+				return err
+			}
+			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, "", payload.Project, payload.DeletedAt, payload.HardDelete, mutation.Seq)
+		}
+		if cloud {
+			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, mutation.Seq)
+			if err != nil || blocked {
+				return err
+			}
 		}
 		if err := validatePulledSessionDirectory([]byte(mutation.Payload)); err != nil {
 			return err
@@ -8972,8 +9082,29 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
 			return err
 		}
+		entityKey := strings.TrimSpace(mutation.EntityKey)
+		payload.SyncID = strings.TrimSpace(payload.SyncID)
+		if payload.SyncID == "" {
+			payload.SyncID = entityKey
+		}
+		if payload.SyncID != entityKey {
+			return fmt.Errorf("%w: mutation entity_key %q does not match payload sync_id %q", ErrPulledObservationIdentityInvalid, entityKey, payload.SyncID)
+		}
 		if mutation.Op == SyncOpDelete {
-			return s.applyObservationDeleteTx(tx, payload)
+			if err := s.applyObservationDeleteTx(tx, payload); err != nil || !cloud {
+				return err
+			}
+			entityKey := payload.SyncID
+			if strings.TrimSpace(entityKey) == "" {
+				entityKey = mutation.EntityKey
+			}
+			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntityObservation, entityKey, payload.SessionID, derefString(payload.Project), payload.DeletedAt, payload.HardDelete, mutation.Seq)
+		}
+		if cloud {
+			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, mutation.Seq)
+			if err != nil || blocked {
+				return err
+			}
 		}
 		return s.applyObservationUpsertTx(tx, payload)
 	case SyncEntityPrompt:
@@ -9006,8 +9137,8 @@ func validatePulledSessionDirectory(raw []byte) error {
 	return nil
 }
 
-// pulledSessionDeadLetterSyncID derives the identity of a quarantined pulled
-// session mutation from the mutation itself, never from its position in the pull.
+// pulledIdentityDeadLetterSyncID derives the identity of quarantined pulled
+// mutations from the mutation itself, never from their position in the pull.
 //
 // The row it identifies is the only record that remote data was discarded, and
 // the insert resolves conflicts with ON CONFLICT(sync_id) DO UPDATE, so the
@@ -9015,7 +9146,7 @@ func validatePulledSessionDirectory(raw []byte) error {
 // land on different rows, or the second silently erases the first and
 // skip-plus-evidence degrades into the silent drop it exists to prevent. One
 // dropped mutation redelivered must land on the same row, or a single discarded
-// session accumulates an evidence row per delivery and overstates the loss.
+// mutation accumulates an evidence row per delivery and overstates the loss.
 //
 // The pull sequence satisfies neither obligation. ApplyPulledChunk overwrites it
 // with the local cursor position, so it describes when a mutation was applied
@@ -9025,26 +9156,50 @@ func validatePulledSessionDirectory(raw []byte) error {
 // are what actually distinguish dropped data, so they are what the identity
 // hashes. Each field is length-prefixed so no field content can imitate a
 // separator and forge a collision.
-func pulledSessionDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
+func pulledIdentityDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
 	digest := sha256.New()
 	for _, field := range []string{targetKey, mutation.Entity, mutation.EntityKey, mutation.Op, mutation.Payload} {
 		digest.Write([]byte(strconv.Itoa(len(field))))
 		digest.Write([]byte(":"))
 		digest.Write([]byte(field))
 	}
-	return "pulled-session-" + hex.EncodeToString(digest.Sum(nil))
+	return "pulled-" + mutation.Entity + "-" + hex.EncodeToString(digest.Sum(nil))
 }
 
-func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
-	syncID := pulledSessionDeadLetterSyncID(targetKey, mutation)
+func pulledIdentityInvalidReasonCode(applyErr error) (string, bool) {
+	switch {
+	case errors.Is(applyErr, ErrPulledSessionIdentityInvalid):
+		return SyncSessionIdentityInvalidReasonCode, true
+	case errors.Is(applyErr, ErrPulledObservationIdentityInvalid):
+		return SyncObservationIdentityInvalidReasonCode, true
+	default:
+		return "", false
+	}
+}
+
+func pulledIdentityEvidenceProject(mutation SyncMutation) string {
 	project := strings.TrimSpace(mutation.Project)
 	if project == "" {
-		var payload syncSessionPayload
-		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
-			project = strings.TrimSpace(payload.Project)
+		switch mutation.Entity {
+		case SyncEntitySession:
+			var payload syncSessionPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(payload.Project)
+			}
+		case SyncEntityObservation:
+			var payload syncObservationPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(derefString(payload.Project))
+			}
 		}
 	}
 	project, _ = NormalizeProject(project)
+	return project
+}
+
+func (s *Store) deadLetterPulledIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation, reasonCode string) error {
+	syncID := pulledIdentityDeadLetterSyncID(targetKey, mutation)
+	project := pulledIdentityEvidenceProject(mutation)
 	scopeClass := "target_scoped"
 	if project != "" {
 		scopeClass = "scoped"
@@ -9058,10 +9213,10 @@ func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, 
 			remote_seq = excluded.remote_seq, entity_key = excluded.entity_key, op = excluded.op,
 			reason_code = excluded.reason_code, project = excluded.project, scope_class = excluded.scope_class,
 			apply_status = 'dead', last_attempted_at = datetime('now')`,
-		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op, SyncSessionIdentityInvalidReasonCode, project, scopeClass,
+		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op, reasonCode, project, scopeClass,
 	)
 	if err != nil {
-		return fmt.Errorf("write invalid pulled session evidence: %w", err)
+		return fmt.Errorf("write invalid pulled %s evidence: %w", mutation.Entity, err)
 	}
 	return nil
 }
