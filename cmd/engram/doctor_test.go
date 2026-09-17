@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
 	engrammcp "github.com/Gentleman-Programming/engram/v2/internal/mcp"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
@@ -154,7 +155,7 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 		{name: "multiple sync mutation modes", args: []string{"engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--dry-run", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "missing project", args: []string{"engram", "doctor", "repair", "--check", "session_project_directory_mismatch", "--plan"}, want: "--project is required"},
 		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "not_real", "--plan"}, want: "unsupported repair check"},
-		{name: "orphaned observation session is report only", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "orphaned_observation_session", "--apply"}, want: "unsupported repair check orphaned_observation_session"},
+		{name: "orphaned observation session is report only", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "orphaned_observation_session", "--apply"}, want: "orphaned_observation_session is a diagnostic-only check with no repair"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +171,81 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCmdDoctorRepairClassificationMatrix(t *testing.T) {
+	cfg := testConfig(t)
+	repairable := diagnostic.RepairableCodes()
+	registered := diagnostic.RegisteredCodes()
+
+	withArgs(t, "engram", "doctor", "--help")
+	usage, usageErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if usageErr != "" {
+		t.Fatalf("usage stderr=%q", usageErr)
+	}
+	if !strings.Contains(usage, "checks: "+strings.Join(registered, ", ")) {
+		t.Fatalf("usage lost registered checks: %q", usage)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--help")
+	repairUsage, repairUsageErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if repairUsageErr != "" {
+		t.Fatalf("repair usage stderr=%q", repairUsageErr)
+	}
+	if !strings.Contains(repairUsage, "repairable checks: "+strings.Join(repairable, ", ")) {
+		t.Fatalf("repair usage repairable checks=%q", repairUsage)
+	}
+
+	repairableSet := make(map[string]bool, len(repairable))
+	for _, code := range repairable {
+		repairableSet[code] = true
+		args := []string{"engram", "doctor", "repair", "--check", code, "--plan"}
+		if code != diagnostic.CheckSyncMutationRequiredFields {
+			args = append(args, "--project", "engram")
+		}
+		withArgs(t, args...)
+		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatalf("repairable %q stderr=%q", code, stderr)
+		}
+		var plan map[string]any
+		if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+			t.Fatalf("repairable %q did not return JSON: %v\n%s", code, err, stdout)
+		}
+		if _, ok := plan["actions"]; !ok {
+			t.Fatalf("repairable %q did not return a plan: %v", code, plan)
+		}
+	}
+
+	for _, code := range registered {
+		if repairableSet[code] {
+			continue
+		}
+		t.Run("diagnostic only "+code, func(t *testing.T) {
+			oldExit := exitFunc
+			exited := false
+			exitFunc = func(code int) { exited = code != 0 }
+			t.Cleanup(func() { exitFunc = oldExit })
+			withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", code, "--plan")
+			stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+			want := code + " is a diagnostic-only check with no repair"
+			if !exited || !strings.Contains(stderr, want) || !strings.Contains(stdout, "usage: engram doctor") {
+				t.Fatalf("code=%q exited=%v stdout=%q stderr=%q want=%q", code, exited, stdout, stderr, want)
+			}
+		})
+	}
+
+	t.Run("unknown", func(t *testing.T) {
+		oldExit := exitFunc
+		exited := false
+		exitFunc = func(code int) { exited = code != 0 }
+		t.Cleanup(func() { exitFunc = oldExit })
+		withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "not_real", "--plan")
+		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if !exited || !strings.Contains(stderr, "unsupported repair check not_real") || !strings.Contains(stdout, "usage: engram doctor") {
+			t.Fatalf("exited=%v stdout=%q stderr=%q", exited, stdout, stderr)
+		}
+	})
 }
 
 func TestCmdDoctorRepairManualSessionNamePlanDryRunApplyJSON(t *testing.T) {
@@ -485,7 +561,7 @@ func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
 	t.Cleanup(func() { exitFunc = oldExit })
 	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
 	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
-	if !exited || !strings.Contains(stdout, "usage: engram doctor") || !strings.Contains(stderr, "unsupported repair check orphaned_observation_session") {
+	if !exited || !strings.Contains(stdout, "usage: engram doctor repair") || !strings.Contains(stderr, "orphaned_observation_session is a diagnostic-only check with no repair") {
 		t.Fatalf("repair exited=%v stdout=%q stderr=%q", exited, stdout, stderr)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.DataDir, "backups")); !os.IsNotExist(err) {

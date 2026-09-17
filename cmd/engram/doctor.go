@@ -96,6 +96,13 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
 }
 
+func printDoctorRepairUsage() {
+	fmt.Fprintln(os.Stdout, "usage: engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
+	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
+}
+
 func cmdDoctorRepair(cfg store.Config) {
 	project := ""
 	check := ""
@@ -127,7 +134,7 @@ func cmdDoctorRepair(cfg store.Config) {
 			mode = diagnostic.RepairModeApply
 			modeCount++
 		case "--help", "-h", "help":
-			printDoctorUsage()
+			printDoctorRepairUsage()
 			return
 		default:
 			failDoctorRepair(fmt.Sprintf("unknown doctor repair argument %q", os.Args[i]))
@@ -152,7 +159,11 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair("exactly one of --plan, --dry-run, or --apply is required")
 		return
 	}
-	if !isSupportedDoctorRepairCheck(check) {
+	if !diagnostic.IsRepairableCode(check) {
+		if _, err := diagnostic.DefaultRegistry().Lookup(check); err == nil {
+			failDoctorRepair(check + " is a diagnostic-only check with no repair")
+			return
+		}
 		failDoctorRepair("unsupported repair check " + check)
 		return
 	}
@@ -282,22 +293,9 @@ func cmdDoctorRepair(cfg store.Config) {
 	writeDoctorRepairJSON(plan)
 }
 
-func isSupportedDoctorRepairCheck(check string) bool {
-	switch check {
-	case diagnostic.CheckSessionProjectDirectoryMismatch,
-		diagnostic.CheckManualSessionNameProjectMismatch,
-		diagnostic.CheckInvalidSessionIdentity,
-		diagnostic.CheckSyncMutationRequiredFields,
-		diagnostic.CheckSyncTargetClosedSpace:
-		return true
-	default:
-		return false
-	}
-}
-
 func failDoctorRepair(message string) {
 	fmt.Fprintln(os.Stderr, "engram doctor repair failed: "+message)
-	printDoctorUsage()
+	printDoctorRepairUsage()
 	exitFunc(1)
 }
 
