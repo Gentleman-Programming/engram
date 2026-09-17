@@ -8,6 +8,7 @@ const PACKAGE_NAME = `npm:${packageMetadata.name}@${packageMetadata.version}`;
 const LEGACY_PACKAGE_NAMES = new Set([
   "npm:gentle-engram@0.1.8",
   "npm:gentle-engram@0.1.11",
+  "npm:gentle-engram@0.1.12",
 ]);
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const HELP = `pi-engram
