@@ -158,8 +158,14 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 		absPath := filepath.Join(engRoot, relPath)
-		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", absPath, err))
+		cleanRoot := filepath.Clean(engRoot)
+		cleanPath := filepath.Clean(absPath)
+		if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
+			result.Errors = append(result.Errors, fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath))
+			continue
+		}
+		if err := os.Remove(cleanPath); err != nil && !os.IsNotExist(err) {
+			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", cleanPath, err))
 		} else {
 			result.Deleted++
 			delete(state.Files, obs.ID)

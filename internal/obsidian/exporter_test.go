@@ -275,6 +275,70 @@ func TestDeletedObsRemoved(t *testing.T) {
 			t.Errorf("expected %s to be deleted, but it still exists", obsFile)
 		}
 	})
+
+	t.Run("deleted observation with path traversal in state file is rejected without deleting external file", func(t *testing.T) {
+		dir := t.TempDir()
+		externalDir := t.TempDir()
+		sensitiveFile := filepath.Join(externalDir, "secret.txt")
+		if err := os.WriteFile(sensitiveFile, []byte("sensitive content"), 0644); err != nil {
+			t.Fatalf("setup sensitive file: %v", err)
+		}
+
+		engRoot := filepath.Join(dir, "engram")
+		if err := os.MkdirAll(engRoot, 0755); err != nil {
+			t.Fatalf("mkdir engRoot: %v", err)
+		}
+
+		relPathToSensitive, err := filepath.Rel(engRoot, sensitiveFile)
+		if err != nil {
+			t.Fatalf("filepath.Rel: %v", err)
+		}
+
+		// Inject path traversal into .engram-sync-state.json
+		state := SyncState{
+			Version: 1,
+			Files: map[int64]string{
+				99: relPathToSensitive,
+			},
+		}
+		statePath := filepath.Join(engRoot, ".engram-sync-state.json")
+		if err := WriteState(statePath, state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+
+		deletedAt := "2026-02-01T00:00:00Z"
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{},
+				Observations: []store.Observation{
+					{
+						ID:        99,
+						Type:      "bugfix",
+						Title:     "Traverse",
+						DeletedAt: &deletedAt,
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		exp := NewExporter(ms, ExportConfig{VaultPath: dir})
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Sensitive file must NOT be deleted
+		if !fileExists(sensitiveFile) {
+			t.Errorf("expected %s to be preserved, but it was deleted via path traversal", sensitiveFile)
+		}
+		if result.Deleted != 0 {
+			t.Errorf("expected 0 deleted, got %d", result.Deleted)
+		}
+		if len(result.Errors) == 0 {
+			t.Errorf("expected error reporting unsafe path rejection, got none")
+		}
+	})
 }
 
 // ─── Task 2.7: TestProjectFilter ─────────────────────────────────────────────
