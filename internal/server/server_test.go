@@ -2203,6 +2203,68 @@ func TestHandleEndSessionReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleEndSessionReturnsConflictWhenSQLiteIsBusy(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+
+	st, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	locker, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open locker store: %v", err)
+	}
+	t.Cleanup(func() { _ = locker.Close() })
+
+	const sessionID = "busy-session"
+	if err := st.CreateSession(sessionID, "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.DB().Exec("PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatalf("disable writer SQLite busy timeout: %v", err)
+	}
+
+	lockConn, err := locker.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire locker connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("acquire SQLite write lock: %v", err)
+	}
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	})
+
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/sessions/"+sessionID+"/end",
+		strings.NewReader(`{"summary":"must remain open"}`),
+	))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST /sessions/{id}/end with SQLite lock = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if response.Error == "" {
+		t.Fatalf("conflict response = %#v, want non-empty error", response)
+	}
+}
+
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
 	loadServerStats = func(s *store.Store) (*store.Stats, error) {
