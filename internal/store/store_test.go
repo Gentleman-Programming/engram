@@ -13006,7 +13006,7 @@ func TestRepairBackfillsMissingMutations(t *testing.T) {
 	})
 }
 
-func TestRepairBackfillIgnoresAcknowledgedCoverage(t *testing.T) {
+func TestRepairBackfillKeepsAcknowledgedCoverage(t *testing.T) {
 	s := newTestStore(t)
 	const project, sessionID = "acknowledged_project", "acknowledged-session"
 	if err := s.EnrollProject(project); err != nil {
@@ -13015,7 +13015,7 @@ func TestRepairBackfillIgnoresAcknowledgedCoverage(t *testing.T) {
 	if err := s.CreateSession(sessionID, project, "/tmp/acknowledged"); err != nil {
 		t.Fatal(err)
 	}
-	observationID, err := s.AddObservation(AddObservationParams{SessionID: sessionID, Type: "decision", Title: "before acknowledgement", Content: "local source", Project: project, Scope: "project"})
+	observationID, err := s.AddObservation(AddObservationParams{SessionID: sessionID, Type: "decision", Title: "acknowledged", Content: "local source", Project: project, Scope: "project"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -13023,30 +13023,30 @@ func TestRepairBackfillIgnoresAcknowledgedCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var seq int64
+	var seq, before int64
 	if err := s.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID).Scan(&seq); err != nil {
 		t.Fatalf("read observation mutation: %v", err)
 	}
 	if err := s.AckSyncMutationSeqs(DefaultSyncTargetKey, []int64{seq}); err != nil {
 		t.Fatalf("ack observation mutation: %v", err)
 	}
-	if err := s.UnenrollProject(project); err != nil {
-		t.Fatal(err)
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&before); err != nil {
+		t.Fatalf("count acknowledged journal: %v", err)
 	}
-	updatedTitle := "after acknowledgement"
-	if _, err := s.UpdateObservation(observationID, UpdateObservationParams{Title: &updatedTitle}); err != nil {
-		t.Fatalf("update while unenrolled: %v", err)
+	for range 2 {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			t.Fatalf("repair acknowledged coverage: %v", err)
+		}
 	}
-	if err := s.EnrollProject(project); err != nil {
-		t.Fatalf("re-enroll project: %v", err)
+	var after, pending int64
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&after); err != nil {
+		t.Fatalf("count repaired journal: %v", err)
 	}
-	var pending int
-	var title string
-	if err := s.DB().QueryRow(`SELECT COUNT(*), coalesce(json_extract(MAX(payload), '$.title'), '') FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntityObservation, observation.SyncID).Scan(&pending, &title); err != nil {
-		t.Fatalf("read regenerated mutation: %v", err)
+	if err := s.DB().QueryRow(`SELECT SUM(CASE WHEN acked_at IS NULL AND disposition = 'pending' THEN 1 ELSE 0 END) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID).Scan(&pending); err != nil {
+		t.Fatalf("read repaired mutation: %v", err)
 	}
-	if pending != 1 || title != updatedTitle {
-		t.Fatalf("regenerated pending=%d title=%q, want 1 and %q", pending, title, updatedTitle)
+	if after != before || pending != 0 {
+		t.Fatalf("journal before=%d after=%d pending=%d, want no new mutation", before, after, pending)
 	}
 }
 
