@@ -112,6 +112,7 @@ async function createRuntime(t, {
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
 	manifestExists = false,
+  emitSpawnError = false,
   installBun = true,
   configuredEngramURL,
   healthOK = true,
@@ -157,13 +158,23 @@ async function createRuntime(t, {
     stdout: args[0] === "instance-id" ? "00000000000000000000000000000000\n" : "",
   })
   childProcess.spawn = (command, args, options) => {
+    let errorListener
     const child = {
       events: [],
       on(event, listener) {
-        if (event === "error" && typeof listener === "function") this.events.push(event)
+        if (event === "error" && typeof listener === "function") {
+          this.events.push(event)
+          errorListener = listener
+        }
         return this
       },
-      unref() { this.events.push("unref") },
+      unref() {
+        this.events.push("unref")
+        if (emitSpawnError) queueMicrotask(() => {
+          this.events.push("error:emitted")
+          errorListener?.(new Error("simulated spawn failure"))
+        })
+      },
     }
     spawns.push({ args: [command, ...args], options, child })
     if (args[0] === "sync" && args[1] === "--import") startupEvents.push("import:spawn")
@@ -246,18 +257,20 @@ test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t
   assert.equal(typeof runtime.plugin["chat.message"], "function")
 })
 
-test("manifest import registers an error listener before detaching", async (t) => {
-  const runtime = await createRuntime(t, { manifestExists: true })
+test("manifest import ignores an asynchronous child launch error", async (t) => {
+  const runtime = await createRuntime(t, { manifestExists: true, emitSpawnError: true })
   const imported = runtime.spawns.find(({ args }) => args[1] === "sync" && args[2] === "--import")
 
-  assert.deepEqual(imported?.child.events, ["error", "unref"])
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.deepEqual(imported?.child.events, ["error", "unref", "error:emitted"])
 })
 
-test("server startup registers an error listener before detaching", async (t) => {
-  const runtime = await createRuntime(t, { healthOK: false })
+test("server startup ignores an asynchronous child launch error", async (t) => {
+  const runtime = await createRuntime(t, { healthOK: false, emitSpawnError: true })
   const server = runtime.spawns.find(({ args }) => args[1] === "serve")
 
-  assert.deepEqual(server?.child.events, ["error", "unref"])
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.deepEqual(server?.child.events, ["error", "unref", "error:emitted"])
 })
 
 test("save nudge fails closed for malformed and non-array observation responses", async (t) => {

@@ -4155,62 +4155,41 @@ func TestInstallOpenCodeWarningUsesResolvedCommand(t *testing.T) {
 
 // ─── Issue #113: OpenCode plugin ENGRAM_BIN bake-in ─────────────────────────
 
-// TestPatchEngramBINLine verifies that patchEngramBINLine() correctly rewrites
-// the ENGRAM_BIN constant in the plugin source to include a Bun.which() runtime
-// fallback and a baked-in absolute path as the final headless fallback.
+// TestPatchEngramBINLine verifies that patchEngramBINLine() preserves an
+// explicit environment override and uses a baked absolute or bare fallback.
 func TestPatchEngramBINLine(t *testing.T) {
 	const original = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`
 
-	t.Run("bakes in absolute path with Bun.which intermediate fallback", func(t *testing.T) {
+	t.Run("bakes in an absolute fallback without Bun", func(t *testing.T) {
 		result := string(patchEngramBINLine([]byte(original), "/usr/local/bin/engram"))
-
-		if strings.Contains(result, `?? "engram"`) {
-			t.Fatalf("original bare-engram fallback should be replaced, got:\n%s", result)
+		want := `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/usr/local/bin/engram"`
+		if result != want {
+			t.Fatalf("patched line = %q, want %q", result, want)
 		}
-		if !strings.Contains(result, `process.env.ENGRAM_BIN`) {
-			t.Fatalf("must keep process.env.ENGRAM_BIN as first option, got:\n%s", result)
-		}
-		if !strings.Contains(result, `Bun.which("engram")`) {
-			t.Fatalf("must include Bun.which fallback, got:\n%s", result)
-		}
-		if !strings.Contains(result, `"/usr/local/bin/engram"`) {
-			t.Fatalf("must include baked-in absolute path, got:\n%s", result)
-		}
-		// Verify precedence order: env var ?? Bun.which ?? absolute path
-		envIdx := strings.Index(result, `process.env.ENGRAM_BIN`)
-		whichIdx := strings.Index(result, `Bun.which`)
-		absIdx := strings.Index(result, `"/usr/local/bin/engram"`)
-		if !(envIdx < whichIdx && whichIdx < absIdx) {
-			t.Fatalf("wrong precedence order (env < which < abs), got:\n%s", result)
+		if strings.Contains(result, `Bun.which`) {
+			t.Fatalf("installed Node adapter must not reference Bun, got:\n%s", result)
 		}
 	})
 
 	t.Run("Windows path with backslashes is JSON-quoted correctly", func(t *testing.T) {
 		result := string(patchEngramBINLine([]byte(original), `C:\Users\user\bin\engram.exe`))
-
-		// The path must appear as a properly JSON-escaped string
-		if !strings.Contains(result, `Bun.which("engram")`) {
-			t.Fatalf("must include Bun.which fallback, got:\n%s", result)
+		if !strings.Contains(result, `"C:\\Users\\user\\bin\\engram.exe"`) {
+			t.Fatalf("must include JSON-quoted Windows binary path, got:\n%s", result)
 		}
-		if !strings.Contains(result, `engram.exe`) {
-			t.Fatalf("must include Windows binary name, got:\n%s", result)
+		if strings.Contains(result, `Bun.which`) {
+			t.Fatalf("installed Node adapter must not reference Bun, got:\n%s", result)
 		}
 	})
 
-	t.Run("bare engram fallback when os.Executable failed", func(t *testing.T) {
+	t.Run("preserves bare engram fallback when os.Executable failed", func(t *testing.T) {
 		result := string(patchEngramBINLine([]byte(original), "engram"))
-
-		// When absBin=="engram", we still add Bun.which but don't repeat "engram" as absolute
-		if !strings.Contains(result, `process.env.ENGRAM_BIN`) {
-			t.Fatalf("must keep process.env.ENGRAM_BIN, got:\n%s", result)
-		}
-		if !strings.Contains(result, `Bun.which("engram")`) {
-			t.Fatalf("must include Bun.which fallback, got:\n%s", result)
+		if result != original {
+			t.Fatalf("bare fallback = %q, want %q", result, original)
 		}
 	})
 
 	t.Run("does not modify source if marker is absent", func(t *testing.T) {
-		src := []byte(`// already patched\nconst ENGRAM_BIN = process.env.ENGRAM_BIN ?? Bun.which("engram") ?? "/bin/engram"`)
+		src := []byte(`// already patched\nconst ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/bin/engram"`)
 		result := patchEngramBINLine(src, "/new/bin/engram")
 		// Marker not found — returns original unchanged
 		if string(result) != string(src) {
@@ -4229,10 +4208,9 @@ func TestPatchEngramBINLine(t *testing.T) {
 }
 
 // TestInstallOpenCodeBakesENGRAMBIN verifies that installOpenCode() writes a
-// plugin file where ENGRAM_BIN includes the absolute binary path as a fallback,
-// so the plugin works in headless/systemd environments (issue #113).
+// Node-compatible plugin file with an absolute or bare command fallback.
 func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
-	t.Run("installed plugin contains absolute path fallback", func(t *testing.T) {
+	t.Run("installed plugin contains absolute path fallback without Bun", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
 		runtimeGOOS = "linux"
@@ -4258,13 +4236,11 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		if !strings.Contains(content, `process.env.ENGRAM_BIN`) {
 			t.Fatalf("installed plugin must keep process.env.ENGRAM_BIN override")
 		}
-		// Must have Bun.which intermediate fallback
-		if !strings.Contains(content, `Bun.which("engram")`) {
-			t.Fatalf("installed plugin must include Bun.which fallback")
+		if strings.Contains(content, `Bun.which`) {
+			t.Fatalf("installed Node plugin must not reference Bun, got:\n%s", content)
 		}
-		// Must have the baked-in absolute path
-		if !strings.Contains(content, `"/usr/local/bin/engram"`) {
-			t.Fatalf("installed plugin must contain baked-in absolute path, got:\n%s", content)
+		if !strings.Contains(content, `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/usr/local/bin/engram"`) {
+			t.Fatalf("installed plugin must contain the expected absolute fallback, got:\n%s", content)
 		}
 		// Source plugin file must remain unchanged (no patching of the template)
 		srcRaw, err := openCodeReadFile("plugins/opencode/engram.ts")
@@ -4278,8 +4254,7 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 
 	t.Run("ENGRAM_BIN env var still takes precedence at runtime", func(t *testing.T) {
 		// We verify by inspection: the installed plugin must use ?? so that a
-		// truthy process.env.ENGRAM_BIN short-circuits before Bun.which and the
-		// baked-in path. This is the JavaScript ?? semantics guarantee.
+		// truthy process.env.ENGRAM_BIN short-circuits before the baked-in path.
 		resetSetupSeams(t)
 		home := useTestHome(t)
 		runtimeGOOS = "linux"
@@ -4298,20 +4273,19 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		content := string(raw)
 
 		// The line must have the form:
-		// const ENGRAM_BIN = process.env.ENGRAM_BIN ?? Bun.which("engram") ?? "/abs/path"
+		// const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/abs/path"
 		// where process.env.ENGRAM_BIN is leftmost (wins if set).
 		envIdx := strings.Index(content, `process.env.ENGRAM_BIN`)
-		whichIdx := strings.Index(content, `Bun.which("engram")`)
 		absIdx := strings.Index(content, `"/usr/local/bin/engram"`)
-		if envIdx == -1 || whichIdx == -1 || absIdx == -1 {
-			t.Fatalf("missing expected tokens in installed plugin:\n%s", content)
+		if envIdx == -1 || absIdx == -1 || strings.Contains(content, `Bun.which`) {
+			t.Fatalf("missing Node-compatible ENGRAM_BIN line in installed plugin:\n%s", content)
 		}
-		if !(envIdx < whichIdx && whichIdx < absIdx) {
+		if envIdx >= absIdx {
 			t.Fatalf("wrong operator precedence in ENGRAM_BIN line:\n%s", content)
 		}
 	})
 
-	t.Run("os.Executable fallback: Bun.which added but no double-engram", func(t *testing.T) {
+	t.Run("os.Executable fallback preserves the bare command", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
 		runtimeGOOS = "linux"
@@ -4329,8 +4303,11 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		}
 		content := string(raw)
 
-		if !strings.Contains(content, `Bun.which("engram")`) {
-			t.Fatalf("must still add Bun.which even when os.Executable fails")
+		if !strings.Contains(content, `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`) {
+			t.Fatalf("must preserve bare fallback when os.Executable fails, got:\n%s", content)
+		}
+		if strings.Contains(content, `Bun.which`) {
+			t.Fatalf("installed Node plugin must not reference Bun, got:\n%s", content)
 		}
 	})
 }
