@@ -801,7 +801,11 @@ func TestCmdDoctorRepairSupersedesBeforeQuarantine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen fixture: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close fixture: %v", err)
+		}
+	})
 	var disposition string
 	if err := db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = ?`, sessionID).Scan(&disposition); err != nil || disposition != store.SyncMutationDispositionSuperseded {
 		t.Fatalf("disposition=%q err=%v", disposition, err)
