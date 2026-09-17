@@ -125,11 +125,13 @@ func TestSQLiteBeginImmediatePreventsDeadlock(t *testing.T) {
 		t.Fatalf("connA BEGIN IMMEDIATE: %v", err)
 	}
 
+	txBAttemptStarted := make(chan struct{})
 	txBDone := make(chan error, 1)
 
 	// 2. Transaction B also attempts BEGIN IMMEDIATE in another goroutine.
 	// Since connA holds the RESERVED lock, connB enters busy_timeout (waits up to 5s) instead of deadlocking!
 	go func() {
+		close(txBAttemptStarted)
 		_, err := connB.ExecContext(context.Background(), "BEGIN IMMEDIATE")
 		if err != nil {
 			txBDone <- fmt.Errorf("connB BEGIN IMMEDIATE failed: %w", err)
@@ -146,8 +148,10 @@ func TestSQLiteBeginImmediatePreventsDeadlock(t *testing.T) {
 		txBDone <- err
 	}()
 
-	// Simulate connA doing read-then-write
-	time.Sleep(50 * time.Millisecond)
+	// Wait until goroutine B has started its BEGIN IMMEDIATE attempt
+	<-txBAttemptStarted
+
+	// connA reads and writes while holding the RESERVED write lock
 	var countA int
 	if err := connA.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sessions").Scan(&countA); err != nil {
 		t.Fatalf("connA select: %v", err)
@@ -155,6 +159,14 @@ func TestSQLiteBeginImmediatePreventsDeadlock(t *testing.T) {
 	if _, err := connA.ExecContext(context.Background(), "UPDATE sessions SET summary = 'summary A' WHERE id = 'test-session'"); err != nil {
 		t.Fatalf("connA update: %v", err)
 	}
+
+	// Verify connB has not finished prematurely (it must be blocked waiting on connA)
+	select {
+	case err := <-txBDone:
+		t.Fatalf("connB should still be waiting on connA, but returned early: %v", err)
+	default:
+	}
+
 	// connA commits and releases write lock
 	if _, err := connA.ExecContext(context.Background(), "COMMIT"); err != nil {
 		t.Fatalf("connA commit: %v", err)
@@ -206,8 +218,10 @@ func TestTxLockImmediateInDSN(t *testing.T) {
 		t.Fatalf("txA begin: %v", err)
 	}
 
+	txBAttemptStarted := make(chan struct{})
 	txBDone := make(chan error, 1)
 	go func() {
+		close(txBAttemptStarted)
 		// dbB also calls db.Begin(). Because _txlock=immediate is active, it enters busy_timeout waiting for txA!
 		txB, err := dbB.Begin()
 		if err != nil {
@@ -225,8 +239,10 @@ func TestTxLockImmediateInDSN(t *testing.T) {
 		txBDone <- txB.Commit()
 	}()
 
+	// Wait until goroutine B has started its dbB.Begin() attempt
+	<-txBAttemptStarted
+
 	// txA reads and writes while holding the immediate lock
-	time.Sleep(50 * time.Millisecond)
 	var valA string
 	if err := txA.QueryRow("SELECT val FROM items WHERE id = 1").Scan(&valA); err != nil {
 		t.Fatalf("txA read: %v", err)
@@ -234,6 +250,14 @@ func TestTxLockImmediateInDSN(t *testing.T) {
 	if _, err := txA.Exec("UPDATE items SET val = 'from A' WHERE id = 1"); err != nil {
 		t.Fatalf("txA write: %v", err)
 	}
+
+	// Verify txB has not finished prematurely (it must be blocked waiting on txA)
+	select {
+	case err := <-txBDone:
+		t.Fatalf("txB should still be waiting on txA, but returned early: %v", err)
+	default:
+	}
+
 	if err := txA.Commit(); err != nil {
 		t.Fatalf("txA commit: %v", err)
 	}
@@ -305,5 +329,30 @@ func TestStoreConcurrentWritesWithTxLock(t *testing.T) {
 
 	for err := range errCh {
 		t.Errorf("concurrent write error: %v", err)
+	}
+
+	// Verify all concurrent writes were correctly persisted and no observations were dropped or duplicated
+	verifyStore, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open verify store: %v", err)
+	}
+	defer verifyStore.Close()
+
+	const expectedTotal = numWriters * writesPerWorker
+
+	var count int
+	if err := verifyStore.DB().QueryRow("SELECT COUNT(*) FROM observations WHERE session_id = ?", "concurrent-session").Scan(&count); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if count != expectedTotal {
+		t.Fatalf("expected %d persisted observations, got %d", expectedTotal, count)
+	}
+
+	var distinctTitles int
+	if err := verifyStore.DB().QueryRow("SELECT COUNT(DISTINCT title) FROM observations WHERE session_id = ?", "concurrent-session").Scan(&distinctTitles); err != nil {
+		t.Fatalf("count distinct observation titles: %v", err)
+	}
+	if distinctTitles != expectedTotal {
+		t.Fatalf("expected %d distinct observation titles, got %d", expectedTotal, distinctTitles)
 	}
 }
