@@ -171,14 +171,6 @@ func WithDashboardAdminToken(adminToken string) Option {
 	}
 }
 
-// WithDashboardStoreForProjects wires the existing CloudStore scoped-view
-// factory without adding an authorization source or deployment configuration.
-func WithDashboardStoreForProjects(factory func([]string) (dashboard.DashboardStore, error)) Option {
-	return func(s *CloudServer) {
-		s.dashboardScope = factory
-	}
-}
-
 func WithMaxPushBodyBytes(limit int64) Option {
 	return func(s *CloudServer) {
 		if limit > 0 {
