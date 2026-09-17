@@ -28,13 +28,13 @@ func TestSQLiteBeginDeferredDeadlockRepro(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open dbA: %v", err)
 	}
-	defer dbA.Close()
+	defer func() { _ = dbA.Close() }()
 
 	dbB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open dbB: %v", err)
 	}
-	defer dbB.Close()
+	defer func() { _ = dbB.Close() }()
 
 	if _, err := dbA.Exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, summary TEXT); INSERT INTO sessions (id, summary) VALUES ('test-session', 'init');"); err != nil {
 		t.Fatalf("init table: %v", err)
@@ -45,14 +45,14 @@ func TestSQLiteBeginDeferredDeadlockRepro(t *testing.T) {
 	if err != nil {
 		t.Fatalf("txA begin: %v", err)
 	}
-	defer txA.Rollback()
+	defer func() { _ = txA.Rollback() }()
 
 	// 2. Transaction B begins (DEFERRED)
 	txB, err := dbB.Begin()
 	if err != nil {
 		t.Fatalf("txB begin: %v", err)
 	}
-	defer txB.Rollback()
+	defer func() { _ = txB.Rollback() }()
 
 	// 3. Both do a SELECT (both acquire SHARED read locks)
 	var countA, countB int
@@ -96,13 +96,13 @@ func TestSQLiteBeginImmediatePreventsDeadlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open dbA: %v", err)
 	}
-	defer dbA.Close()
+	defer func() { _ = dbA.Close() }()
 
 	dbB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open dbB: %v", err)
 	}
-	defer dbB.Close()
+	defer func() { _ = dbB.Close() }()
 
 	if _, err := dbA.Exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, summary TEXT); INSERT INTO sessions (id, summary) VALUES ('test-session', 'init');"); err != nil {
 		t.Fatalf("init table: %v", err)
@@ -112,13 +112,13 @@ func TestSQLiteBeginImmediatePreventsDeadlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connA: %v", err)
 	}
-	defer connA.Close()
+	defer func() { _ = connA.Close() }()
 
 	connB, err := dbB.Conn(context.Background())
 	if err != nil {
 		t.Fatalf("connB: %v", err)
 	}
-	defer connB.Close()
+	defer func() { _ = connB.Close() }()
 
 	// 1. Transaction A acquires RESERVED write lock immediately at the start of transaction
 	if _, err := connA.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
@@ -200,13 +200,13 @@ func TestTxLockImmediateInDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open dbA: %v", err)
 	}
-	defer dbA.Close()
+	defer func() { _ = dbA.Close() }()
 
 	dbB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open dbB: %v", err)
 	}
-	defer dbB.Close()
+	defer func() { _ = dbB.Close() }()
 
 	if _, err := dbA.Exec("CREATE TABLE items (id INTEGER PRIMARY KEY, val TEXT); INSERT INTO items (val) VALUES ('init');"); err != nil {
 		t.Fatalf("init table: %v", err)
@@ -217,6 +217,7 @@ func TestTxLockImmediateInDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("txA begin: %v", err)
 	}
+	defer func() { _ = txA.Rollback() }()
 
 	txBAttemptStarted := make(chan struct{})
 	txBDone := make(chan error, 1)
@@ -306,7 +307,7 @@ func TestStoreConcurrentWritesWithTxLock(t *testing.T) {
 				errCh <- fmt.Errorf("worker %d New(): %w", workerID, err)
 				return
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 
 			for i := 0; i < writesPerWorker; i++ {
 				_, err := s.AddObservation(AddObservationParams{
@@ -336,7 +337,7 @@ func TestStoreConcurrentWritesWithTxLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open verify store: %v", err)
 	}
-	defer verifyStore.Close()
+	defer func() { _ = verifyStore.Close() }()
 
 	const expectedTotal = numWriters * writesPerWorker
 
