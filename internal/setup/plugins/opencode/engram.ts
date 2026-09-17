@@ -318,19 +318,22 @@ function isSessionActive(statuses: Record<string, any> | undefined, sessionID: s
   return undefined
 }
 
-async function endArchivedSessionRequest(sessionId: string): Promise<void> {
+async function endArchivedSessionRequest(sessionId: string, isCurrent: () => boolean): Promise<void> {
   const path = `/sessions/${encodeURIComponent(sessionId)}/end`
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!isCurrent()) return
     const response = await fetch(`${ENGRAM_URL}${path}`, {
       method: "POST",
       signal: AbortSignal.timeout(3000),
     })
+    if (!isCurrent()) return
 
     if (response.ok) return
 
     if (attempt === 0 && isTransientSessionEndFailure(response.status)) {
       await new Promise((resolve) => setTimeout(resolve, SESSION_END_RETRY_DELAY_MS))
+      if (!isCurrent()) return
       continue
     }
 
@@ -392,6 +395,19 @@ export const Engram: Plugin = async (ctx) => {
   const closingArchivedSessions = new Set<string>()
   const closedArchivedSessions = new Set<string>()
   const sessionEventQueues = new Map<string, Promise<void>>()
+  const archivedSessionGenerations = new Map<string, number>()
+
+  function archivedSessionGeneration(sessionID: string): number {
+    return archivedSessionGenerations.get(sessionID) ?? 0
+  }
+
+  function invalidateArchivedSession(sessionID: string): void {
+    archivedSessionGenerations.set(sessionID, archivedSessionGeneration(sessionID) + 1)
+  }
+
+  function isArchivedSessionGenerationCurrent(sessionID: string, generation: number): boolean {
+    return archivedSessionGeneration(sessionID) === generation
+  }
 
   function invalidateSessionTree(sessionId: string): void {
     const invalidated = new Set([sessionId])
@@ -626,14 +642,19 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  async function closeArchivedSession(sessionId: string): Promise<ArchivedSessionCloseResult> {
+  async function closeArchivedSession(
+    sessionId: string,
+    generation: number,
+  ): Promise<ArchivedSessionCloseResult> {
     if (
       !sessionId ||
       invalidSessions.has(sessionId) ||
       subAgentSessions.has(sessionId) ||
       parentSessions.get(sessionId) !== null
     ) return "terminal"
-    if (!await ensureResolvedProject()) return "deferred"
+    if (!await ensureResolvedProject() || !isArchivedSessionGenerationCurrent(sessionId, generation)) {
+      return "deferred"
+    }
 
     let response: Response
     try {
@@ -643,6 +664,7 @@ export const Engram: Plugin = async (ctx) => {
     } catch {
       return "deferred"
     }
+    if (!isArchivedSessionGenerationCurrent(sessionId, generation)) return "deferred"
 
     if (response.status === 404) return "terminal"
     if (!response.ok) return "deferred"
@@ -653,6 +675,7 @@ export const Engram: Plugin = async (ctx) => {
     } catch {
       return "deferred"
     }
+    if (!isArchivedSessionGenerationCurrent(sessionId, generation)) return "deferred"
 
     if (!existing || existing.error) return "deferred"
     if (existing.id !== sessionId) return "terminal"
@@ -661,7 +684,12 @@ export const Engram: Plugin = async (ctx) => {
     }
     if (comparableProjectName(existing.project) !== comparableProjectName(project)) return "terminal"
 
-    await endArchivedSessionRequest(sessionId)
+    if (!isArchivedSessionGenerationCurrent(sessionId, generation)) return "deferred"
+    await endArchivedSessionRequest(
+      sessionId,
+      () => isArchivedSessionGenerationCurrent(sessionId, generation),
+    )
+    if (!isArchivedSessionGenerationCurrent(sessionId, generation)) return "deferred"
     closedSessions.add(sessionId)
     for (const sessions of [knownSessions, registrationAttempts, deletedRootSessions, closeRequestedSessions]) {
       sessions.delete(sessionId)
@@ -678,12 +706,17 @@ export const Engram: Plugin = async (ctx) => {
     })
   }
 
-  async function closePendingArchivedSession(sessionID: string): Promise<void> {
+  async function closePendingArchivedSession(
+    sessionID: string,
+    generation = archivedSessionGeneration(sessionID),
+  ): Promise<void> {
     if (!pendingArchivedSessions.has(sessionID) || closingArchivedSessions.has(sessionID)) return
+    if (!isArchivedSessionGenerationCurrent(sessionID, generation)) return
 
     closingArchivedSessions.add(sessionID)
     try {
-      const result = await closeArchivedSession(sessionID)
+      const result = await closeArchivedSession(sessionID, generation)
+      if (!isArchivedSessionGenerationCurrent(sessionID, generation)) return
       if (result === "closed" || result === "terminal") {
         pendingArchivedSessions.delete(sessionID)
         closedArchivedSessions.add(sessionID)
@@ -693,19 +726,21 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  async function handleArchivedSession(sessionID: string): Promise<void> {
+  async function handleArchivedSession(sessionID: string, generation: number): Promise<void> {
     if (
       !sessionID ||
       subAgentSessions.has(sessionID) ||
       pendingArchivedSessions.has(sessionID) ||
       closedArchivedSessions.has(sessionID)
     ) return
+    if (!isArchivedSessionGenerationCurrent(sessionID, generation)) return
 
     pendingArchivedSessions.add(sessionID)
     const active = await isOpenCodeSessionActive(sessionID)
+    if (!isArchivedSessionGenerationCurrent(sessionID, generation)) return
     if (active !== false) return
 
-    await closePendingArchivedSession(sessionID)
+    await closePendingArchivedSession(sessionID, generation)
   }
 
   // Try to start engram server if not running
@@ -788,8 +823,10 @@ export const Engram: Plugin = async (ctx) => {
         if (event.type === "session.updated" && sessionId) {
           const archiveState = sessionArchiveState(info)
           if (archiveState === "archived") {
-            await enqueueSessionEvent(sessionId, () => handleArchivedSession(sessionId))
+            const generation = archivedSessionGeneration(sessionId)
+            await enqueueSessionEvent(sessionId, () => handleArchivedSession(sessionId, generation))
           } else if (archiveState === "unarchived") {
+            invalidateArchivedSession(sessionId)
             await enqueueSessionEvent(sessionId, async () => {
               pendingArchivedSessions.delete(sessionId)
             })
@@ -800,7 +837,8 @@ export const Engram: Plugin = async (ctx) => {
       if (event.type === "session.idle") {
         const sessionId = (event.properties as any)?.sessionID
         if (typeof sessionId === "string") {
-          await enqueueSessionEvent(sessionId, () => closePendingArchivedSession(sessionId))
+          const generation = archivedSessionGeneration(sessionId)
+          await enqueueSessionEvent(sessionId, () => closePendingArchivedSession(sessionId, generation))
         }
       }
 
@@ -810,6 +848,7 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
+          invalidateArchivedSession(sessionId)
           await enqueueSessionEvent(sessionId, async () => {
             pendingArchivedSessions.delete(sessionId)
             closingArchivedSessions.delete(sessionId)

@@ -14,6 +14,8 @@ type HarnessOptions = {
   statuses?: Record<string, SessionStatusType>
   statusResponseStyle?: "data" | "fields"
   statusFailure?: boolean
+  statusGate?: Promise<void>
+  onStatusQuery?: () => void
   sessions?: Record<string, string>
   endStatuses?: number[]
 }
@@ -27,6 +29,19 @@ type Call = {
 type Harness = {
   calls: Call[]
   statusQueries: any[]
+}
+
+type Deferred = {
+  promise: Promise<void>
+  resolve: () => void
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void
+  const promise = new Promise<void>((complete) => {
+    resolve = complete
+  })
+  return { promise, resolve }
 }
 
 function sessionInfo(id: string, time: Record<string, unknown> = {}, fields: Record<string, unknown> = {}) {
@@ -108,6 +123,8 @@ async function withPlugin<T>(
     session: {
       status: async (request: any = {}) => {
         statusQueries.push(request)
+        options.onStatusQuery?.()
+        if (options.statusGate) await options.statusGate
         if (options.statusFailure) throw new Error("status unavailable")
 
         const data = Object.fromEntries(
@@ -328,6 +345,44 @@ test("unarchiving before idle cancels deferred closure", async () => {
     },
   )
 })
+
+for (const [name, cancellationEvent] of [
+  ["unarchiving", (id: string) => ({
+    type: "session.updated",
+    properties: { info: sessionInfo(id, { archived: 0 }) },
+  })],
+  ["deletion", (id: string) => ({
+    type: "session.deleted",
+    properties: { info: sessionInfo(id) },
+  })],
+] as const) {
+  test(`${name} invalidates an in-flight archive status check`, async () => {
+    const statusStarted = deferred()
+    const statusGate = deferred()
+    const sessionID = `in-flight-${name}`
+
+    await withPlugin(
+      {
+        statuses: { [sessionID]: "idle" },
+        sessions: { [sessionID]: PROJECT },
+        onStatusQuery: statusStarted.resolve,
+        statusGate: statusGate.promise,
+      },
+      async (plugin, harness) => {
+        const archive = plugin.event({ event: archiveEvent(sessionID) })
+        await statusStarted.promise
+
+        const cancellation = plugin.event({ event: cancellationEvent(sessionID) })
+        await Promise.resolve()
+        statusGate.resolve()
+        await Promise.all([archive, cancellation])
+
+        expect(harness.calls.some((call) => call.path === `/sessions/${sessionID}`)).toBe(false)
+        expect(harness.calls.some((call) => call.path === `/sessions/${sessionID}/end`)).toBe(false)
+      },
+    )
+  })
+}
 
 test("archive closure succeeds without retry", async () => {
   const result = await runArchiveWithEndStatuses([200])
