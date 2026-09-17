@@ -164,7 +164,14 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			result.Errors = append(result.Errors, fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath))
 			continue
 		}
-		if err := os.Remove(cleanPath); err != nil && !os.IsNotExist(err) {
+		root, err := os.OpenRoot(engRoot)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("open export root for delete %s: %w", cleanPath, err))
+			continue
+		}
+		err = root.Remove(relPath)
+		_ = root.Close()
+		if err != nil && !os.IsNotExist(err) {
 			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", cleanPath, err))
 		} else {
 			result.Deleted++

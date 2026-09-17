@@ -339,6 +339,70 @@ func TestDeletedObsRemoved(t *testing.T) {
 			t.Errorf("expected error reporting unsafe path rejection, got none")
 		}
 	})
+
+	t.Run("deleted observation through intermediate symlink preserves external file and state", func(t *testing.T) {
+		vault := t.TempDir()
+		externalDir := t.TempDir()
+		sensitiveFile := filepath.Join(externalDir, "sensitive.md")
+		if err := os.WriteFile(sensitiveFile, []byte("sensitive content"), 0644); err != nil {
+			t.Fatalf("setup sensitive file: %v", err)
+		}
+
+		engRoot := filepath.Join(vault, "engram")
+		if err := os.MkdirAll(engRoot, 0755); err != nil {
+			t.Fatalf("mkdir engRoot: %v", err)
+		}
+		if err := os.Symlink(externalDir, filepath.Join(engRoot, "linked")); err != nil {
+			t.Skipf("symlink creation is unavailable: %v", err)
+		}
+
+		state := SyncState{
+			Version: 1,
+			Files: map[int64]string{
+				100: filepath.Join("linked", "sensitive.md"),
+			},
+		}
+		statePath := filepath.Join(engRoot, ".engram-sync-state.json")
+		if err := WriteState(statePath, state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+
+		deletedAt := "2026-02-01T00:00:00Z"
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{},
+				Observations: []store.Observation{{
+					ID:        100,
+					Type:      "bugfix",
+					Title:     "Symlink escape",
+					DeletedAt: &deletedAt,
+				}},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		result, err := NewExporter(ms, ExportConfig{VaultPath: vault}).Export()
+		if err != nil {
+			t.Fatalf("Export() error: %v", err)
+		}
+		if !fileExists(sensitiveFile) {
+			t.Errorf("expected external file %s to be preserved, but it was deleted", sensitiveFile)
+		}
+		if result.Deleted != 0 {
+			t.Errorf("Deleted: got %d, want 0", result.Deleted)
+		}
+		if len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Error(), "delete") {
+			t.Errorf("expected deletion containment error, got %v", result.Errors)
+		}
+
+		updatedState, err := ReadState(statePath)
+		if err != nil {
+			t.Fatalf("ReadState: %v", err)
+		}
+		if got, tracked := updatedState.Files[100]; !tracked || got != filepath.Join("linked", "sensitive.md") {
+			t.Errorf("state.Files[100] = %q, tracked=%t; want tracked symlink path", got, tracked)
+		}
+	})
 }
 
 // ─── Task 2.7: TestProjectFilter ─────────────────────────────────────────────
