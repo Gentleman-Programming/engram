@@ -11,6 +11,7 @@ import (
 
 	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
 )
 
 type managedDashboardPrincipalStore struct {
@@ -138,6 +139,259 @@ func TestManagedDashboardMemberCannotAccessAdminBehavior(t *testing.T) {
 	adminRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin", cookie)
 	if adminRec.Code != http.StatusForbidden {
 		t.Fatalf("expected managed member admin dashboard request to be forbidden, got %d body=%q", adminRec.Code, adminRec.Body.String())
+	}
+}
+
+type dashboardPrincipalGrantAuthorizer struct {
+	grants map[string][]string
+	err    error
+}
+
+func (a *dashboardPrincipalGrantAuthorizer) AuthorizeProjectForPrincipal(_ context.Context, _ cloudauth.Principal, _ string) error {
+	return nil
+}
+
+func (a *dashboardPrincipalGrantAuthorizer) EnrolledProjectsForPrincipal(_ context.Context, principal cloudauth.Principal) ([]string, error) {
+	if a.err != nil {
+		return nil, a.err
+	}
+	return append([]string(nil), a.grants[principal.ID]...), nil
+}
+
+type dashboardPrincipalHTTPStore struct {
+	*managedDashboardPrincipalStore
+	allowed     map[string]struct{}
+	syncToggles int
+}
+
+func (s *dashboardPrincipalHTTPStore) scoped(projects []string) dashboard.DashboardStore {
+	view := *s
+	view.allowed = make(map[string]struct{}, len(projects))
+	for _, project := range projects {
+		view.allowed[project] = struct{}{}
+	}
+	return &view
+}
+
+func (s *dashboardPrincipalHTTPStore) projectAllowed(project string) error {
+	if s.allowed == nil {
+		return nil
+	}
+	if _, ok := s.allowed[project]; !ok {
+		return cloudstore.ErrDashboardProjectForbidden
+	}
+	return nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListProjects(string) ([]cloudstore.DashboardProjectRow, error) {
+	rows := []cloudstore.DashboardProjectRow{}
+	for _, row := range []cloudstore.DashboardProjectRow{{Project: "project-a", Chunks: 1}, {Project: "project-b", Chunks: 1}} {
+		if s.projectAllowed(row.Project) == nil {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ProjectDetail(project string) (cloudstore.DashboardProjectDetail, error) {
+	if err := s.projectAllowed(project); err != nil {
+		return cloudstore.DashboardProjectDetail{}, err
+	}
+	return cloudstore.DashboardProjectDetail{Project: project, Stats: cloudstore.DashboardProjectRow{Project: project, Chunks: 1}}, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListContributors(string) ([]cloudstore.DashboardContributorRow, error) {
+	return []cloudstore.DashboardContributorRow{}, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListRecentSessions(project, query string, limit int) ([]cloudstore.DashboardSessionRow, error) {
+	rows, _, err := s.ListRecentSessionsPaginated(project, query, limit, 0)
+	return rows, err
+}
+
+func (s *dashboardPrincipalHTTPStore) ListRecentObservations(project, query string, limit int) ([]cloudstore.DashboardObservationRow, error) {
+	rows, _, err := s.ListRecentObservationsPaginated(project, query, "", limit, 0)
+	return rows, err
+}
+
+func (s *dashboardPrincipalHTTPStore) ListRecentPrompts(project, query string, limit int) ([]cloudstore.DashboardPromptRow, error) {
+	rows, _, err := s.ListRecentPromptsPaginated(project, query, limit, 0)
+	return rows, err
+}
+
+func (s *dashboardPrincipalHTTPStore) AdminOverview() (cloudstore.DashboardAdminOverview, error) {
+	rows, _ := s.ListProjects("")
+	return cloudstore.DashboardAdminOverview{Projects: len(rows), Chunks: len(rows)}, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListProjectsPaginated(query string, limit, offset int) ([]cloudstore.DashboardProjectRow, int, error) {
+	rows, err := s.ListProjects(query)
+	if err != nil {
+		return nil, 0, err
+	}
+	return rows, len(rows), nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListRecentObservationsPaginated(project, query, obsType string, limit, offset int) ([]cloudstore.DashboardObservationRow, int, error) {
+	if project != "" {
+		if err := s.projectAllowed(project); err != nil {
+			return nil, 0, err
+		}
+	}
+	rows := []cloudstore.DashboardObservationRow{}
+	for _, row := range []cloudstore.DashboardObservationRow{{Project: "project-a", SessionID: "session-a", SyncID: "observation-a", Title: "allowed observation"}, {Project: "project-b", SessionID: "session-b", SyncID: "observation-b", Title: "private observation"}} {
+		if s.projectAllowed(row.Project) == nil && (project == "" || project == row.Project) {
+			rows = append(rows, row)
+		}
+	}
+	return rows, len(rows), nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListRecentSessionsPaginated(project, query string, limit, offset int) ([]cloudstore.DashboardSessionRow, int, error) {
+	if project != "" {
+		if err := s.projectAllowed(project); err != nil {
+			return nil, 0, err
+		}
+	}
+	return []cloudstore.DashboardSessionRow{}, 0, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListRecentPromptsPaginated(project, query string, limit, offset int) ([]cloudstore.DashboardPromptRow, int, error) {
+	if project != "" {
+		if err := s.projectAllowed(project); err != nil {
+			return nil, 0, err
+		}
+	}
+	return []cloudstore.DashboardPromptRow{}, 0, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListContributorsPaginated(string, int, int) ([]cloudstore.DashboardContributorRow, int, error) {
+	return []cloudstore.DashboardContributorRow{}, 0, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) GetSessionDetail(project, sessionID string) (cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error) {
+	if err := s.projectAllowed(project); err != nil {
+		return cloudstore.DashboardSessionRow{}, nil, nil, err
+	}
+	return cloudstore.DashboardSessionRow{Project: project, SessionID: sessionID}, nil, nil, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) GetObservationDetail(project, sessionID, syncID string) (cloudstore.DashboardObservationRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, error) {
+	if err := s.projectAllowed(project); err != nil {
+		return cloudstore.DashboardObservationRow{}, cloudstore.DashboardSessionRow{}, nil, err
+	}
+	return cloudstore.DashboardObservationRow{Project: project, SessionID: sessionID, SyncID: syncID}, cloudstore.DashboardSessionRow{Project: project, SessionID: sessionID}, nil, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) GetPromptDetail(project, sessionID, syncID string) (cloudstore.DashboardPromptRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardPromptRow, error) {
+	if err := s.projectAllowed(project); err != nil {
+		return cloudstore.DashboardPromptRow{}, cloudstore.DashboardSessionRow{}, nil, err
+	}
+	return cloudstore.DashboardPromptRow{Project: project, SessionID: sessionID, SyncID: syncID}, cloudstore.DashboardSessionRow{Project: project, SessionID: sessionID}, nil, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) SystemHealth() (cloudstore.DashboardSystemHealth, error) {
+	return cloudstore.DashboardSystemHealth{}, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) ListProjectSyncControls() ([]cloudstore.ProjectSyncControl, error) {
+	return []cloudstore.ProjectSyncControl{}, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) GetProjectSyncControl(project string) (*cloudstore.ProjectSyncControl, error) {
+	return &cloudstore.ProjectSyncControl{Project: project, SyncEnabled: true}, nil
+}
+
+func (s *dashboardPrincipalHTTPStore) SetProjectSyncEnabled(string, bool, string, string) error {
+	s.syncToggles++
+	return nil
+}
+
+func (s *dashboardPrincipalHTTPStore) IsProjectSyncEnabled(string) (bool, error) { return true, nil }
+
+func (s *dashboardPrincipalHTTPStore) GetContributorDetail(string) (cloudstore.DashboardContributorRow, []cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error) {
+	return cloudstore.DashboardContributorRow{}, nil, nil, nil, cloudstore.ErrDashboardContributorNotFound
+}
+
+func (s *dashboardPrincipalHTTPStore) ListDistinctTypes() ([]string, error) { return nil, nil }
+
+func (s *dashboardPrincipalHTTPStore) ListAuditEntriesPaginated(context.Context, cloudstore.AuditFilter, int, int) ([]cloudstore.DashboardAuditRow, int, error) {
+	return nil, 0, nil
+}
+
+func TestDashboardPrincipalHTTPRequestsUseScopedStoresAndFailClosed(t *testing.T) {
+	principals := []cloudauth.Principal{
+		dashboardManagedPrincipal("principal-a", cloudstore.PrincipalRoleAdmin, true),
+		dashboardManagedPrincipal("principal-b", cloudstore.PrincipalRoleAdmin, true),
+	}
+	state := newManagedDashboardPrincipalStore(
+		dashboardStoredPrincipal("principal-a", cloudstore.PrincipalRoleAdmin, true),
+		dashboardStoredPrincipal("principal-b", cloudstore.PrincipalRoleAdmin, true),
+	)
+	store := &dashboardPrincipalHTTPStore{managedDashboardPrincipalStore: state}
+	authorizer := &dashboardPrincipalGrantAuthorizer{grants: map[string][]string{"principal-a": {"project-a"}, "principal-b": {"project-b"}}}
+	authn := resolvingAuth{principals: map[string]cloudauth.Principal{"token-a": principals[0], "token-b": principals[1]}}
+	srv := New(store, authn, 0,
+		WithPrincipalStateStore(store),
+		WithPrincipalProjectAuthorizer(authorizer),
+		WithDashboardStoreForProjects(func(projects []string) (dashboard.DashboardStore, error) { return store.scoped(projects), nil }),
+	)
+	alice := managedDashboardLogin(t, srv, "token-a", false)
+	bob := managedDashboardLogin(t, srv, "token-b", false)
+
+	assertDashboardPrincipalHTTPBody(t, srv, alice, "/dashboard/activity", false, "allowed observation", "private observation")
+	assertDashboardPrincipalHTTPBody(t, srv, alice, "/dashboard/browser/observations", true, "allowed observation", "private observation")
+	assertDashboardPrincipalHTTPStatus(t, srv, alice, "/dashboard/projects/project-b", http.StatusForbidden)
+	assertDashboardPrincipalHTTPStatus(t, srv, alice, "/dashboard/observations/project-b/session-b/observation-b", http.StatusForbidden)
+	assertDashboardPrincipalHTTPBody(t, srv, bob, "/dashboard/activity", false, "private observation", "allowed observation")
+	assertDashboardPrincipalHTTPBody(t, srv, alice, "/dashboard/activity", false, "allowed observation", "private observation")
+
+	authorizer.err = context.DeadlineExceeded
+	assertDashboardPrincipalHTTPStatus(t, srv, alice, "/dashboard/activity", http.StatusServiceUnavailable)
+	authorizer.err = nil
+
+	form := httptest.NewRequest(http.MethodPost, "/dashboard/admin/projects/project-b/sync", strings.NewReader("enabled=false"))
+	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	form.AddCookie(alice)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, form)
+	if response.Code != http.StatusSeeOther || store.syncToggles != 1 {
+		t.Fatalf("expected unscoped existing sync-toggle behavior, status=%d toggles=%d", response.Code, store.syncToggles)
+	}
+}
+
+func TestDashboardPrincipalUnsupportedManagedStoreFailsClosed(t *testing.T) {
+	principal := dashboardManagedPrincipal("principal-a", cloudstore.PrincipalRoleAdmin, true)
+	state := newManagedDashboardPrincipalStore(dashboardStoredPrincipal("principal-a", cloudstore.PrincipalRoleAdmin, true))
+	store := &dashboardPrincipalHTTPStore{managedDashboardPrincipalStore: state}
+	authn := resolvingAuth{principals: map[string]cloudauth.Principal{"token-a": principal}}
+	srv := New(store, authn, 0, WithPrincipalStateStore(store), WithPrincipalProjectAuthorizer(&dashboardPrincipalGrantAuthorizer{grants: map[string][]string{"principal-a": {"project-a"}}}))
+	cookie := managedDashboardLogin(t, srv, "token-a", false)
+	assertDashboardPrincipalHTTPStatus(t, srv, cookie, "/dashboard/activity", http.StatusServiceUnavailable)
+}
+
+func assertDashboardPrincipalHTTPStatus(t *testing.T, srv *CloudServer, cookie *http.Cookie, path string, want int) {
+	t.Helper()
+	response := performDashboardRequest(srv, http.MethodGet, path, cookie)
+	if response.Code != want {
+		t.Fatalf("expected %d for %s, got %d body=%q", want, path, response.Code, response.Body.String())
+	}
+}
+
+func assertDashboardPrincipalHTTPBody(t *testing.T, srv *CloudServer, cookie *http.Cookie, path string, htmx bool, want, absent string) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.AddCookie(cookie)
+	if htmx {
+		request.Header.Set("HX-Request", "true")
+	}
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200 for %s, got %d body=%q", path, response.Code, response.Body.String())
+	}
+	if body := response.Body.String(); !strings.Contains(body, want) || strings.Contains(body, absent) {
+		t.Fatalf("expected %q and not %q for %s, body=%q", want, absent, path, body)
 	}
 }
 
