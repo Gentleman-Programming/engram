@@ -13006,6 +13006,50 @@ func TestRepairBackfillsMissingMutations(t *testing.T) {
 	})
 }
 
+func TestRepairBackfillIgnoresAcknowledgedCoverage(t *testing.T) {
+	s := newTestStore(t)
+	const project, sessionID = "acknowledged_project", "acknowledged-session"
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(sessionID, project, "/tmp/acknowledged"); err != nil {
+		t.Fatal(err)
+	}
+	observationID, err := s.AddObservation(AddObservationParams{SessionID: sessionID, Type: "decision", Title: "before acknowledgement", Content: "local source", Project: project, Scope: "project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := s.GetObservation(observationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seq int64
+	if err := s.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID).Scan(&seq); err != nil {
+		t.Fatalf("read observation mutation: %v", err)
+	}
+	if err := s.AckSyncMutationSeqs(DefaultSyncTargetKey, []int64{seq}); err != nil {
+		t.Fatalf("ack observation mutation: %v", err)
+	}
+	if err := s.UnenrollProject(project); err != nil {
+		t.Fatal(err)
+	}
+	updatedTitle := "after acknowledgement"
+	if _, err := s.UpdateObservation(observationID, UpdateObservationParams{Title: &updatedTitle}); err != nil {
+		t.Fatalf("update while unenrolled: %v", err)
+	}
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("re-enroll project: %v", err)
+	}
+	var pending int
+	var title string
+	if err := s.DB().QueryRow(`SELECT COUNT(*), coalesce(json_extract(MAX(payload), '$.title'), '') FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntityObservation, observation.SyncID).Scan(&pending, &title); err != nil {
+		t.Fatalf("read regenerated mutation: %v", err)
+	}
+	if pending != 1 || title != updatedTitle {
+		t.Fatalf("regenerated pending=%d title=%q, want 1 and %q", pending, title, updatedTitle)
+	}
+}
+
 func TestRepairBackfillDoesNotRecreateQuarantinedMutation(t *testing.T) {
 	s := newTestStoreRaw(t)
 	const project, sessionID, syncID = "quarantine_project", "quarantine-session", "quarantine-observation"

@@ -294,7 +294,11 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			terminal = append(terminal, c.quarantinedFinding(mutation))
 			continue
 		case store.SyncMutationDispositionSuperseded:
-			terminal = append(terminal, c.supersededFinding(mutation))
+			if missing := supersededEvidenceMissingFields(mutation); len(missing) > 0 {
+				blocking = append(blocking, c.incompleteSupersededFinding(mutation, missing))
+			} else {
+				terminal = append(terminal, c.supersededFinding(mutation))
+			}
 			continue
 		}
 		validation := store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
@@ -371,6 +375,33 @@ func syncMutationRequiredFieldsRepairHint(project string) string {
 		command = "engram doctor repair --project " + project + " --check sync_mutation_required_fields --dry-run"
 	}
 	return "Run `" + command + "` to inspect local repairs; cloud-upgrade tooling requires configured cloud sync."
+}
+
+func supersededEvidenceMissingFields(mutation store.SyncMutation) []string {
+	missing := make([]string, 0, 3)
+	if strings.TrimSpace(mutation.DispositionReason) == "" {
+		missing = append(missing, "disposition_reason")
+	}
+	if strings.TrimSpace(mutation.DispositionEvidence) == "" {
+		missing = append(missing, "disposition_evidence")
+	}
+	if mutation.DispositionAt == nil || strings.TrimSpace(*mutation.DispositionAt) == "" {
+		missing = append(missing, "disposition_at")
+	}
+	return missing
+}
+
+func (c SyncMutationRequiredFieldsCheck) incompleteSupersededFinding(mutation store.SyncMutation, missing []string) Finding {
+	return Finding{
+		CheckID:              c.Code(),
+		Severity:             SeverityBlocking,
+		ReasonCode:           "sync_mutation_superseded_evidence_incomplete",
+		Message:              "Superseded sync mutation is missing required audit evidence: " + strings.Join(missing, ", "),
+		Why:                  "A terminal supersession without its reason, evidence, and timestamp cannot prove why transport was suppressed.",
+		Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "missing_fields": missing}),
+		SafeNextStep:         "Inspect the local journal evidence and repair it deliberately; automatic supersession metadata repair is unavailable.",
+		RequiresConfirmation: true,
+	}
 }
 
 func (c SyncMutationRequiredFieldsCheck) supersededFinding(mutation store.SyncMutation) Finding {

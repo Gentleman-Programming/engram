@@ -976,6 +976,17 @@ func TestCmdDoctorRepairApplyUnblocksDoctorAndKeepsPendingWork(t *testing.T) {
 	}
 }
 
+func TestPrintDoctorUsageDocumentsOptionalRequiredFieldsProject(t *testing.T) {
+	withArgs(t, "engram", "doctor", "--help")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(testConfig(t)) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, "doctor repair [--project PROJECT] --check sync_mutation_required_fields") || !strings.Contains(stdout, "optionally scopes title repair, supersession, quarantine, and source-title repair") || !strings.Contains(stdout, "--project is required for every repair check except sync_mutation_required_fields") {
+		t.Fatalf("usage=%q", stdout)
+	}
+}
+
 func TestPrintDoctorUsageMarksProjectOptionalOnlyForSyncMutationRepair(t *testing.T) {
 	withArgs(t, "engram", "doctor", "--help")
 	stdout, stderr := captureOutput(t, func() { cmdDoctor(testConfig(t)) })

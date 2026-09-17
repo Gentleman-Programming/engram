@@ -1124,3 +1124,23 @@ func TestSyncMutationRequiredFieldsAfterLocalRepairHasNoBlockingWarning(t *testi
 		t.Fatalf("superseded evidence finding=%+v", finding)
 	}
 }
+
+func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *testing.T) {
+	for _, column := range []string{"disposition_reason", "disposition_evidence", "disposition_at"} {
+		t.Run(column, func(t *testing.T) {
+			s, cfg := newDiagnosticTestStoreWithConfig(t)
+			seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntitySession, "retired-session", store.SyncOpUpsert, `{"id":"retired-session","project":"legacy","directory":"/tmp/legacy"}`)
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), `+column+` = NULL WHERE entity_key = 'retired-session'`); err != nil {
+				t.Fatalf("seed incomplete supersession: %v", err)
+			}
+			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			check := report.Checks[0]
+			if report.Status != StatusBlocked || check.Severity != SeverityBlocking || len(check.Findings) != 1 || check.Findings[0].ReasonCode != "sync_mutation_superseded_evidence_incomplete" {
+				t.Fatalf("incomplete %s report=%+v", column, report)
+			}
+		})
+	}
+}

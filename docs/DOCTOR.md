@@ -19,7 +19,7 @@ Flags:
 - `--json` prints the stable diagnostic envelope for agents.
 - `--project PROJECT` scopes checks to a normalized project name.
 - `--check CODE` runs one registered check and fails loudly for unknown codes.
-- `doctor repair` requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`.
+- `doctor repair` requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`, except `sync_mutation_required_fields` may omit `--project`. Its optional project scopes title repair, supersession, quarantine, and source-title repair.
 
 ## MCP
 
@@ -79,7 +79,7 @@ Plain `engram doctor` remains diagnostic-only. Findings that imply data movement
 
 Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. Run `engram doctor repair --check sync_mutation_required_fields --dry-run` first (add `--project <project>` to scope it); cloud-upgrade tooling instead requires configured cloud sync. The repair derives a sanitized, bounded title from local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
 
-The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Terminal quarantined and superseded rows remain visible as informational evidence without keeping doctor in warning or blocked status when no actionable defect remains.
+The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Superseded evidence missing its reason, evidence, or timestamp remains blocking until manually repaired; complete terminal quarantined and superseded rows remain informational without keeping doctor in warning or blocked status.
 
 Repair never deletes or deduplicates rows, never edits sync cursors, never acknowledges undelivered mutations, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
 
