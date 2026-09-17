@@ -625,13 +625,95 @@ type syncRelationPayload struct {
 	UpdatedAt      string   `json:"updated_at"`
 }
 
-// ExportData is the full serializable dump of the engram database.
+const (
+	legacyExportVersion  = "0.1.0"
+	currentExportVersion = "0.2.0"
+)
+
+// BackupRelation is the lossless direct-backup representation of a
+// memory_relations row. Relation IDs are local SQLite keys, so supersession is
+// represented by the referenced relation's portable sync ID instead.
+type BackupRelation struct {
+	SyncID                     string   `json:"sync_id"`
+	SourceID                   string   `json:"source_id"`
+	TargetID                   string   `json:"target_id"`
+	Relation                   string   `json:"relation"`
+	Reason                     *string  `json:"reason,omitempty"`
+	Evidence                   *string  `json:"evidence,omitempty"`
+	Confidence                 *float64 `json:"confidence,omitempty"`
+	JudgmentStatus             string   `json:"judgment_status"`
+	MarkedByActor              *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind               *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel              *string  `json:"marked_by_model,omitempty"`
+	SessionID                  *string  `json:"session_id,omitempty"`
+	SupersededAt               *string  `json:"superseded_at,omitempty"`
+	SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id,omitempty"`
+	CreatedAt                  string   `json:"created_at"`
+	UpdatedAt                  string   `json:"updated_at"`
+}
+
+// backupObservation is deliberately separate from Observation's shared sync
+// representation: direct backups preserve local pinned state while sync JSON
+// continues to omit it.
+type backupObservation struct {
+	Observation
+	Pinned bool `json:"pinned"`
+}
+
+// ExportData is the full serializable direct-backup dump of the engram database.
 type ExportData struct {
-	Version      string        `json:"version"`
-	ExportedAt   string        `json:"exported_at"`
-	Sessions     []Session     `json:"sessions"`
-	Observations []Observation `json:"observations"`
-	Prompts      []Prompt      `json:"prompts"`
+	Version      string           `json:"version"`
+	ExportedAt   string           `json:"exported_at"`
+	Sessions     []Session        `json:"sessions"`
+	Observations []Observation    `json:"observations"`
+	Prompts      []Prompt         `json:"prompts"`
+	Relations    []BackupRelation `json:"relations,omitempty"`
+}
+
+// MarshalJSON projects observations through the backup-only form so direct
+// exports include pinned state without changing Observation's sync JSON tag.
+func (d ExportData) MarshalJSON() ([]byte, error) {
+	observations := make([]backupObservation, len(d.Observations))
+	for i, observation := range d.Observations {
+		observations[i] = backupObservation{Observation: observation, Pinned: observation.Pinned}
+	}
+	return json.Marshal(struct {
+		Version      string              `json:"version"`
+		ExportedAt   string              `json:"exported_at"`
+		Sessions     []Session           `json:"sessions"`
+		Observations []backupObservation `json:"observations"`
+		Prompts      []Prompt            `json:"prompts"`
+		Relations    []BackupRelation    `json:"relations,omitempty"`
+	}{
+		Version: d.Version, ExportedAt: d.ExportedAt, Sessions: d.Sessions,
+		Observations: observations, Prompts: d.Prompts, Relations: d.Relations,
+	})
+}
+
+// UnmarshalJSON accepts both the current backup projection and legacy 0.1.0
+// exports, where pinned and relations are absent and therefore retain defaults.
+func (d *ExportData) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Version      string              `json:"version"`
+		ExportedAt   string              `json:"exported_at"`
+		Sessions     []Session           `json:"sessions"`
+		Observations []backupObservation `json:"observations"`
+		Prompts      []Prompt            `json:"prompts"`
+		Relations    []BackupRelation    `json:"relations"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	observations := make([]Observation, len(decoded.Observations))
+	for i, observation := range decoded.Observations {
+		observation.Observation.Pinned = observation.Pinned
+		observations[i] = observation.Observation
+	}
+	*d = ExportData{
+		Version: decoded.Version, ExportedAt: decoded.ExportedAt, Sessions: decoded.Sessions,
+		Observations: observations, Prompts: decoded.Prompts, Relations: decoded.Relations,
+	}
+	return nil
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -5101,7 +5183,7 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 // refuses to read the legacy unowned rows the operator is trying to rescue.
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	data := &ExportData{
-		Version:    "0.1.0",
+		Version:    currentExportVersion,
 		ExportedAt: Now(),
 	}
 
@@ -5196,10 +5278,62 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		return nil, err
 	}
 
+	// Relations are direct-backup metadata, not sync payloads. They are selected
+	// separately so every persisted judgment and supersession field is retained.
+	relationQuery := `
+		SELECT r.sync_id, ifnull(r.source_id, ''), ifnull(r.target_id, ''), r.relation,
+		       r.reason, r.evidence, r.confidence, r.judgment_status,
+		       r.marked_by_actor, r.marked_by_kind, r.marked_by_model, r.session_id,
+		       r.superseded_at, superseding.sync_id, r.created_at, r.updated_at
+		FROM memory_relations r
+		LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id`
+	relationArgs := []any{}
+	if project != "" {
+		relationQuery += `
+			WHERE r.source_id IN (
+				SELECT sync_id FROM observations
+				WHERE ifnull(project, '') = ?
+				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+			)
+			  AND r.target_id IN (
+				SELECT sync_id FROM observations
+				WHERE ifnull(project, '') = ?
+				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+			)`
+		relationArgs = append(relationArgs, project, project, project, project)
+	}
+	relationQuery += " ORDER BY r.created_at, r.sync_id"
+	relationRows, err := s.queryItHook(s.db, relationQuery, relationArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
+	defer relationRows.Close()
+	for relationRows.Next() {
+		var relation BackupRelation
+		if err := relationRows.Scan(
+			&relation.SyncID, &relation.SourceID, &relation.TargetID, &relation.Relation,
+			&relation.Reason, &relation.Evidence, &relation.Confidence, &relation.JudgmentStatus,
+			&relation.MarkedByActor, &relation.MarkedByKind, &relation.MarkedByModel, &relation.SessionID,
+			&relation.SupersededAt, &relation.SupersededByRelationSyncID, &relation.CreatedAt, &relation.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("export relations: scan: %w", err)
+		}
+		data.Relations = append(data.Relations, relation)
+	}
+	if err := relationRows.Err(); err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
+
 	return data, nil
 }
 
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
+	if data == nil {
+		return nil, errors.New("import: export data is required")
+	}
+	if data.Version != "" && data.Version != legacyExportVersion && data.Version != currentExportVersion {
+		return nil, fmt.Errorf("import: unsupported export version %q", data.Version)
+	}
 	for _, sess := range data.Sessions {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
@@ -5262,16 +5396,16 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if duplicateCount <= 0 {
 				duplicateCount = existing.DuplicateCount
 			}
-			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
-				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
+			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, pinned = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
+				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, obs.Pinned, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
 			result.ObservationsUpdated++
 			continue
 		}
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at)
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -5287,6 +5421,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
 			obs.ReviewAfter,
+			obs.Pinned,
 			obs.CreatedAt,
 			obs.UpdatedAt,
 			obs.DeletedAt,
@@ -5323,6 +5458,66 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		}
 		n, _ := res.RowsAffected()
 		result.PromptsImported += int(n)
+	}
+
+	// Relations are imported only after all observation endpoints have been
+	// written. Any missing endpoint aborts this transaction and rolls back the
+	// sessions, observations, prompts, and earlier relation rows together.
+	importedRelations := make(map[string]bool, len(data.Relations))
+	for _, relation := range data.Relations {
+		if strings.TrimSpace(relation.SyncID) == "" {
+			return nil, errors.New("import relation: sync id is required")
+		}
+		for _, endpoint := range []struct {
+			role   string
+			syncID string
+		}{
+			{role: "source", syncID: relation.SourceID},
+			{role: "target", syncID: relation.TargetID},
+		} {
+			if strings.TrimSpace(endpoint.syncID) == "" {
+				return nil, fmt.Errorf("import relation %s: relation endpoint %s is required", relation.SyncID, endpoint.role)
+			}
+			var exists bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observations WHERE sync_id = ?)`, endpoint.syncID).Scan(&exists); err != nil {
+				return nil, fmt.Errorf("import relation %s: check %s endpoint: %w", relation.SyncID, endpoint.role, err)
+			}
+			if !exists {
+				return nil, fmt.Errorf("import relation %s: relation endpoint %s not found", relation.SyncID, endpoint.role)
+			}
+		}
+		res, err := s.execHook(tx, `INSERT OR IGNORE INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status,
+			 marked_by_actor, marked_by_kind, marked_by_model, session_id, superseded_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation,
+			relation.Reason, relation.Evidence, relation.Confidence, relation.JudgmentStatus,
+			relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
+			relation.SupersededAt, relation.CreatedAt, relation.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("import relation %s: %w", relation.SyncID, err)
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("import relation %s: rows affected: %w", relation.SyncID, err)
+		}
+		importedRelations[relation.SyncID] = inserted == 1
+	}
+	for _, relation := range data.Relations {
+		if !importedRelations[relation.SyncID] || relation.SupersededByRelationSyncID == nil {
+			continue
+		}
+		var supersedingID int64
+		if err := tx.QueryRow(`SELECT id FROM memory_relations WHERE sync_id = ?`, *relation.SupersededByRelationSyncID).Scan(&supersedingID); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("import relation %s: superseding relation %s not found", relation.SyncID, *relation.SupersededByRelationSyncID)
+			}
+			return nil, fmt.Errorf("import relation %s: lookup superseding relation: %w", relation.SyncID, err)
+		}
+		if _, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id = ? WHERE sync_id = ?`, supersedingID, relation.SyncID); err != nil {
+			return nil, fmt.Errorf("import relation %s: set superseding relation: %w", relation.SyncID, err)
+		}
 	}
 
 	if err := s.commitHook(tx); err != nil {
