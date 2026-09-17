@@ -5181,7 +5181,7 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 // exportWithProjectScope reads sessions.project through ifnull(): an export is how
 // data leaves the store before a repair, so it must not be the one path that
 // refuses to read the legacy unowned rows the operator is trying to rescue.
-func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
+func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error) {
 	data := &ExportData{
 		Version:    currentExportVersion,
 		ExportedAt: Now(),
@@ -5307,7 +5307,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("export relations: %w", err)
 	}
-	defer relationRows.Close()
+	defer func() { _ = relationRows.Close() }()
 	for relationRows.Next() {
 		var relation BackupRelation
 		if err := relationRows.Scan(
@@ -5322,6 +5322,9 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	}
 	if err := relationRows.Err(); err != nil {
 		return nil, fmt.Errorf("export relations: %w", err)
+	}
+	if err := relationRows.Close(); err != nil {
+		return nil, fmt.Errorf("export relations: close: %w", err)
 	}
 
 	return data, nil
