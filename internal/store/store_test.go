@@ -11329,6 +11329,34 @@ func TestDeleteSession_EnrolledProjectEnqueuesSyncDeleteMutation(t *testing.T) {
 	}
 }
 
+func TestSupersedeUnenrolledLegacyMutationsPreservesTargetKey(t *testing.T) {
+	s := newTestStore(t)
+	const project, key, target = "target_project", "target-prompt", "archive"
+	for _, targetKey := range []string{DefaultSyncTargetKey, target, syncTargetKeyForProject(project)} {
+		if _, err := s.GetSyncState(targetKey); err != nil {
+			t.Fatalf("initialize %q state: %v", targetKey, err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project) VALUES (?, ?, ?)`, key, "target-session", project); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	for _, targetKey := range []string{DefaultSyncTargetKey, target} {
+		if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, targetKey, SyncEntityPrompt, key, SyncOpUpsert, `{"sync_id":"target-prompt","session_id":"target-session","content":"obsolete","project":"target_project"}`, SyncSourceLocal, project); err != nil {
+			t.Fatalf("seed %q mutation: %v", targetKey, err)
+		}
+	}
+	report, err := s.SupersedeUnenrolledLegacyMutations(target, project, true)
+	if err != nil || len(report.Actions) != 1 {
+		t.Fatalf("supersede report=%+v err=%v", report, err)
+	}
+	for targetKey, want := range map[string]string{target: SyncMutationDispositionSuperseded, DefaultSyncTargetKey: SyncMutationDispositionPending} {
+		var disposition string
+		if err := s.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE target_key = ? AND entity_key = ?`, targetKey, key).Scan(&disposition); err != nil || disposition != want {
+			t.Fatalf("target %q disposition=%q err=%v, want %q", targetKey, disposition, err, want)
+		}
+	}
+}
+
 func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("repairable", "project", "/tmp/repairable"); err != nil {

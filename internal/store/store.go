@@ -5643,7 +5643,7 @@ func (s *Store) SupersedeUnenrolledLegacyMutations(targetKey, project string, ap
 			if !apply {
 				continue
 			}
-			changed, err := s.supersedePendingLocalUpsertTx(tx, mutation.Entity, mutation.EntityKey, mutation.Project, action.ReasonCode, action.Evidence)
+			changed, err := s.supersedePendingLocalUpsertTx(tx, mutation.TargetKey, mutation.Entity, mutation.EntityKey, mutation.Project, action.ReasonCode, action.Evidence)
 			if err != nil {
 				return err
 			}
@@ -5694,12 +5694,12 @@ func syncMutationSupersededEvidence(mutation SyncMutation, trigger string) (stri
 	return string(evidence), err
 }
 
-func (s *Store) supersedePendingLocalUpsertTx(tx *sql.Tx, entity, entityKey, project, reason, evidence string) (bool, error) {
+func (s *Store) supersedePendingLocalUpsertTx(tx *sql.Tx, targetKey, entity, entityKey, project, reason, evidence string) (bool, error) {
 	result, err := s.execHook(tx, `UPDATE sync_mutations
 		SET disposition = ?, disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now')
 		WHERE target_key = ? AND entity = ? AND entity_key = ? AND project = ?
 		  AND op = ? AND source = ? AND acked_at IS NULL AND disposition = ?`,
-		SyncMutationDispositionSuperseded, reason, evidence, DefaultSyncTargetKey, entity, entityKey, project,
+		SyncMutationDispositionSuperseded, reason, evidence, targetKey, entity, entityKey, project,
 		SyncOpUpsert, SyncSourceLocal, SyncMutationDispositionPending,
 	)
 	if err != nil {
@@ -5715,7 +5715,7 @@ func (s *Store) supersedeDeletedEntityMutationTx(tx *sql.Tx, entity, entityKey, 
 	if err != nil {
 		return false, err
 	}
-	return s.supersedePendingLocalUpsertTx(tx, entity, entityKey, project, SyncMutationSupersededReasonLocalEntityDeleted, evidence)
+	return s.supersedePendingLocalUpsertTx(tx, DefaultSyncTargetKey, entity, entityKey, project, SyncMutationSupersededReasonLocalEntityDeleted, evidence)
 }
 
 func (s *Store) refreshSupersededProjectLifecycleTx(tx *sql.Tx, project string, changed bool) error {
