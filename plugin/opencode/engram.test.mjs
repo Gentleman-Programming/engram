@@ -112,6 +112,7 @@ async function createRuntime(t, {
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
 	manifestExists = false,
+  identityLookupFails = false,
   emitSpawnError = false,
   installBun = true,
   configuredEngramURL,
@@ -154,8 +155,8 @@ async function createRuntime(t, {
     delete globalThis.Bun
   }
   childProcess.spawnSync = (_command, args) => ({
-    status: args[0] === "instance-id" ? 0 : 1,
-    stdout: args[0] === "instance-id" ? "00000000000000000000000000000000\n" : "",
+    status: args[0] === "instance-id" && !identityLookupFails ? 0 : 1,
+    stdout: args[0] === "instance-id" && !identityLookupFails ? "00000000000000000000000000000000\n" : "",
   })
   childProcess.spawn = (command, args, options) => {
     let errorListener
@@ -252,6 +253,13 @@ async function createRuntime(t, {
 
 test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t) => {
   const runtime = await createRuntime(t, { installBun: false })
+
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+test("adapter returns hooks when local identity lookup fails", async (t) => {
+  const runtime = await createRuntime(t, { installBun: false, identityLookupFails: true })
 
   assert.equal(typeof runtime.plugin.event, "function")
   assert.equal(typeof runtime.plugin["chat.message"], "function")

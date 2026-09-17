@@ -188,8 +188,14 @@ async function isEngramRunning(expectedID = ""): Promise<boolean> {
 }
 
 async function ensureLocalReady(): Promise<boolean> {
-	if (!localReady) localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
-	return localReady
+  if (!localReady) {
+    try {
+      localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
+    } catch {
+      localReady = false
+    }
+  }
+  return localReady
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
