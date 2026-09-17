@@ -904,8 +904,16 @@ func (s *Store) Close() error {
 // storeDSN builds the modernc.org/sqlite DSN for dbPath with the session
 // pragmas encoded as _pragma query parameters. The driver applies these to
 // every physical connection it opens, including replacement pool connections.
+//
+// _txlock=immediate ensures modernc.org/sqlite begins transactions with
+// BEGIN IMMEDIATE instead of BEGIN DEFERRED. Under concurrent agent workloads
+// performing read-then-write operations, BEGIN DEFERRED can result in
+// SQLITE_BUSY_SNAPSHOT (code 517) aborting the transaction before busy_timeout
+// can serialize writes. BEGIN IMMEDIATE acquires the write lock at the start of
+// the transaction, allowing SQLite to queue concurrent writers gracefully.
 func storeDSN(dbPath string) string {
 	q := url.Values{}
+	q.Set("_txlock", "immediate")
 	for _, p := range []string{
 		"busy_timeout(5000)",
 		"journal_mode(WAL)",

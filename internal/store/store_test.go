@@ -6540,10 +6540,10 @@ func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T)
 
 	const lockFailuresBeforeRelease = 5
 	originalExec := writer.hooks.exec
+	originalBeginTx := writer.hooks.beginTx
 	lockFailures := 0
 	var releaseErr error
-	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-		result, err := originalExec(db, query, args...)
+	recordLockFailure := func(err error) {
 		if isRetryableSQLiteLockError(err) {
 			lockFailures++
 			if lockFailures == lockFailuresBeforeRelease {
@@ -6551,9 +6551,21 @@ func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T)
 				locked = false
 			}
 		}
+	}
+	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		recordLockFailure(err)
 		return result, err
 	}
-	t.Cleanup(func() { writer.hooks.exec = originalExec })
+	writer.hooks.beginTx = func(db *sql.DB) (*sql.Tx, error) {
+		tx, err := originalBeginTx(db)
+		recordLockFailure(err)
+		return tx, err
+	}
+	t.Cleanup(func() {
+		writer.hooks.exec = originalExec
+		writer.hooks.beginTx = originalBeginTx
+	})
 
 	id, err := writer.AddObservation(AddObservationParams{
 		SessionID: "retry-lock-session",
