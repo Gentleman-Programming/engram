@@ -11357,6 +11357,37 @@ func TestSupersedeUnenrolledLegacyMutationsPreservesTargetKey(t *testing.T) {
 	}
 }
 
+func TestSupersedeUnenrolledLegacyMutationsContract(t *testing.T) {
+	s := newTestStore(t)
+	const project, key = "contract_project", "contract-prompt"
+	for _, targetKey := range []string{DefaultSyncTargetKey, syncTargetKeyForProject(project)} {
+		if _, err := s.GetSyncState(targetKey); err != nil {
+			t.Fatalf("initialize %q state: %v", targetKey, err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project) VALUES (?, ?, ?)`, key, "contract-session", project); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntityPrompt, key, SyncOpUpsert, `{"sync_id":"contract-prompt","session_id":"contract-session","content":"obsolete","project":"contract_project"}`, SyncSourceLocal, project); err != nil {
+		t.Fatalf("seed mutation: %v", err)
+	}
+	dryRun, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, project, false)
+	if err != nil || len(dryRun.Actions) != 1 {
+		t.Fatalf("dry-run=%+v err=%v", dryRun, err)
+	}
+	if _, err := s.DB().Exec(`DELETE FROM prompt_tombstones WHERE sync_id = ?`, key); err != nil {
+		t.Fatalf("remove delete evidence: %v", err)
+	}
+	report, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, project, true)
+	if err != nil || len(report.Actions) != 0 {
+		t.Fatalf("missing-evidence report=%+v err=%v", report, err)
+	}
+	var disposition string
+	if err := s.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = ?`, key).Scan(&disposition); err != nil || disposition != SyncMutationDispositionPending {
+		t.Fatalf("disposition=%q err=%v", disposition, err)
+	}
+}
+
 func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("repairable", "project", "/tmp/repairable"); err != nil {

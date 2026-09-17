@@ -544,6 +544,23 @@ func TestSyncMutationRequiredFieldsReportsCorruptSourceObservations(t *testing.T
 // proves the issue #688 signal survives: once the device uses cloud sync, a
 // project whose pending mutations cannot be delivered is reported as blocked
 // with the enrollment guidance, while the enrolled project stays silent.
+func TestSyncMutationRequiredFieldsCheckSuggestsLocalRepair(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "engram", store.SyncEntitySession, "poison", store.SyncOpUpsert, `{}`)
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	next := report.Checks[0].Findings[0].SafeNextStep
+	if !strings.Contains(next, "engram doctor repair --project engram --check sync_mutation_required_fields --dry-run") || !strings.Contains(next, "cloud-upgrade tooling requires configured cloud sync") {
+		t.Fatalf("local repair guidance=%q", next)
+	}
+}
+
 func TestSyncMutationRequiredFieldsBlocksNonEnrolledBacklogWhenCloudSyncInUse(t *testing.T) {
 	s, cfg := newDiagnosticTestStoreWithConfig(t)
 	if err := s.CreateSession("manual-save-enrolled", "enrolled", "/work/enrolled"); err != nil {

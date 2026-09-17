@@ -169,24 +169,27 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
-		report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
-		if err != nil {
-			failDoctorRepair(err.Error())
-			return
-		}
 		superseded, err := s.SupersedeUnenrolledLegacyMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
 		if err != nil {
 			failDoctorRepair(err.Error())
 			return
 		}
-		if mode != diagnostic.RepairModeApply && len(repairs.Actions) > 0 {
-			repairSeqs := make(map[int64]struct{}, len(repairs.Actions))
+		report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
+		if mode != diagnostic.RepairModeApply {
+			handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions))
 			for _, action := range repairs.Actions {
-				repairSeqs[action.Seq] = struct{}{}
+				handledSeqs[action.Seq] = struct{}{}
+			}
+			for _, action := range superseded.Actions {
+				handledSeqs[action.Seq] = struct{}{}
 			}
 			remaining := report.Actions[:0]
 			for _, action := range report.Actions {
-				if _, repaired := repairSeqs[action.Seq]; !repaired {
+				if _, handled := handledSeqs[action.Seq]; !handled {
 					remaining = append(remaining, action)
 				}
 			}

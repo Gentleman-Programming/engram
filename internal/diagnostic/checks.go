@@ -281,7 +281,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
 			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
 			Evidence:             mustJSON(observation),
-			SafeNextStep:         "Run `engram cloud upgrade doctor repair --check sync_mutation_required_fields --dry-run` to inspect title-only repairs; content and type require manual recovery.",
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
 			RequiresConfirmation: true,
 		})
 	}
@@ -301,10 +301,6 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		if validation.ReasonCode == "" {
 			continue
 		}
-		nextStep := "Run `engram cloud upgrade doctor` and inspect the mutation payload before any manual repair."
-		if strings.TrimSpace(scope.Project) != "" {
-			nextStep = "Run `engram cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
-		}
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityBlocking,
@@ -312,7 +308,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              validation.Message,
 			Why:                  "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
 			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "missing_fields": validation.MissingFields}),
-			SafeNextStep:         nextStep,
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
 			RequiresConfirmation: true,
 		})
 	}
@@ -367,6 +363,14 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func syncMutationRequiredFieldsRepairHint(project string) string {
+	command := "engram doctor repair --check sync_mutation_required_fields --dry-run"
+	if project = strings.TrimSpace(project); project != "" {
+		command = "engram doctor repair --project " + project + " --check sync_mutation_required_fields --dry-run"
+	}
+	return "Run `" + command + "` to inspect local repairs; cloud-upgrade tooling requires configured cloud sync."
 }
 
 func (c SyncMutationRequiredFieldsCheck) supersededFinding(mutation store.SyncMutation) Finding {
