@@ -18,6 +18,7 @@ type HarnessOptions = {
   onStatusQuery?: () => void
   sessions?: Record<string, string>
   endStatuses?: number[]
+  endFailures?: number
 }
 
 type Call = {
@@ -81,6 +82,7 @@ async function withPlugin<T>(
   const statusQueries: any[] = []
   const sessionProjects = new Map(Object.entries(options.sessions ?? {}))
   const endStatuses = [...(options.endStatuses ?? [])]
+  let endFailures = options.endFailures ?? 0
 
   globalThis.fetch = async (input, init) => {
     const parsed = new URL(String(input))
@@ -104,6 +106,10 @@ async function withPlugin<T>(
       const id = decodeURIComponent(isEnd ? suffix.slice(0, -4) : suffix)
 
       if (isEnd && method === "POST") {
+        if (endFailures > 0) {
+          endFailures -= 1
+          throw new Error("archive end unavailable")
+        }
         const status = endStatuses.shift() ?? 200
         return status === 200
           ? Response.json({ status: "ok" })
@@ -150,7 +156,7 @@ async function withPlugin<T>(
   }
 }
 
-async function runArchiveWithEndStatuses(statuses: number[]) {
+async function runArchiveWithEndStatuses(statuses: number[], endFailures = 0) {
   let error: unknown
 
   const result = await withPlugin(
@@ -159,6 +165,7 @@ async function runArchiveWithEndStatuses(statuses: number[]) {
       statusResponseStyle: "fields",
       sessions: { "archive-retry": PROJECT },
       endStatuses: statuses,
+      endFailures,
     },
     async (plugin, harness) => {
       try {
@@ -405,6 +412,13 @@ test("archive closure retries a server failure once", async () => {
   expect(result.error).toBeUndefined()
 })
 
+test("archive closure retries a rejected end request once", async () => {
+  const result = await runArchiveWithEndStatuses([200], 1)
+
+  expect(result.endCalls).toHaveLength(2)
+  expect(result.error).toBeUndefined()
+})
+
 test("archive closure does not retry non-transient HTTP failures", async () => {
   const result = await runArchiveWithEndStatuses([400])
 
@@ -419,4 +433,32 @@ test("archive closure reports a failed retry", async () => {
   expect(result.endCalls).toHaveLength(2)
   expect(result.error).toBeInstanceOf(Error)
   expect((result.error as Error).message).toContain("HTTP 502")
+})
+
+test("exhausted rejected archive closure remains deferred for a later idle retry", async () => {
+  await withPlugin(
+    {
+      statuses: { "archive-retry": "busy" },
+      statusResponseStyle: "fields",
+      sessions: { "archive-retry": PROJECT },
+      endFailures: 2,
+    },
+    async (plugin, harness) => {
+      await plugin.event({ event: archiveEvent("archive-retry") })
+
+      let error: unknown
+      try {
+        await plugin.event({ event: idleEvent("archive-retry") })
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(harness.calls.filter((call) => call.path === "/sessions/archive-retry/end")).toHaveLength(2)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain("archive end unavailable")
+
+      await plugin.event({ event: idleEvent("archive-retry") })
+      expect(harness.calls.filter((call) => call.path === "/sessions/archive-retry/end")).toHaveLength(3)
+    },
+  )
 })

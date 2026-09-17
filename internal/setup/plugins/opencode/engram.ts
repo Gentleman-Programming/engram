@@ -323,10 +323,20 @@ async function endArchivedSessionRequest(sessionId: string, isCurrent: () => boo
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (!isCurrent()) return
-    const response = await fetch(`${ENGRAM_URL}${path}`, {
-      method: "POST",
-      signal: AbortSignal.timeout(3000),
-    })
+    let response: Response
+    try {
+      response = await fetch(`${ENGRAM_URL}${path}`, {
+        method: "POST",
+        signal: AbortSignal.timeout(3000),
+      })
+    } catch (error) {
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, SESSION_END_RETRY_DELAY_MS))
+        if (!isCurrent()) return
+        continue
+      }
+      throw error
+    }
     if (!isCurrent()) return
 
     if (response.ok) return
