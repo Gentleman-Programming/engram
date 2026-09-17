@@ -713,6 +713,18 @@ func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 	}
 	seedDoctorPendingMutation(t, cfg, "", store.SyncEntitySession, "poison", store.SyncOpUpsert, `{"id":"poison"}`)
 	seedDoctorPendingMutation(t, cfg, "", store.SyncEntitySession, "later", store.SyncOpDelete, `{"id":"later"}`)
+	seedDoctorPendingMutation(t, cfg, "legacy", store.SyncEntityPrompt, "retired-prompt", store.SyncOpUpsert, `{"sync_id":"retired-prompt","session_id":"legacy-session","content":"obsolete","project":"legacy"}`)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open legacy tombstone fixture: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project) VALUES (?, ?, ?)`, "retired-prompt", "legacy-session", "legacy"); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed legacy tombstone fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy tombstone fixture: %v", err)
+	}
 
 	withArgs(t, "engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--dry-run")
 	dryOut, dryErr := captureOutput(t, func() { cmdDoctor(cfg) })
@@ -720,7 +732,7 @@ func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 		t.Fatalf("dry-run stderr=%q", dryErr)
 	}
 	dry := decodeRepairPlan(t, dryOut)
-	if dry["applied"] != false || len(dry["actions"].([]any)) != 2 {
+	if dry["applied"] != false || len(dry["actions"].([]any)) != 2 || len(dry["superseded"].([]any)) != 1 {
 		t.Fatalf("dry-run=%v", dry)
 	}
 
@@ -730,23 +742,26 @@ func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 		t.Fatalf("apply stderr=%q", applyErr)
 	}
 	applied := decodeRepairPlan(t, applyOut)
-	if applied["applied"] != true || len(applied["actions"].([]any)) != 2 {
+	if applied["applied"] != true || len(applied["actions"].([]any)) != 2 || len(applied["superseded"].([]any)) != 1 {
 		t.Fatalf("apply=%v", applied)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer db.Close()
-	var poison, later string
+	var poison, later, retired string
 	if err := db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'poison'`).Scan(&poison); err != nil {
 		t.Fatalf("read poison: %v", err)
 	}
 	if err := db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'later'`).Scan(&later); err != nil {
 		t.Fatalf("read later: %v", err)
 	}
-	if poison != store.SyncMutationDispositionQuarantined || later != store.SyncMutationDispositionQuarantined {
-		t.Fatalf("dispositions poison=%q later=%q", poison, later)
+	if err := db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'retired-prompt'`).Scan(&retired); err != nil {
+		t.Fatalf("read retired prompt: %v", err)
+	}
+	if poison != store.SyncMutationDispositionQuarantined || later != store.SyncMutationDispositionQuarantined || retired != "superseded" {
+		t.Fatalf("dispositions poison=%q later=%q retired=%q", poison, later, retired)
 	}
 }
 

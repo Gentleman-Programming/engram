@@ -272,7 +272,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		return CheckResult{}, err
 	}
 	blocking := make([]Finding, 0)
-	quarantined := make([]Finding, 0)
+	terminal := make([]Finding, 0)
 	for _, observation := range sourceObservations {
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -289,8 +289,12 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		// A quarantined row is an explicit, already-taken disposition: it no
 		// longer reaches transport, so it must not keep doctor blocked. It stays
 		// reported as non-blocking evidence of what was dropped from sync.
-		if strings.TrimSpace(mutation.Disposition) == store.SyncMutationDispositionQuarantined {
-			quarantined = append(quarantined, c.quarantinedFinding(mutation))
+		switch strings.TrimSpace(mutation.Disposition) {
+		case store.SyncMutationDispositionQuarantined:
+			terminal = append(terminal, c.quarantinedFinding(mutation))
+			continue
+		case store.SyncMutationDispositionSuperseded:
+			terminal = append(terminal, c.supersededFinding(mutation))
 			continue
 		}
 		validation := store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
@@ -314,13 +318,13 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	}
 	// Quarantined rows are already-taken dispositions, so they never count as
 	// work still pending delivery.
-	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined), "corrupt_source_observations": len(sourceObservations)}
-	if len(quarantined) > 0 {
-		evidence["quarantined_mutations"] = len(quarantined)
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(terminal), "corrupt_source_observations": len(sourceObservations)}
+	if len(terminal) > 0 {
+		evidence["terminal_mutations"] = len(terminal)
 	}
 	// Blocking findings lead the roll-up so the check summary always describes the
 	// work that still needs a decision rather than already-dispositioned evidence.
-	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), quarantined...) }
+	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), terminal...) }
 
 	// A non-enrolled backlog is only a fault on a device that actually uses
 	// cloud sync. The store journals sync mutations unconditionally, so on a
@@ -363,6 +367,30 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func (c SyncMutationRequiredFieldsCheck) supersededFinding(mutation store.SyncMutation) Finding {
+	return Finding{
+		CheckID:    c.Code(),
+		Severity:   SeverityInfo,
+		ReasonCode: "sync_mutation_superseded",
+		Message:    "Sync mutation is superseded by current local lifecycle evidence and no longer blocks cloud replication.",
+		Why:        "Supersession preserves the obsolete local journal row and its reason without acknowledging or transporting it, so doctor keeps audit evidence without treating it as active work.",
+		Evidence: mustJSON(map[string]any{
+			"seq":                  mutation.Seq,
+			"target_key":           mutation.TargetKey,
+			"project":              mutation.Project,
+			"entity":               mutation.Entity,
+			"op":                   mutation.Op,
+			"entity_key":           mutation.EntityKey,
+			"disposition":          mutation.Disposition,
+			"disposition_reason":   mutation.DispositionReason,
+			"disposition_evidence": mutation.DispositionEvidence,
+			"disposition_at":       mutation.DispositionAt,
+		}),
+		SafeNextStep:         "No action required. Inspect the recorded disposition evidence if you need to audit the local reconciliation.",
+		RequiresConfirmation: false,
+	}
 }
 
 func (c SyncMutationRequiredFieldsCheck) quarantinedFinding(mutation store.SyncMutation) Finding {

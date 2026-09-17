@@ -1084,3 +1084,26 @@ func TestUnownedSessionProjectCheckIsOKWhenEverySessionIsOwned(t *testing.T) {
 		t.Fatalf("report = %+v, want ok with no findings", report)
 	}
 }
+
+func TestSyncMutationRequiredFieldsAfterLocalRepairHasNoBlockingWarning(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntityPrompt, "retired-prompt", store.SyncOpUpsert, `{"sync_id":"retired-prompt","session_id":"legacy-session","content":"obsolete","project":"legacy"}`)
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-prompt"}', disposition_at = datetime('now') WHERE entity_key = 'retired-prompt'`); err != nil {
+		t.Fatalf("seed superseded mutation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || report.Summary.Warnings != 0 || report.Summary.Blocked != 0 {
+		t.Fatalf("terminal local repair must not leave a warning: %+v", report)
+	}
+	check := report.Checks[0]
+	if check.Result != StatusOK || check.Severity != SeverityInfo || len(check.Findings) != 1 {
+		t.Fatalf("terminal evidence check=%+v", check)
+	}
+	if finding := check.Findings[0]; finding.ReasonCode != "sync_mutation_superseded" || finding.Severity != SeverityInfo || finding.RequiresConfirmation {
+		t.Fatalf("superseded evidence finding=%+v", finding)
+	}
+}

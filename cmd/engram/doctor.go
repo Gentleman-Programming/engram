@@ -174,6 +174,11 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
+		superseded, err := s.SupersedeUnenrolledLegacyMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
 		if mode != diagnostic.RepairModeApply && len(repairs.Actions) > 0 {
 			repairSeqs := make(map[int64]struct{}, len(repairs.Actions))
 			for _, action := range repairs.Actions {
@@ -193,14 +198,15 @@ func cmdDoctorRepair(cfg store.Config) {
 			return
 		}
 		if mode == diagnostic.RepairModeApply {
-			report.Applied = len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(sourceRepairs.Actions) > 0
+			report.Applied = len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
 		}
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
 			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
+			Superseded             []store.SyncMutationSupersedeAction         `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-		}{report, repairs.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
+		}{report, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
 		return
 	}
 
