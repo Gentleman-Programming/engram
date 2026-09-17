@@ -221,6 +221,27 @@ test("ordinary session updates do not trigger archive handling", async () => {
   )
 })
 
+test("updates without archive state preserve deferred archive closure", async () => {
+  await withPlugin(
+    {
+      statuses: { pending: "busy" },
+      sessions: { pending: PROJECT },
+    },
+    async (plugin, harness) => {
+      await plugin.event({ event: archiveEvent("pending") })
+      await plugin.event({
+        event: {
+          type: "session.updated",
+          properties: { info: sessionInfo("pending") },
+        },
+      })
+      await plugin.event({ event: idleEvent("pending") })
+
+      expect(harness.calls.filter((call) => call.path === "/sessions/pending/end")).toHaveLength(1)
+    },
+  )
+})
+
 test("duplicate archive and idle events result in one closure", async () => {
   await withPlugin(
     {
@@ -298,7 +319,7 @@ test("unarchiving before idle cancels deferred closure", async () => {
       await plugin.event({
         event: {
           type: "session.updated",
-          properties: { info: sessionInfo("restored") },
+          properties: { info: sessionInfo("restored", { archived: 0 }) },
         },
       })
       await plugin.event({ event: idleEvent("restored") })

@@ -277,7 +277,7 @@ type ArchivedSessionCloseResult = "closed" | "terminal" | "deferred"
 function sessionArchiveState(info: unknown): SessionArchiveState {
   const time = asRecord(asRecord(info)?.time)
   if (!time) return "unknown"
-  if (!Object.prototype.hasOwnProperty.call(time, "archived")) return "unarchived"
+  if (!Object.prototype.hasOwnProperty.call(time, "archived")) return "unknown"
 
   const archived = time.archived
   if (typeof archived === "number") return archived > 0 ? "archived" : "unarchived"
