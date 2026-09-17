@@ -682,9 +682,12 @@ func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		if sh, err := h.cfg.Store.SystemHealth(); err == nil {
 			health = &sh
 		}
-		if ctrls, err := h.cfg.Store.ListProjectSyncControls(); err == nil {
-			controls = ctrls
+		ctrls, err := h.cfg.Store.ListProjectSyncControls()
+		if err != nil {
+			h.renderStoreError(w, r, "admin", "Admin", err)
+			return
 		}
+		controls = ctrls
 	}
 	component := AdminPage(health, controls)
 	if isHTMXRequest(r) {
@@ -705,10 +708,12 @@ func (h *handlers) handleAdminProjectControls(w http.ResponseWriter, r *http.Req
 	}
 	var controls []cloudstore.ProjectSyncControl
 	if h.cfg.Store != nil {
-		// Degrade gracefully: empty controls if store fails.
-		if ctrls, err := h.cfg.Store.ListProjectSyncControls(); err == nil {
-			controls = ctrls
+		ctrls, err := h.cfg.Store.ListProjectSyncControls()
+		if err != nil {
+			h.renderStoreError(w, r, "admin", "Project controls", err)
+			return
 		}
+		controls = ctrls
 	}
 	component := AdminProjectsPage(controls)
 	if isHTMXRequest(r) {
@@ -739,10 +744,13 @@ func (h *handlers) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
 			return
 		}
-		// Degrade gracefully: if controls fail, render without badges.
-		if ctrls, err := h.cfg.Store.ListProjectSyncControls(); err == nil {
-			controlsMap = controlsByProject(ctrls)
+		ctrls, err := h.cfg.Store.ListProjectSyncControls()
+		if err != nil {
+			log.Printf("dashboard: project controls store error: %v", err)
+			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
+			return
 		}
+		controlsMap = controlsByProject(ctrls)
 	}
 	// R4-3: re-clamp to real total; re-fetch if requested page was beyond last page.
 	// R5-3: add tier-3 fallback — if clamped re-fetch fails AND rows are empty, attempt page 1.

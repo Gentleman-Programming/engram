@@ -99,6 +99,57 @@ func TestDashboardPrincipalScopeHonorsDeploymentWildcardAndZeroGrants(t *testing
 	}
 }
 
+func TestDashboardPrincipalSyncControlsIntersectDeploymentAndGrants(t *testing.T) {
+	store := &CloudStore{
+		dashboardAllowedScopes: map[string]struct{}{"project-a": {}},
+		dashboardReadModel:     dashboardPrincipalReadModel(),
+		dashboardReadModelOK:   true,
+	}
+
+	wildcard, err := store.DashboardStoreForProjects([]string{"*"})
+	if err != nil {
+		t.Fatalf("DashboardStoreForProjects wildcard: %v", err)
+	}
+	assertDashboardPrincipalProjects(t, wildcard, "project-a")
+	if _, err := wildcard.scopedProject("project-b"); !errors.Is(err, ErrDashboardProjectForbidden) {
+		t.Fatalf("expected explicit deployment scope to forbid project-b, got %v", err)
+	}
+
+	stale, err := store.DashboardStoreForProjects([]string{"project-b"})
+	if err != nil {
+		t.Fatalf("DashboardStoreForProjects stale grant: %v", err)
+	}
+	if projects, err := stale.ListProjects(""); err != nil || len(projects) != 0 {
+		t.Fatalf("expected stale grant to expose no projects, projects=%+v err=%v", projects, err)
+	}
+	if _, err := stale.scopedProject("project-b"); !errors.Is(err, ErrDashboardProjectForbidden) {
+		t.Fatalf("expected stale grant to forbid project-b controls, got %v", err)
+	}
+}
+
+func TestDashboardPrincipalSyncControlsRejectInvalidRecords(t *testing.T) {
+	store := &CloudStore{
+		dashboardAllowedScopes: map[string]struct{}{"project-a": {}},
+		dashboardReadModel:     dashboardPrincipalReadModel(),
+		dashboardReadModelOK:   true,
+	}
+	view, err := store.DashboardStoreForProjects([]string{"*"})
+	if err != nil {
+		t.Fatalf("DashboardStoreForProjects: %v", err)
+	}
+
+	controls, err := view.filterProjectSyncControls([]ProjectSyncControl{{Project: "project-a"}, {Project: "project-b"}})
+	if err != nil {
+		t.Fatalf("filterProjectSyncControls: %v", err)
+	}
+	if len(controls) != 1 || controls[0].Project != "project-a" {
+		t.Fatalf("expected only effective-scope control, got %+v", controls)
+	}
+	if _, err := view.filterProjectSyncControls([]ProjectSyncControl{{Project: " "}}); !errors.Is(err, ErrDashboardProjectInvalid) {
+		t.Fatalf("expected invalid control project error, got %v", err)
+	}
+}
+
 func TestDashboardPrincipalScopeKeepsSharedCacheIsolatedBetweenSequentialPrincipals(t *testing.T) {
 	store := &CloudStore{dashboardReadModel: dashboardPrincipalReadModel(), dashboardReadModelOK: true}
 

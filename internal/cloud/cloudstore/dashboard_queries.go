@@ -1093,13 +1093,37 @@ func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardSc
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[string]struct{}, len(projects))
+	principalAllowed := make(map[string]struct{}, len(projects))
+	principalAll := false
 	for _, project := range projects {
+		if strings.TrimSpace(project) == "*" {
+			principalAll = true
+			continue
+		}
 		project = NormalizeProjectGrant(project)
 		if project != "" {
-			allowed[project] = struct{}{}
+			principalAllowed[project] = struct{}{}
 		}
 	}
+
+	allowed := principalAllowed
+	if !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
+		allowed = make(map[string]struct{})
+		if principalAll {
+			for project := range cs.dashboardAllowedScopes {
+				allowed[project] = struct{}{}
+			}
+		} else {
+			for project := range principalAllowed {
+				if _, ok := cs.dashboardAllowedScopes[project]; ok {
+					allowed[project] = struct{}{}
+				}
+			}
+		}
+	} else if principalAll {
+		allowed = map[string]struct{}{"*": {}}
+	}
+
 	if len(allowed) == 0 {
 		model = dashboardReadModel{projects: []DashboardProjectRow{}, contributors: []DashboardContributorRow{}, projectDetails: map[string]DashboardProjectDetail{}}
 	} else if _, all := allowed["*"]; !all {
@@ -1437,11 +1461,19 @@ func (s *DashboardScopedStore) ListProjectSyncControls() ([]ProjectSyncControl, 
 	if err != nil {
 		return nil, err
 	}
+	return s.filterProjectSyncControls(controls)
+}
+
+func (s *DashboardScopedStore) filterProjectSyncControls(controls []ProjectSyncControl) ([]ProjectSyncControl, error) {
 	filtered := make([]ProjectSyncControl, 0, len(controls))
 	for _, control := range controls {
-		if _, err := s.scopedProject(control.Project); err == nil {
-			filtered = append(filtered, control)
+		if _, err := s.scopedProject(control.Project); err != nil {
+			if errors.Is(err, ErrDashboardProjectForbidden) {
+				continue
+			}
+			return nil, fmt.Errorf("cloudstore: validate dashboard sync control project %q: %w", control.Project, err)
 		}
+		filtered = append(filtered, control)
 	}
 	return filtered, nil
 }
