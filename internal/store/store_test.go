@@ -13006,6 +13006,41 @@ func TestRepairBackfillsMissingMutations(t *testing.T) {
 	})
 }
 
+func TestRepairBackfillDoesNotRecreateQuarantinedMutation(t *testing.T) {
+	s := newTestStoreRaw(t)
+	const project, sessionID, syncID = "quarantine_project", "quarantine-session", "quarantine-observation"
+	for _, targetKey := range []string{DefaultSyncTargetKey, syncTargetKeyForProject(project)} {
+		if _, err := s.GetSyncState(targetKey); err != nil {
+			t.Fatalf("initialize %q state: %v", targetKey, err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_enrolled_projects (project) VALUES (?)`, project); err != nil {
+		t.Fatalf("seed enrollment: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, sessionID, project, "/tmp/quarantine"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, syncID, sessionID, "decision", "", "corrupt source", project, "project", hashNormalized("corrupt source")); err != nil {
+		t.Fatalf("seed corrupt source: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`, DefaultSyncTargetKey, SyncEntitySession, sessionID, SyncOpUpsert, `{"id":"quarantine-session","project":"quarantine_project","directory":"/tmp/quarantine"}`, SyncSourceLocal, project); err != nil {
+		t.Fatalf("seed session coverage: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'quarantined')`, DefaultSyncTargetKey, SyncEntityObservation, syncID, SyncOpUpsert, `{"sync_id":"quarantine-observation","session_id":"quarantine-session","type":"decision","title":"","content":"corrupt source","project":"quarantine_project","scope":"project"}`, SyncSourceLocal, project); err != nil {
+		t.Fatalf("seed quarantined coverage: %v", err)
+	}
+	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	var pending int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND disposition = 'pending'`, SyncEntityObservation, syncID).Scan(&pending); err != nil {
+		t.Fatalf("count recreated mutations: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("recreated pending mutations = %d, want 0", pending)
+	}
+}
+
 // TestRepairDoesNotDeadlockWithCursorAndInsert verifies that repair handles
 // 100 sessions without mutations correctly — no deadlock, cursor-insert interference,
 // or busy loop.
