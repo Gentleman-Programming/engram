@@ -92,7 +92,7 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
-	fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
 }
 
