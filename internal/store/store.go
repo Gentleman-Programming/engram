@@ -3038,7 +3038,7 @@ func (s *Store) StaleOpenSessions(now time.Time, olderThan time.Duration, projec
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	stale := make([]StaleOpenSession, 0)
 	for rows.Next() {
