@@ -302,12 +302,16 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 // orphanedObservationProjects returns the set of normalized projects whose
 // observations currently reference the given session ID inside the caller's
 // transaction.
-func orphanedObservationProjects(tx *sql.Tx, sessionID string) (map[string]struct{}, error) {
+func orphanedObservationProjects(tx *sql.Tx, sessionID string) (_ map[string]struct{}, err error) {
 	rows, err := tx.Query(`SELECT DISTINCT ifnull(project, '') FROM observations WHERE session_id = ?`, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	projects := make(map[string]struct{})
 	for rows.Next() {

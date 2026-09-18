@@ -583,7 +583,11 @@ func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t
 	if err != nil {
 		t.Fatalf("reopen database: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	}()
 	var project, ownership, directory, startedAt, endedAt string
 	if err := db.QueryRow(`SELECT project, ownership_mode, directory, started_at, ended_at FROM sessions WHERE id = 'missing-session'`).Scan(&project, &ownership, &directory, &startedAt, &endedAt); err != nil {
 		t.Fatalf("read placeholder: %v", err)
