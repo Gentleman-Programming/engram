@@ -355,7 +355,7 @@ func TestOrphanedObservationSessionCheckReportsGroupedEvidence(t *testing.T) {
 	if evidence.Project != "engram" || evidence.SessionID != "missing-session" || evidence.ObservationCount != 1 {
 		t.Fatalf("evidence=%+v", evidence)
 	}
-	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "cannot be reconstructed") || !strings.Contains(finding.SafeNextStep, "no supported repair") {
+	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "orphaned_observation_session") || !strings.Contains(finding.SafeNextStep, "local placeholder") {
 		t.Fatalf("finding guidance=%+v", finding)
 	}
 }
@@ -1184,7 +1184,7 @@ func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *te
 		t.Run(column, func(t *testing.T) {
 			s, cfg := newDiagnosticTestStoreWithConfig(t)
 			seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntitySession, "retired-session", store.SyncOpUpsert, `{"id":"retired-session","project":"legacy","directory":"/tmp/legacy"}`)
-			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), `+column+` = NULL WHERE entity_key = 'retired-session'`); err != nil {
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), ` + column + ` = NULL WHERE entity_key = 'retired-session'`); err != nil {
 				t.Fatalf("seed incomplete supersession: %v", err)
 			}
 			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)

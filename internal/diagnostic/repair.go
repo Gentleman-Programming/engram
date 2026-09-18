@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 const (
@@ -24,6 +26,7 @@ var repairImplementations = map[string]struct{}{
 	CheckSessionProjectDirectoryMismatch:  {},
 	CheckManualSessionNameProjectMismatch: {},
 	CheckInvalidSessionIdentity:           {},
+	CheckOrphanedObservationSession:       {},
 	CheckSyncMutationRequiredFields:       {},
 	CheckSyncTargetClosedSpace:            {},
 }
@@ -80,15 +83,16 @@ type SyncTargetCleanupAction struct {
 }
 
 type RepairPlan struct {
-	Project       string                    `json:"project"`
-	Check         string                    `json:"check"`
-	Mode          RepairMode                `json:"mode"`
-	Status        string                    `json:"status"`
-	Actions       []ProjectReclassifyAction `json:"actions"`
-	TargetActions []SyncTargetCleanupAction `json:"target_actions,omitempty"`
-	Skipped       []RepairSkip              `json:"skipped,omitempty"`
-	Counts        RepairCounts              `json:"counts"`
-	BackupPath    string                    `json:"backup_path,omitempty"`
+	Project             string                             `json:"project"`
+	Check               string                             `json:"check"`
+	Mode                RepairMode                         `json:"mode"`
+	Status              string                             `json:"status"`
+	Actions             []ProjectReclassifyAction          `json:"actions"`
+	TargetActions       []SyncTargetCleanupAction          `json:"target_actions,omitempty"`
+	PlaceholderSessions []store.OrphanedSessionPlaceholder `json:"placeholder_sessions,omitempty"`
+	Skipped             []RepairSkip                       `json:"skipped,omitempty"`
+	Counts              RepairCounts                       `json:"counts"`
+	BackupPath          string                             `json:"backup_path,omitempty"`
 }
 
 func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check string, mode RepairMode) (RepairPlan, error) {
@@ -116,6 +120,8 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 		}
 	case CheckInvalidSessionIdentity:
 		planInvalidSessionIdentityRepair(&plan, report)
+	case CheckOrphanedObservationSession:
+		planOrphanedObservationSessionRepair(&plan, report)
 	case CheckSyncTargetClosedSpace:
 		if err := planForeignSyncTargetCleanup(&plan, scope); err != nil {
 			return RepairPlan{}, err
@@ -125,7 +131,7 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 	}
 
 	dedupeAndSortRepairPlan(&plan)
-	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 {
+	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 && len(plan.PlaceholderSessions) == 0 {
 		plan.Status = "noop"
 	}
 	return plan, nil
@@ -140,6 +146,27 @@ func planForeignSyncTargetCleanup(plan *RepairPlan, scope Scope) error {
 		plan.TargetActions = append(plan.TargetActions, SyncTargetCleanupAction{TargetKey: action.TargetKey, RetargetedMutations: action.RetargetedMutations, RetainedMutations: action.RetainedMutations, StateRemoved: action.StateRemoved})
 	}
 	return nil
+}
+
+func planOrphanedObservationSessionRepair(plan *RepairPlan, report Report) {
+	for _, check := range report.Checks {
+		for _, finding := range check.Findings {
+			if finding.ReasonCode != CheckOrphanedObservationSession {
+				continue
+			}
+			var evidence store.OrphanedObservationSessionEvidence
+			if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+				plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+				continue
+			}
+			project := normalizeProjectName(evidence.Project)
+			if evidence.SessionID == "" || project == "" || evidence.FirstObservedAt == "" {
+				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: evidence.SessionID, ReasonCode: "invalid_orphaned_session_evidence", Message: "orphaned session repair requires a non-blank session ID, project, and first observation timestamp"})
+				continue
+			}
+			plan.PlaceholderSessions = append(plan.PlaceholderSessions, store.OrphanedSessionPlaceholder{SessionID: evidence.SessionID, Project: project, ObservationCount: evidence.ObservationCount, StartedAt: evidence.FirstObservedAt})
+		}
+	}
 }
 
 func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {

@@ -37,8 +37,8 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 		t.Fatalf("evidence=%+v, want %+v", got, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("evidence[%d]=%+v, want %+v", i, got[i], want[i])
+		if got[i].Project != want[i].Project || got[i].SessionID != want[i].SessionID || got[i].ObservationCount != want[i].ObservationCount || got[i].FirstObservedAt == "" {
+			t.Fatalf("evidence[%d]=%+v, want %+v with first observation timestamp", i, got[i], want[i])
 		}
 	}
 

@@ -621,7 +621,7 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("%d observation(s) reference missing session %q.", item.ObservationCount, item.SessionID),
 			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically.",
 			Evidence:             mustJSON(item),
-			SafeNextStep:         "Inspect and recover the affected data deliberately. The canonical session cannot be reconstructed automatically, and no supported repair exists.",
+			SafeNextStep:         "Review the affected reference, then run `engram doctor repair --project <project> --check orphaned_observation_session --plan`; apply only after confirming the local placeholder session is appropriate.",
 			RequiresConfirmation: true,
 		})
 	}

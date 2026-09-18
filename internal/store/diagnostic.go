@@ -28,6 +28,16 @@ type OrphanedObservationSessionEvidence struct {
 	Project          string `json:"project"`
 	SessionID        string `json:"session_id"`
 	ObservationCount int64  `json:"observation_count"`
+	FirstObservedAt  string `json:"first_observed_at"`
+}
+
+// OrphanedSessionPlaceholder is the minimal local-only session record used to
+// restore an observation foreign-key reference without fabricating sync state.
+type OrphanedSessionPlaceholder struct {
+	SessionID        string `json:"session_id"`
+	Project          string `json:"project"`
+	ObservationCount int64  `json:"observation_count"`
+	StartedAt        string `json:"started_at"`
 }
 
 // SyncMutationPayloadValidation describes deterministic required-field issues
@@ -184,7 +194,7 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]OrphanedObservationSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT ifnull(o.project, ''), o.session_id, COUNT(*)
+	query := `SELECT ifnull(o.project, ''), o.session_id, COUNT(*), MIN(o.created_at)
 		FROM observations o
 		LEFT JOIN sessions s ON s.id = o.session_id
 		WHERE s.id IS NULL
@@ -204,7 +214,7 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 	evidence := make([]OrphanedObservationSessionEvidence, 0)
 	for rows.Next() {
 		var item OrphanedObservationSessionEvidence
-		if err := rows.Scan(&item.Project, &item.SessionID, &item.ObservationCount); err != nil {
+		if err := rows.Scan(&item.Project, &item.SessionID, &item.ObservationCount, &item.FirstObservedAt); err != nil {
 			return nil, closeRowsWithError(rows, err)
 		}
 		evidence = append(evidence, item)
@@ -216,6 +226,44 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 		return nil, err
 	}
 	return evidence, nil
+}
+
+// RestoreOrphanedObservationSessions creates immediately-ended, local-only
+// placeholders for confirmed missing session references. It never updates
+// observations or emits sync mutations, and existing sessions are left intact.
+func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlaceholder) ([]OrphanedSessionPlaceholder, error) {
+	applied := make([]OrphanedSessionPlaceholder, 0, len(actions))
+	err := s.withTx(func(tx *sql.Tx) error {
+		for _, action := range actions {
+			if err := validateSessionID(action.SessionID); err != nil {
+				return err
+			}
+			project, _ := NormalizeProject(action.Project)
+			if strings.TrimSpace(project) == "" || strings.TrimSpace(action.StartedAt) == "" {
+				return fmt.Errorf("orphaned session placeholder requires project and first observation timestamp")
+			}
+			result, err := s.execHook(tx, `INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
+				SELECT ?, ?, ?, '', ?, ?, 'Recovered local placeholder for orphaned observations.'
+				WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?)`,
+				action.SessionID, project, SessionOwnershipProjectOwned, action.StartedAt, action.StartedAt, action.SessionID)
+			if err != nil {
+				return err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed > 0 {
+				action.Project = project
+				applied = append(applied, action)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return applied, nil
 }
 
 // ListPendingProjectMutations returns pending cloud mutations for one project,
