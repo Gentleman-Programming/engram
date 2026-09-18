@@ -2920,18 +2920,30 @@ const (
 	SessionEndStatusNotFound     = "not_found"
 )
 
+// SessionEndResult is the outcome of one strict end operation. EndedAt is the
+// authoritative ended_at of the session row inside the same transaction that
+// decided Status: the freshly written timestamp for "ended", the original
+// pre-existing timestamp for "already_ended", and nil for "not_found" — so
+// callers never need a follow-up read that could race or fail after the commit.
+type SessionEndResult struct {
+	Status  string
+	EndedAt *string
+}
+
 // EndSessionStrict ends an open session and reports what happened instead of
 // silently succeeding like EndSession. The UPDATE matches only open rows, so
 // an already-ended session reports "already_ended" with its original ended_at
 // and summary intact, and a missing ID reports "not_found" — neither can ever
 // overwrite persisted data. A non-nil summary fills an empty summary through
 // COALESCE without clobbering one recorded earlier. Sync journaling mirrors
-// EndSession and runs only when the session was actually ended.
-func (s *Store) EndSessionStrict(id string, summary *string) (string, error) {
+// EndSession and runs only when the session was actually ended. The returned
+// EndedAt is authoritative for every status that carries one, including
+// already_ended, where it is the original pre-existing timestamp.
+func (s *Store) EndSessionStrict(id string, summary *string) (SessionEndResult, error) {
 	if err := validateSessionID(id); err != nil {
-		return "", err
+		return SessionEndResult{}, err
 	}
-	status := SessionEndStatusEnded
+	result := SessionEndResult{Status: SessionEndStatusEnded}
 	if err := s.withTx(func(tx *sql.Tx) error {
 		// COALESCE(summary, ?): an already-recorded summary wins, so the supplied
 		// one only fills an empty summary instead of clobbering what an earlier
@@ -2949,13 +2961,16 @@ func (s *Store) EndSessionStrict(id string, summary *string) (string, error) {
 		}
 		if rows == 0 {
 			var existing int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, id).Scan(&existing); err != nil {
+			// ended_at rides along with the existence check so the already_ended
+			// result carries the ORIGINAL timestamp without a second query.
+			var existingEndedAt *string
+			if err := tx.QueryRow(`SELECT COUNT(*), ended_at FROM sessions WHERE id = ?`, id).Scan(&existing, &existingEndedAt); err != nil {
 				return err
 			}
 			if existing == 0 {
-				status = SessionEndStatusNotFound
+				result = SessionEndResult{Status: SessionEndStatusNotFound}
 			} else {
-				status = SessionEndStatusAlreadyEnded
+				result = SessionEndResult{Status: SessionEndStatusAlreadyEnded, EndedAt: existingEndedAt}
 			}
 			return nil
 		}
@@ -2972,6 +2987,9 @@ func (s *Store) EndSessionStrict(id string, summary *string) (string, error) {
 		).Scan(&project, &mode, &directory, &startedAt, &endedAt, &storedSummary); err != nil {
 			return err
 		}
+		// The transaction already holds the freshly written ended_at for the
+		// sync payload; the same value is the authoritative result timestamp.
+		result.EndedAt = &endedAt
 
 		return s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpUpsert, syncSessionPayload{
 			ID:            id,
@@ -2983,9 +3001,9 @@ func (s *Store) EndSessionStrict(id string, summary *string) (string, error) {
 			Summary:       storedSummary,
 		})
 	}); err != nil {
-		return "", err
+		return SessionEndResult{}, err
 	}
-	return status, nil
+	return result, nil
 }
 
 // StaleOpenSession is one open session a stale-session report or bulk end

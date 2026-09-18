@@ -16502,15 +16502,18 @@ func TestRuntimeSessionLeaseStaysOutOfSyncAndExportPayloads(t *testing.T) {
 // ─── EndSessionStrict (issue #1247) ──────────────────────────────────────────
 
 func TestEndSessionStrictStatuses(t *testing.T) {
-	t.Run("unknown id reports not_found", func(t *testing.T) {
+	t.Run("unknown id reports not_found with no timestamp", func(t *testing.T) {
 		s := newTestStore(t)
 
-		status, err := s.EndSessionStrict("no-such-session", nil)
+		res, err := s.EndSessionStrict("no-such-session", nil)
 		if err != nil {
 			t.Fatalf("EndSessionStrict: %v", err)
 		}
-		if status != SessionEndStatusNotFound {
-			t.Fatalf("status = %q, want %q", status, SessionEndStatusNotFound)
+		if res.Status != SessionEndStatusNotFound {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusNotFound)
+		}
+		if res.EndedAt != nil {
+			t.Fatalf("ended_at = %q, want nil for not_found", *res.EndedAt)
 		}
 	})
 
@@ -16533,12 +16536,15 @@ func TestEndSessionStrictStatuses(t *testing.T) {
 			t.Fatalf("count journal before: %v", err)
 		}
 
-		status, err := s.EndSessionStrict("strict-sess", nil)
+		res, err := s.EndSessionStrict("strict-sess", nil)
 		if err != nil {
 			t.Fatalf("EndSessionStrict: %v", err)
 		}
-		if status != SessionEndStatusAlreadyEnded {
-			t.Fatalf("status = %q, want %q", status, SessionEndStatusAlreadyEnded)
+		if res.Status != SessionEndStatusAlreadyEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusAlreadyEnded)
+		}
+		if res.EndedAt == nil || *res.EndedAt != "2020-01-02 03:04:05" {
+			t.Fatalf("result ended_at = %v, want the original 2020-01-02 03:04:05", res.EndedAt)
 		}
 
 		sess, err := s.GetSession("strict-sess")
@@ -16570,12 +16576,12 @@ func TestEndSessionStrictStatuses(t *testing.T) {
 			t.Fatalf("end session: %v", err)
 		}
 		replacement := "replacement summary"
-		status, err := s.EndSessionStrict("strict-sess2", &replacement)
+		res, err := s.EndSessionStrict("strict-sess2", &replacement)
 		if err != nil {
 			t.Fatalf("EndSessionStrict: %v", err)
 		}
-		if status != SessionEndStatusAlreadyEnded {
-			t.Fatalf("status = %q, want %q", status, SessionEndStatusAlreadyEnded)
+		if res.Status != SessionEndStatusAlreadyEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusAlreadyEnded)
 		}
 		sess, err := s.GetSession("strict-sess2")
 		if err != nil {
@@ -16594,12 +16600,12 @@ func TestEndSessionStrictStatuses(t *testing.T) {
 		}
 
 		summary := "wrapped up"
-		status, err := s.EndSessionStrict("strict-fresh", &summary)
+		res, err := s.EndSessionStrict("strict-fresh", &summary)
 		if err != nil {
 			t.Fatalf("EndSessionStrict: %v", err)
 		}
-		if status != SessionEndStatusEnded {
-			t.Fatalf("status = %q, want %q", status, SessionEndStatusEnded)
+		if res.Status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusEnded)
 		}
 
 		sess, err := s.GetSession("strict-fresh")
@@ -16608,6 +16614,9 @@ func TestEndSessionStrictStatuses(t *testing.T) {
 		}
 		if sess.EndedAt == nil || *sess.EndedAt == "" {
 			t.Fatalf("expected ended_at to be set, got %+v", sess.EndedAt)
+		}
+		if res.EndedAt == nil || *res.EndedAt != *sess.EndedAt {
+			t.Fatalf("result ended_at = %v, want the just-written %v", res.EndedAt, sess.EndedAt)
 		}
 		if sess.Summary == nil || *sess.Summary != "wrapped up" {
 			t.Fatalf("summary = %v, want \"wrapped up\"", sess.Summary)
@@ -16650,12 +16659,12 @@ func TestEndSessionStrictSummaryNeverClobbers(t *testing.T) {
 		}
 
 		replacement := "replacement summary"
-		status, err := s.EndSessionStrict("strict-keep", &replacement)
+		res, err := s.EndSessionStrict("strict-keep", &replacement)
 		if err != nil {
 			t.Fatalf("EndSessionStrict: %v", err)
 		}
-		if status != SessionEndStatusEnded {
-			t.Fatalf("status = %q, want %q", status, SessionEndStatusEnded)
+		if res.Status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusEnded)
 		}
 
 		sess, err := s.GetSession("strict-keep")
@@ -16678,12 +16687,12 @@ func TestEndSessionStrictSummaryNeverClobbers(t *testing.T) {
 		}
 
 		summary := "wrapped up"
-		status, err := s.EndSessionStrict("strict-fill", &summary)
+		res, err := s.EndSessionStrict("strict-fill", &summary)
 		if err != nil {
 			t.Fatalf("EndSessionStrict: %v", err)
 		}
-		if status != SessionEndStatusEnded {
-			t.Fatalf("status = %q, want %q", status, SessionEndStatusEnded)
+		if res.Status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusEnded)
 		}
 
 		sess, err := s.GetSession("strict-fill")

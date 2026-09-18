@@ -15,7 +15,7 @@ import (
 // Injectable store entry points for the session end command, following the
 // package-var pattern used across main.go so tests can stub every store touch.
 var (
-	storeEndSessionStrict = func(s *store.Store, id string, summary *string) (string, error) {
+	storeEndSessionStrict = func(s *store.Store, id string, summary *string) (store.SessionEndResult, error) {
 		return s.EndSessionStrict(id, summary)
 	}
 	storeStaleOpenSessions = func(s *store.Store, now time.Time, olderThan time.Duration, project string) ([]store.StaleOpenSession, error) {
@@ -23,9 +23,6 @@ var (
 	}
 	storeEndSessionsBulk = func(s *store.Store, now time.Time, olderThan time.Duration, project string) ([]string, error) {
 		return s.EndSessionsBulk(now, olderThan, project)
-	}
-	storeGetSession = func(s *store.Store, id string) (*store.Session, error) {
-		return s.GetSession(id)
 	}
 )
 
@@ -211,8 +208,10 @@ func cmdSessionEnd(cfg store.Config) {
 // cmdSessionEndSingle ends exactly one session by ID. An already-ended session
 // is a normal no-op notice with exit code 0; an unknown ID is a hard error —
 // the CLI path must not inherit the silent success of store.EndSession. With
-// --json it emits {"id", "status", "ended_at"} (ended_at omitted when the
-// session carries none); the not-found fatal path never emits JSON.
+// --json it emits {"id", "status", "ended_at"} built straight from the end
+// result's authoritative ended_at (omitted when the result carries none), so a
+// committed end always produces its JSON even if a separate post-commit read
+// would fail; the not-found fatal path never emits JSON.
 func cmdSessionEndSingle(cfg store.Config, parsed sessionEndArgs) {
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -225,30 +224,25 @@ func cmdSessionEndSingle(cfg store.Config, parsed sessionEndArgs) {
 	if parsed.hasSummary {
 		summary = &parsed.summary
 	}
-	status, err := storeEndSessionStrict(s, parsed.sessionID, summary)
+	result, err := storeEndSessionStrict(s, parsed.sessionID, summary)
 	if err != nil {
 		fatal(err)
 		return
 	}
-	if status == store.SessionEndStatusNotFound {
+	if result.Status == store.SessionEndStatusNotFound {
 		fmt.Fprintf(os.Stderr, "error: session %q not found\n", parsed.sessionID)
 		exitFunc(1)
 		return
 	}
 	if parsed.jsonOut {
-		payload := map[string]any{"id": parsed.sessionID, "status": status}
-		sess, err := storeGetSession(s, parsed.sessionID)
-		if err != nil {
-			fatal(err)
-			return
-		}
-		if sess.EndedAt != nil {
-			payload["ended_at"] = *sess.EndedAt
+		payload := map[string]any{"id": parsed.sessionID, "status": result.Status}
+		if result.EndedAt != nil {
+			payload["ended_at"] = *result.EndedAt
 		}
 		writeSessionEndJSON(payload)
 		return
 	}
-	switch status {
+	switch result.Status {
 	case store.SessionEndStatusEnded:
 		fmt.Printf("Session %q ended\n", parsed.sessionID)
 	case store.SessionEndStatusAlreadyEnded:

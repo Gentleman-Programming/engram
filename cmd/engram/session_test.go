@@ -370,6 +370,37 @@ func TestCmdSessionEndSingle(t *testing.T) {
 		}
 	})
 
+	t.Run("json output is built from the end result without a second read", func(t *testing.T) {
+		// The session stays open in the store, so any post-commit re-read would
+		// find no ended_at and drop the field. The result-carried timestamp must
+		// win, or a committed end could still lose its JSON to a read failure.
+		cfg := testConfig(t)
+		mustSeedSession(t, cfg, "sess-end-json-result", "proj-end")
+		resultEndedAt := "2021-06-07 08:09:10"
+		oldEnd := storeEndSessionStrict
+		storeEndSessionStrict = func(s *store.Store, id string, summary *string) (store.SessionEndResult, error) {
+			return store.SessionEndResult{Status: store.SessionEndStatusEnded, EndedAt: &resultEndedAt}, nil
+		}
+		t.Cleanup(func() { storeEndSessionStrict = oldEnd })
+
+		withArgs(t, "engram", "session", "end", "sess-end-json-result", "--json")
+		stdout, stderr := captureOutput(t, func() { cmdSession(cfg) })
+		if stderr != "" {
+			t.Fatalf("expected no stderr, got: %q", stderr)
+		}
+		var payload struct {
+			ID      string  `json:"id"`
+			Status  string  `json:"status"`
+			EndedAt *string `json:"ended_at"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Fatalf("invalid single-end JSON %q: %v", stdout, err)
+		}
+		if payload.ID != "sess-end-json-result" || payload.Status != "ended" || payload.EndedAt == nil || *payload.EndedAt != resultEndedAt {
+			t.Fatalf("single-end JSON = %+v, want ended with result-carried ended_at %q", payload, resultEndedAt)
+		}
+	})
+
 	t.Run("unknown id fails even with json", func(t *testing.T) {
 		cfg := testConfig(t)
 
