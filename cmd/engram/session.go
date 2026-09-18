@@ -77,10 +77,24 @@ func parseSessionEndAge(value string) (time.Duration, error) {
 	return d, nil
 }
 
+// isMissingFlagValue reports whether the token after a value-taking flag fails
+// to name a usable value: it is blank or is itself a long flag. Accepting such
+// a token as the value (e.g. summary="--apply") would consume the next option
+// as data and run the end operation under an argument the operator never
+// typed, so it is rejected with the same error as an absent value.
+func isMissingFlagValue(value string) bool {
+	return strings.TrimSpace(value) == "" || strings.HasPrefix(value, "--")
+}
+
 // parseSessionEndArgs validates the tokens that follow "engram session end"
 // and rejects anything undocumented BEFORE the store is opened (#1084
 // guarantee): silently ignoring an unsupported option such as --apply would
-// let an end operation run under assumptions the operator never made.
+// let an end operation run under assumptions the operator never made. Flag
+// values are held to the same bar, so a value that looks like the next flag
+// (--summary --apply) errors instead of being swallowed. Bulk mode (no session
+// ID) requires an explicit --by-age window (#1253): without one the staleness
+// cutoff degenerates to "now" and an --apply run would end every live open
+// session, while --project alone only narrows the match within a window.
 func parseSessionEndArgs(args []string) (sessionEndArgs, error) {
 	var parsed sessionEndArgs
 	missingValue := func(flag string) error {
@@ -89,7 +103,7 @@ func parseSessionEndArgs(args []string) (sessionEndArgs, error) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--summary":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || isMissingFlagValue(args[i+1]) {
 				return sessionEndArgs{}, missingValue("--summary")
 			}
 			parsed.summary = args[i+1]
@@ -107,7 +121,7 @@ func parseSessionEndArgs(args []string) (sessionEndArgs, error) {
 			parsed.hasByAge = true
 			i++
 		case "--project":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || isMissingFlagValue(args[i+1]) {
 				return sessionEndArgs{}, missingValue("--project")
 			}
 			parsed.project = args[i+1]
@@ -139,17 +153,24 @@ func parseSessionEndArgs(args []string) (sessionEndArgs, error) {
 	if parsed.hasSummary {
 		return sessionEndArgs{}, errors.New("--summary is only valid when ending a single session by ID")
 	}
-	if !parsed.hasByAge && parsed.project == "" {
-		return sessionEndArgs{}, errors.New("specify a session ID, or at least one bulk filter (--by-age/--project)")
+	// A staleness window is the bulk-mode seatbelt: the store query treats a
+	// zero window as "everything open up to now", so ending by project name
+	// alone would sweep live sessions into the batch.
+	if !parsed.hasByAge {
+		if parsed.project != "" {
+			return sessionEndArgs{}, errors.New("bulk mode requires --by-age DURATION (--project only narrows within that window)")
+		}
+		return sessionEndArgs{}, errors.New("specify a session ID, or an explicit staleness window (--by-age) for bulk mode")
 	}
 	return parsed, nil
 }
 
 func printSessionEndUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram session end <id> [--summary TEXT] [--json]")
-	fmt.Fprintln(os.Stderr, "       engram session end [--by-age DURATION] [--project NAME] [--apply] [--json]")
+	fmt.Fprintln(os.Stderr, "       engram session end --by-age DURATION [--project NAME] [--apply] [--json]")
 	fmt.Fprintln(os.Stderr, "  End one session by ID (immediate, idempotent: an already-ended session is a no-op notice),")
-	fmt.Fprintln(os.Stderr, "  or bulk-end stale open sessions matching the filters.")
+	fmt.Fprintln(os.Stderr, "  or bulk-end stale open sessions older than the --by-age window (required in bulk mode).")
+	fmt.Fprintln(os.Stderr, "  --project only narrows the bulk match within that window.")
 	fmt.Fprintln(os.Stderr, "  Bulk runs a DRY-RUN preview by default; add --apply to end the matched sessions.")
 	fmt.Fprintln(os.Stderr, "  DURATION accepts Go syntax (72h) or compact forms (30d, 2w).")
 }
@@ -157,7 +178,7 @@ func printSessionEndUsage() {
 func cmdSession(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram session end <id> [--summary TEXT] [--json]")
-		fmt.Fprintln(os.Stderr, "       engram session end [--by-age DURATION] [--project NAME] [--apply] [--json]")
+		fmt.Fprintln(os.Stderr, "       engram session end --by-age DURATION [--project NAME] [--apply] [--json]")
 		exitFunc(1)
 		return
 	}

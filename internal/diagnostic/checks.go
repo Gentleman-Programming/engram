@@ -149,10 +149,13 @@ const (
 // StaleOpenSessionsCheck reports open sessions whose effective last activity
 // (the newest observation, falling back to started_at) is older than the
 // threshold. It is strictly read-only: doctor surfaces the evidence and points
-// at the session end CLI, but never mutates sessions.
+// at the session end CLI, but never mutates sessions. The store query inherits
+// scope.Project so a project-scoped doctor run reports only that project's
+// stale sessions instead of every project's; an unscoped run keeps the empty
+// filter and sees them all.
 func (c StaleOpenSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
-	stale, err := scope.Store.StaleOpenSessions(scope.Now, staleOpenSessionsThreshold, "")
+	stale, err := scope.Store.StaleOpenSessions(scope.Now, staleOpenSessionsThreshold, scope.Project)
 	if err != nil {
 		return CheckResult{}, err
 	}

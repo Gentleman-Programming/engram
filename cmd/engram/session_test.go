@@ -38,9 +38,14 @@ func TestParseSessionEndArgs(t *testing.T) {
 			want: sessionEndArgs{olderThan: 72 * time.Hour, hasByAge: true},
 		},
 		{
-			name: "bulk with project filter only",
-			args: []string{"--project", "web"},
-			want: sessionEndArgs{project: "web"},
+			name:    "bulk with project filter only requires an explicit window",
+			args:    []string{"--project", "web"},
+			wantErr: "requires --by-age",
+		},
+		{
+			name: "bulk with project narrowed by an explicit window",
+			args: []string{"--project", "web", "--by-age", "30d"},
+			want: sessionEndArgs{olderThan: 30 * 24 * time.Hour, hasByAge: true, project: "web"},
 		},
 		{
 			name: "bulk with every flag",
@@ -110,6 +115,36 @@ func TestParseSessionEndArgs(t *testing.T) {
 		{
 			name:    "--project missing value",
 			args:    []string{"--project"},
+			wantErr: "--project requires a value",
+		},
+		{
+			name:    "--summary value that looks like a flag",
+			args:    []string{"sess-1", "--summary", "--apply"},
+			wantErr: "--summary requires a value",
+		},
+		{
+			name:    "--summary empty value",
+			args:    []string{"sess-1", "--summary", ""},
+			wantErr: "--summary requires a value",
+		},
+		{
+			name:    "--summary whitespace-only value",
+			args:    []string{"sess-1", "--summary", "   "},
+			wantErr: "--summary requires a value",
+		},
+		{
+			name:    "--project value that looks like a flag",
+			args:    []string{"sess-1", "--project", "--json"},
+			wantErr: "--project requires a value",
+		},
+		{
+			name:    "--project empty value",
+			args:    []string{"--by-age", "30d", "--project", ""},
+			wantErr: "--project requires a value",
+		},
+		{
+			name:    "--project whitespace-only value",
+			args:    []string{"--by-age", "30d", "--project", "  "},
 			wantErr: "--project requires a value",
 		},
 		{
@@ -472,6 +507,9 @@ func TestCmdSessionEndRejectsInvalidInvocationsBeforeStoreOpen(t *testing.T) {
 		{name: "unknown flag", args: []string{"end", "sess-1", "--sumary", "x"}, wantErr: "unknown flag"},
 		{name: "apply with id", args: []string{"end", "sess-1", "--apply"}, wantErr: "only valid"},
 		{name: "garbage duration", args: []string{"end", "--by-age", "soon"}, wantErr: "invalid --by-age value"},
+		{name: "summary value that looks like a flag", args: []string{"end", "sess-1", "--summary", "--apply"}, wantErr: "--summary requires a value"},
+		{name: "bulk project without an explicit window", args: []string{"end", "--project", "web"}, wantErr: "requires --by-age"},
+		{name: "bulk project with apply but no window", args: []string{"end", "--project", "web", "--apply"}, wantErr: "requires --by-age"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
