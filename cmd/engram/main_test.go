@@ -34,6 +34,116 @@ const (
 	windowsErrorDirNotEmpty       = syscall.Errno(145)
 )
 
+func TestRemoveWindowsTestTempDir(t *testing.T) {
+	const dir = "test-dir"
+
+	wrappedDirNotEmpty := fmt.Errorf("wrapped: %w", windowsErrorDirNotEmpty)
+	wrappedPermission := fmt.Errorf("wrapped: %w", os.ErrPermission)
+	exhaustedRemoveErrors := make([]error, windowsTempDirCleanupAttempts)
+	for i := range exhaustedRemoveErrors {
+		exhaustedRemoveErrors[i] = wrappedDirNotEmpty
+	}
+
+	tests := []struct {
+		name            string
+		removeErrors    []error
+		wantRemoveCalls int
+		wantSleepCalls  int
+		wantErr         error
+		wantErrMessage  string
+	}{
+		{
+			name:            "immediate successful removal",
+			removeErrors:    []error{nil},
+			wantRemoveCalls: 1,
+		},
+		{
+			name:            "wrapped directory not empty followed by success",
+			removeErrors:    []error{wrappedDirNotEmpty, nil},
+			wantRemoveCalls: 2,
+			wantSleepCalls:  1,
+		},
+		{
+			name:            "immediate wrapped non-directory-not-empty error",
+			removeErrors:    []error{wrappedPermission},
+			wantRemoveCalls: 1,
+			wantErr:         os.ErrPermission,
+			wantErrMessage:  fmt.Sprintf("remove test temp directory %q: %v", dir, wrappedPermission),
+		},
+		{
+			name:            "wrapped directory not empty through retry exhaustion",
+			removeErrors:    exhaustedRemoveErrors,
+			wantRemoveCalls: windowsTempDirCleanupAttempts,
+			wantSleepCalls:  windowsTempDirCleanupAttempts - 1,
+			wantErr:         windowsErrorDirNotEmpty,
+			wantErrMessage: fmt.Sprintf("remove test temp directory %q after %d attempts: %v",
+				dir, windowsTempDirCleanupAttempts, wrappedDirNotEmpty),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var removeDirs []string
+			removeAll := func(gotDir string) error {
+				removeDirs = append(removeDirs, gotDir)
+				return tc.removeErrors[len(removeDirs)-1]
+			}
+			var sleepDurations []time.Duration
+			sleep := func(duration time.Duration) {
+				sleepDurations = append(sleepDurations, duration)
+			}
+
+			err := removeWindowsTestTempDir(dir, removeAll, sleep)
+
+			if len(removeDirs) != tc.wantRemoveCalls {
+				t.Fatalf("remove calls = %d, want %d", len(removeDirs), tc.wantRemoveCalls)
+			}
+			for _, gotDir := range removeDirs {
+				if gotDir != dir {
+					t.Fatalf("remove directory = %q, want %q", gotDir, dir)
+				}
+			}
+			if len(sleepDurations) != tc.wantSleepCalls {
+				t.Fatalf("sleep calls = %d, want %d", len(sleepDurations), tc.wantSleepCalls)
+			}
+			for _, gotDuration := range sleepDurations {
+				if gotDuration != windowsTempDirCleanupDelay {
+					t.Fatalf("sleep duration = %s, want %s", gotDuration, windowsTempDirCleanupDelay)
+				}
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("removeWindowsTestTempDir() error = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("removeWindowsTestTempDir() error = %v, want errors.Is(..., %v)", err, tc.wantErr)
+			}
+			if err.Error() != tc.wantErrMessage {
+				t.Fatalf("removeWindowsTestTempDir() error = %q, want %q", err, tc.wantErrMessage)
+			}
+		})
+	}
+}
+
+func removeWindowsTestTempDir(dir string, removeAll func(string) error, sleep func(time.Duration)) error {
+	var cleanupErr error
+	for attempt := 1; attempt <= windowsTempDirCleanupAttempts; attempt++ {
+		cleanupErr = removeAll(dir)
+		if cleanupErr == nil {
+			return nil
+		}
+		if !errors.Is(cleanupErr, windowsErrorDirNotEmpty) {
+			return fmt.Errorf("remove test temp directory %q: %w", dir, cleanupErr)
+		}
+		if attempt < windowsTempDirCleanupAttempts {
+			sleep(windowsTempDirCleanupDelay)
+		}
+	}
+	return fmt.Errorf("remove test temp directory %q after %d attempts: %w", dir, windowsTempDirCleanupAttempts, cleanupErr)
+}
+
 func testTempDir(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {
@@ -45,20 +155,9 @@ func testTempDir(t *testing.T) string {
 		t.Fatalf("create test temp directory: %v", err)
 	}
 	t.Cleanup(func() {
-		var cleanupErr error
-		for attempt := 1; attempt <= windowsTempDirCleanupAttempts; attempt++ {
-			cleanupErr = os.RemoveAll(dir)
-			if cleanupErr == nil {
-				return
-			}
-			if !errors.Is(cleanupErr, windowsErrorDirNotEmpty) {
-				t.Fatalf("remove test temp directory %q: %v", dir, cleanupErr)
-			}
-			if attempt < windowsTempDirCleanupAttempts {
-				time.Sleep(windowsTempDirCleanupDelay)
-			}
+		if err := removeWindowsTestTempDir(dir, os.RemoveAll, time.Sleep); err != nil {
+			t.Fatal(err)
 		}
-		t.Fatalf("remove test temp directory %q after %d attempts: %v", dir, windowsTempDirCleanupAttempts, cleanupErr)
 	})
 	return dir
 }
