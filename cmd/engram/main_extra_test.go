@@ -4935,14 +4935,14 @@ func TestCmdSyncCloudImportPrintsSkippedRelationWarnings(t *testing.T) {
 				ChunksImported:       1,
 				SessionsImported:     1,
 				ObservationsImported: 1,
-				SkippedRelations:     []string{"relation obs-a->obs-b: referenced observation missing permanently"},
+				SkippedRelations:     []string{"relation rel-a obs-a->obs-b: referenced observation missing permanently"},
 			},
 		},
 		{
 			name: "no new chunks",
 			result: &engramsync.ImportResult{
 				ChunksSkipped:    1,
-				SkippedRelations: []string{"relation obs-a->obs-b: referenced observation missing permanently"},
+				SkippedRelations: []string{"relation rel-a obs-a->obs-b: referenced observation missing permanently"},
 			},
 		},
 	}
@@ -4963,7 +4963,7 @@ func TestCmdSyncCloudImportPrintsSkippedRelationWarnings(t *testing.T) {
 			if recovered != nil || stderr != "" {
 				t.Fatalf("expected successful cloud import, panic=%v stderr=%q", recovered, stderr)
 			}
-			if !strings.Contains(stdout, "WARNING skipped relation obs-a->obs-b: referenced observation missing permanently") {
+			if !strings.Contains(stdout, "WARNING skipped relation rel-a obs-a->obs-b: referenced observation missing permanently") {
 				t.Fatalf("expected skipped relation warning in import output, got:\n%s", stdout)
 			}
 		})

@@ -1369,7 +1369,7 @@ func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependenc
 			filtered = append(filtered, mutation)
 			continue
 		}
-		sourceID, targetID, classifiable := relationUpsertEndpoints(mutation)
+		relationID, sourceID, targetID, classifiable := relationUpsertEndpoints(mutation)
 		if !classifiable {
 			filtered = append(filtered, mutation)
 			continue
@@ -1388,7 +1388,7 @@ func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependenc
 		}
 		changed = true
 		skipped = append(skipped, mutation)
-		warnings = append(warnings, fmt.Sprintf("relation %s->%s: referenced observation missing permanently", sourceID, targetID))
+		warnings = append(warnings, fmt.Sprintf("relation %s %s->%s: referenced observation missing permanently", relationID, sourceID, targetID))
 	}
 	if !changed {
 		return chunk, nil, nil, nil
@@ -1398,23 +1398,30 @@ func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependenc
 	return filteredChunk, skipped, warnings, nil
 }
 
-// relationUpsertEndpoints decodes the endpoints of a relation upsert payload.
-// classifiable is false when the payload cannot be judged (decode failure or
-// blank endpoints); the caller keeps the mutation so the store classifies it.
-func relationUpsertEndpoints(mutation store.SyncMutation) (sourceID, targetID string, classifiable bool) {
+// relationUpsertEndpoints decodes a relation upsert's display identity and
+// endpoints. The payload sync_id is authoritative for operator-visible output;
+// a blank payload ID falls back to the trimmed mutation entity_key. Endpoint
+// classification remains unchanged: it is false only for undecodable payloads
+// or blank endpoints, so the store continues to handle those mutations.
+func relationUpsertEndpoints(mutation store.SyncMutation) (relationID, sourceID, targetID string, classifiable bool) {
 	var payload struct {
+		SyncID   string `json:"sync_id"`
 		SourceID string `json:"source_id"`
 		TargetID string `json:"target_id"`
 	}
 	if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
-		return "", "", false
+		return "", "", "", false
+	}
+	relationID = strings.TrimSpace(payload.SyncID)
+	if relationID == "" {
+		relationID = strings.TrimSpace(mutation.EntityKey)
 	}
 	sourceID = strings.TrimSpace(payload.SourceID)
 	targetID = strings.TrimSpace(payload.TargetID)
 	if sourceID == "" || targetID == "" {
-		return "", "", false
+		return "", "", "", false
 	}
-	return sourceID, targetID, true
+	return relationID, sourceID, targetID, true
 }
 
 func importDependencyError(chunk ChunkData, err error) error {

@@ -4000,7 +4000,7 @@ func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 			},
 			relID: "rel-skip-del",
 			wantSkippedEdges: []string{
-				"relation obs-skip-del-src->obs-skip-del-gone: referenced observation missing permanently",
+				"relation rel-skip-del obs-skip-del-src->obs-skip-del-gone: referenced observation missing permanently",
 			},
 			wantDeferred: 1,
 			wantRelation: false,
@@ -4080,7 +4080,7 @@ func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 			},
 			relID: "rel-skip-mismatch",
 			wantSkippedEdges: []string{
-				"relation obs-skip-mismatch-src->obs-skip-mismatch-gone: referenced observation missing permanently",
+				"relation rel-skip-mismatch obs-skip-mismatch-src->obs-skip-mismatch-gone: referenced observation missing permanently",
 			},
 			wantDeferred: 1,
 			wantDead:     1,
@@ -4144,6 +4144,38 @@ func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("warning relation ID uses payload with entity key fallback", func(t *testing.T) {
+		for _, tt := range []struct {
+			name           string
+			mutation       store.SyncMutation
+			wantRelationID string
+		}{
+			{
+				name: "payload sync ID is preferred",
+				mutation: store.SyncMutation{
+					EntityKey: "relation-entity-key",
+					Payload:   `{"sync_id":"relation-payload-id","source_id":"source-id","target_id":"target-id","project":"proj-a"}`,
+				},
+				wantRelationID: "relation-payload-id",
+			},
+			{
+				name: "blank payload sync ID falls back to entity key",
+				mutation: store.SyncMutation{
+					EntityKey: " relation-entity-key ",
+					Payload:   `{"sync_id":" ","source_id":"source-id","target_id":"target-id","project":"proj-a"}`,
+				},
+				wantRelationID: "relation-entity-key",
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				relationID, sourceID, targetID, classifiable := relationUpsertEndpoints(tt.mutation)
+				if !classifiable || relationID != tt.wantRelationID || sourceID != "source-id" || targetID != "target-id" {
+					t.Fatalf("relation identity = (%q, %q, %q, %t), want (%q, %q, %q, true)", relationID, sourceID, targetID, classifiable, tt.wantRelationID, "source-id", "target-id")
+				}
+			})
+		}
+	})
 }
 
 func TestCloudImportEmptyProjectDoesNotReplayAnotherProjectDeferredRelation(t *testing.T) {
@@ -4995,7 +5027,7 @@ func TestCloudImportHandlesRelationWithPermanentlyMissingEndpoint(t *testing.T) 
 			relChunk:   withObservationDelete(relationMissingEndpointChunk("sess-1135", "obs-1135-a", "obs-1135-deleted", "rel-1135"), "obs-1135-deleted"),
 			wantChunks: 1,
 			wantSkippedEdges: []string{
-				"relation obs-1135-a->obs-1135-deleted: referenced observation missing permanently",
+				"relation rel-1135 obs-1135-a->obs-1135-deleted: referenced observation missing permanently",
 			},
 			wantDeferred: 1,
 			wantDead:     0,
@@ -5162,7 +5194,7 @@ func TestCloudImportKnownDeleteEvidenceSkipsLaterRelationOnlyChunk(t *testing.T)
 	if err != nil {
 		t.Fatalf("import later relation-only chunk: %v", err)
 	}
-	if got, want := result.SkippedRelations, []string{"relation obs-known-delete-source->obs-known-delete-target: referenced observation missing permanently"}; !equalStrings(got, want) {
+	if got, want := result.SkippedRelations, []string{"relation rel-known-delete obs-known-delete-source->obs-known-delete-target: referenced observation missing permanently"}; !equalStrings(got, want) {
 		t.Fatalf("skipped relations = %q, want %q", got, want)
 	}
 	if result.RelationsDeferred != 1 || result.RelationsDead != 0 {
