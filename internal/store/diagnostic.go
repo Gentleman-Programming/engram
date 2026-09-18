@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -229,8 +230,10 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 }
 
 // RestoreOrphanedObservationSessions creates immediately-ended, local-only
-// placeholders for confirmed missing session references. It never updates
-// observations or emits sync mutations, and existing sessions are left intact.
+// placeholders for confirmed missing session references. It validates the
+// current observation evidence and any existing session ownership inside one
+// transaction, so a stale or direct caller cannot attach a session ID to the
+// wrong project. It never updates observations or emits sync mutations.
 func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlaceholder) ([]OrphanedSessionPlaceholder, error) {
 	applied := make([]OrphanedSessionPlaceholder, 0, len(actions))
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -242,10 +245,39 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 			if strings.TrimSpace(project) == "" || strings.TrimSpace(action.StartedAt) == "" {
 				return fmt.Errorf("orphaned session placeholder requires project and first observation timestamp")
 			}
+
+			var existingProject string
+			err := tx.QueryRow(`SELECT ifnull(project, '') FROM sessions WHERE id = ?`, action.SessionID).Scan(&existingProject)
+			switch {
+			case err == nil:
+				existingProject, _ = NormalizeProject(existingProject)
+				if strings.TrimSpace(existingProject) != project {
+					return fmt.Errorf("orphaned session %q already belongs to project %q, not %q", action.SessionID, existingProject, project)
+				}
+				// The same project already owns this ID, so a stale plan is an
+				// explicit no-op rather than an apparently successful insert.
+				continue
+			case !errors.Is(err, sql.ErrNoRows):
+				return err
+			}
+
+			projects, err := orphanedObservationProjects(tx, action.SessionID)
+			if err != nil {
+				return err
+			}
+			if len(projects) == 0 {
+				return fmt.Errorf("orphaned session %q has no supporting observations", action.SessionID)
+			}
+			if len(projects) != 1 {
+				return fmt.Errorf("orphaned session %q is referenced by multiple projects", action.SessionID)
+			}
+			if _, ok := projects[project]; !ok {
+				return fmt.Errorf("orphaned session %q evidence belongs to a different project", action.SessionID)
+			}
+
 			result, err := s.execHook(tx, `INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
-				SELECT ?, ?, ?, '', ?, ?, 'Recovered local placeholder for orphaned observations.'
-				WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?)`,
-				action.SessionID, project, SessionOwnershipProjectOwned, action.StartedAt, action.StartedAt, action.SessionID)
+				VALUES (?, ?, ?, '', ?, ?, 'Recovered local placeholder for orphaned observations.')`,
+				action.SessionID, project, SessionOwnershipProjectOwned, action.StartedAt, action.StartedAt)
 			if err != nil {
 				return err
 			}
@@ -253,10 +285,11 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 			if err != nil {
 				return err
 			}
-			if changed > 0 {
-				action.Project = project
-				applied = append(applied, action)
+			if changed != 1 {
+				return fmt.Errorf("orphaned session %q placeholder insert affected %d rows", action.SessionID, changed)
 			}
+			action.Project = project
+			applied = append(applied, action)
 		}
 		return nil
 	})
@@ -264,6 +297,32 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 		return nil, err
 	}
 	return applied, nil
+}
+
+func orphanedObservationProjects(tx *sql.Tx, sessionID string) (map[string]struct{}, error) {
+	rows, err := tx.Query(`SELECT DISTINCT ifnull(project, '') FROM observations WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	projects := make(map[string]struct{})
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		project, _ = NormalizeProject(project)
+		project = strings.TrimSpace(project)
+		if project == "" {
+			return nil, fmt.Errorf("orphaned session %q has observation evidence without a project", sessionID)
+		}
+		projects[project] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return projects, nil
 }
 
 // ListPendingProjectMutations returns pending cloud mutations for one project,

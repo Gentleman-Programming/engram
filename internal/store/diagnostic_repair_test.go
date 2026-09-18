@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,6 +61,8 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 
 func TestRestoreOrphanedObservationSessionsRollsBackOnFailure(t *testing.T) {
 	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-a", "missing-a", "engram", nil)
+	seedOrphanedObservationSession(t, s, "obs-b", "missing-b", "engram", nil)
 	original := s.hooks.exec
 	calls := 0
 	wantErr := errors.New("insert failed")
@@ -78,6 +81,68 @@ func TestRestoreOrphanedObservationSessionsRollsBackOnFailure(t *testing.T) {
 	var count int
 	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sessions WHERE id IN ('missing-a', 'missing-b')`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("placeholder count=%d err=%v", count, err)
+	}
+}
+
+func TestRestoreOrphanedObservationSessionsRejectsConflictingEvidence(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-alpha", "missing-shared", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-beta", "missing-shared", "beta", nil)
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-shared", Project: "alpha", StartedAt: "2026-01-01 00:00:00"}})
+	if err == nil || !strings.Contains(err.Error(), "multiple projects") {
+		t.Fatalf("error=%v, want multiple-project conflict", err)
+	}
+	if count := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-shared"); count != 0 {
+		t.Fatalf("placeholder count=%d, want 0", count)
+	}
+}
+
+func TestRestoreOrphanedObservationSessionsRejectsExistingOwnershipConflict(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("existing-session", "beta", "/work/beta"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "existing-session", Project: "alpha", StartedAt: "2026-01-01 00:00:00"}})
+	if err == nil || !strings.Contains(err.Error(), "already belongs") {
+		t.Fatalf("error=%v, want ownership conflict", err)
+	}
+	if got := scalarString(t, s, `SELECT project FROM sessions WHERE id = ?`, "existing-session"); got != "beta" {
+		t.Fatalf("project=%q, want beta", got)
+	}
+}
+
+func TestRestoreOrphanedObservationSessionsRollsBackBatchOnConflict(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-safe", "missing-safe", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-conflict-alpha", "missing-conflict", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-conflict-beta", "missing-conflict", "beta", nil)
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{
+		{SessionID: "missing-safe", Project: "alpha", StartedAt: "2026-01-01 00:00:00"},
+		{SessionID: "missing-conflict", Project: "alpha", StartedAt: "2026-01-01 00:00:00"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple projects") {
+		t.Fatalf("error=%v, want conflict", err)
+	}
+	if count := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id IN ('missing-safe', 'missing-conflict')`); count != 0 {
+		t.Fatalf("placeholder count=%d, want full rollback", count)
+	}
+}
+
+func TestRestoreOrphanedObservationSessionsTreatsMatchingExistingSessionAsNoop(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("existing-session", "alpha", "/work/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	applied, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "existing-session", Project: "alpha", StartedAt: "2026-01-01 00:00:00"}})
+	if err != nil {
+		t.Fatalf("RestoreOrphanedObservationSessions: %v", err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("applied=%+v, want no-op", applied)
 	}
 }
 

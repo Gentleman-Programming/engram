@@ -583,6 +583,38 @@ func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t
 	}
 }
 
+func TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	seedDoctorSession(t, cfg, "existing-session", "engram", "/work/engram")
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := db.Exec(`
+		PRAGMA foreign_keys = OFF;
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES ('obs-orphan', 'existing-session', 'bugfix', 'orphan', 'content', 'engram', 'project', 'obs-orphan', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed orphaned observation: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seeded database: %v", err)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	plan := decodeRepairPlan(t, stdout)
+	if plan["status"] != "noop" || plan["counts"].(map[string]any)["sessions_applied"] != float64(0) {
+		t.Fatalf("apply=%v", plan)
+	}
+}
+
 func TestCmdDoctorInvalidCheckFailsLoudly(t *testing.T) {
 	cfg := testConfig(t)
 	oldExit := exitFunc

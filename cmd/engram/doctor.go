@@ -236,25 +236,24 @@ func cmdDoctorRepair(cfg store.Config) {
 		return
 	}
 	if check == diagnostic.CheckOrphanedObservationSession {
+		plan.Counts.SessionsPlanned = int64(len(plan.PlaceholderSessions))
+		for _, action := range plan.PlaceholderSessions {
+			plan.Counts.ObservationsPlanned += action.ObservationCount
+		}
 		if mode == diagnostic.RepairModeApply && len(plan.PlaceholderSessions) > 0 {
 			applied, err := s.RestoreOrphanedObservationSessions(plan.PlaceholderSessions)
 			if err != nil {
 				failDoctorRepair(err.Error())
 				return
 			}
-			plan.Status = "applied"
-			plan.Counts.SessionsPlanned = int64(len(plan.PlaceholderSessions))
-			for _, action := range plan.PlaceholderSessions {
-				plan.Counts.ObservationsPlanned += action.ObservationCount
+			if len(applied) > 0 {
+				plan.Status = "applied"
+			} else {
+				plan.Status = "noop"
 			}
-			plan.Counts.SessionsApplied = int64(len(applied))
 			for _, action := range applied {
+				plan.Counts.SessionsApplied++
 				plan.Counts.ObservationsApplied += action.ObservationCount
-			}
-		} else {
-			plan.Counts.SessionsPlanned = int64(len(plan.PlaceholderSessions))
-			for _, action := range plan.PlaceholderSessions {
-				plan.Counts.ObservationsPlanned += action.ObservationCount
 			}
 		}
 		writeDoctorRepairJSON(plan)

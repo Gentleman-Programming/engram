@@ -1198,3 +1198,57 @@ func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *te
 		})
 	}
 }
+
+func TestBuildRepairPlanOrphanedObservationSessionRules(t *testing.T) {
+	evidence := func(project, sessionID string, count int64, first string) Finding {
+		raw, err := json.Marshal(store.OrphanedObservationSessionEvidence{
+			Project: project, SessionID: sessionID, ObservationCount: count, FirstObservedAt: first,
+		})
+		if err != nil {
+			t.Fatalf("marshal evidence: %v", err)
+		}
+		return Finding{ReasonCode: CheckOrphanedObservationSession, Evidence: raw}
+	}
+	report := Report{Status: StatusWarning, Checks: []CheckResult{{
+		CheckID: CheckOrphanedObservationSession,
+		Result:  StatusWarning,
+		Findings: []Finding{
+			evidence("alpha", "missing-2", 2, "2026-01-02 00:00:00"),
+			evidence("alpha", "missing-1", 1, "2026-01-01 00:00:00"),
+			evidence("alpha", "missing-1", 1, "2026-01-03 00:00:00"),
+			evidence("beta", "missing-1", 1, "2026-01-04 00:00:00"),
+			evidence("", "missing-blank-project", 1, "2026-01-05 00:00:00"),
+			evidence("alpha", "", 1, "2026-01-06 00:00:00"),
+		},
+	}}}
+
+	plan, err := BuildRepairPlan(context.Background(), Scope{}, report, CheckOrphanedObservationSession, RepairModePlan)
+	if err != nil {
+		t.Fatalf("BuildRepairPlan: %v", err)
+	}
+	if len(plan.PlaceholderSessions) != 1 {
+		t.Fatalf("placeholders=%+v skipped=%+v", plan.PlaceholderSessions, plan.Skipped)
+	}
+	if got := plan.PlaceholderSessions[0]; got.SessionID != "missing-2" || got.Project != "alpha" || got.ObservationCount != 2 || got.StartedAt != "2026-01-02 00:00:00" {
+		t.Fatalf("placeholder=%+v", got)
+	}
+	skips := map[string]int{}
+	for _, skip := range plan.Skipped {
+		skips[skip.ReasonCode]++
+	}
+	if skips["ambiguous_orphaned_session_project"] != 1 || skips["invalid_orphaned_session_evidence"] != 2 {
+		t.Fatalf("skips=%+v", plan.Skipped)
+	}
+	if plan.Status != "planned" {
+		t.Fatalf("status=%q", plan.Status)
+	}
+
+	empty := Report{Status: StatusOK, Checks: []CheckResult{{CheckID: CheckOrphanedObservationSession, Result: StatusOK}}}
+	noop, err := BuildRepairPlan(context.Background(), Scope{}, empty, CheckOrphanedObservationSession, RepairModePlan)
+	if err != nil {
+		t.Fatalf("BuildRepairPlan empty: %v", err)
+	}
+	if noop.Status != "noop" || len(noop.PlaceholderSessions) != 0 {
+		t.Fatalf("noop plan=%+v", noop)
+	}
+}
