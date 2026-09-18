@@ -6684,7 +6684,10 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 				ELSE excluded.reason_code
 			END,
 			payload_sync_id   = excluded.payload_sync_id,
-			project           = excluded.project,
+			project           = CASE
+				WHEN sync_apply_deferred.reason_code = ? AND excluded.reason_code <> ? THEN sync_apply_deferred.project
+				ELSE excluded.project
+			END,
 			scope_class       = excluded.scope_class,
 			apply_status      = CASE
 				WHEN excluded.apply_status = 'dead' THEN 'dead'
@@ -6699,7 +6702,7 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 		WHERE sync_apply_deferred.apply_status <> 'dead'
 		   OR excluded.apply_status = 'dead'
 		   OR ?
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status, relationDeferredOuterProjectAuthoritativeReasonCode, rearmFlag, rearmFlag, rearmFlag); err != nil {
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status, relationDeferredOuterProjectAuthoritativeReasonCode, relationDeferredOuterProjectAuthoritativeReasonCode, relationDeferredOuterProjectAuthoritativeReasonCode, rearmFlag, rearmFlag, rearmFlag); err != nil {
 		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 

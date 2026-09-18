@@ -677,6 +677,8 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 		payloadProject       string
 		clearProvenance      bool
 		enqueueBlankOuterDup bool
+		wantDeferredProject  string
+		wantReplayAttempt    bool
 		wantApplied          bool
 	}{
 		{
@@ -693,8 +695,10 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 		{
 			name:                 "blank-project duplicate preserves authoritative replay scope",
 			outerProject:         projectA,
-			payloadProject:       projectA,
+			payloadProject:       projectB,
 			enqueueBlankOuterDup: true,
+			wantDeferredProject:  projectA,
+			wantReplayAttempt:    true,
 		},
 	}
 
@@ -739,6 +743,15 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 					t.Fatalf("EnqueueDeferredRelation blank-project duplicate: %v", err)
 				}
 			}
+			if tt.wantDeferredProject != "" {
+				var gotProject string
+				if err := s.db.QueryRow(`SELECT project FROM sync_apply_deferred WHERE sync_id = ?`, relationSyncID).Scan(&gotProject); err != nil {
+					t.Fatalf("read deferred project: %v", err)
+				}
+				if gotProject != tt.wantDeferredProject {
+					t.Fatalf("deferred project = %q, want %q", gotProject, tt.wantDeferredProject)
+				}
+			}
 
 			targetObservationID, _ := addTestObsSession(t, s, "session-replay", "Personal target", "decision", endpointProject, "personal")
 			if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, targetID, targetObservationID); err != nil {
@@ -748,6 +761,9 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 			result, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, projectA)
 			if err != nil {
 				t.Fatalf("ReplayDeferredForScope: %v", err)
+			}
+			if tt.wantReplayAttempt && result.Retried != 1 {
+				t.Fatalf("replayed deferred rows = %d, want 1 (result=%+v)", result.Retried, result)
 			}
 			if got := countRelationRows(t, s, relationSyncID); (got == 1) != tt.wantApplied {
 				t.Fatalf("replayed relation rows = %d, want applied=%t (result=%+v)", got, tt.wantApplied, result)
