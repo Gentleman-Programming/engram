@@ -94,6 +94,7 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
+	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
 
 func printDoctorRepairUsage() {
@@ -101,6 +102,23 @@ func printDoctorRepairUsage() {
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
 	_, _ = fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
+	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
+}
+
+func diagnosticOnlyCheckCodes() []string {
+	repairable := make(map[string]bool, len(diagnostic.RepairableCodes()))
+	for _, code := range diagnostic.RepairableCodes() {
+		repairable[code] = true
+	}
+
+	registered := diagnostic.RegisteredCodes()
+	diagnosticOnly := make([]string, 0, len(registered)-len(repairable))
+	for _, code := range registered {
+		if !repairable[code] {
+			diagnosticOnly = append(diagnosticOnly, code)
+		}
+	}
+	return diagnosticOnly
 }
 
 func cmdDoctorRepair(cfg store.Config) {
