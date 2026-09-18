@@ -179,6 +179,17 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	cfg := testConfig(t)
 	repairable := diagnostic.RepairableCodes()
 	registered := diagnostic.RegisteredCodes()
+	repairableSet := make(map[string]bool, len(repairable))
+	for _, code := range repairable {
+		repairableSet[code] = true
+	}
+	diagnosticOnly := make([]string, 0, len(registered)-len(repairable))
+	for _, code := range registered {
+		if !repairableSet[code] {
+			diagnosticOnly = append(diagnosticOnly, code)
+		}
+	}
+	wantDiagnosticOnly := "diagnostic-only checks with no repair: " + strings.Join(diagnosticOnly, ", ")
 
 	withArgs(t, "engram", "doctor", "--help")
 	usage, usageErr := captureOutput(t, func() { cmdDoctor(cfg) })
@@ -187,6 +198,9 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	}
 	if !strings.Contains(usage, "checks: "+strings.Join(registered, ", ")) {
 		t.Fatalf("usage lost registered checks: %q", usage)
+	}
+	if !strings.Contains(usage, wantDiagnosticOnly) {
+		t.Fatalf("usage diagnostic-only checks=%q want %q", usage, wantDiagnosticOnly)
 	}
 
 	withArgs(t, "engram", "doctor", "repair", "--help")
@@ -197,10 +211,11 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	if !strings.Contains(repairUsage, "repairable checks: "+strings.Join(repairable, ", ")) {
 		t.Fatalf("repair usage repairable checks=%q", repairUsage)
 	}
+	if !strings.Contains(repairUsage, wantDiagnosticOnly) {
+		t.Fatalf("repair usage diagnostic-only checks=%q want %q", repairUsage, wantDiagnosticOnly)
+	}
 
-	repairableSet := make(map[string]bool, len(repairable))
 	for _, code := range repairable {
-		repairableSet[code] = true
 		args := []string{"engram", "doctor", "repair", "--check", code, "--plan"}
 		if code != diagnostic.CheckSyncMutationRequiredFields {
 			args = append(args, "--project", "engram")
