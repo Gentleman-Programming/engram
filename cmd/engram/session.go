@@ -198,7 +198,7 @@ func cmdSessionEndSingle(cfg store.Config, parsed sessionEndArgs) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var summary *string
 	if parsed.hasSummary {
@@ -244,7 +244,7 @@ func cmdSessionEndBulk(cfg store.Config, parsed sessionEndArgs) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	now := time.Now()
 	if !parsed.apply {
