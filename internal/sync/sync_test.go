@@ -3956,8 +3956,8 @@ func withObservationDelete(chunk ChunkData, syncID string) ChunkData {
 // durable hub delete for the absent endpoint inside the current manifest
 // snapshot proves the edge permanently unsatisfiable; that edge is skipped
 // with a visible warning and durably queued for replay. An upsert for the same
-// ID anywhere in the snapshot keeps the edge recoverable, including when the
-// upsert's identity comes from the payload because its entity_key is blank.
+// ID anywhere in the snapshot keeps the edge recoverable when its payload and
+// entity_key satisfy the store identity contract.
 func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 	for _, tt := range []struct {
 		name             string
@@ -3968,6 +3968,7 @@ func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 		extraChunk       ChunkData
 		wantSkippedEdges []string
 		wantDeferred     int
+		wantDead         int
 		wantRelation     bool
 		assertStore      func(t *testing.T, s *store.Store)
 	}{
@@ -4047,30 +4048,55 @@ func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 			wantRelation:     true,
 		},
 		{
-			name:       "blank entity key upsert with payload sync id prevents false skip",
-			relChunkID: "chunk-skip-blank-key",
+			name:       "keyed upsert with omitted payload sync id prevents false skip",
+			relChunkID: "chunk-skip-keyed-fallback",
 			relChunk: func() ChunkData {
-				chunk := relationMissingEndpointChunk("sess-skip-blank", "obs-skip-blank-src", "obs-skip-blank-x", "rel-skip-blank")
-				chunk.Mutations = append(chunk.Mutations,
-					store.SyncMutation{
-						Entity:    store.SyncEntityObservation,
-						EntityKey: "",
-						Op:        store.SyncOpUpsert,
-						Payload:   `{"sync_id":"obs-skip-blank-x","session_id":"sess-skip-blank","type":"decision","title":"x","content":"identity from payload only","project":"proj-a","scope":"project"}`,
-					},
-					store.SyncMutation{
-						Entity:    store.SyncEntityObservation,
-						EntityKey: "obs-skip-blank-x",
-						Op:        store.SyncOpDelete,
-						Payload:   `{"sync_id":"obs-skip-blank-x","deleted":true,"hard_delete":true}`,
-					},
-				)
+				chunk := withObservationDelete(relationMissingEndpointChunk("sess-skip-keyed", "obs-skip-keyed-src", "obs-skip-keyed-x", "rel-skip-keyed"), "obs-skip-keyed-x")
+				chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: " obs-skip-keyed-x ",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"session_id":"sess-skip-keyed","type":"decision","title":"x","content":"identity from mutation key","project":"proj-a","scope":"project"}`,
+				})
 				return chunk
 			},
-			relID:            "rel-skip-blank",
+			relID:            "rel-skip-keyed",
 			wantSkippedEdges: nil,
 			wantDeferred:     0,
 			wantRelation:     true,
+		},
+		{
+			name:       "mismatched upsert does not suppress delete evidence",
+			relChunkID: "chunk-skip-mismatched-evidence",
+			relChunk: func() ChunkData {
+				chunk := withObservationDelete(relationMissingEndpointChunk("sess-skip-mismatch", "obs-skip-mismatch-src", "obs-skip-mismatch-gone", "rel-skip-mismatch"), "obs-skip-mismatch-gone")
+				chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: "obs-skip-mismatch-invalid",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"obs-skip-mismatch-gone","session_id":"sess-skip-mismatch","type":"decision","title":"invalid","content":"must be quarantined","project":"proj-a","scope":"project"}`,
+				})
+				return chunk
+			},
+			relID: "rel-skip-mismatch",
+			wantSkippedEdges: []string{
+				"relation obs-skip-mismatch-src->obs-skip-mismatch-gone: referenced observation missing permanently",
+			},
+			wantDeferred: 1,
+			wantDead:     1,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "dead"})
+				if err != nil {
+					t.Fatalf("list quarantine evidence: %v", err)
+				}
+				for _, row := range rows {
+					if row.Entity == store.SyncEntityObservation && row.EntityKey == "obs-skip-mismatch-invalid" && row.ReasonCode == store.SyncObservationIdentityInvalidReasonCode {
+						return
+					}
+				}
+				t.Fatalf("expected invalid observation quarantine evidence, got %+v", rows)
+			},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4103,8 +4129,8 @@ func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("count deferred and dead: %v", err)
 			}
-			if deferred != tt.wantDeferred || dead != 0 {
-				t.Fatalf("unexpected deferred state: deferred=%d dead=%d, want deferred=%d dead=0", deferred, dead, tt.wantDeferred)
+			if deferred != tt.wantDeferred || dead != tt.wantDead {
+				t.Fatalf("unexpected deferred state: deferred=%d dead=%d, want deferred=%d dead=%d", deferred, dead, tt.wantDeferred, tt.wantDead)
 			}
 			if tt.wantRelation {
 				if _, err := s.GetRelation(tt.relID); err != nil {
@@ -5607,11 +5633,10 @@ func TestCloudImportReadsEachPendingChunkOnce(t *testing.T) {
 	}
 }
 
-// TestImportDependencyOracleClassificationSets triangulates the observation
-// identity rules the classification relies on: a blank entity_key falls back
-// to the payload's trimmed sync_id, an identity that stays blank or whose
-// payload cannot be decoded is ignored, and delete mutations feed only the
-// delete-evidence set — never the upsert set.
+// TestImportDependencyOracleClassificationSets triangulates the store's
+// observation identity contract: both identities are trimmed, a blank payload
+// sync_id falls back to a non-blank entity_key, and mismatched, effectively
+// blank, or undecodable identities contribute no evidence.
 func TestImportDependencyOracleClassificationSets(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
@@ -5620,29 +5645,30 @@ func TestImportDependencyOracleClassificationSets(t *testing.T) {
 		wantDeletes []string
 	}{
 		{
-			name: "blank entity key falls back to payload sync id on both ops",
+			name: "matching identities are trimmed on both ops",
 			mutations: []store.SyncMutation{
-				{Entity: store.SyncEntityObservation, EntityKey: "", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-blank-up"}`},
-				{Entity: store.SyncEntityObservation, EntityKey: "", Op: store.SyncOpDelete, Payload: `{"sync_id":"obs-blank-del"}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-matching-up ", Op: store.SyncOpUpsert, Payload: `{"sync_id":" obs-matching-up "}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-matching-del ", Op: store.SyncOpDelete, Payload: `{"sync_id":" obs-matching-del "}`},
 			},
-			wantUpserts: []string{"obs-blank-up"},
-			wantDeletes: []string{"obs-blank-del"},
+			wantUpserts: []string{"obs-matching-up"},
+			wantDeletes: []string{"obs-matching-del"},
 		},
 		{
-			name: "payload identity overrides a mismatched entity key on both ops",
+			name: "blank payload sync id falls back to entity key on both ops",
 			mutations: []store.SyncMutation{
-				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-up", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-payload-up"}`},
-				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-del", Op: store.SyncOpDelete, Payload: `{"sync_id":"obs-payload-del"}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-fallback-up ", Op: store.SyncOpUpsert, Payload: `{"sync_id":" "}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-fallback-del ", Op: store.SyncOpDelete, Payload: `{"other":"x"}`},
 			},
-			wantUpserts: []string{"obs-payload-up"},
-			wantDeletes: []string{"obs-payload-del"},
+			wantUpserts: []string{"obs-fallback-up"},
+			wantDeletes: []string{"obs-fallback-del"},
 		},
 		{
-			name: "identity-less or malformed payloads are ignored despite an entity key",
+			name: "payload-only mismatched blank and malformed identities are ignored",
 			mutations: []store.SyncMutation{
-				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-blank", Op: store.SyncOpUpsert, Payload: `{"sync_id":"   "}`},
+				{Entity: store.SyncEntityObservation, EntityKey: "", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-payload-only"}`},
+				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-mismatch", Op: store.SyncOpDelete, Payload: `{"sync_id":"obs-payload-mismatch"}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " \t", Op: store.SyncOpUpsert, Payload: `{"sync_id":" "}`},
 				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-malformed", Op: store.SyncOpUpsert, Payload: `not-json`},
-				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-missing", Op: store.SyncOpDelete, Payload: `{"other":"x"}`},
 			},
 			wantUpserts: nil,
 			wantDeletes: nil,

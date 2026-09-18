@@ -1325,11 +1325,10 @@ func (o *importDependencyOracle) classifyPendingChunks() (upserts, deletes map[s
 	return upserts, deletes, nil
 }
 
-// observationMutationSyncID resolves the observation identity an upsert or
-// delete mutation acts on. The store applies both operations by the payload's
-// sync_id (applyObservationUpsertTx / applyObservationDeleteTx), so classifier
-// evidence must use that decoded identity even when entity_key is non-blank. A
-// malformed or identity-less payload cannot contribute evidence.
+// observationMutationSyncID resolves an observation mutation identity exactly
+// as the store does: a blank payload sync_id falls back to entity_key, while a
+// non-blank payload sync_id must match it. Invalid identities and undecodable
+// payloads contribute no dependency evidence.
 func observationMutationSyncID(mutation store.SyncMutation) string {
 	var payload struct {
 		SyncID string `json:"sync_id"`
@@ -1337,7 +1336,16 @@ func observationMutationSyncID(mutation store.SyncMutation) string {
 	if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(payload.SyncID)
+
+	entityKey := strings.TrimSpace(mutation.EntityKey)
+	syncID := strings.TrimSpace(payload.SyncID)
+	if syncID == "" {
+		syncID = entityKey
+	}
+	if syncID == "" || entityKey == "" || syncID != entityKey {
+		return ""
+	}
+	return syncID
 }
 
 // filterUnsatisfiableRelationUpserts returns the chunk with relation upserts
