@@ -7723,6 +7723,9 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 	})
 }
 
+// modernc.org/sqlite v1.45.0 maps ReadOnly to deferred BEGIN, overriding
+// storeDSN's _txlock=immediate. Read-only planners therefore do not reserve a
+// writer lock; writable paths continue to use withTx.
 func (s *Store) withReadTx(fn func(tx *sql.Tx) error) error {
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {

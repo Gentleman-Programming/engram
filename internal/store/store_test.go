@@ -51,6 +51,22 @@ func enrollTestProject(t *testing.T, s *Store, project string) {
 	}
 }
 
+type firstNextBlockingScanner struct {
+	rowScanner
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (s *firstNextBlockingScanner) Next() bool {
+	next := s.rowScanner.Next()
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return next
+}
+
 func TestStoreDataDir(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
@@ -65,7 +81,9 @@ func TestStoreDataDir(t *testing.T) {
 	}
 }
 
-func TestRepairObservationMutationTitlesPlanDoesNotReserveWriterLock(t *testing.T) {
+// Characterization: the plan holds withReadTx open. modernc.org/sqlite v1.45.0
+// must let ReadOnly override the DSN's immediate mode, so this writer proceeds.
+func TestWithReadTxReadOnlyDoesNotReserveWriterLockDuringRepairPlan(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
 	cfg.DedupeWindow = time.Hour
@@ -95,11 +113,14 @@ func TestRepairObservationMutationTitlesPlanDoesNotReserveWriterLock(t *testing.
 	release := func() { releasePlannerOnce.Do(func() { close(releasePlanner) }) }
 	t.Cleanup(release)
 	planner.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
-		if strings.Contains(query, "FROM sync_mutations WHERE target_key") {
-			close(plannerEnteredQuery)
-			<-releasePlanner
+		rows, err := originalQueryIt(db, query, args...)
+		if err != nil {
+			return nil, err
 		}
-		return originalQueryIt(db, query, args...)
+		if strings.Contains(query, "FROM sync_mutations WHERE target_key") {
+			return &firstNextBlockingScanner{rowScanner: rows, entered: plannerEnteredQuery, release: releasePlanner}, nil
+		}
+		return rows, nil
 	}
 	t.Cleanup(func() { planner.hooks.queryIt = originalQueryIt })
 
