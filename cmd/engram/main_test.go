@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 const (
 	windowsTempDirCleanupAttempts = 10
 	windowsTempDirCleanupDelay    = 10 * time.Millisecond
+	windowsErrorDirNotEmpty       = syscall.Errno(145)
 )
 
 func testTempDir(t *testing.T) string {
@@ -48,6 +50,9 @@ func testTempDir(t *testing.T) string {
 			cleanupErr = os.RemoveAll(dir)
 			if cleanupErr == nil {
 				return
+			}
+			if !errors.Is(cleanupErr, windowsErrorDirNotEmpty) {
+				t.Fatalf("remove test temp directory %q: %v", dir, cleanupErr)
 			}
 			if attempt < windowsTempDirCleanupAttempts {
 				time.Sleep(windowsTempDirCleanupDelay)
