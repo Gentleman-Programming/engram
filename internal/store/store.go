@@ -2917,6 +2917,229 @@ func (s *Store) EndSession(id string, summary string) error {
 	})
 }
 
+// Session end statuses reported by EndSessionStrict.
+const (
+	SessionEndStatusEnded        = "ended"
+	SessionEndStatusAlreadyEnded = "already_ended"
+	SessionEndStatusNotFound     = "not_found"
+)
+
+// EndSessionStrict ends an open session and reports what happened instead of
+// silently succeeding like EndSession. The UPDATE matches only open rows, so
+// an already-ended session reports "already_ended" with its original ended_at
+// and summary intact, and a missing ID reports "not_found" — neither can ever
+// overwrite persisted data. A non-nil summary fills an empty summary through
+// COALESCE without clobbering one recorded earlier. Sync journaling mirrors
+// EndSession and runs only when the session was actually ended.
+func (s *Store) EndSessionStrict(id string, summary *string) (string, error) {
+	if err := validateSessionID(id); err != nil {
+		return "", err
+	}
+	status := SessionEndStatusEnded
+	if err := s.withTx(func(tx *sql.Tx) error {
+		res, err := s.execHook(tx,
+			`UPDATE sessions SET ended_at = datetime('now'), summary = COALESCE(?, summary) WHERE id = ? AND ended_at IS NULL`,
+			summary, id,
+		)
+		if err != nil {
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			var existing int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, id).Scan(&existing); err != nil {
+				return err
+			}
+			if existing == 0 {
+				status = SessionEndStatusNotFound
+			} else {
+				status = SessionEndStatusAlreadyEnded
+			}
+			return nil
+		}
+
+		var startedAt, endedAt string
+		var project, directory, mode string
+		var storedSummary *string
+		// sessions.project is read through ifnull() because a database upgraded from
+		// the schema where the column was nullable still carries rows that identify no
+		// project, and no migration rewrites them.
+		if err := tx.QueryRow(
+			`SELECT ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`,
+			id,
+		).Scan(&project, &mode, &directory, &startedAt, &endedAt, &storedSummary); err != nil {
+			return err
+		}
+
+		return s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpUpsert, syncSessionPayload{
+			ID:            id,
+			Project:       project,
+			OwnershipMode: mode,
+			Directory:     directory,
+			StartedAt:     startedAt,
+			EndedAt:       &endedAt,
+			Summary:       storedSummary,
+		})
+	}); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+// StaleOpenSession is one open session a stale-session report or bulk end
+// operation is considering. LastActivity is the effective last-activity proxy:
+// the newest observation the session recorded, falling back to started_at when
+// it recorded none.
+type StaleOpenSession struct {
+	ID           string
+	Project      string
+	Directory    string
+	StartedAt    string
+	LastActivity string
+}
+
+// sqliteTimeLayout matches the "YYYY-MM-DD HH:MM:SS" UTC format that
+// datetime('now') writes into sessions.started_at and observations.created_at.
+const sqliteTimeLayout = "2006-01-02 15:04:05"
+
+// staleOpenSessionQuery builds the shared read-only selection of open sessions
+// whose effective last activity predates a cutoff. The caller appends the
+// cutoff as the final bind argument. When project is empty every project is
+// selected; otherwise LOWER() keeps the filter consistent with
+// ActiveRuntimeSessions, and NULL or blank project rows never match because
+// neither LOWER(NULL) nor ” equals a named project.
+func staleOpenSessionQuery(project string) (string, []any) {
+	query := `
+		SELECT s.id, ifnull(s.project, ''), ifnull(s.directory, ''), s.started_at,
+		       COALESCE(MAX(o.created_at), s.started_at)
+		FROM sessions s
+		LEFT JOIN observations o ON o.session_id = s.id
+		WHERE s.ended_at IS NULL`
+	args := []any{}
+	if project != "" {
+		query += ` AND LOWER(s.project) = LOWER(?)`
+		args = append(args, project)
+	}
+	query += `
+		GROUP BY s.id
+		HAVING COALESCE(MAX(o.created_at), s.started_at) < ?
+		ORDER BY s.id`
+	return query, args
+}
+
+// StaleOpenSessions returns open sessions whose effective last activity (the
+// newest observation, falling back to started_at) is older than now minus
+// olderThan. The selection is read-only and ordered by ID for deterministic
+// reporting; it never considers ended sessions.
+func (s *Store) StaleOpenSessions(now time.Time, olderThan time.Duration, project string) ([]StaleOpenSession, error) {
+	query, args := staleOpenSessionQuery(project)
+	args = append(args, now.Add(-olderThan).UTC().Format(sqliteTimeLayout))
+
+	rows, err := s.queryHook(s.db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stale := make([]StaleOpenSession, 0)
+	for rows.Next() {
+		var sess StaleOpenSession
+		if err := rows.Scan(&sess.ID, &sess.Project, &sess.Directory, &sess.StartedAt, &sess.LastActivity); err != nil {
+			return nil, err
+		}
+		stale = append(stale, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return stale, nil
+}
+
+// EndSessionsBulk ends every open session matching the staleness filter in one
+// transaction: it re-selects the matches, sets ended_at without touching any
+// summary, and journals one sync mutation per ended session, so a cloud mirror
+// can never observe a partially applied batch. It returns the ended IDs in
+// selection order.
+func (s *Store) EndSessionsBulk(now time.Time, olderThan time.Duration, project string) ([]string, error) {
+	cutoff := now.Add(-olderThan).UTC().Format(sqliteTimeLayout)
+	var ended []string
+	if err := s.withTx(func(tx *sql.Tx) error {
+		ended = nil
+		query, args := staleOpenSessionQuery(project)
+		args = append(args, cutoff)
+
+		rows, err := tx.Query(query, args...)
+		if err != nil {
+			return err
+		}
+		stale := make([]StaleOpenSession, 0)
+		for rows.Next() {
+			var sess StaleOpenSession
+			if err := rows.Scan(&sess.ID, &sess.Project, &sess.Directory, &sess.StartedAt, &sess.LastActivity); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			stale = append(stale, sess)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		// Release the read cursor before writing to the same table inside
+		// this transaction.
+		_ = rows.Close()
+
+		for _, sess := range stale {
+			res, err := s.execHook(tx,
+				`UPDATE sessions SET ended_at = datetime('now') WHERE id = ? AND ended_at IS NULL`,
+				sess.ID,
+			)
+			if err != nil {
+				return err
+			}
+			updated, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if updated == 0 {
+				continue
+			}
+
+			var startedAt, endedAt string
+			var project, directory, mode string
+			var storedSummary *string
+			// sessions.project is read through ifnull() because a database upgraded
+			// from the schema where the column was nullable still carries rows that
+			// identify no project, and no migration rewrites them.
+			if err := tx.QueryRow(
+				`SELECT ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`,
+				sess.ID,
+			).Scan(&project, &mode, &directory, &startedAt, &endedAt, &storedSummary); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, sess.ID, SyncOpUpsert, syncSessionPayload{
+				ID:            sess.ID,
+				Project:       project,
+				OwnershipMode: mode,
+				Directory:     directory,
+				StartedAt:     startedAt,
+				EndedAt:       &endedAt,
+				Summary:       storedSummary,
+			}); err != nil {
+				return err
+			}
+			ended = append(ended, sess.ID)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return ended, nil
+}
+
 func (s *Store) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
 		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary, runtime_lease_expires_at FROM sessions WHERE id = ?`, id,
