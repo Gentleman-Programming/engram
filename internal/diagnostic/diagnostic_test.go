@@ -1199,6 +1199,10 @@ func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *te
 	}
 }
 
+// TestBuildRepairPlanOrphanedObservationSessionRules proves the planner's
+// grouping rules: single-project evidence becomes a sorted placeholder action,
+// a session ID referenced by multiple projects is skipped as ambiguous, blank
+// required fields are skipped as invalid, and a clean report yields a noop plan.
 func TestBuildRepairPlanOrphanedObservationSessionRules(t *testing.T) {
 	evidence := func(project, sessionID string, count int64, first string) Finding {
 		raw, err := json.Marshal(store.OrphanedObservationSessionEvidence{

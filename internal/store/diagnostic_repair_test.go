@@ -59,6 +59,9 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 	}
 }
 
+// TestRestoreOrphanedObservationSessionsRollsBackOnFailure proves that a
+// mid-batch insert failure rolls the whole transaction back so no partial
+// placeholder set survives.
 func TestRestoreOrphanedObservationSessionsRollsBackOnFailure(t *testing.T) {
 	s := newTestStore(t)
 	seedOrphanedObservationSession(t, s, "obs-a", "missing-a", "engram", nil)
@@ -84,6 +87,9 @@ func TestRestoreOrphanedObservationSessionsRollsBackOnFailure(t *testing.T) {
 	}
 }
 
+// TestRestoreOrphanedObservationSessionsRejectsConflictingEvidence proves
+// the store fails closed when a session ID is referenced by observations from
+// multiple projects, persisting no placeholder.
 func TestRestoreOrphanedObservationSessionsRejectsConflictingEvidence(t *testing.T) {
 	s := newTestStore(t)
 	seedOrphanedObservationSession(t, s, "obs-alpha", "missing-shared", "alpha", nil)
@@ -98,6 +104,9 @@ func TestRestoreOrphanedObservationSessionsRejectsConflictingEvidence(t *testing
 	}
 }
 
+// TestRestoreOrphanedObservationSessionsRejectsExistingOwnershipConflict
+// proves the store refuses to attach an existing session ID to a different
+// project and leaves the current owner untouched.
 func TestRestoreOrphanedObservationSessionsRejectsExistingOwnershipConflict(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("existing-session", "beta", "/work/beta"); err != nil {
@@ -113,6 +122,9 @@ func TestRestoreOrphanedObservationSessionsRejectsExistingOwnershipConflict(t *t
 	}
 }
 
+// TestRestoreOrphanedObservationSessionsRollsBackBatchOnConflict proves
+// that a conflict discovered after earlier actions already inserted rows
+// aborts the transaction and rolls the whole batch back.
 func TestRestoreOrphanedObservationSessionsRollsBackBatchOnConflict(t *testing.T) {
 	s := newTestStore(t)
 	seedOrphanedObservationSession(t, s, "obs-safe", "missing-safe", "alpha", nil)
@@ -131,6 +143,9 @@ func TestRestoreOrphanedObservationSessionsRollsBackBatchOnConflict(t *testing.T
 	}
 }
 
+// TestRestoreOrphanedObservationSessionsTreatsMatchingExistingSessionAsNoop
+// proves that a session already owned by the same project is reported as an
+// applied no-op rather than an error or a duplicate insert.
 func TestRestoreOrphanedObservationSessionsTreatsMatchingExistingSessionAsNoop(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("existing-session", "alpha", "/work/alpha"); err != nil {

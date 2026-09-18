@@ -299,6 +299,9 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 	return applied, nil
 }
 
+// orphanedObservationProjects returns the set of normalized projects whose
+// observations currently reference the given session ID inside the caller's
+// transaction.
 func orphanedObservationProjects(tx *sql.Tx, sessionID string) (map[string]struct{}, error) {
 	rows, err := tx.Query(`SELECT DISTINCT ifnull(project, '') FROM observations WHERE session_id = ?`, sessionID)
 	if err != nil {

@@ -535,6 +535,11 @@ func TestCmdDoctorTextOutput(t *testing.T) {
 	}
 }
 
+// TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder
+// proves the full plan/dry-run/apply flow: apply creates an immediately ended,
+// project-owned placeholder with no directory and no session sync mutation,
+// preserves the observation, and reports a noop with zero applied sessions on
+// the idempotent rerun.
 func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t *testing.T) {
 	cfg := testConfig(t)
 	initDoctorStore(t, cfg)
@@ -598,6 +603,9 @@ func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t
 	}
 }
 
+// TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop
+// proves that an apply over a session that already exists reports an explicit
+// noop with zero applied sessions instead of looking successfully repaired.
 func TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop(t *testing.T) {
 	cfg := testConfig(t)
 	initDoctorStore(t, cfg)

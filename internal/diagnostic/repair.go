@@ -148,6 +148,10 @@ func planForeignSyncTargetCleanup(plan *RepairPlan, scope Scope) error {
 	return nil
 }
 
+// planOrphanedObservationSessionRepair turns orphaned-session findings into
+// placeholder actions, grouping evidence by session ID so a session referenced
+// from multiple normalized projects is skipped deterministically instead of
+// being attached to an arbitrary project.
 func planOrphanedObservationSessionRepair(plan *RepairPlan, report Report) {
 	candidates := map[string]store.OrphanedSessionPlaceholder{}
 	ambiguous := map[string]bool{}
