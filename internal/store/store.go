@@ -1927,30 +1927,23 @@ func (s *Store) applyCloudUpgradeLegacyMutationRepairs(project string) error {
 }
 
 func (s *Store) evaluateCloudUpgradeLegacyMutations(project string) ([]cloudUpgradeLegacyMutationEvaluation, error) {
-	return s.withReadTx(func(tx *sql.Tx) ([]cloudUpgradeLegacyMutationEvaluation, error) {
+	var evaluations []cloudUpgradeLegacyMutationEvaluation
+	err := s.withReadTx(func(tx *sql.Tx) error {
 		mutations, err := s.listPendingProjectMutationsTx(tx, project)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		evaluations := make([]cloudUpgradeLegacyMutationEvaluation, 0, len(mutations))
+		evaluations = make([]cloudUpgradeLegacyMutationEvaluation, 0, len(mutations))
 		for _, mutation := range mutations {
 			eval, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			evaluations = append(evaluations, eval)
 		}
-		return evaluations, nil
+		return nil
 	})
-}
-
-func (s *Store) withReadTx(fn func(tx *sql.Tx) ([]cloudUpgradeLegacyMutationEvaluation, error)) ([]cloudUpgradeLegacyMutationEvaluation, error) {
-	tx, err := s.beginTxHook()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	return fn(tx)
+	return evaluations, err
 }
 
 // listPendingProjectMutationsTx returns the transportable pending journal rows a
@@ -5516,7 +5509,11 @@ func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, ap
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	report := SyncMutationQuarantineReport{Project: project, Applied: apply, Actions: []SyncMutationQuarantineAction{}}
-	err := s.withTx(func(tx *sql.Tx) error {
+	runTx := s.withTx
+	if !apply {
+		runTx = s.withReadTx
+	}
+	err := runTx(func(tx *sql.Tx) error {
 		affectedProjects := map[string]struct{}{}
 		quarantinedAny := false
 		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
@@ -5606,7 +5603,11 @@ func (s *Store) SupersedeUnenrolledLegacyMutations(targetKey, project string, ap
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	report := SyncMutationSupersedeReport{Project: project, Applied: apply, Actions: []SyncMutationSupersedeAction{}}
-	err := s.withTx(func(tx *sql.Tx) error {
+	runTx := s.withTx
+	if !apply {
+		runTx = s.withReadTx
+	}
+	err := runTx(func(tx *sql.Tx) error {
 		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 			FROM sync_mutations sm
 			WHERE sm.target_key = ? AND sm.acked_at IS NULL AND sm.disposition = ?
@@ -7722,6 +7723,15 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 	})
 }
 
+func (s *Store) withReadTx(fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return fn(tx)
+}
+
 func withSQLiteWriteRetry(fn func() error) error {
 	var lastErr error
 	for attempt := 0; attempt <= len(sqliteWriteRetryBackoffs); attempt++ {
@@ -7823,7 +7833,11 @@ type SyncTargetState struct {
 // their state only when no terminal journal rows remain.
 func (s *Store) CleanupForeignSyncTargets(apply bool) (ForeignSyncTargetCleanupReport, error) {
 	report := ForeignSyncTargetCleanupReport{Actions: []ForeignSyncTargetCleanupAction{}}
-	err := s.withTx(func(tx *sql.Tx) error {
+	runTx := s.withTx
+	if !apply {
+		runTx = s.withReadTx
+	}
+	err := runTx(func(tx *sql.Tx) error {
 		rows, err := s.queryItHook(tx, `
 			SELECT ss.target_key,
 				SUM(CASE WHEN sm.acked_at IS NULL AND sm.disposition = 'pending' AND EXISTS(SELECT 1 FROM sync_enrolled_projects sep WHERE sep.project = sm.project) THEN 1 ELSE 0 END),

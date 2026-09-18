@@ -703,7 +703,11 @@ func (s *Store) RepairObservationMutationTitles(project string, apply bool) (Syn
 	project = strings.TrimSpace(project)
 	report := SyncMutationTitleRepairReport{Project: project, Applied: apply, Actions: []SyncMutationTitleRepairAction{}}
 	var actions []SyncMutationTitleRepairAction
-	err := s.withTx(func(tx *sql.Tx) error {
+	runTx := s.withTx
+	if !apply {
+		runTx = s.withReadTx
+	}
+	err := runTx(func(tx *sql.Tx) error {
 		type titleRepair struct {
 			action        SyncMutationTitleRepairAction
 			payload       string
