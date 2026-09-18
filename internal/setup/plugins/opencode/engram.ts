@@ -13,6 +13,8 @@
  *   even when no session.created event is replayed.
  */
 
+import { spawn, spawnSync } from "node:child_process"
+import { existsSync } from "node:fs"
 import type { Plugin } from "@opencode-ai/plugin"
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -167,8 +169,9 @@ async function engramFetch(
 }
 
 function localInstanceID(): string {
-  const result = Bun.spawnSync([ENGRAM_BIN, "instance-id"]); const id = Buffer.from(result.stdout).toString().trim()
-  if (result.exitCode !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
+  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8" })
+  const id = (result.stdout ?? "").toString().trim()
+  if (result.status !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
   return id
 }
 
@@ -185,8 +188,14 @@ async function isEngramRunning(expectedID = ""): Promise<boolean> {
 }
 
 async function ensureLocalReady(): Promise<boolean> {
-	if (!localReady) localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
-	return localReady
+  if (!localReady) {
+    try {
+      localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
+    } catch {
+      localReady = false
+    }
+  }
+  return localReady
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -533,11 +542,12 @@ export const Engram: Plugin = async (ctx) => {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
 		localReady = await isEngramRunning(expectedID)
 		if (!localReady && !CONFIGURED_ENGRAM_URL) {
-			Bun.spawn([ENGRAM_BIN, "serve"], {
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-			})
+      const serverChild = spawn(ENGRAM_BIN, ["serve"], {
+        detached: true,
+        stdio: "ignore",
+      })
+      serverChild.on("error", () => {})
+      serverChild.unref()
 			await new Promise((r) => setTimeout(r, 500))
 			localReady = await isEngramRunning(expectedID)
 		}
@@ -550,14 +560,14 @@ export const Engram: Plugin = async (ctx) => {
 		// pulling changes. Each chunk is imported only once (tracked by ID).
 		try {
 			const manifestFile = `${ctx.directory}/.engram/manifest.json`
-			const file = Bun.file(manifestFile)
-			if (await file.exists()) {
-				Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
-					cwd: ctx.directory,
-					stdout: "ignore",
-					stderr: "ignore",
-					stdin: "ignore",
-				})
+			if (existsSync(manifestFile)) {
+        const importChild = spawn(ENGRAM_BIN, ["sync", "--import"], {
+          cwd: ctx.directory,
+          detached: true,
+          stdio: "ignore",
+        })
+        importChild.on("error", () => {})
+        importChild.unref()
 			}
 		} catch {
 			// Manifest doesn't exist or binary not found — silently skip

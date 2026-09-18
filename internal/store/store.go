@@ -98,6 +98,8 @@ var (
 
 	// ErrPulledSessionIdentityInvalid identifies an invalid identity after successful decoding and legacy fallback.
 	ErrPulledSessionIdentityInvalid = errors.New("pulled session identity is invalid")
+	// ErrPulledObservationIdentityInvalid identifies a pulled observation whose payload and mutation identities disagree.
+	ErrPulledObservationIdentityInvalid = errors.New("pulled observation identity is invalid")
 	// ErrPulledSessionDirectoryInvalid identifies a pulled or imported session that
 	// has no concrete directory and therefore cannot be admitted as cloud state.
 	ErrPulledSessionDirectoryInvalid = errors.New("pulled session directory is invalid")
@@ -334,7 +336,8 @@ const (
 	SyncSourceLocal  = "local"
 	SyncSourceRemote = "remote"
 
-	SyncSessionIdentityInvalidReasonCode = "sync_session_identity_invalid"
+	SyncSessionIdentityInvalidReasonCode     = "sync_session_identity_invalid"
+	SyncObservationIdentityInvalidReasonCode = "sync_observation_identity_invalid"
 
 	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
 	// relation carried a non-blank outer mutation project. Unmarked legacy rows
@@ -416,6 +419,9 @@ type SyncMutation struct {
 const (
 	SyncMutationDispositionPending     = "pending"
 	SyncMutationDispositionQuarantined = "quarantined"
+	SyncMutationDispositionSuperseded  = "superseded"
+
+	SyncMutationSupersededReasonLocalEntityDeleted = "local_entity_deleted"
 )
 
 // SyncMutationQuarantineAction records one deterministic local quarantine.
@@ -435,6 +441,26 @@ type SyncMutationQuarantineReport struct {
 	Project string                         `json:"project,omitempty"`
 	Applied bool                           `json:"applied"`
 	Actions []SyncMutationQuarantineAction `json:"actions"`
+}
+
+// SyncMutationSupersedeAction records a local journal row retired because a
+// tombstone or deleted source row proves that its prior upsert is obsolete.
+type SyncMutationSupersedeAction struct {
+	Seq        int64  `json:"seq"`
+	Project    string `json:"project"`
+	Entity     string `json:"entity"`
+	EntityKey  string `json:"entity_key"`
+	Op         string `json:"op"`
+	ReasonCode string `json:"reason_code"`
+	Evidence   string `json:"evidence"`
+}
+
+// SyncMutationSupersedeReport is the explicit, non-acknowledging local
+// recovery result for stale pending upserts.
+type SyncMutationSupersedeReport struct {
+	Project string                       `json:"project,omitempty"`
+	Applied bool                         `json:"applied"`
+	Actions []SyncMutationSupersedeAction `json:"actions"`
 }
 
 // ForeignSyncTargetCleanupAction records one foreign target cleanup classification.
@@ -599,13 +625,95 @@ type syncRelationPayload struct {
 	UpdatedAt      string   `json:"updated_at"`
 }
 
-// ExportData is the full serializable dump of the engram database.
+const (
+	legacyExportVersion  = "0.1.0"
+	currentExportVersion = "0.2.0"
+)
+
+// BackupRelation is the lossless direct-backup representation of a
+// memory_relations row. Relation IDs are local SQLite keys, so supersession is
+// represented by the referenced relation's portable sync ID instead.
+type BackupRelation struct {
+	SyncID                     string   `json:"sync_id"`
+	SourceID                   string   `json:"source_id"`
+	TargetID                   string   `json:"target_id"`
+	Relation                   string   `json:"relation"`
+	Reason                     *string  `json:"reason,omitempty"`
+	Evidence                   *string  `json:"evidence,omitempty"`
+	Confidence                 *float64 `json:"confidence,omitempty"`
+	JudgmentStatus             string   `json:"judgment_status"`
+	MarkedByActor              *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind               *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel              *string  `json:"marked_by_model,omitempty"`
+	SessionID                  *string  `json:"session_id,omitempty"`
+	SupersededAt               *string  `json:"superseded_at,omitempty"`
+	SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id,omitempty"`
+	CreatedAt                  string   `json:"created_at"`
+	UpdatedAt                  string   `json:"updated_at"`
+}
+
+// backupObservation is deliberately separate from Observation's shared sync
+// representation: direct backups preserve local pinned state while sync JSON
+// continues to omit it.
+type backupObservation struct {
+	Observation
+	Pinned bool `json:"pinned"`
+}
+
+// ExportData is the full serializable direct-backup dump of the engram database.
 type ExportData struct {
-	Version      string        `json:"version"`
-	ExportedAt   string        `json:"exported_at"`
-	Sessions     []Session     `json:"sessions"`
-	Observations []Observation `json:"observations"`
-	Prompts      []Prompt      `json:"prompts"`
+	Version      string           `json:"version"`
+	ExportedAt   string           `json:"exported_at"`
+	Sessions     []Session        `json:"sessions"`
+	Observations []Observation    `json:"observations"`
+	Prompts      []Prompt         `json:"prompts"`
+	Relations    []BackupRelation `json:"relations,omitempty"`
+}
+
+// MarshalJSON projects observations through the backup-only form so direct
+// exports include pinned state without changing Observation's sync JSON tag.
+func (d ExportData) MarshalJSON() ([]byte, error) {
+	observations := make([]backupObservation, len(d.Observations))
+	for i, observation := range d.Observations {
+		observations[i] = backupObservation{Observation: observation, Pinned: observation.Pinned}
+	}
+	return json.Marshal(struct {
+		Version      string              `json:"version"`
+		ExportedAt   string              `json:"exported_at"`
+		Sessions     []Session           `json:"sessions"`
+		Observations []backupObservation `json:"observations"`
+		Prompts      []Prompt            `json:"prompts"`
+		Relations    []BackupRelation    `json:"relations,omitempty"`
+	}{
+		Version: d.Version, ExportedAt: d.ExportedAt, Sessions: d.Sessions,
+		Observations: observations, Prompts: d.Prompts, Relations: d.Relations,
+	})
+}
+
+// UnmarshalJSON accepts both the current backup projection and legacy 0.1.0
+// exports, where pinned and relations are absent and therefore retain defaults.
+func (d *ExportData) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Version      string              `json:"version"`
+		ExportedAt   string              `json:"exported_at"`
+		Sessions     []Session           `json:"sessions"`
+		Observations []backupObservation `json:"observations"`
+		Prompts      []Prompt            `json:"prompts"`
+		Relations    []BackupRelation    `json:"relations"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	observations := make([]Observation, len(decoded.Observations))
+	for i, observation := range decoded.Observations {
+		observation.Observation.Pinned = observation.Pinned
+		observations[i] = observation.Observation
+	}
+	*d = ExportData{
+		Version: decoded.Version, ExportedAt: decoded.ExportedAt, Sessions: decoded.Sessions,
+		Observations: observations, Prompts: decoded.Prompts, Relations: decoded.Relations,
+	}
+	return nil
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -1084,9 +1192,18 @@ func (s *Store) migrate() error {
 				project     TEXT NOT NULL DEFAULT '',
 				deleted_at        TEXT NOT NULL DEFAULT (datetime('now')),
 				hard_delete       BOOLEAN NOT NULL DEFAULT 1,
-				active            BOOLEAN NOT NULL DEFAULT 1,
-				last_mutation_seq INTEGER NOT NULL DEFAULT 0,
+				active                   BOOLEAN NOT NULL DEFAULT 1,
+				last_mutation_seq        INTEGER NOT NULL DEFAULT 0,
+				last_remote_mutation_seq INTEGER,
 				PRIMARY KEY (entity, entity_key)
+			);
+
+			CREATE TABLE IF NOT EXISTS sync_delete_tombstone_remote_floors (
+				target_key        TEXT NOT NULL,
+				entity            TEXT NOT NULL,
+				entity_key        TEXT NOT NULL,
+				last_mutation_seq INTEGER NOT NULL,
+				PRIMARY KEY (target_key, entity, entity_key)
 			);
 
 		CREATE INDEX IF NOT EXISTS idx_prompts_session ON user_prompts(session_id);
@@ -1198,6 +1315,9 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sync_delete_tombstones", "last_remote_mutation_seq", "INTEGER"); err != nil {
 		return err
 	}
 	if err := s.migrateFTS(); err != nil {
@@ -2358,6 +2478,7 @@ func (s *Store) projectSyncBackfillRequired(project string) (bool, error) {
 				  AND sm.entity = ?
 				  AND sm.entity_key = sess.id
 				  AND sm.source = ?
+				  AND sm.disposition IN ('pending', 'quarantined')
 			  )
 			UNION ALL
 			SELECT 1
@@ -2374,6 +2495,7 @@ func (s *Store) projectSyncBackfillRequired(project string) (bool, error) {
 				  AND sm.entity = ?
 				  AND sm.entity_key = obs.sync_id
 				  AND sm.source = ?
+				  AND sm.disposition IN ('pending', 'quarantined')
 			  )
 			UNION ALL
 			SELECT 1
@@ -3761,9 +3883,22 @@ func (s *Store) DeleteSession(id string) error {
 			}); err != nil {
 				return fmt.Errorf("delete session: enqueue mutation: %w", err)
 			}
+			return nil
 		}
 
-		return nil
+		changed := false
+		for _, prompt := range prompts {
+			superseded, err := s.supersedeDeletedEntityMutationTx(tx, SyncEntityPrompt, prompt.SyncID, derefString(prompt.Project))
+			if err != nil {
+				return fmt.Errorf("delete session: supersede prompt mutation: %w", err)
+			}
+			changed = changed || superseded
+		}
+		superseded, err := s.supersedeDeletedEntityMutationTx(tx, SyncEntitySession, id, project)
+		if err != nil {
+			return fmt.Errorf("delete session: supersede mutation: %w", err)
+		}
+		return s.refreshSupersededProjectLifecycleTx(tx, project, changed || superseded)
 	})
 }
 
@@ -3780,6 +3915,14 @@ func (s *Store) DeletePrompt(id int64) error {
 				return fmt.Errorf("%w: prompt #%d", ErrPromptNotFound, id)
 			}
 			return fmt.Errorf("delete prompt: load row: %w", err)
+		}
+		project, _ = NormalizeProject(project)
+		if project == "" {
+			resolvedProject, err := s.resolveSessionProjectTx(tx, payload.SessionID)
+			if err != nil {
+				return fmt.Errorf("delete prompt: resolve project: %w", err)
+			}
+			project = resolvedProject
 		}
 		payload.Project = nullableString(project)
 		now := Now()
@@ -3800,6 +3943,17 @@ func (s *Store) DeletePrompt(id int64) error {
 		}
 		if err := s.recordPromptTombstoneTx(tx, payload.SyncID, payload.SessionID, payload.Project, now); err != nil {
 			return fmt.Errorf("delete prompt: upsert tombstone: %w", err)
+		}
+		enrolled, err := isProjectEnrolledTx(tx, project)
+		if err != nil {
+			return fmt.Errorf("delete prompt: check enrollment: %w", err)
+		}
+		if !enrolled {
+			changed, err := s.supersedeDeletedEntityMutationTx(tx, SyncEntityPrompt, payload.SyncID, project)
+			if err != nil {
+				return fmt.Errorf("delete prompt: supersede mutation: %w", err)
+			}
+			return s.refreshSupersededProjectLifecycleTx(tx, project, changed)
 		}
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpDelete, payload); err != nil {
 			return fmt.Errorf("delete prompt: enqueue mutation: %w", err)
@@ -3928,16 +4082,18 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 			return err
 		}
 
+		project := derefString(obs.Project)
+		if project == "" {
+			project, err = s.resolveSessionProjectTx(tx, obs.SessionID)
+			if err != nil {
+				return err
+			}
+		}
+		project, _ = NormalizeProject(project)
+		obs.Project = nullableString(project)
+
 		deletedAt := Now()
 		if hardDelete {
-			project := derefString(obs.Project)
-			if project == "" {
-				project, err = s.resolveSessionProjectTx(tx, obs.SessionID)
-				if err != nil {
-					return err
-				}
-			}
-			project, _ = NormalizeProject(project)
 			if err := s.recordSyncDeleteTombstoneTx(tx, SyncEntityObservation, obs.SyncID, obs.SessionID, project, deletedAt); err != nil {
 				return fmt.Errorf("record hard observation tombstone: %w", err)
 			}
@@ -3974,6 +4130,17 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 			}
 		}
 
+		enrolled, err := isProjectEnrolledTx(tx, project)
+		if err != nil {
+			return err
+		}
+		if !enrolled {
+			changed, err := s.supersedeDeletedEntityMutationTx(tx, SyncEntityObservation, obs.SyncID, project)
+			if err != nil {
+				return fmt.Errorf("supersede observation mutation: %w", err)
+			}
+			return s.refreshSupersededProjectLifecycleTx(tx, project, changed)
+		}
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
 			SyncID:     obs.SyncID,
 			SessionID:  obs.SessionID,
@@ -5014,9 +5181,9 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 // exportWithProjectScope reads sessions.project through ifnull(): an export is how
 // data leaves the store before a repair, so it must not be the one path that
 // refuses to read the legacy unowned rows the operator is trying to rescue.
-func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
+func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error) {
 	data := &ExportData{
-		Version:    "0.1.0",
+		Version:    currentExportVersion,
 		ExportedAt: Now(),
 	}
 
@@ -5111,10 +5278,65 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		return nil, err
 	}
 
+	// Relations are direct-backup metadata, not sync payloads. They are selected
+	// separately so every persisted judgment and supersession field is retained.
+	relationQuery := `
+		SELECT r.sync_id, ifnull(r.source_id, ''), ifnull(r.target_id, ''), r.relation,
+		       r.reason, r.evidence, r.confidence, r.judgment_status,
+		       r.marked_by_actor, r.marked_by_kind, r.marked_by_model, r.session_id,
+		       r.superseded_at, superseding.sync_id, r.created_at, r.updated_at
+		FROM memory_relations r
+		LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id`
+	relationArgs := []any{}
+	if project != "" {
+		relationQuery += `
+			WHERE r.source_id IN (
+				SELECT sync_id FROM observations
+				WHERE ifnull(project, '') = ?
+				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+			)
+			  AND r.target_id IN (
+				SELECT sync_id FROM observations
+				WHERE ifnull(project, '') = ?
+				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+			)`
+		relationArgs = append(relationArgs, project, project, project, project)
+	}
+	relationQuery += " ORDER BY r.created_at, r.sync_id"
+	relationRows, err := s.queryItHook(s.db, relationQuery, relationArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
+	defer func() { _ = relationRows.Close() }()
+	for relationRows.Next() {
+		var relation BackupRelation
+		if err := relationRows.Scan(
+			&relation.SyncID, &relation.SourceID, &relation.TargetID, &relation.Relation,
+			&relation.Reason, &relation.Evidence, &relation.Confidence, &relation.JudgmentStatus,
+			&relation.MarkedByActor, &relation.MarkedByKind, &relation.MarkedByModel, &relation.SessionID,
+			&relation.SupersededAt, &relation.SupersededByRelationSyncID, &relation.CreatedAt, &relation.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("export relations: scan: %w", err)
+		}
+		data.Relations = append(data.Relations, relation)
+	}
+	if err := relationRows.Err(); err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
+	if err := relationRows.Close(); err != nil {
+		return nil, fmt.Errorf("export relations: close: %w", err)
+	}
+
 	return data, nil
 }
 
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
+	if data == nil {
+		return nil, errors.New("import: export data is required")
+	}
+	if data.Version != "" && data.Version != legacyExportVersion && data.Version != currentExportVersion {
+		return nil, fmt.Errorf("import: unsupported export version %q", data.Version)
+	}
 	for _, sess := range data.Sessions {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
@@ -5177,16 +5399,16 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if duplicateCount <= 0 {
 				duplicateCount = existing.DuplicateCount
 			}
-			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
-				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
+			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, pinned = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
+				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, obs.Pinned, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
 			result.ObservationsUpdated++
 			continue
 		}
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at)
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -5202,6 +5424,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
 			obs.ReviewAfter,
+			obs.Pinned,
 			obs.CreatedAt,
 			obs.UpdatedAt,
 			obs.DeletedAt,
@@ -5238,6 +5461,66 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		}
 		n, _ := res.RowsAffected()
 		result.PromptsImported += int(n)
+	}
+
+	// Relations are imported only after all observation endpoints have been
+	// written. Any missing endpoint aborts this transaction and rolls back the
+	// sessions, observations, prompts, and earlier relation rows together.
+	importedRelations := make(map[string]bool, len(data.Relations))
+	for _, relation := range data.Relations {
+		if strings.TrimSpace(relation.SyncID) == "" {
+			return nil, errors.New("import relation: sync id is required")
+		}
+		for _, endpoint := range []struct {
+			role   string
+			syncID string
+		}{
+			{role: "source", syncID: relation.SourceID},
+			{role: "target", syncID: relation.TargetID},
+		} {
+			if strings.TrimSpace(endpoint.syncID) == "" {
+				return nil, fmt.Errorf("import relation %s: relation endpoint %s is required", relation.SyncID, endpoint.role)
+			}
+			var exists bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observations WHERE sync_id = ?)`, endpoint.syncID).Scan(&exists); err != nil {
+				return nil, fmt.Errorf("import relation %s: check %s endpoint: %w", relation.SyncID, endpoint.role, err)
+			}
+			if !exists {
+				return nil, fmt.Errorf("import relation %s: relation endpoint %s not found", relation.SyncID, endpoint.role)
+			}
+		}
+		res, err := s.execHook(tx, `INSERT OR IGNORE INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status,
+			 marked_by_actor, marked_by_kind, marked_by_model, session_id, superseded_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation,
+			relation.Reason, relation.Evidence, relation.Confidence, relation.JudgmentStatus,
+			relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
+			relation.SupersededAt, relation.CreatedAt, relation.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("import relation %s: %w", relation.SyncID, err)
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("import relation %s: rows affected: %w", relation.SyncID, err)
+		}
+		importedRelations[relation.SyncID] = inserted == 1
+	}
+	for _, relation := range data.Relations {
+		if !importedRelations[relation.SyncID] || relation.SupersededByRelationSyncID == nil {
+			continue
+		}
+		var supersedingID int64
+		if err := tx.QueryRow(`SELECT id FROM memory_relations WHERE sync_id = ?`, *relation.SupersededByRelationSyncID).Scan(&supersedingID); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("import relation %s: superseding relation %s not found", relation.SyncID, *relation.SupersededByRelationSyncID)
+			}
+			return nil, fmt.Errorf("import relation %s: lookup superseding relation: %w", relation.SyncID, err)
+		}
+		if _, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id = ? WHERE sync_id = ?`, supersedingID, relation.SyncID); err != nil {
+			return nil, fmt.Errorf("import relation %s: set superseding relation: %w", relation.SyncID, err)
+		}
 	}
 
 	if err := s.commitHook(tx); err != nil {
@@ -5502,6 +5785,145 @@ func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, ap
 		return SyncMutationQuarantineReport{}, fmt.Errorf("quarantine irreparable sync mutations: %w", err)
 	}
 	return report, nil
+}
+
+// SupersedeUnenrolledLegacyMutations retires pending local upserts only when
+// local delete evidence proves the entity is no longer current. It preserves the
+// mutation, acknowledgement state, and recorded evidence; it never claims cloud
+// delivery. An empty project evaluates every unenrolled project for doctor.
+func (s *Store) SupersedeUnenrolledLegacyMutations(targetKey, project string, apply bool) (SyncMutationSupersedeReport, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	report := SyncMutationSupersedeReport{Project: project, Applied: apply, Actions: []SyncMutationSupersedeAction{}}
+	err := s.withTx(func(tx *sql.Tx) error {
+		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
+			FROM sync_mutations sm
+			WHERE sm.target_key = ? AND sm.acked_at IS NULL AND sm.disposition = ?
+			  AND sm.source = ? AND sm.op = ? AND sm.project != ''
+			  AND NOT EXISTS (SELECT 1 FROM sync_enrolled_projects sep WHERE sep.project = sm.project)`
+		args := []any{targetKey, SyncMutationDispositionPending, SyncSourceLocal, SyncOpUpsert}
+		if project != "" {
+			query += ` AND sm.project = ?`
+			args = append(args, project)
+		}
+		query += ` ORDER BY sm.seq ASC`
+		rows, err := s.queryItHook(tx, query, args...)
+		if err != nil {
+			return err
+		}
+		candidates := make([]SyncMutation, 0)
+		for rows.Next() {
+			var mutation SyncMutation
+			if err := rows.Scan(&mutation.Seq, &mutation.TargetKey, &mutation.Entity, &mutation.EntityKey, &mutation.Op, &mutation.Payload, &mutation.Source, &mutation.Project, &mutation.OccurredAt, &mutation.AckedAt); err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			current, err := s.localMutationHasDeleteEvidenceTx(tx, mutation)
+			if err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			if current {
+				candidates = append(candidates, mutation)
+			}
+		}
+		if err := closeRowsWithError(rows, rows.Err()); err != nil {
+			return err
+		}
+
+		affectedProjects := make(map[string]struct{})
+		for _, mutation := range candidates {
+			evidence, err := syncMutationSupersededEvidence(mutation, "doctor_local_reconciliation")
+			if err != nil {
+				return err
+			}
+			action := SyncMutationSupersedeAction{Seq: mutation.Seq, Project: mutation.Project, Entity: mutation.Entity, EntityKey: mutation.EntityKey, Op: mutation.Op, ReasonCode: SyncMutationSupersededReasonLocalEntityDeleted, Evidence: evidence}
+			report.Actions = append(report.Actions, action)
+			if !apply {
+				continue
+			}
+			changed, err := s.supersedePendingLocalUpsertTx(tx, mutation.TargetKey, mutation.Entity, mutation.EntityKey, mutation.Project, action.ReasonCode, action.Evidence)
+			if err != nil {
+				return err
+			}
+			if changed {
+				affectedProjects[mutation.Project] = struct{}{}
+			}
+		}
+		if !apply || len(affectedProjects) == 0 {
+			return nil
+		}
+		if err := s.refreshSyncLifecycleTx(tx, targetKey); err != nil {
+			return err
+		}
+		for affectedProject := range affectedProjects {
+			if err := s.refreshProjectSyncLifecycleTx(tx, affectedProject); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return SyncMutationSupersedeReport{}, fmt.Errorf("supersede unenrolled legacy mutations: %w", err)
+	}
+	return report, nil
+}
+
+func (s *Store) localMutationHasDeleteEvidenceTx(tx *sql.Tx, mutation SyncMutation) (bool, error) {
+	var exists bool
+	switch mutation.Entity {
+	case SyncEntitySession, SyncEntityObservation:
+		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ? AND project = ? AND active = 1)`, mutation.Entity, mutation.EntityKey, mutation.Project).Scan(&exists)
+		return exists, err
+	case SyncEntityPrompt:
+		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM prompt_tombstones WHERE sync_id = ? AND project = ?)`, mutation.EntityKey, mutation.Project).Scan(&exists)
+		return exists, err
+	default:
+		return false, nil
+	}
+}
+
+func syncMutationSupersededEvidence(mutation SyncMutation, trigger string) (string, error) {
+	evidence, err := json.Marshal(map[string]any{
+		"entity":     mutation.Entity,
+		"entity_key": mutation.EntityKey,
+		"project":    mutation.Project,
+		"trigger":    trigger,
+	})
+	return string(evidence), err
+}
+
+func (s *Store) supersedePendingLocalUpsertTx(tx *sql.Tx, targetKey, entity, entityKey, project, reason, evidence string) (bool, error) {
+	result, err := s.execHook(tx, `UPDATE sync_mutations
+		SET disposition = ?, disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now')
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND project = ?
+		  AND op = ? AND source = ? AND acked_at IS NULL AND disposition = ?`,
+		SyncMutationDispositionSuperseded, reason, evidence, targetKey, entity, entityKey, project,
+		SyncOpUpsert, SyncSourceLocal, SyncMutationDispositionPending,
+	)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed > 0, err
+}
+
+func (s *Store) supersedeDeletedEntityMutationTx(tx *sql.Tx, entity, entityKey, project string) (bool, error) {
+	mutation := SyncMutation{Entity: entity, EntityKey: entityKey, Project: project}
+	evidence, err := syncMutationSupersededEvidence(mutation, "local_delete")
+	if err != nil {
+		return false, err
+	}
+	return s.supersedePendingLocalUpsertTx(tx, DefaultSyncTargetKey, entity, entityKey, project, SyncMutationSupersededReasonLocalEntityDeleted, evidence)
+}
+
+func (s *Store) refreshSupersededProjectLifecycleTx(tx *sql.Tx, project string, changed bool) error {
+	if !changed {
+		return nil
+	}
+	if err := s.refreshSyncLifecycleTx(tx, DefaultSyncTargetKey); err != nil {
+		return err
+	}
+	return s.refreshProjectSyncLifecycleTx(tx, project)
 }
 
 func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
@@ -6053,15 +6475,14 @@ func (s *Store) MarkSyncPending(targetKey string) error {
 
 // ApplyPulledMutation applies one remote mutation and advances the pull cursor.
 //
-// Session-identity semantics are skip-plus-evidence, not fail-closed. A blank
-// or inconsistent session identity in a pulled mutation is quarantined through
-// deadLetterPulledSessionIdentityTx and the cursor still advances past it.
-// Failing closed here would be a permanent retry loop: servers that predate the
-// identity rule hold historical chunks with blank session IDs, and no local
-// action can ever make such a mutation valid, so halting would pin the cursor
-// forever and block every later mutation behind it. Quarantining keeps the
-// dropped data visible — `engram doctor --check invalid_session_identity`
-// reports it and `engram conflicts deferred` lists the raw row.
+// Session and observation identity semantics are skip-plus-evidence, not
+// fail-closed. A blank or inconsistent session identity, or an inconsistent
+// observation identity, in a pulled mutation is quarantined through
+// deadLetterPulledIdentityTx and the cursor still advances past it. Failing
+// closed here would be a permanent retry loop: immutable remote data cannot
+// become valid through local retries, so halting would pin the cursor forever
+// and block every later mutation behind it. Quarantining keeps the dropped data
+// visible in `engram conflicts deferred`.
 //
 // Every other apply failure keeps its existing fail-closed behavior.
 func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) error {
@@ -6075,13 +6496,13 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			return nil
 		}
 
-		applyErr := s.applyPulledMutationTx(tx, mutation)
+		applyErr := s.applyCloudPulledMutationTx(tx, targetKey, mutation)
 		if applyErr != nil {
 			if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 				return err
 			} else if !handled {
-				if errors.Is(applyErr, ErrPulledSessionIdentityInvalid) {
-					if err := s.deadLetterPulledSessionIdentityTx(tx, targetKey, mutation); err != nil {
+				if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+					if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
 						return err
 					}
 				} else {
@@ -6120,7 +6541,7 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 // overwrite the first through ON CONFLICT(sync_id) DO UPDATE, destroying the only
 // record that the first mutation's data was dropped. The identity is therefore
 // derived from the mutation's own distinguishing material, as
-// pulledSessionDeadLetterSyncID already does for discarded session mutations:
+// pulledIdentityDeadLetterSyncID does for discarded session mutations:
 // distinct mutations stay apart by construction, while a genuine redelivery of
 // the same mutation still lands on the same row. Each field is length-prefixed so
 // no field's content can imitate a separator and forge a collision.
@@ -6313,8 +6734,9 @@ func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation)
 // retry safety: a failed chunk import leaves no partial semantic mutations.
 //
 // It shares ApplyPulledMutation's skip-plus-evidence rule for invalid session
-// identities: such a mutation is quarantined and the rest of the chunk still
-// applies, so one historical blank identity cannot block the chunk forever.
+// and observation identities: such a mutation is quarantined and the rest of
+// the chunk still applies, so one permanently malformed identity cannot block
+// the chunk forever.
 // A payload that does not even decode stays fail-closed and rolls back the
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
@@ -6354,8 +6776,8 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 				if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 				} else if !handled {
-					if errors.Is(applyErr, ErrPulledSessionIdentityInvalid) {
-						if err := s.deadLetterPulledSessionIdentityTx(tx, targetKey, mutation); err != nil {
+					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
 							return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 						}
 					} else {
@@ -7862,10 +8284,9 @@ func backfillMutationSource(source []string) string {
 }
 
 func syncDeleteTombstoneNeedsBackfill(alias string) string {
-	return fmt.Sprintf(`%[1]s.active = 1 AND NOT EXISTS (
+	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.last_remote_mutation_seq IS NULL AND NOT EXISTS (
 		SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = %[1]s.entity
-		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ?
-		AND sm.seq > %[1]s.last_mutation_seq
+		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.acked_at IS NULL AND sm.disposition IN ('pending', 'quarantined')
 	)`, alias)
 }
 
@@ -7896,9 +8317,15 @@ func (s *Store) recordSyncDeleteTombstoneTx(tx *sql.Tx, entity, entityKey, sessi
 		VALUES (?, ?, ?, ?, ?, 1, 1, ?)
 		ON CONFLICT(entity, entity_key) DO UPDATE SET
 			session_id = excluded.session_id, project = excluded.project, deleted_at = excluded.deleted_at,
-			hard_delete = excluded.hard_delete, active = 1, last_mutation_seq = MAX(sync_delete_tombstones.last_mutation_seq, excluded.last_mutation_seq)`,
+			hard_delete = excluded.hard_delete, active = 1,
+			last_mutation_seq = MAX(sync_delete_tombstones.last_mutation_seq, excluded.last_mutation_seq),
+			last_remote_mutation_seq = NULL`,
 		entity, entityKey, nullableString(sessionID), project, deletedAt, floor,
 	)
+	if err != nil {
+		return err
+	}
+	_, err = s.execHook(tx, `DELETE FROM sync_delete_tombstone_remote_floors WHERE entity = ? AND entity_key = ?`, entity, entityKey)
 	return err
 }
 
@@ -7907,6 +8334,79 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 		return nil
 	}
 	_, err := s.execHook(tx, `UPDATE sync_delete_tombstones SET active = 0 WHERE entity = ? AND entity_key = ?`, entity, entityKey)
+	return err
+}
+
+func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
+	if targetKey == DefaultSyncTargetKey {
+		var active int
+		var floor sql.NullInt64
+		err := tx.QueryRow(`SELECT active, last_remote_mutation_seq FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&active, &floor)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if floor.Valid {
+			return seq <= floor.Int64, nil
+		}
+		return active == 1, nil
+	}
+	var active int
+	err := tx.QueryRow(`SELECT active FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var floor int64
+	err = tx.QueryRow(`SELECT last_mutation_seq FROM sync_delete_tombstone_remote_floors WHERE target_key = ? AND entity = ? AND entity_key = ?`, targetKey, entity, entityKey).Scan(&floor)
+	if err == nil {
+		return seq <= floor, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	var hasTargetFloor bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstone_remote_floors WHERE entity = ? AND entity_key = ?)`, entity, entityKey).Scan(&hasTargetFloor); err != nil {
+		return false, err
+	}
+	if hasTargetFloor {
+		return false, nil
+	}
+	return active == 1, nil
+}
+
+func (s *Store) recordCloudDeleteTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey, sessionID, project string, deletedAt *string, hardDelete bool, seq int64) error {
+	project, _ = NormalizeProject(strings.TrimSpace(project))
+	deleted := Now()
+	if deletedAt != nil && strings.TrimSpace(*deletedAt) != "" {
+		deleted = *deletedAt
+	}
+	_, err := s.execHook(tx, `
+		INSERT INTO sync_delete_tombstones (entity, entity_key, session_id, project, deleted_at, hard_delete, active)
+		VALUES (?, ?, ?, ?, ?, ?, 1)
+		ON CONFLICT(entity, entity_key) DO UPDATE SET
+			session_id = excluded.session_id, project = excluded.project, deleted_at = excluded.deleted_at,
+			hard_delete = excluded.hard_delete, active = 1`,
+		entity, entityKey, nullableString(sessionID), project, deleted, hardDelete,
+	)
+	if err != nil {
+		return err
+	}
+	if targetKey == DefaultSyncTargetKey {
+		_, err = s.execHook(tx, `UPDATE sync_delete_tombstones SET last_remote_mutation_seq = CASE WHEN last_remote_mutation_seq IS NULL OR ? > last_remote_mutation_seq THEN ? ELSE last_remote_mutation_seq END WHERE entity = ? AND entity_key = ?`, seq, seq, entity, entityKey)
+		return err
+	}
+	_, err = s.execHook(tx, `
+		INSERT INTO sync_delete_tombstone_remote_floors (target_key, entity, entity_key, last_mutation_seq)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(target_key, entity, entity_key) DO UPDATE SET
+			last_mutation_seq = MAX(sync_delete_tombstone_remote_floors.last_mutation_seq, excluded.last_mutation_seq)`,
+		targetKey, entity, entityKey, seq,
+	)
 	return err
 }
 
@@ -8066,7 +8566,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			      AND ` + sqlSessionIDNotBlank("id") + `
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = sessions.id AND sm.source = ?
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = sessions.id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
 			args: []any{project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal},
 		},
@@ -8077,7 +8577,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			      AND o.deleted_at IS NULL
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.source = ?
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal},
 		},
@@ -8088,7 +8588,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			      AND o.deleted_at IS NOT NULL
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.op = ? AND sm.source = ?
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.op = ? AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal},
 		},
@@ -8103,7 +8603,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ?
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal},
 		},
@@ -8113,7 +8613,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ? AND sm.op = ?
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ? AND sm.op = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete},
 		},
@@ -8137,7 +8637,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			      AND coalesce(nullif(src.project, ''), src_s.project, '') = ?
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ?
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
 			args: []any{JudgmentStatusOrphaned, JudgmentStatusPending, project, DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal},
 		},
@@ -8166,25 +8666,25 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 			SELECT x.project
 			FROM sessions x
 			WHERE trim(x.id, ?) != ''
-			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.id AND sm.source = ?)
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 			UNION
 			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
 			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
 			WHERE x.deleted_at IS NULL
-			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 			UNION
 			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
 			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
 			WHERE x.deleted_at IS NOT NULL
-			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.op = ? AND sm.source = ?)
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.op = ? AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 			UNION
 			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
 			FROM user_prompts x LEFT JOIN sessions xs ON xs.id = x.session_id
-			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 			UNION
 			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
 			FROM prompt_tombstones x LEFT JOIN sessions xs ON xs.id = x.session_id
-			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.op = ?)
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.op = ? AND sm.disposition IN ('pending', 'quarantined'))
 			UNION
 			SELECT x.project
 			FROM sync_delete_tombstones x
@@ -8198,7 +8698,7 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 			WHERE r.judgment_status NOT IN (?, ?)
 			  AND ifnull(r.marked_by_actor, '') != ''
 			  AND ifnull(r.marked_by_kind, '') != ''
-			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ?)
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 		) candidates ON candidates.project = ep.project
 		ORDER BY ep.project ASC`,
 		sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
@@ -8311,6 +8811,7 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string, sourc
 			  AND sm.entity = ?
 			  AND sm.entity_key = sessions.id
 			  AND sm.source = ?
+			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		ORDER BY started_at ASC, id ASC`,
 		project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, mutationSource,
@@ -8367,6 +8868,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 			  AND sm.entity = ?
 			  AND sm.entity_key = o.sync_id
 			  AND sm.source = ?
+			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		ORDER BY o.id ASC`,
 		project, project, DefaultSyncTargetKey, SyncEntityObservation, mutationSource,
@@ -8431,6 +8933,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 			  AND sm.entity_key = o.sync_id
 			  AND sm.op = ?
 			  AND sm.source = ?
+			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		ORDER BY o.id ASC`,
 		project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, mutationSource,
@@ -8546,6 +9049,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 			  AND sm.entity = ?
 			  AND sm.entity_key = p.sync_id
 			  AND sm.source = ?
+			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		ORDER BY p.id ASC`,
 		project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource,
@@ -8594,6 +9098,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 			  AND sm.entity_key = prompt_tombstones.sync_id
 			  AND sm.source = ?
 			  AND sm.op = ?
+			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		ORDER BY deleted_at ASC`,
 		project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource, SyncOpDelete,
@@ -8672,6 +9177,7 @@ func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string, sour
 		      AND sm.entity = ?
 		      AND sm.entity_key = r.sync_id
 		      AND sm.source = ?
+		      AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		ORDER BY r.created_at ASC, r.sync_id ASC`,
 		JudgmentStatusOrphaned, JudgmentStatusPending,
@@ -8763,8 +9269,8 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 	}
 	if source == SyncSourceLocal && entity == SyncEntitySession && op == SyncOpUpsert {
 		if _, err := s.execHook(tx, `DELETE FROM sync_mutations
-			WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND project = ? AND acked_at IS NULL`,
-			DefaultSyncTargetKey, entity, entityKey, op, source, project,
+			WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND project = ? AND acked_at IS NULL AND disposition = ?`,
+			DefaultSyncTargetKey, entity, entityKey, op, source, project, SyncMutationDispositionPending,
 		); err != nil {
 			return err
 		}
@@ -9038,6 +9544,14 @@ func (s *Store) adoptSessionOwnershipTx(tx *sql.Tx, sessionID, project string) e
 }
 
 func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
+	return s.applyPulledMutationForDomainTx(tx, mutation, false, "")
+}
+
+func (s *Store) applyCloudPulledMutationTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
+	return s.applyPulledMutationForDomainTx(tx, mutation, true, targetKey)
+}
+
+func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation, cloud bool, targetKey string) error {
 	switch mutation.Entity {
 	case SyncEntityRelation:
 		return s.applyRelationUpsertTx(tx, mutation)
@@ -9054,7 +9568,16 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 			return fmt.Errorf("%w: %v", ErrPulledSessionIdentityInvalid, err)
 		}
 		if mutation.Op == SyncOpDelete || isSessionDeletePayload(payload) {
-			return s.applySessionDeleteTx(tx, payload)
+			if err := s.applySessionDeleteTx(tx, payload); err != nil || !cloud {
+				return err
+			}
+			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, "", payload.Project, payload.DeletedAt, payload.HardDelete, mutation.Seq)
+		}
+		if cloud {
+			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, mutation.Seq)
+			if err != nil || blocked {
+				return err
+			}
 		}
 		if err := validatePulledSessionDirectory([]byte(mutation.Payload)); err != nil {
 			return err
@@ -9065,8 +9588,29 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
 			return err
 		}
+		entityKey := strings.TrimSpace(mutation.EntityKey)
+		payload.SyncID = strings.TrimSpace(payload.SyncID)
+		if payload.SyncID == "" {
+			payload.SyncID = entityKey
+		}
+		if payload.SyncID != entityKey {
+			return fmt.Errorf("%w: mutation entity_key %q does not match payload sync_id %q", ErrPulledObservationIdentityInvalid, entityKey, payload.SyncID)
+		}
 		if mutation.Op == SyncOpDelete {
-			return s.applyObservationDeleteTx(tx, payload)
+			if err := s.applyObservationDeleteTx(tx, payload); err != nil || !cloud {
+				return err
+			}
+			entityKey := payload.SyncID
+			if strings.TrimSpace(entityKey) == "" {
+				entityKey = mutation.EntityKey
+			}
+			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntityObservation, entityKey, payload.SessionID, derefString(payload.Project), payload.DeletedAt, payload.HardDelete, mutation.Seq)
+		}
+		if cloud {
+			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, mutation.Seq)
+			if err != nil || blocked {
+				return err
+			}
 		}
 		return s.applyObservationUpsertTx(tx, payload)
 	case SyncEntityPrompt:
@@ -9099,8 +9643,8 @@ func validatePulledSessionDirectory(raw []byte) error {
 	return nil
 }
 
-// pulledSessionDeadLetterSyncID derives the identity of a quarantined pulled
-// session mutation from the mutation itself, never from its position in the pull.
+// pulledIdentityDeadLetterSyncID derives the identity of quarantined pulled
+// mutations from the mutation itself, never from their position in the pull.
 //
 // The row it identifies is the only record that remote data was discarded, and
 // the insert resolves conflicts with ON CONFLICT(sync_id) DO UPDATE, so the
@@ -9108,7 +9652,7 @@ func validatePulledSessionDirectory(raw []byte) error {
 // land on different rows, or the second silently erases the first and
 // skip-plus-evidence degrades into the silent drop it exists to prevent. One
 // dropped mutation redelivered must land on the same row, or a single discarded
-// session accumulates an evidence row per delivery and overstates the loss.
+// mutation accumulates an evidence row per delivery and overstates the loss.
 //
 // The pull sequence satisfies neither obligation. ApplyPulledChunk overwrites it
 // with the local cursor position, so it describes when a mutation was applied
@@ -9118,26 +9662,50 @@ func validatePulledSessionDirectory(raw []byte) error {
 // are what actually distinguish dropped data, so they are what the identity
 // hashes. Each field is length-prefixed so no field content can imitate a
 // separator and forge a collision.
-func pulledSessionDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
+func pulledIdentityDeadLetterSyncID(targetKey string, mutation SyncMutation) string {
 	digest := sha256.New()
 	for _, field := range []string{targetKey, mutation.Entity, mutation.EntityKey, mutation.Op, mutation.Payload} {
 		digest.Write([]byte(strconv.Itoa(len(field))))
 		digest.Write([]byte(":"))
 		digest.Write([]byte(field))
 	}
-	return "pulled-session-" + hex.EncodeToString(digest.Sum(nil))
+	return "pulled-" + mutation.Entity + "-" + hex.EncodeToString(digest.Sum(nil))
 }
 
-func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
-	syncID := pulledSessionDeadLetterSyncID(targetKey, mutation)
+func pulledIdentityInvalidReasonCode(applyErr error) (string, bool) {
+	switch {
+	case errors.Is(applyErr, ErrPulledSessionIdentityInvalid):
+		return SyncSessionIdentityInvalidReasonCode, true
+	case errors.Is(applyErr, ErrPulledObservationIdentityInvalid):
+		return SyncObservationIdentityInvalidReasonCode, true
+	default:
+		return "", false
+	}
+}
+
+func pulledIdentityEvidenceProject(mutation SyncMutation) string {
 	project := strings.TrimSpace(mutation.Project)
 	if project == "" {
-		var payload syncSessionPayload
-		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
-			project = strings.TrimSpace(payload.Project)
+		switch mutation.Entity {
+		case SyncEntitySession:
+			var payload syncSessionPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(payload.Project)
+			}
+		case SyncEntityObservation:
+			var payload syncObservationPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(derefString(payload.Project))
+			}
 		}
 	}
 	project, _ = NormalizeProject(project)
+	return project
+}
+
+func (s *Store) deadLetterPulledIdentityTx(tx *sql.Tx, targetKey string, mutation SyncMutation, reasonCode string) error {
+	syncID := pulledIdentityDeadLetterSyncID(targetKey, mutation)
+	project := pulledIdentityEvidenceProject(mutation)
 	scopeClass := "target_scoped"
 	if project != "" {
 		scopeClass = "scoped"
@@ -9151,10 +9719,10 @@ func (s *Store) deadLetterPulledSessionIdentityTx(tx *sql.Tx, targetKey string, 
 			remote_seq = excluded.remote_seq, entity_key = excluded.entity_key, op = excluded.op,
 			reason_code = excluded.reason_code, project = excluded.project, scope_class = excluded.scope_class,
 			apply_status = 'dead', last_attempted_at = datetime('now')`,
-		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op, SyncSessionIdentityInvalidReasonCode, project, scopeClass,
+		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op, reasonCode, project, scopeClass,
 	)
 	if err != nil {
-		return fmt.Errorf("write invalid pulled session evidence: %w", err)
+		return fmt.Errorf("write invalid pulled %s evidence: %w", mutation.Entity, err)
 	}
 	return nil
 }

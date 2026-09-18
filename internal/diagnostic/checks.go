@@ -272,7 +272,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		return CheckResult{}, err
 	}
 	blocking := make([]Finding, 0)
-	quarantined := make([]Finding, 0)
+	terminal := make([]Finding, 0)
 	for _, observation := range sourceObservations {
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -281,7 +281,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
 			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
 			Evidence:             mustJSON(observation),
-			SafeNextStep:         "Run `engram cloud upgrade doctor repair --check sync_mutation_required_fields --dry-run` to inspect title-only repairs; content and type require manual recovery.",
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
 			RequiresConfirmation: true,
 		})
 	}
@@ -289,17 +289,21 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		// A quarantined row is an explicit, already-taken disposition: it no
 		// longer reaches transport, so it must not keep doctor blocked. It stays
 		// reported as non-blocking evidence of what was dropped from sync.
-		if strings.TrimSpace(mutation.Disposition) == store.SyncMutationDispositionQuarantined {
-			quarantined = append(quarantined, c.quarantinedFinding(mutation))
+		switch strings.TrimSpace(mutation.Disposition) {
+		case store.SyncMutationDispositionQuarantined:
+			terminal = append(terminal, c.quarantinedFinding(mutation))
+			continue
+		case store.SyncMutationDispositionSuperseded:
+			if missing := supersededEvidenceMissingFields(mutation); len(missing) > 0 {
+				blocking = append(blocking, c.incompleteSupersededFinding(mutation, missing))
+			} else {
+				terminal = append(terminal, c.supersededFinding(mutation))
+			}
 			continue
 		}
 		validation := store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
 		if validation.ReasonCode == "" {
 			continue
-		}
-		nextStep := "Run `engram cloud upgrade doctor` and inspect the mutation payload before any manual repair."
-		if strings.TrimSpace(scope.Project) != "" {
-			nextStep = "Run `engram cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
 		}
 		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
@@ -308,19 +312,19 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              validation.Message,
 			Why:                  "A pending sync mutation with missing required fields can block safe cloud replication and must fail loudly instead of being silently dropped.",
 			Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "target_key": mutation.TargetKey, "project": mutation.Project, "entity": mutation.Entity, "op": mutation.Op, "entity_key": mutation.EntityKey, "missing_fields": validation.MissingFields}),
-			SafeNextStep:         nextStep,
+			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
 			RequiresConfirmation: true,
 		})
 	}
 	// Quarantined rows are already-taken dispositions, so they never count as
 	// work still pending delivery.
-	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined), "corrupt_source_observations": len(sourceObservations)}
-	if len(quarantined) > 0 {
-		evidence["quarantined_mutations"] = len(quarantined)
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(terminal), "corrupt_source_observations": len(sourceObservations)}
+	if len(terminal) > 0 {
+		evidence["terminal_mutations"] = len(terminal)
 	}
 	// Blocking findings lead the roll-up so the check summary always describes the
 	// work that still needs a decision rather than already-dispositioned evidence.
-	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), quarantined...) }
+	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), terminal...) }
 
 	// A non-enrolled backlog is only a fault on a device that actually uses
 	// cloud sync. The store journals sync mutations unconditionally, so on a
@@ -363,6 +367,65 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func syncMutationRequiredFieldsRepairHint(project string) string {
+	command := "engram doctor repair --check sync_mutation_required_fields --dry-run"
+	if project = strings.TrimSpace(project); project != "" {
+		command = "engram doctor repair --project " + project + " --check sync_mutation_required_fields --dry-run"
+	}
+	return "Run `" + command + "` to inspect local repairs; cloud-upgrade tooling requires configured cloud sync."
+}
+
+func supersededEvidenceMissingFields(mutation store.SyncMutation) []string {
+	missing := make([]string, 0, 3)
+	if strings.TrimSpace(mutation.DispositionReason) == "" {
+		missing = append(missing, "disposition_reason")
+	}
+	if strings.TrimSpace(mutation.DispositionEvidence) == "" {
+		missing = append(missing, "disposition_evidence")
+	}
+	if mutation.DispositionAt == nil || strings.TrimSpace(*mutation.DispositionAt) == "" {
+		missing = append(missing, "disposition_at")
+	}
+	return missing
+}
+
+func (c SyncMutationRequiredFieldsCheck) incompleteSupersededFinding(mutation store.SyncMutation, missing []string) Finding {
+	return Finding{
+		CheckID:              c.Code(),
+		Severity:             SeverityBlocking,
+		ReasonCode:           "sync_mutation_superseded_evidence_incomplete",
+		Message:              "Superseded sync mutation is missing required audit evidence: " + strings.Join(missing, ", "),
+		Why:                  "A terminal supersession without its reason, evidence, and timestamp cannot prove why transport was suppressed.",
+		Evidence:             mustJSON(map[string]any{"seq": mutation.Seq, "missing_fields": missing}),
+		SafeNextStep:         "Inspect the local journal evidence and repair it deliberately; automatic supersession metadata repair is unavailable.",
+		RequiresConfirmation: true,
+	}
+}
+
+func (c SyncMutationRequiredFieldsCheck) supersededFinding(mutation store.SyncMutation) Finding {
+	return Finding{
+		CheckID:    c.Code(),
+		Severity:   SeverityInfo,
+		ReasonCode: "sync_mutation_superseded",
+		Message:    "Sync mutation is superseded by current local lifecycle evidence and no longer blocks cloud replication.",
+		Why:        "Supersession preserves the obsolete local journal row and its reason without acknowledging or transporting it, so doctor keeps audit evidence without treating it as active work.",
+		Evidence: mustJSON(map[string]any{
+			"seq":                  mutation.Seq,
+			"target_key":           mutation.TargetKey,
+			"project":              mutation.Project,
+			"entity":               mutation.Entity,
+			"op":                   mutation.Op,
+			"entity_key":           mutation.EntityKey,
+			"disposition":          mutation.Disposition,
+			"disposition_reason":   mutation.DispositionReason,
+			"disposition_evidence": mutation.DispositionEvidence,
+			"disposition_at":       mutation.DispositionAt,
+		}),
+		SafeNextStep:         "No action required. Inspect the recorded disposition evidence if you need to audit the local reconciliation.",
+		RequiresConfirmation: false,
+	}
 }
 
 func (c SyncMutationRequiredFieldsCheck) quarantinedFinding(mutation store.SyncMutation) Finding {

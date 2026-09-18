@@ -4095,15 +4095,28 @@ func TestCmdImportStoreImportFailure(t *testing.T) {
 }
 
 func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
+	stubExitWithPanic(t)
 	cfg := testConfig(t)
 
 	withArgs(t, "engram", "save", "dangling-title", "dangling-content", "--type")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("save with dangling flag panic = %v, want exitCode", recovered)
+	}
+	if !strings.Contains(stderr, "--type requires a value") {
+		t.Fatalf("save with dangling flag stderr = %q, want --type requires a value", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("save with dangling flag opened store or left state: %v", err)
+	}
+
+	withArgs(t, "engram", "save", "dangling-title", "dangling-content")
 	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
 	if recovered != nil || stderr != "" {
-		t.Fatalf("save with dangling flag failed, panic=%v stderr=%q", recovered, stderr)
+		t.Fatalf("valid save failed, panic=%v stderr=%q", recovered, stderr)
 	}
 	if !strings.Contains(stdout, "Memory saved:") {
-		t.Fatalf("unexpected save output: %q", stdout)
+		t.Fatalf("unexpected valid save output: %q", stdout)
 	}
 
 	withArgs(t, "engram", "search", "dangling-content", "--limit", "not-a-number", "--project")

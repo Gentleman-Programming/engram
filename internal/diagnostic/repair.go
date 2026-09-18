@@ -16,6 +16,36 @@ const (
 
 type RepairMode string
 
+// repairImplementations is the authoritative registry of diagnostic checks
+// that have a doctor repair implementation. Keep the command-specific sync
+// mutation repair here with the BuildRepairPlan implementations so callers
+// cannot advertise a separate, hand-maintained support list.
+var repairImplementations = map[string]struct{}{
+	CheckSessionProjectDirectoryMismatch:  {},
+	CheckManualSessionNameProjectMismatch: {},
+	CheckInvalidSessionIdentity:           {},
+	CheckSyncMutationRequiredFields:       {},
+	CheckSyncTargetClosedSpace:            {},
+}
+
+// RepairableCodes returns the registered repair implementations in stable
+// order for command validation and help output.
+func RepairableCodes() []string {
+	codes := make([]string, 0, len(repairImplementations))
+	for code := range repairImplementations {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// IsRepairableCode reports whether a diagnostic check has a repair
+// implementation.
+func IsRepairableCode(code string) bool {
+	_, ok := repairImplementations[strings.TrimSpace(code)]
+	return ok
+}
+
 type ProjectReclassifyAction struct {
 	SessionID      string `json:"session_id"`
 	FromProject    string `json:"from_project"`

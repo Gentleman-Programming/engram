@@ -544,6 +544,23 @@ func TestSyncMutationRequiredFieldsReportsCorruptSourceObservations(t *testing.T
 // proves the issue #688 signal survives: once the device uses cloud sync, a
 // project whose pending mutations cannot be delivered is reported as blocked
 // with the enrollment guidance, while the enrolled project stays silent.
+func TestSyncMutationRequiredFieldsCheckSuggestsLocalRepair(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "engram", store.SyncEntitySession, "poison", store.SyncOpUpsert, `{}`)
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	next := report.Checks[0].Findings[0].SafeNextStep
+	if !strings.Contains(next, "engram doctor repair --project engram --check sync_mutation_required_fields --dry-run") || !strings.Contains(next, "cloud-upgrade tooling requires configured cloud sync") {
+		t.Fatalf("local repair guidance=%q", next)
+	}
+}
+
 func TestSyncMutationRequiredFieldsBlocksNonEnrolledBacklogWhenCloudSyncInUse(t *testing.T) {
 	s, cfg := newDiagnosticTestStoreWithConfig(t)
 	if err := s.CreateSession("manual-save-enrolled", "enrolled", "/work/enrolled"); err != nil {
@@ -1082,5 +1099,48 @@ func TestUnownedSessionProjectCheckIsOKWhenEverySessionIsOwned(t *testing.T) {
 	}
 	if report.Status != StatusOK || len(report.Checks[0].Findings) != 0 {
 		t.Fatalf("report = %+v, want ok with no findings", report)
+	}
+}
+
+func TestSyncMutationRequiredFieldsAfterLocalRepairHasNoBlockingWarning(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntityPrompt, "retired-prompt", store.SyncOpUpsert, `{"sync_id":"retired-prompt","session_id":"legacy-session","content":"obsolete","project":"legacy"}`)
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-prompt"}', disposition_at = datetime('now') WHERE entity_key = 'retired-prompt'`); err != nil {
+		t.Fatalf("seed superseded mutation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || report.Summary.Warnings != 0 || report.Summary.Blocked != 0 {
+		t.Fatalf("terminal local repair must not leave a warning: %+v", report)
+	}
+	check := report.Checks[0]
+	if check.Result != StatusOK || check.Severity != SeverityInfo || len(check.Findings) != 1 {
+		t.Fatalf("terminal evidence check=%+v", check)
+	}
+	if finding := check.Findings[0]; finding.ReasonCode != "sync_mutation_superseded" || finding.Severity != SeverityInfo || finding.RequiresConfirmation {
+		t.Fatalf("superseded evidence finding=%+v", finding)
+	}
+}
+
+func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *testing.T) {
+	for _, column := range []string{"disposition_reason", "disposition_evidence", "disposition_at"} {
+		t.Run(column, func(t *testing.T) {
+			s, cfg := newDiagnosticTestStoreWithConfig(t)
+			seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntitySession, "retired-session", store.SyncOpUpsert, `{"id":"retired-session","project":"legacy","directory":"/tmp/legacy"}`)
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), `+column+` = NULL WHERE entity_key = 'retired-session'`); err != nil {
+				t.Fatalf("seed incomplete supersession: %v", err)
+			}
+			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			check := report.Checks[0]
+			if report.Status != StatusBlocked || check.Severity != SeverityBlocking || len(check.Findings) != 1 || check.Findings[0].ReasonCode != "sync_mutation_superseded_evidence_incomplete" {
+				t.Fatalf("incomplete %s report=%+v", column, report)
+			}
+		})
 	}
 }
