@@ -16674,6 +16674,166 @@ func TestEndSessionStrictStatuses(t *testing.T) {
 	})
 }
 
+// TestEndSessionStrictSummaryNeverClobbers pins the fill-only summary
+// semantics: the supplied summary fills an empty one, and an already-recorded
+// summary wins (COALESCE(summary, ?) ordering), so ending with a summary can
+// never erase what an earlier phase recorded.
+func TestEndSessionStrictSummaryNeverClobbers(t *testing.T) {
+	t.Run("existing summary wins over the supplied one", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-keep", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if _, err := s.db.Exec(`UPDATE sessions SET summary = ? WHERE id = ?`, "earlier note", "strict-keep"); err != nil {
+			t.Fatalf("seed existing summary: %v", err)
+		}
+
+		replacement := "replacement summary"
+		status, err := s.EndSessionStrict("strict-keep", &replacement)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", status, SessionEndStatusEnded)
+		}
+
+		sess, err := s.GetSession("strict-keep")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.EndedAt == nil || *sess.EndedAt == "" {
+			t.Fatalf("expected the session to still be ended, got ended_at %+v", sess.EndedAt)
+		}
+		if sess.Summary == nil || *sess.Summary != "earlier note" {
+			t.Fatalf("summary = %v, want preserved \"earlier note\"", sess.Summary)
+		}
+	})
+
+	t.Run("supplied summary fills an empty summary", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-fill", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+
+		summary := "wrapped up"
+		status, err := s.EndSessionStrict("strict-fill", &summary)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", status, SessionEndStatusEnded)
+		}
+
+		sess, err := s.GetSession("strict-fill")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.Summary == nil || *sess.Summary != "wrapped up" {
+			t.Fatalf("summary = %v, want \"wrapped up\"", sess.Summary)
+		}
+	})
+}
+
+// TestSessionEndJournalFailureRollsBack pins the atomicity contract shared by
+// the strict and bulk end paths: a failed sync_mutations journal insert must
+// abort the whole transaction, so a cloud mirror can never observe a half-
+// applied end (a session still open locally but already ended upstream, or an
+// end mutation without its session row).
+func TestSessionEndJournalFailureRollsBack(t *testing.T) {
+	t.Run("EndSessionStrict leaves the session open", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-rollback", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		var journalBefore int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-rollback").Scan(&journalBefore); err != nil {
+			t.Fatalf("count journal before: %v", err)
+		}
+
+		originalExec := s.hooks.exec
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "INSERT INTO sync_mutations") {
+				return nil, errors.New("journal unavailable")
+			}
+			return originalExec(db, query, args...)
+		}
+		t.Cleanup(func() { s.hooks.exec = originalExec })
+
+		if _, err := s.EndSessionStrict("strict-rollback", nil); err == nil {
+			t.Fatal("expected the journal failure to fail the end")
+		}
+
+		sess, err := s.GetSession("strict-rollback")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.EndedAt != nil {
+			t.Fatalf("ended_at = %v, want NULL after the rollback", *sess.EndedAt)
+		}
+		var journalAfter int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-rollback").Scan(&journalAfter); err != nil {
+			t.Fatalf("count journal after: %v", err)
+		}
+		if journalAfter != journalBefore {
+			t.Fatalf("journal rows %d -> %d, want unchanged (no end mutation survived)", journalBefore, journalAfter)
+		}
+	})
+
+	t.Run("EndSessionsBulk rolls back the whole batch after an earlier session updated", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+		seedOpenSession(t, s, "bulk-rb-a", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		seedOpenSession(t, s, "bulk-rb-b", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		var journalBefore int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key IN (?, ?)`, SyncEntitySession, "bulk-rb-a", "bulk-rb-b").Scan(&journalBefore); err != nil {
+			t.Fatalf("count journal before: %v", err)
+		}
+
+		originalExec := s.hooks.exec
+		syncInserts := 0
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "INSERT INTO sync_mutations") {
+				syncInserts++
+				// Selection order is by ID, so the second journal insert belongs
+				// to bulk-rb-b and fires only after bulk-rb-a already updated.
+				if syncInserts == 2 {
+					return nil, errors.New("journal unavailable")
+				}
+			}
+			return originalExec(db, query, args...)
+		}
+		t.Cleanup(func() { s.hooks.exec = originalExec })
+
+		if _, err := s.EndSessionsBulk(now, 30*24*time.Hour, ""); err == nil {
+			t.Fatal("expected the mid-batch journal failure to fail the whole batch")
+		}
+		if syncInserts != 2 {
+			t.Fatalf("sync_mutations inserts attempted = %d, want 2 (first ended, second failed)", syncInserts)
+		}
+
+		for _, id := range []string{"bulk-rb-a", "bulk-rb-b"} {
+			sess, err := s.GetSession(id)
+			if err != nil {
+				t.Fatalf("get %s: %v", id, err)
+			}
+			if sess.EndedAt != nil {
+				t.Fatalf("%s: ended_at = %v, want NULL after the whole-batch rollback", id, *sess.EndedAt)
+			}
+		}
+		var journalAfter int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key IN (?, ?)`, SyncEntitySession, "bulk-rb-a", "bulk-rb-b").Scan(&journalAfter); err != nil {
+			t.Fatalf("count journal after: %v", err)
+		}
+		if journalAfter != journalBefore {
+			t.Fatalf("journal rows %d -> %d, want unchanged (no end mutation survived)", journalBefore, journalAfter)
+		}
+	})
+}
+
 // ─── Stale open sessions: bulk selection and end (issue #1247) ───────────────
 
 // sqliteSeedTime formats a wall-clock instant the way datetime('now') stores

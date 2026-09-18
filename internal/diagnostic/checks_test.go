@@ -84,6 +84,62 @@ func TestStaleOpenSessionsCheckFlagsOnlyStaleSessions(t *testing.T) {
 	}
 }
 
+// TestStaleOpenSessionsCheckRespectsProjectScope pins project-scoped doctor
+// runs: a Scope with a project must pass it through to the store query so only
+// that project's stale sessions are reported, never another project's.
+func TestStaleOpenSessionsCheckRespectsProjectScope(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	now := time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)
+	seedSessionStartedAt(t, s, "alpha-stale", "alpha", "2026-06-01 00:00:00")
+	seedSessionStartedAt(t, s, "beta-stale", "beta", "2026-06-01 00:00:00")
+
+	result, err := StaleOpenSessionsCheck{}.Run(context.Background(), Scope{Store: s, Project: "alpha", Now: now})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Result != StatusWarning || len(result.Findings) != 1 {
+		t.Fatalf("result=%s findings=%d, want one warning finding for alpha only", result.Result, len(result.Findings))
+	}
+
+	var evidence struct {
+		StaleCount int            `json:"stale_count"`
+		ByProject  map[string]int `json:"by_project"`
+	}
+	if err := json.Unmarshal(result.Findings[0].Evidence, &evidence); err != nil {
+		t.Fatalf("invalid evidence JSON %s: %v", result.Findings[0].Evidence, err)
+	}
+	if evidence.StaleCount != 1 || evidence.ByProject["alpha"] != 1 {
+		t.Fatalf("evidence = %+v, want exactly alpha's stale session", evidence)
+	}
+	if _, beta := evidence.ByProject["beta"]; beta {
+		t.Fatalf("evidence = %+v, want beta's stale session excluded from an alpha-scoped run", evidence)
+	}
+}
+
+// TestStaleOpenSessionsCheckPropagatesStoreFailure pins the error contract: a
+// store failure surfaces unchanged instead of being masked as an ok result. A
+// closed store fails every query with the same deterministic driver error, and
+// the expected error is derived from the same store call so the assertion
+// tracks the driver rather than a copied message string.
+func TestStaleOpenSessionsCheckPropagatesStoreFailure(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	now := time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	_, wantErr := s.StaleOpenSessions(now, staleOpenSessionsThreshold, "alpha")
+	if wantErr == nil {
+		t.Fatal("expected the closed store to fail StaleOpenSessions")
+	}
+
+	if _, err := (StaleOpenSessionsCheck{}).Run(context.Background(), Scope{Store: s, Project: "alpha", Now: now}); err == nil {
+		t.Fatal("Run: want the store error")
+	} else if err.Error() != wantErr.Error() {
+		t.Fatalf("Run error = %v, want the unchanged store error %v", err, wantErr)
+	}
+}
+
 func TestStaleOpenSessionsCheckAllFreshIsOK(t *testing.T) {
 	s := newDiagnosticTestStore(t)
 	now := time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)

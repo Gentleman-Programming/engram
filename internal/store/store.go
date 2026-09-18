@@ -2937,8 +2937,11 @@ func (s *Store) EndSessionStrict(id string, summary *string) (string, error) {
 	}
 	status := SessionEndStatusEnded
 	if err := s.withTx(func(tx *sql.Tx) error {
+		// COALESCE(summary, ?): an already-recorded summary wins, so the supplied
+		// one only fills an empty summary instead of clobbering what an earlier
+		// phase recorded — the argument order is the whole fill-only contract.
 		res, err := s.execHook(tx,
-			`UPDATE sessions SET ended_at = datetime('now'), summary = COALESCE(?, summary) WHERE id = ? AND ended_at IS NULL`,
+			`UPDATE sessions SET ended_at = datetime('now'), summary = COALESCE(summary, ?) WHERE id = ? AND ended_at IS NULL`,
 			summary, id,
 		)
 		if err != nil {
