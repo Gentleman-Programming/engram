@@ -2085,7 +2085,7 @@ func TestExportErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("store export: %v", err)
 		}
-		chunk := sy.filterNewData(data, "")
+		chunk := sy.filterNewDataWithSessionClosures(data, "", nil)
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
 			t.Fatalf("marshal chunk: %v", err)
@@ -4683,12 +4683,12 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 	}
 
 	sy := New(nil, t.TempDir())
-	all := sy.filterNewData(data, "")
+	all := sy.filterNewDataWithSessionClosures(data, "", nil)
 	if len(all.Sessions) != 2 || len(all.Observations) != 2 || len(all.Prompts) != 2 {
 		t.Fatalf("expected first sync to include all data, got %+v", all)
 	}
 
-	newOnly := sy.filterNewData(data, "2025-01-01T10:30:00Z")
+	newOnly := sy.filterNewDataWithSessionClosures(data, "2025-01-01T10:30:00Z", nil)
 	if len(newOnly.Sessions) != 1 || newOnly.Sessions[0].ID != "s2" {
 		t.Fatalf("unexpected new sessions: %+v", newOnly.Sessions)
 	}
@@ -4731,7 +4731,7 @@ func TestFilterNewDataIncludesEditedObservations(t *testing.T) {
 
 	cutoff := "2025-01-01T10:30:00Z"
 	sy := New(nil, t.TempDir())
-	filtered := sy.filterNewData(data, cutoff)
+	filtered := sy.filterNewDataWithSessionClosures(data, cutoff, nil)
 
 	ids := make([]int64, 0, len(filtered.Observations))
 	for _, o := range filtered.Observations {
@@ -4768,7 +4768,7 @@ func TestFilterNewDataIncludesSessionClosureAtCutoff(t *testing.T) {
 		{ID: "still-active", Project: "proj-a", StartedAt: "2025-01-01 09:00:00"},
 	}}
 
-	filtered := New(nil, t.TempDir()).filterNewData(data, "2025-01-01T10:30:00Z")
+	filtered := New(nil, t.TempDir()).filterNewDataWithSessionClosures(data, "2025-01-01T10:30:00Z", nil)
 	if len(filtered.Sessions) != 1 || filtered.Sessions[0].ID != "ended-at-cutoff" {
 		t.Fatalf("expected closure at cutoff to be included without active stale session, got %+v", filtered.Sessions)
 	}

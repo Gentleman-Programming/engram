@@ -2073,12 +2073,6 @@ func hasExportedSessionClosure(states map[string]map[sessionClosureState]struct{
 	return exported
 }
 
-// filterNewData returns only data created after the given timestamp.
-// If lastChunkTime is empty, returns everything (first sync).
-func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
-	return sy.filterNewDataWithSessionClosures(data, lastChunkTime, nil)
-}
-
 func (sy *Syncer) filterNewDataWithSessionClosures(data *store.ExportData, lastChunkTime string, exportedClosures map[string]map[sessionClosureState]struct{}) *ChunkData {
 	chunk := &ChunkData{}
 
