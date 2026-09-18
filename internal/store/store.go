@@ -108,13 +108,14 @@ var (
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Session struct {
-	ID            string  `json:"id"`
-	Project       string  `json:"project"`
-	OwnershipMode string  `json:"ownership_mode,omitempty"`
-	Directory     string  `json:"directory"`
-	StartedAt     string  `json:"started_at"`
-	EndedAt       *string `json:"ended_at,omitempty"`
-	Summary       *string `json:"summary,omitempty"`
+	ID                    string  `json:"id"`
+	Project               string  `json:"project"`
+	OwnershipMode         string  `json:"ownership_mode,omitempty"`
+	Directory             string  `json:"directory"`
+	StartedAt             string  `json:"started_at"`
+	EndedAt               *string `json:"ended_at,omitempty"`
+	Summary               *string `json:"summary,omitempty"`
+	RuntimeLeaseExpiresAt *string `json:"-"`
 }
 
 // SessionProjectConflictError identifies a strict registration that would reuse
@@ -1134,7 +1135,8 @@ func (s *Store) migrate() error {
 			directory  TEXT NOT NULL,
 			started_at TEXT NOT NULL DEFAULT (datetime('now')),
 			ended_at   TEXT,
-			summary    TEXT
+			summary    TEXT,
+			runtime_lease_expires_at TEXT
 		);
 
 			CREATE TABLE IF NOT EXISTS observations (
@@ -1309,6 +1311,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfNotExists("sessions", "ownership_mode", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sessions", "runtime_lease_expires_at", "TEXT"); err != nil {
 		return err
 	}
 	// Legacy rows remain unclassified unless their persisted identity proves a
@@ -2793,12 +2798,24 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	})
 }
 
-// StartSession registers a new session or idempotently starts an active one.
-// It refuses to reuse an ended session ID so MCP callers cannot silently strand
-// later writes on a fallback session.
+// runtimeSessionLeaseDuration bounds local runtime-session liveness. It is not
+// synchronized and never changes a session's terminal state.
+const runtimeSessionLeaseDuration = "+30 minutes"
+
+// StartSession registers a shared runtime session or renews its local lease.
 func (s *Store) StartSession(id, project, directory string) error {
+	return s.StartSessionWithOwnershipMode(id, project, directory, SessionOwnershipShared)
+}
+
+// StartSessionWithOwnershipMode registers a runtime session or renews its local
+// lease. It preserves the existing session identity and refuses to reopen an
+// ended session; EndSession remains terminal truth.
+func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
 	if err := validateSessionID(id); err != nil {
 		return err
+	}
+	if !validSessionOwnershipMode(mode) {
+		return fmt.Errorf("%w %q", ErrInvalidSessionOwnershipMode, mode)
 	}
 	project, _ = NormalizeProject(project)
 	if strings.TrimSpace(project) == "" {
@@ -2806,24 +2823,29 @@ func (s *Store) StartSession(id, project, directory string) error {
 	}
 
 	return s.withTx(func(tx *sql.Tx) error {
-		ended, err := sessionEndedTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if ended {
-			return ErrSessionAlreadyEnded
-		}
 		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
 		if err != nil {
 			return err
 		}
+		identityRepaired := !found
 		if found {
+			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
+				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
+			}
 			if err := sessionProjectWriteError(id, existingProject, existingMode, project); err != nil {
 				return err
 			}
+			var existingDirectory string
+			if err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, id).Scan(&existingDirectory); err != nil {
+				return err
+			}
+			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
 		}
-		if err := s.startSessionTx(tx, id, project, directory, SessionOwnershipShared); err != nil {
+		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
 			return err
+		}
+		if !identityRepaired {
+			return nil
 		}
 		var persisted Session
 		// sessions.project is read through ifnull() because a database upgraded from
@@ -2893,14 +2915,14 @@ func (s *Store) EndSession(id string, summary string) error {
 
 func (s *Store) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id,
+		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary, runtime_lease_expires_at FROM sessions WHERE id = ?`, id,
 	)
 	var sess Session
 	// A database upgraded from the schema where sessions.project was nullable
 	// still carries NULL ownership, so the column must be read as nullable or
 	// every caller that inspects a legacy session dies on an opaque scan error.
 	var project sql.NullString
-	if err := row.Scan(&sess.ID, &project, &sess.OwnershipMode, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary); err != nil {
+	if err := row.Scan(&sess.ID, &project, &sess.OwnershipMode, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary, &sess.RuntimeLeaseExpiresAt); err != nil {
 		return nil, err
 	}
 	sess.Project = project.String
@@ -2928,20 +2950,19 @@ const activeRuntimeSessionWindow = "-7 days"
 //   - Scope to the (normalized) project.
 //   - Scope to the current runtime directory.
 //   - Require ended_at IS NULL — ended sessions are never returned.
-//   - Require recent effective activity. ended_at IS NULL alone means "never
-//     closed", not "in use": a session whose process is long gone stays a
-//     candidate forever, and two such rows make resolution fail permanently
-//     for that project and directory (#1101). Effective activity is the last
-//     observation the session recorded, falling back to started_at when it
-//     recorded none. The sessions table carries no pid or heartbeat, so
-//     liveness is not observable; recency of recorded work is.
+//   - A nonblank runtime lease is authoritative: return it only while it is
+//     valid and unexpired. Expired or malformed leases are excluded.
+//   - A live lease suppresses unleased legacy candidates in its directory only.
+//     Where no live lease exists, preserve the legacy effective-activity window:
+//     the latest observation, falling back to started_at, must be recent.
 //   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
 //
 // ActiveRuntimeSessions returns active, non-manual sessions for a project and
 // runtime directories. The directories narrow candidates; callers must not
-// treat them as session identity.
+// treat them as session identity. Selection is read-only: it never ends or
+// repairs historical rows.
 func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]string, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
@@ -2965,16 +2986,39 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 	}
 
 	rows, err := s.queryHook(s.db, `
-		SELECT s.id
-		FROM sessions s
-		LEFT JOIN observations o ON o.session_id = s.id
-		WHERE LOWER(s.project) = ?
-		  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
-		  AND s.ended_at IS NULL
-		  AND s.id NOT LIKE 'manual-save%'
-		GROUP BY s.id
-		HAVING COALESCE(MAX(o.created_at), s.started_at) >= datetime('now', '`+activeRuntimeSessionWindow+`')
-		ORDER BY s.id
+		WITH runtime_candidates AS (
+			SELECT s.id,
+			       s.directory,
+			       s.runtime_lease_expires_at,
+			       COALESCE(MAX(o.created_at), s.started_at) AS effective_activity
+			FROM sessions s
+			LEFT JOIN observations o ON o.session_id = s.id
+			WHERE LOWER(s.project) = ?
+			  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
+			  AND s.ended_at IS NULL
+			  AND s.id NOT LIKE 'manual-save%'
+			GROUP BY s.id
+		), live_leased_directories AS (
+			SELECT directory
+			FROM runtime_candidates
+			WHERE runtime_lease_expires_at IS NOT NULL
+			  AND runtime_lease_expires_at <> ''
+			  AND datetime(runtime_lease_expires_at) > datetime('now')
+			GROUP BY directory
+		)
+		SELECT candidate.id
+		FROM runtime_candidates candidate
+		WHERE (candidate.runtime_lease_expires_at IS NOT NULL
+		       AND candidate.runtime_lease_expires_at <> ''
+		       AND datetime(candidate.runtime_lease_expires_at) > datetime('now'))
+		   OR ((candidate.runtime_lease_expires_at IS NULL OR candidate.runtime_lease_expires_at = '')
+		       AND candidate.effective_activity >= datetime('now', '`+activeRuntimeSessionWindow+`')
+		       AND NOT EXISTS (
+				SELECT 1
+				FROM live_leased_directories live
+				WHERE live.directory = candidate.directory
+			   ))
+		ORDER BY candidate.id
 	`, args...)
 	if err != nil {
 		return nil, err
@@ -8086,13 +8130,14 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string)
 
 func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory, mode string) error {
 	result, err := s.execHook(tx,
-		`INSERT INTO sessions (id, project, ownership_mode, directory) VALUES (?, ?, ?, ?)
+		`INSERT INTO sessions (id, project, ownership_mode, directory, runtime_lease_expires_at) VALUES (?, ?, ?, ?, datetime('now', ?))
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
-		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END
+		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END,
+		   runtime_lease_expires_at = excluded.runtime_lease_expires_at
 		 WHERE sessions.ended_at IS NULL`,
-		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		id, project, mode, directory, runtimeSessionLeaseDuration, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err
@@ -9431,18 +9476,6 @@ func sessionOwnershipTx(tx *sql.Tx, sessionID string) (project, mode string, fou
 	}
 	normalized, _ := NormalizeProject(strings.TrimSpace(rawProject.String))
 	return normalized, strings.TrimSpace(rawMode.String), true, nil
-}
-
-func sessionEndedTx(tx *sql.Tx, sessionID string) (bool, error) {
-	var endedAt sql.NullString
-	err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, sessionID).Scan(&endedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return endedAt.Valid, nil
 }
 
 func sessionProjectWriteError(sessionID, sessionProject, mode, requested string) error {

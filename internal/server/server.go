@@ -522,9 +522,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = store.SessionOwnershipShared
 	}
-	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+	if err := s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {
+		case errors.Is(err, store.ErrSessionAlreadyEnded):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
+				"code":       "session_already_ended",
+				"session_id": body.ID,
+			})
 		case errors.As(err, &conflict):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
 				"code":              "session_project_conflict",

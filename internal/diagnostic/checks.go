@@ -125,7 +125,7 @@ func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scop
 			Message:              fmt.Sprintf("Project %q has %d active runtime session candidates across %d directory or directories.", project, len(ambiguousIDs), len(ambiguousDirectories)),
 			Why:                  "Omitted-session writes fail closed when multiple active runtime sessions match the same project and directory, so doctor reports the ambiguity without selecting or changing a session.",
 			Evidence:             mustJSON(map[string]any{"project": project, "active_candidate_count": len(ambiguousIDs), "directories": ambiguousDirectories, "session_ids": ambiguousIDs}),
-			SafeNextStep:         "Use an explicit session ID for writes in the affected directory; doctor does not select, end, or modify sessions.",
+			SafeNextStep:         "Use `mem_session_end` to end only confirmed stale IDs; otherwise keep explicit runtime attribution with `session_id` on writes. Doctor is diagnostic-only and never selects, ends, or modifies sessions.",
 			RequiresConfirmation: true,
 		})
 	}

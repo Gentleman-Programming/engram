@@ -875,6 +875,42 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	}
 }
 
+func TestHandleSavePrefersCurrentLeasedRuntimeSessionOverRecentLegacySession(t *testing.T) {
+	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	directory := runtimeSessionDirectory("/work/engram")
+
+	if err := s.CreateSession("legacy-yesterday", "engram", directory); err != nil {
+		t.Fatalf("create legacy session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = datetime('now', '-1 day') WHERE id = ?`, "legacy-yesterday"); err != nil {
+		t.Fatalf("backdate legacy session: %v", err)
+	}
+	if err := s.StartSession("leased-current", "engram", directory); err != nil {
+		t.Fatalf("start leased session: %v", err)
+	}
+
+	res, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Lease-aware active session resolution",
+		"content": "The leased runtime owner supersedes the recent legacy root.",
+		"type":    "bugfix",
+		"project": "engram",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, res))
+	}
+
+	observations, err := s.RecentObservations("engram", "project", 1)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].SessionID != "leased-current" {
+		t.Fatalf("omitted-session save attached to %#v, want leased-current", observations)
+	}
+}
+
 func TestHandleSaveBindsNestedWriteToSessionRegisteredAtRepositoryRoot(t *testing.T) {
 	s := newMCPTestStore(t)
 	repository := project.DetectProjectFull(".")
