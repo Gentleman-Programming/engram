@@ -571,6 +571,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 
 - `--dry-run` (default): for non-semantic lexical scans, reports candidates found with 0 pending rows inserted.
 - `--apply`: inserts up to `--max-insert` (default 100) new rows; prints WARNING when cap is reached.
+- `--dry-run` and `--apply` are mutually exclusive; combining them in either order exits with an error before opening the store.
 - `--since RFC3339`: scan only observations created at or after the timestamp.
 - `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
 - `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
