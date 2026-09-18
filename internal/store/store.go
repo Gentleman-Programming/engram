@@ -108,13 +108,14 @@ var (
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Session struct {
-	ID            string  `json:"id"`
-	Project       string  `json:"project"`
-	OwnershipMode string  `json:"ownership_mode,omitempty"`
-	Directory     string  `json:"directory"`
-	StartedAt     string  `json:"started_at"`
-	EndedAt       *string `json:"ended_at,omitempty"`
-	Summary       *string `json:"summary,omitempty"`
+	ID                    string  `json:"id"`
+	Project               string  `json:"project"`
+	OwnershipMode         string  `json:"ownership_mode,omitempty"`
+	Directory             string  `json:"directory"`
+	StartedAt             string  `json:"started_at"`
+	EndedAt               *string `json:"ended_at,omitempty"`
+	Summary               *string `json:"summary,omitempty"`
+	RuntimeLeaseExpiresAt *string `json:"-"`
 }
 
 // SessionProjectConflictError identifies a strict registration that would reuse
@@ -1134,7 +1135,8 @@ func (s *Store) migrate() error {
 			directory  TEXT NOT NULL,
 			started_at TEXT NOT NULL DEFAULT (datetime('now')),
 			ended_at   TEXT,
-			summary    TEXT
+			summary    TEXT,
+			runtime_lease_expires_at TEXT
 		);
 
 			CREATE TABLE IF NOT EXISTS observations (
@@ -1309,6 +1311,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfNotExists("sessions", "ownership_mode", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sessions", "runtime_lease_expires_at", "TEXT"); err != nil {
 		return err
 	}
 	// Legacy rows remain unclassified unless their persisted identity proves a
@@ -2793,12 +2798,24 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	})
 }
 
-// StartSession registers a new session or idempotently starts an active one.
-// It refuses to reuse an ended session ID so MCP callers cannot silently strand
-// later writes on a fallback session.
+// runtimeSessionLeaseDuration bounds local runtime-session liveness. It is not
+// synchronized and never changes a session's terminal state.
+const runtimeSessionLeaseDuration = "+30 minutes"
+
+// StartSession registers a shared runtime session or renews its local lease.
 func (s *Store) StartSession(id, project, directory string) error {
+	return s.StartSessionWithOwnershipMode(id, project, directory, SessionOwnershipShared)
+}
+
+// StartSessionWithOwnershipMode registers a runtime session or renews its local
+// lease. It preserves the existing session identity and refuses to reopen an
+// ended session; EndSession remains terminal truth.
+func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
 	if err := validateSessionID(id); err != nil {
 		return err
+	}
+	if !validSessionOwnershipMode(mode) {
+		return fmt.Errorf("%w %q", ErrInvalidSessionOwnershipMode, mode)
 	}
 	project, _ = NormalizeProject(project)
 	if strings.TrimSpace(project) == "" {
@@ -2806,23 +2823,19 @@ func (s *Store) StartSession(id, project, directory string) error {
 	}
 
 	return s.withTx(func(tx *sql.Tx) error {
-		ended, err := sessionEndedTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if ended {
-			return ErrSessionAlreadyEnded
-		}
 		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
 		if err != nil {
 			return err
 		}
 		if found {
+			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
+				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
+			}
 			if err := sessionProjectWriteError(id, existingProject, existingMode, project); err != nil {
 				return err
 			}
 		}
-		if err := s.startSessionTx(tx, id, project, directory, SessionOwnershipShared); err != nil {
+		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
 			return err
 		}
 		var persisted Session
@@ -2893,14 +2906,14 @@ func (s *Store) EndSession(id string, summary string) error {
 
 func (s *Store) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id,
+		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary, runtime_lease_expires_at FROM sessions WHERE id = ?`, id,
 	)
 	var sess Session
 	// A database upgraded from the schema where sessions.project was nullable
 	// still carries NULL ownership, so the column must be read as nullable or
 	// every caller that inspects a legacy session dies on an opaque scan error.
 	var project sql.NullString
-	if err := row.Scan(&sess.ID, &project, &sess.OwnershipMode, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary); err != nil {
+	if err := row.Scan(&sess.ID, &project, &sess.OwnershipMode, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary, &sess.RuntimeLeaseExpiresAt); err != nil {
 		return nil, err
 	}
 	sess.Project = project.String
@@ -8086,13 +8099,14 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string)
 
 func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory, mode string) error {
 	result, err := s.execHook(tx,
-		`INSERT INTO sessions (id, project, ownership_mode, directory) VALUES (?, ?, ?, ?)
+		`INSERT INTO sessions (id, project, ownership_mode, directory, runtime_lease_expires_at) VALUES (?, ?, ?, ?, datetime('now', ?))
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
-		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END
+		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END,
+		   runtime_lease_expires_at = excluded.runtime_lease_expires_at
 		 WHERE sessions.ended_at IS NULL`,
-		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		id, project, mode, directory, runtimeSessionLeaseDuration, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err

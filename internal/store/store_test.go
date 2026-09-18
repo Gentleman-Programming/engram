@@ -16274,3 +16274,124 @@ func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
 		t.Fatalf("small budget output produced invalid UTF-8: %q", got)
 	}
 }
+
+func TestRuntimeSessionRegistrationPersistsLocalLease(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+
+	session, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get runtime session: %v", err)
+	}
+	if session.RuntimeLeaseExpiresAt == nil || *session.RuntimeLeaseExpiresAt == "" {
+		t.Fatalf("runtime session lease = %v, want future expiry", session.RuntimeLeaseExpiresAt)
+	}
+	var future int
+	if err := s.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-session").Scan(&future); err != nil {
+		t.Fatalf("check runtime lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatalf("runtime session lease must be in the future, got %q", *session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionRegistrationRenewsWithoutChangingSessionIdentity(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ?, runtime_lease_expires_at = ? WHERE id = ?`, "2001-02-03 04:05:06", "2001-02-03 04:05:06", "runtime-session"); err != nil {
+		t.Fatalf("seed expired lease: %v", err)
+	}
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/ignored", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("renew runtime session: %v", err)
+	}
+
+	session, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get renewed runtime session: %v", err)
+	}
+	if session.StartedAt != "2001-02-03 04:05:06" || session.Project != "runtime-project" || session.OwnershipMode != SessionOwnershipProjectOwned || session.EndedAt != nil {
+		t.Fatalf("renewed runtime session = %#v, want original identity and active terminal state", session)
+	}
+	var future int
+	if err := s.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-session").Scan(&future); err != nil {
+		t.Fatalf("check renewed lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatalf("renewal did not replace expired runtime lease: %#v", session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionRegistrationRejectsEndedSessions(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	if err := s.EndSession("runtime-session", "complete"); err != nil {
+		t.Fatalf("end runtime session: %v", err)
+	}
+	before, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get ended runtime session: %v", err)
+	}
+
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("renew ended runtime session error = %v, want ErrSessionAlreadyEnded", err)
+	}
+	after, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get ended runtime session after renewal: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("ended runtime session changed: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestCreateSessionDoesNotCreateRuntimeLease(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("manual-session", "manual-project", "/manual"); err != nil {
+		t.Fatalf("create manual session: %v", err)
+	}
+
+	session, err := s.GetSession("manual-session")
+	if err != nil {
+		t.Fatalf("get manual session: %v", err)
+	}
+	if session.RuntimeLeaseExpiresAt != nil {
+		t.Fatalf("manual session lease = %q, want nil", *session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionLeaseStaysOutOfSyncAndExportPayloads(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+
+	var mutationPayload string
+	if err := s.DB().QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "runtime-session").Scan(&mutationPayload); err != nil {
+		t.Fatalf("read runtime session mutation: %v", err)
+	}
+	if strings.Contains(mutationPayload, "runtime_lease_expires_at") {
+		t.Fatalf("sync mutation leaked runtime lease: %s", mutationPayload)
+	}
+
+	exported, err := s.Export()
+	if err != nil {
+		t.Fatalf("export runtime session: %v", err)
+	}
+	exportPayload, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal runtime export: %v", err)
+	}
+	if strings.Contains(string(exportPayload), "runtime_lease_expires_at") {
+		t.Fatalf("export leaked runtime lease: %s", exportPayload)
+	}
+}
