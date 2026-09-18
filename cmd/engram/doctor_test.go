@@ -551,12 +551,12 @@ func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t
 	}
 	for _, mode := range []string{"--plan", "--dry-run"} {
 		plan := runRepair(mode)
-		if len(plan["placeholder_sessions"].([]any)) != 1 || plan["counts"].(map[string]any)["sessions_planned"] != float64(1) {
+		if len(plan["placeholder_sessions"].([]any)) != 1 || plan["counts"].(map[string]any)["sessions_planned"] != float64(1) || plan["counts"].(map[string]any)["observations_planned"] != float64(1) {
 			t.Fatalf("%s plan=%v", mode, plan)
 		}
 	}
 	applied := runRepair("--apply")
-	if applied["status"] != "applied" || applied["counts"].(map[string]any)["sessions_applied"] != float64(1) {
+	if applied["status"] != "applied" || applied["counts"].(map[string]any)["sessions_applied"] != float64(1) || applied["counts"].(map[string]any)["observations_applied"] != float64(1) {
 		t.Fatalf("apply=%v", applied)
 	}
 	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))

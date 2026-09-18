@@ -149,6 +149,8 @@ func planForeignSyncTargetCleanup(plan *RepairPlan, scope Scope) error {
 }
 
 func planOrphanedObservationSessionRepair(plan *RepairPlan, report Report) {
+	candidates := map[string]store.OrphanedSessionPlaceholder{}
+	ambiguous := map[string]bool{}
 	for _, check := range report.Checks {
 		for _, finding := range check.Findings {
 			if finding.ReasonCode != CheckOrphanedObservationSession {
@@ -164,9 +166,24 @@ func planOrphanedObservationSessionRepair(plan *RepairPlan, report Report) {
 				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: evidence.SessionID, ReasonCode: "invalid_orphaned_session_evidence", Message: "orphaned session repair requires a non-blank session ID, project, and first observation timestamp"})
 				continue
 			}
-			plan.PlaceholderSessions = append(plan.PlaceholderSessions, store.OrphanedSessionPlaceholder{SessionID: evidence.SessionID, Project: project, ObservationCount: evidence.ObservationCount, StartedAt: evidence.FirstObservedAt})
+			candidate := store.OrphanedSessionPlaceholder{SessionID: evidence.SessionID, Project: project, ObservationCount: evidence.ObservationCount, StartedAt: evidence.FirstObservedAt}
+			if existing, found := candidates[candidate.SessionID]; found && existing.Project != candidate.Project {
+				ambiguous[candidate.SessionID] = true
+				continue
+			}
+			candidates[candidate.SessionID] = candidate
 		}
 	}
+	for sessionID, candidate := range candidates {
+		if ambiguous[sessionID] {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: sessionID, ReasonCode: "ambiguous_orphaned_session_project", Message: "the same missing session ID is referenced by multiple projects"})
+			continue
+		}
+		plan.PlaceholderSessions = append(plan.PlaceholderSessions, candidate)
+	}
+	sort.Slice(plan.PlaceholderSessions, func(i, j int) bool {
+		return plan.PlaceholderSessions[i].SessionID < plan.PlaceholderSessions[j].SessionID
+	})
 }
 
 func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {
