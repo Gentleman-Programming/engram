@@ -55,6 +55,7 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 // Sentinel errors returned by Store operations so callers can use errors.Is.
 var (
 	ErrSessionNotFound             = errors.New("session not found")
+	ErrSessionBusy                 = errors.New("session closure is temporarily blocked while the store is busy")
 	ErrSessionIDRequired           = errors.New("session id is required")
 	ErrSessionAlreadyEnded         = errors.New("session has already ended")
 	ErrSessionHasObservations      = errors.New("session still has observations")
@@ -2850,32 +2851,40 @@ func (s *Store) EndSession(id string, summary string) error {
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
-	return s.withTx(func(tx *sql.Tx) error {
-		res, err := s.execHook(tx,
-			`UPDATE sessions SET ended_at = datetime('now'), summary = ? WHERE id = ?`,
-			nullableString(summary), id,
-		)
-		if err != nil {
+	err := s.withTx(func(tx *sql.Tx) error {
+		var endedAt sql.NullString
+		var storedSummary *string
+		if err := tx.QueryRow(
+			`SELECT ended_at, summary FROM sessions WHERE id = ?`, id,
+		).Scan(&endedAt, &storedSummary); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: %q", ErrSessionNotFound, id)
+			}
 			return err
 		}
-		rows, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if rows == 0 {
+
+		if endedAt.Valid && strings.TrimSpace(endedAt.String) != "" {
 			return nil
 		}
 
-		var startedAt, endedAt string
+		if _, err := s.execHook(tx,
+			`UPDATE sessions
+			 SET ended_at = datetime('now'), summary = COALESCE(summary, ?)
+			 WHERE id = ?`,
+			nullableString(summary), id,
+		); err != nil {
+			return err
+		}
+
+		var startedAt, closedAt string
 		var project, directory, mode string
-		var storedSummary *string
 		// sessions.project is read through ifnull() because a database upgraded from
 		// the schema where the column was nullable still carries rows that identify no
 		// project, and no migration rewrites them.
 		if err := tx.QueryRow(
 			`SELECT ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`,
 			id,
-		).Scan(&project, &mode, &directory, &startedAt, &endedAt, &storedSummary); err != nil {
+		).Scan(&project, &mode, &directory, &startedAt, &closedAt, &storedSummary); err != nil {
 			return err
 		}
 
@@ -2885,10 +2894,14 @@ func (s *Store) EndSession(id string, summary string) error {
 			OwnershipMode: mode,
 			Directory:     directory,
 			StartedAt:     startedAt,
-			EndedAt:       &endedAt,
+			EndedAt:       &closedAt,
 			Summary:       storedSummary,
 		})
 	})
+	if isRetryableSQLiteLockError(err) {
+		return fmt.Errorf("%w: %v", ErrSessionBusy, err)
+	}
+	return err
 }
 
 func (s *Store) GetSession(id string) (*Session, error) {
@@ -5357,18 +5370,14 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 
 	result := &ImportResult{}
 
-	// Import sessions (skip duplicates)
 	for _, sess := range data.Sessions {
-		res, err := s.execHook(tx,
-			`INSERT OR IGNORE INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
-			 VALUES (?, ?, COALESCE(?, 'shared'), ?, ?, ?, ?)`,
-			sess.ID, sess.Project, nullableOwnershipMode(sess.OwnershipMode), sess.Directory, sess.StartedAt, sess.EndedAt, sess.Summary,
-		)
+		inserted, err := s.importSessionTx(tx, sess)
 		if err != nil {
 			return nil, fmt.Errorf("import session %s: %w", sess.ID, err)
 		}
-		n, _ := res.RowsAffected()
-		result.SessionsImported += int(n)
+		if inserted {
+			result.SessionsImported++
+		}
 	}
 
 	// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
@@ -5529,6 +5538,44 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	return result, nil
+}
+
+func (s *Store) importSessionTx(tx *sql.Tx, sess Session) (bool, error) {
+	if strings.TrimSpace(sess.ID) == "" {
+		return false, fmt.Errorf("session id is required")
+	}
+
+	var existingID string
+	err := tx.QueryRow(`SELECT id FROM sessions WHERE id = ?`, sess.ID).Scan(&existingID)
+	if errors.Is(err, sql.ErrNoRows) {
+		endedAt := sess.EndedAt
+		if endedAt != nil && strings.TrimSpace(*endedAt) == "" {
+			endedAt = nil
+		}
+		_, err := s.execHook(tx,
+			`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
+			 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)`,
+			sess.ID, sess.Project, nullableOwnershipMode(sess.OwnershipMode), sess.Directory, strings.TrimSpace(sess.StartedAt), endedAt, sess.Summary,
+		)
+		return true, err
+	}
+	if err != nil {
+		return false, err
+	}
+
+	endedAt := sess.EndedAt
+	if endedAt != nil && strings.TrimSpace(*endedAt) == "" {
+		endedAt = nil
+	}
+	_, err = s.execHook(tx,
+		`UPDATE sessions
+			 SET ended_at = COALESCE(?, ended_at),
+			     summary = COALESCE(?, summary)
+			 WHERE id = ?`,
+		endedAt, sess.Summary,
+		sess.ID,
+	)
+	return false, err
 }
 
 type ImportResult struct {
@@ -10085,19 +10132,17 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 	if strings.TrimSpace(payload.OwnershipMode) != "" && !validSessionOwnershipMode(payload.OwnershipMode) {
 		return fmt.Errorf("%w %q", ErrInvalidSessionOwnershipMode, payload.OwnershipMode)
 	}
+	endedAt := payload.EndedAt
+	if endedAt != nil && strings.TrimSpace(*endedAt) == "" {
+		endedAt = nil
+	}
 	_, err := s.execHook(tx,
 		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
-		 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET
-		   project = CASE WHEN sessions.ownership_mode = 'project_owned' THEN sessions.project ELSE excluded.project END,
-		   ownership_mode = CASE
-		     WHEN sessions.ownership_mode = 'project_owned' OR excluded.ownership_mode IS NULL THEN sessions.ownership_mode
-		     ELSE excluded.ownership_mode END,
-		   directory = excluded.directory,
-		   started_at = COALESCE(NULLIF(excluded.started_at, ''), sessions.started_at),
-		   ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
-		   summary = COALESCE(excluded.summary, sessions.summary)`,
-		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), payload.EndedAt, payload.Summary,
+			 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
+			   summary = COALESCE(excluded.summary, sessions.summary)`,
+		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), endedAt, payload.Summary,
 	)
 	if err != nil {
 		return err
