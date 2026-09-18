@@ -17,7 +17,8 @@
 
 | Integration | Coverage |
 |---|---|
-| OpenCode | TypeScript plugin plus MCP registration via `engram setup opencode`. |
+| OpenCode 1.x | TypeScript plugin plus MCP registration via `engram setup opencode`. |
+| OpenCode 2.x | TypeScript plugin for the V2 plugin API via `engram setup opencode-v2` (MCP registration under `mcp.servers`). |
 | Claude Code | Marketplace/bundled plugin for hooks, scripts, and skills; `engram setup claude-code` solely registers MCP. |
 | Codex | Codex plugin assets under `plugin/codex/`; `engram setup codex` best-effort installs the marketplace plugin and writes MCP/instruction config. |
 | Pi | Pi package under `plugin/pi/` exposes Pi-native HTTP memory tools and configures MCP through `pi-mcp-adapter`. |
@@ -40,6 +41,18 @@ engram setup opencode
 The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed.
 
 > **Local model compatibility:** The plugin works with all models, including local ones served via llama.cpp, Ollama, or similar. The Memory Protocol is concatenated into the existing system prompt (not added as a separate system message), so models with strict Jinja templates (Qwen, Mistral/Ministral) work correctly.
+
+### OpenCode v2
+
+OpenCode 2.x loads a new plugin API, which no longer runs V1 plugin implementations (`Plugin must export a default definition with an id and an effect or setup function`). Install the V2 adapter:
+
+```bash
+engram setup opencode-v2
+```
+
+It writes the same plugin path (`~/.config/opencode/plugins/engram.ts`) and registers the MCP server under `mcp.servers`, the V2 config shape. The adapter keeps the same behavior contract as the 1.x plugin — runtime session resolution, Memory Protocol injection, save nudges, compaction context, and passive capture — and uses `node:child_process`/`node:fs` instead of `Bun.*` so it also runs in hosts without a `Bun` global (issue [#1218](https://github.com/Gentleman-Programming/engram/issues/1218)).
+
+> Run only one of `engram setup opencode` (OpenCode 1.x) or `engram setup opencode-v2` (OpenCode 2.x): both install to the same plugin file.
 
 ### What the Plugin Does
 

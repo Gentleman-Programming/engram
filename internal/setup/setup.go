@@ -54,6 +54,7 @@ var (
 	jsonMarshalFn                      = json.Marshal
 	jsonMarshalIndentFn                = json.MarshalIndent
 	injectOpenCodeMCPFn                = injectOpenCodeMCP
+	injectOpenCodeMCPV2Fn              = injectOpenCodeMCPV2
 	injectOpenCodeTUIPluginFn          = injectOpenCodeTUIPlugin
 	injectGeminiMCPFn                  = injectGeminiMCP
 	writeGeminiSystemPromptFn          = writeGeminiSystemPrompt
@@ -70,7 +71,7 @@ var (
 	resolveMiseNodeVersionFn = resolveMiseNodeVersion
 )
 
-//go:embed plugins/opencode/*
+//go:embed plugins/opencode/* plugins/opencode-v2/*
 var openCodeFS embed.FS
 
 // Agent represents a supported AI coding agent.
@@ -632,6 +633,53 @@ func installOpenCode() (*Result, error) {
 	}, nil
 }
 
+// installOpenCodeV2 installs the OpenCode V2 plugin adapter. It shares the
+// destination and binary-path patching with the 1.x installer but registers the
+// MCP server using the V2 config shape (mcp.servers).
+func installOpenCodeV2() (*Result, error) {
+	dir := openCodePluginDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("create plugin dir %s: %w", dir, err)
+	}
+
+	data, err := openCodeReadFile("plugins/opencode-v2/engram.ts")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded opencode-v2 engram.ts: %w", err)
+	}
+
+	// Patch ENGRAM_BIN in the installed copy so the plugin can find the binary
+	// in headless/systemd environments where PATH may not include user tool dirs.
+	// The source plugin file is not modified — it keeps the simple env-var form.
+	data = patchEngramBINLine(data, resolveEngramCommand())
+
+	dest := filepath.Join(dir, "engram.ts")
+	if err := openCodeWriteFileFn(dest, data, 0644); err != nil {
+		return nil, fmt.Errorf("write %s: %w", dest, err)
+	}
+
+	// Register engram MCP server in opencode.json using the V2 shape:
+	// servers live under "mcp.servers" and use "disabled" instead of "enabled".
+	files := 1
+	mcpConfigured := false
+	if err := injectOpenCodeMCPV2Fn(); err != nil {
+		// Non-fatal: plugin works, MCP just needs manual config
+		cmd := resolveEngramCommand()
+		fmt.Fprintf(os.Stderr, "warning: could not auto-register MCP server in opencode.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Add manually to your opencode.json under \"mcp.servers\":\n")
+		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"] }\n", cmd)
+	} else {
+		files++
+		mcpConfigured = true
+	}
+
+	return &Result{
+		Agent:         "opencode-v2",
+		Destination:   dir,
+		Files:         files,
+		MCPConfigured: mcpConfigured,
+	}, nil
+}
+
 // injectOpenCodeTUIPlugin adds the subagent monitor package to tui.json.
 // It preserves the existing config and only appends the package when missing.
 func injectOpenCodeTUIPlugin() error {
@@ -736,6 +784,95 @@ func injectOpenCodeMCP() error {
 	mcpBlock["engram"] = json.RawMessage(entryJSON)
 
 	// Write mcp block back to config
+	mcpJSON, err := jsonMarshalFn(mcpBlock)
+	if err != nil {
+		return fmt.Errorf("marshal mcp block: %w", err)
+	}
+	config["mcp"] = json.RawMessage(mcpJSON)
+
+	// Write config back with indentation
+	output, err := jsonMarshalIndentFn(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	return nil
+}
+
+// injectOpenCodeMCPV2 adds the engram MCP server entry to opencode.json using
+// the OpenCode V2 config shape: servers live under "mcp.servers" and use
+// "disabled" instead of "enabled". It reads the existing config, adds the
+// engram entry, and writes it back preserving all other settings.
+func injectOpenCodeMCPV2() error {
+	configPath := openCodeConfigPath()
+
+	// Read existing config (or start with empty object)
+	var config map[string]json.RawMessage
+	data, err := readFileFn(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			config = make(map[string]json.RawMessage)
+		} else {
+			return fmt.Errorf("read config: %w", err)
+		}
+	} else {
+		cleaned := stripJSONC(data)
+		if err := json.Unmarshal(cleaned, &config); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+
+	// Parse or create the "mcp" block
+	var mcpBlock map[string]json.RawMessage
+	if raw, exists := config["mcp"]; exists {
+		if err := json.Unmarshal(raw, &mcpBlock); err != nil {
+			return fmt.Errorf("parse mcp block: %w", err)
+		}
+	}
+	if mcpBlock == nil {
+		mcpBlock = make(map[string]json.RawMessage)
+	}
+
+	// Parse or create the nested "mcp.servers" block (V2 shape)
+	var servers map[string]json.RawMessage
+	if raw, exists := mcpBlock["servers"]; exists {
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return fmt.Errorf("parse mcp.servers block: %w", err)
+		}
+	}
+	if servers == nil {
+		servers = make(map[string]json.RawMessage)
+	}
+
+	// Check if engram is already registered
+	if _, exists := servers["engram"]; exists {
+		return nil // already registered, nothing to do
+	}
+
+	// Add engram MCP entry (agent profile — only tools agents need).
+	// Use resolveEngramCommand() so Windows users (and headless Linux setups
+	// where PATH is not inherited) get the absolute binary path.
+	engramEntry := map[string]interface{}{
+		"type":     "local",
+		"command":  []string{resolveEngramCommand(), "mcp", "--tools=agent"},
+		"disabled": false,
+	}
+	entryJSON, err := jsonMarshalFn(engramEntry)
+	if err != nil {
+		return fmt.Errorf("marshal engram entry: %w", err)
+	}
+	servers["engram"] = json.RawMessage(entryJSON)
+
+	serversJSON, err := jsonMarshalFn(servers)
+	if err != nil {
+		return fmt.Errorf("marshal mcp.servers block: %w", err)
+	}
+	mcpBlock["servers"] = json.RawMessage(serversJSON)
+
 	mcpJSON, err := jsonMarshalFn(mcpBlock)
 	if err != nil {
 		return fmt.Errorf("marshal mcp block: %w", err)

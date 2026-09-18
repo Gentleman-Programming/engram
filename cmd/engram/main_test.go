@@ -445,7 +445,7 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "[--match all|any]") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
-	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode"} {
+	for _, agent := range []string{"opencode", "opencode-v2", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode"} {
 		if !strings.Contains(stdout, agent) {
 			t.Fatalf("usage missing setup agent %q: %q", agent, stdout)
 		}
@@ -509,6 +509,18 @@ func TestPrintPostInstall(t *testing.T) {
 		{
 			name:       "opencode with incomplete MCP registration",
 			result:     &setup.Result{Agent: "opencode", MCPConfigured: false, TUIPluginEnabled: false},
+			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "opencode-v2 with MCP configured",
+			result:     &setup.Result{Agent: "opencode-v2", MCPConfigured: true},
+			expects:    []string{"OpenCode v2 plugin and Engram MCP registration (mcp.servers)", "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, mcpManualMessage, "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "opencode-v2 with incomplete MCP registration",
+			result:     &setup.Result{Agent: "opencode-v2", MCPConfigured: false},
 			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
 			notExpects: []string{mcpConfiguredMessage, "opencode-subagent-statusline", "engram serve &"},
 		},
