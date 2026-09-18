@@ -458,8 +458,8 @@ type SyncMutationSupersedeAction struct {
 // SyncMutationSupersedeReport is the explicit, non-acknowledging local
 // recovery result for stale pending upserts.
 type SyncMutationSupersedeReport struct {
-	Project string                       `json:"project,omitempty"`
-	Applied bool                         `json:"applied"`
+	Project string                        `json:"project,omitempty"`
+	Applied bool                          `json:"applied"`
 	Actions []SyncMutationSupersedeAction `json:"actions"`
 }
 
@@ -625,13 +625,95 @@ type syncRelationPayload struct {
 	UpdatedAt      string   `json:"updated_at"`
 }
 
-// ExportData is the full serializable dump of the engram database.
+const (
+	legacyExportVersion  = "0.1.0"
+	currentExportVersion = "0.2.0"
+)
+
+// BackupRelation is the lossless direct-backup representation of a
+// memory_relations row. Relation IDs are local SQLite keys, so supersession is
+// represented by the referenced relation's portable sync ID instead.
+type BackupRelation struct {
+	SyncID                     string   `json:"sync_id"`
+	SourceID                   string   `json:"source_id"`
+	TargetID                   string   `json:"target_id"`
+	Relation                   string   `json:"relation"`
+	Reason                     *string  `json:"reason,omitempty"`
+	Evidence                   *string  `json:"evidence,omitempty"`
+	Confidence                 *float64 `json:"confidence,omitempty"`
+	JudgmentStatus             string   `json:"judgment_status"`
+	MarkedByActor              *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind               *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel              *string  `json:"marked_by_model,omitempty"`
+	SessionID                  *string  `json:"session_id,omitempty"`
+	SupersededAt               *string  `json:"superseded_at,omitempty"`
+	SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id,omitempty"`
+	CreatedAt                  string   `json:"created_at"`
+	UpdatedAt                  string   `json:"updated_at"`
+}
+
+// backupObservation is deliberately separate from Observation's shared sync
+// representation: direct backups preserve local pinned state while sync JSON
+// continues to omit it.
+type backupObservation struct {
+	Observation
+	Pinned bool `json:"pinned"`
+}
+
+// ExportData is the full serializable direct-backup dump of the engram database.
 type ExportData struct {
-	Version      string        `json:"version"`
-	ExportedAt   string        `json:"exported_at"`
-	Sessions     []Session     `json:"sessions"`
-	Observations []Observation `json:"observations"`
-	Prompts      []Prompt      `json:"prompts"`
+	Version      string           `json:"version"`
+	ExportedAt   string           `json:"exported_at"`
+	Sessions     []Session        `json:"sessions"`
+	Observations []Observation    `json:"observations"`
+	Prompts      []Prompt         `json:"prompts"`
+	Relations    []BackupRelation `json:"relations,omitempty"`
+}
+
+// MarshalJSON projects observations through the backup-only form so direct
+// exports include pinned state without changing Observation's sync JSON tag.
+func (d ExportData) MarshalJSON() ([]byte, error) {
+	observations := make([]backupObservation, len(d.Observations))
+	for i, observation := range d.Observations {
+		observations[i] = backupObservation{Observation: observation, Pinned: observation.Pinned}
+	}
+	return json.Marshal(struct {
+		Version      string              `json:"version"`
+		ExportedAt   string              `json:"exported_at"`
+		Sessions     []Session           `json:"sessions"`
+		Observations []backupObservation `json:"observations"`
+		Prompts      []Prompt            `json:"prompts"`
+		Relations    []BackupRelation    `json:"relations,omitempty"`
+	}{
+		Version: d.Version, ExportedAt: d.ExportedAt, Sessions: d.Sessions,
+		Observations: observations, Prompts: d.Prompts, Relations: d.Relations,
+	})
+}
+
+// UnmarshalJSON accepts both the current backup projection and legacy 0.1.0
+// exports, where pinned and relations are absent and therefore retain defaults.
+func (d *ExportData) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Version      string              `json:"version"`
+		ExportedAt   string              `json:"exported_at"`
+		Sessions     []Session           `json:"sessions"`
+		Observations []backupObservation `json:"observations"`
+		Prompts      []Prompt            `json:"prompts"`
+		Relations    []BackupRelation    `json:"relations"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	observations := make([]Observation, len(decoded.Observations))
+	for i, observation := range decoded.Observations {
+		observation.Observation.Pinned = observation.Pinned
+		observations[i] = observation.Observation
+	}
+	*d = ExportData{
+		Version: decoded.Version, ExportedAt: decoded.ExportedAt, Sessions: decoded.Sessions,
+		Observations: observations, Prompts: decoded.Prompts, Relations: decoded.Relations,
+	}
+	return nil
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -5100,9 +5182,9 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 // exportWithProjectScope reads sessions.project through ifnull(): an export is how
 // data leaves the store before a repair, so it must not be the one path that
 // refuses to read the legacy unowned rows the operator is trying to rescue.
-func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
+func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error) {
 	data := &ExportData{
-		Version:    "0.1.0",
+		Version:    currentExportVersion,
 		ExportedAt: Now(),
 	}
 
@@ -5197,10 +5279,65 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		return nil, err
 	}
 
+	// Relations are direct-backup metadata, not sync payloads. They are selected
+	// separately so every persisted judgment and supersession field is retained.
+	relationQuery := `
+		SELECT r.sync_id, ifnull(r.source_id, ''), ifnull(r.target_id, ''), r.relation,
+		       r.reason, r.evidence, r.confidence, r.judgment_status,
+		       r.marked_by_actor, r.marked_by_kind, r.marked_by_model, r.session_id,
+		       r.superseded_at, superseding.sync_id, r.created_at, r.updated_at
+		FROM memory_relations r
+		LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id`
+	relationArgs := []any{}
+	if project != "" {
+		relationQuery += `
+			WHERE r.source_id IN (
+				SELECT sync_id FROM observations
+				WHERE ifnull(project, '') = ?
+				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+			)
+			  AND r.target_id IN (
+				SELECT sync_id FROM observations
+				WHERE ifnull(project, '') = ?
+				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
+			)`
+		relationArgs = append(relationArgs, project, project, project, project)
+	}
+	relationQuery += " ORDER BY r.created_at, r.sync_id"
+	relationRows, err := s.queryItHook(s.db, relationQuery, relationArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
+	defer func() { _ = relationRows.Close() }()
+	for relationRows.Next() {
+		var relation BackupRelation
+		if err := relationRows.Scan(
+			&relation.SyncID, &relation.SourceID, &relation.TargetID, &relation.Relation,
+			&relation.Reason, &relation.Evidence, &relation.Confidence, &relation.JudgmentStatus,
+			&relation.MarkedByActor, &relation.MarkedByKind, &relation.MarkedByModel, &relation.SessionID,
+			&relation.SupersededAt, &relation.SupersededByRelationSyncID, &relation.CreatedAt, &relation.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("export relations: scan: %w", err)
+		}
+		data.Relations = append(data.Relations, relation)
+	}
+	if err := relationRows.Err(); err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
+	if err := relationRows.Close(); err != nil {
+		return nil, fmt.Errorf("export relations: close: %w", err)
+	}
+
 	return data, nil
 }
 
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
+	if data == nil {
+		return nil, errors.New("import: export data is required")
+	}
+	if data.Version != "" && data.Version != legacyExportVersion && data.Version != currentExportVersion {
+		return nil, fmt.Errorf("import: unsupported export version %q", data.Version)
+	}
 	for _, sess := range data.Sessions {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
@@ -5263,16 +5400,16 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if duplicateCount <= 0 {
 				duplicateCount = existing.DuplicateCount
 			}
-			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
-				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
+			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, pinned = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
+				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, obs.Pinned, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
 			result.ObservationsUpdated++
 			continue
 		}
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at)
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -5288,6 +5425,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
 			obs.ReviewAfter,
+			obs.Pinned,
 			obs.CreatedAt,
 			obs.UpdatedAt,
 			obs.DeletedAt,
@@ -5324,6 +5462,66 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		}
 		n, _ := res.RowsAffected()
 		result.PromptsImported += int(n)
+	}
+
+	// Relations are imported only after all observation endpoints have been
+	// written. Any missing endpoint aborts this transaction and rolls back the
+	// sessions, observations, prompts, and earlier relation rows together.
+	importedRelations := make(map[string]bool, len(data.Relations))
+	for _, relation := range data.Relations {
+		if strings.TrimSpace(relation.SyncID) == "" {
+			return nil, errors.New("import relation: sync id is required")
+		}
+		for _, endpoint := range []struct {
+			role   string
+			syncID string
+		}{
+			{role: "source", syncID: relation.SourceID},
+			{role: "target", syncID: relation.TargetID},
+		} {
+			if strings.TrimSpace(endpoint.syncID) == "" {
+				return nil, fmt.Errorf("import relation %s: relation endpoint %s is required", relation.SyncID, endpoint.role)
+			}
+			var exists bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observations WHERE sync_id = ?)`, endpoint.syncID).Scan(&exists); err != nil {
+				return nil, fmt.Errorf("import relation %s: check %s endpoint: %w", relation.SyncID, endpoint.role, err)
+			}
+			if !exists {
+				return nil, fmt.Errorf("import relation %s: relation endpoint %s not found", relation.SyncID, endpoint.role)
+			}
+		}
+		res, err := s.execHook(tx, `INSERT OR IGNORE INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status,
+			 marked_by_actor, marked_by_kind, marked_by_model, session_id, superseded_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation,
+			relation.Reason, relation.Evidence, relation.Confidence, relation.JudgmentStatus,
+			relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
+			relation.SupersededAt, relation.CreatedAt, relation.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("import relation %s: %w", relation.SyncID, err)
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("import relation %s: rows affected: %w", relation.SyncID, err)
+		}
+		importedRelations[relation.SyncID] = inserted == 1
+	}
+	for _, relation := range data.Relations {
+		if !importedRelations[relation.SyncID] || relation.SupersededByRelationSyncID == nil {
+			continue
+		}
+		var supersedingID int64
+		if err := tx.QueryRow(`SELECT id FROM memory_relations WHERE sync_id = ?`, *relation.SupersededByRelationSyncID).Scan(&supersedingID); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("import relation %s: superseding relation %s not found", relation.SyncID, *relation.SupersededByRelationSyncID)
+			}
+			return nil, fmt.Errorf("import relation %s: lookup superseding relation: %w", relation.SyncID, err)
+		}
+		if _, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id = ? WHERE sync_id = ?`, supersedingID, relation.SyncID); err != nil {
+			return nil, fmt.Errorf("import relation %s: set superseding relation: %w", relation.SyncID, err)
+		}
 	}
 
 	if err := s.commitHook(tx); err != nil {
@@ -6387,6 +6585,36 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 		return false, nil
 	}
 
+	syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, status, false)
+	if err != nil {
+		return false, err
+	}
+
+	log.Printf("[store] relation apply seq=%d entity_key=%s sync_id=%s err=%v - marking %s", mutation.Seq, mutation.EntityKey, syncID, applyErr, status)
+	return true, nil
+}
+
+// writeRelationApplyFailureTx persists the one sync_apply_deferred row shared
+// by both relation-failure callers — recordRelationApplyFailureTx (post-apply
+// FK-miss and dead-letter evidence) and EnqueueDeferredRelation (pre-apply
+// skip evidence from the cloud import, issue #1135). Keeping a single writer
+// is what makes "same deterministic identity and scope semantics" structural:
+// a skipped edge and a later delivery of the same edge collapse onto a single
+// row, whichever wrote first. Returns the derived row identity.
+//
+// allowDeadRearm gates the only resurrection path in this writer; ordinary
+// apply redelivery always passes false and keeps the historical rule that a
+// dead row stays dead. Only EnqueueDeferredRelation passes true, and even then
+// a dead row is re-armed only when the computed identity is the relation's own
+// sync_id — the identity deferred retry state is keyed on — and the payload's
+// decoded sync_id agrees with that identity, so a dead row there can only be
+// retry state that expired at ReplayDeferredForScope's retry cap.
+// Re-arming resets retry_count to 0 (a fresh bounded replay window), preserves
+// first_seen_at, keeps last_error as diagnostic history until the next replay
+// overwrites it, and bumps last_attempted_at as any write does. Rows under
+// hashed identities are dead evidence of non-retryable failures; no caller may
+// resurrect them.
+func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, status string, allowDeadRearm bool) (string, error) {
 	// Read the payload the same way applyRelationUpsertTx reads it, so the
 	// identity stored on the row is the identity the applier would recognise.
 	var payload syncRelationPayload
@@ -6419,6 +6647,19 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 
 	syncID := relationApplyFailureSyncID(status, targetKey, mutation)
 
+	// Re-arm applies only when the computed identity is the relation's own
+	// sync_id (a non-blank entity key under the deferred status) and the payload
+	// agrees: its decoded sync_id must equal that identity, so a mutation naming
+	// one relation in its key while encoding another in its payload can never
+	// resurrect the dead retry row keyed by that name. Hash-keyed
+	// identities — blank entity keys and every status='dead' write — land on
+	// dead-evidence rows that stay dead no matter which caller writes.
+	rearmDead := allowDeadRearm && syncID != "" && syncID == strings.TrimSpace(mutation.EntityKey) && payloadSyncID == syncID
+	rearmFlag := 0
+	if rearmDead {
+		rearmFlag = 1
+	}
+
 	// Rows written before the identity above existed are keyed on the mutation's
 	// entity_key and store no entity_key of their own. Retire the one this exact
 	// mutation wrote, so redelivering it rekeys its evidence instead of leaving a
@@ -6434,7 +6675,7 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 			  AND payload = ?
 			  AND apply_status = 'dead'
 		`, mutation.Entity, mutation.EntityKey, mutation.Payload); err != nil {
-			return false, fmt.Errorf("retire legacy relation apply failure: %w", err)
+			return "", fmt.Errorf("retire legacy relation apply failure: %w", err)
 		}
 	}
 
@@ -6447,21 +6688,60 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 			target_key        = excluded.target_key,
 			entity_key        = excluded.entity_key,
 			op                = excluded.op,
-			reason_code       = excluded.reason_code,
+			reason_code       = CASE
+				WHEN sync_apply_deferred.reason_code = ? THEN sync_apply_deferred.reason_code
+				ELSE excluded.reason_code
+			END,
 			payload_sync_id   = excluded.payload_sync_id,
-			project           = excluded.project,
+			project           = CASE
+				WHEN sync_apply_deferred.reason_code = ? AND excluded.reason_code <> ? THEN sync_apply_deferred.project
+				ELSE excluded.project
+			END,
 			scope_class       = excluded.scope_class,
 			apply_status      = CASE
 				WHEN excluded.apply_status = 'dead' THEN 'dead'
+				WHEN ? AND sync_apply_deferred.apply_status = 'dead' THEN 'deferred'
 				ELSE sync_apply_deferred.apply_status
 			END,
+			retry_count       = CASE
+				WHEN ? AND sync_apply_deferred.apply_status = 'dead' THEN 0
+				ELSE sync_apply_deferred.retry_count
+			END,
 			last_attempted_at = datetime('now')
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status); err != nil {
-		return false, fmt.Errorf("write relation apply failure: %w", err)
+		WHERE sync_apply_deferred.apply_status <> 'dead'
+		   OR excluded.apply_status = 'dead'
+		   OR ?
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status, relationDeferredOuterProjectAuthoritativeReasonCode, relationDeferredOuterProjectAuthoritativeReasonCode, relationDeferredOuterProjectAuthoritativeReasonCode, rearmFlag, rearmFlag, rearmFlag); err != nil {
+		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 
-	log.Printf("[store] relation apply seq=%d entity_key=%s sync_id=%s err=%v - marking %s", mutation.Seq, mutation.EntityKey, syncID, applyErr, status)
-	return true, nil
+	return syncID, nil
+}
+
+// EnqueueDeferredRelation durably records a relation upsert as deferred retry
+// state before its chunk applies (issue #1135): when the cloud import skips an
+// edge as permanently unsatisfiable, this row is what keeps the skip
+// recoverable — ReplayDeferredForScope re-applies the edge once its endpoint
+// reappears, and the apply's success path deletes the row. It writes exactly
+// the row recordRelationApplyFailureTx writes for a deferred FK miss, so a
+// later delivery of the same edge collapses onto this row instead of queueing
+// it twice. Re-enqueueing a live deferred row never resets its retry state;
+// re-enqueueing a row that died at the replay retry cap re-arms it to
+// 'deferred' with retry_count reset to 0, giving the edge a fresh bounded
+// replay window. Hash-keyed dead evidence is never re-armed.
+func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation) error {
+	if mutation.Entity != SyncEntityRelation {
+		return fmt.Errorf("EnqueueDeferredRelation: unsupported entity %q", mutation.Entity)
+	}
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, "deferred", true)
+		if err != nil {
+			return err
+		}
+		log.Printf("[store] EnqueueDeferredRelation entity_key=%s sync_id=%s - queued before apply (issue #1135)", mutation.EntityKey, syncID)
+		return nil
+	})
 }
 
 // ApplyPulledChunk atomically applies all mutations contained in a pulled chunk
@@ -6542,7 +6822,7 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT `+observationSelectColumns+`
-		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
+			 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
 		syncID,
 	)
 	var o Observation
@@ -6550,6 +6830,23 @@ func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+// HasObservationBySyncIDAnyState reports whether an observation with the given
+// sync_id exists locally in any deletion state, tombstones included. It mirrors
+// the tombstone-inclusive relation FK precondition (getObservationBySyncIDTx
+// with includeDeleted) for callers outside Store transactions and answers
+// through the idx_obs_sync_id index without materializing an export.
+func (s *Store) HasObservationBySyncIDAnyState(syncID string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM observations WHERE sync_id = ? LIMIT 1`, syncID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check observation sync_id %s: %w", syncID, err)
+	}
+	return true, nil
 }
 
 // ─── Project Enrollment for Cloud Sync ───────────────────────────────────────
@@ -9522,6 +9819,36 @@ const relationApplyCleanupSQL = `
 	  AND payload_sync_id IN ('', ?)
 `
 
+// relationEndpointPredicate returns the observation lookup shared by relation
+// apply and dead-letter rearm eligibility. A non-blank outer project requires
+// project-scoped endpoints; otherwise the payload's project retains legacy
+// payload-scoped (or global) endpoint behavior.
+func relationEndpointPredicate(sourceID, targetID, payloadProject, outerProject string) (string, []any, int) {
+	effectiveProject := payloadProject
+	if outerProject != "" {
+		effectiveProject = outerProject
+	}
+	query := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
+	args := []any{sourceID, targetID}
+	if effectiveProject != "" {
+		query = `
+			SELECT count(DISTINCT o.sync_id)
+			FROM observations o
+			LEFT JOIN sessions sess ON sess.id = o.session_id
+			WHERE o.sync_id IN (?, ?)
+			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
+		args = append(args, effectiveProject)
+		if outerProject != "" {
+			query += "\n\t\t\t  AND o.scope = 'project'"
+		}
+	}
+	required := 2
+	if sourceID == targetID {
+		required = 1
+	}
+	return query, args, required
+}
+
 // applyRelationUpsertTx handles a pulled mutation with entity='relation' and
 // op='upsert'. It implements the pull-side behavior for Phase 2:
 //
@@ -9590,31 +9917,10 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	// A non-blank mutation project is authoritative for pulled relations: both
 	// endpoints must use its normalized project scope. Blank outer projects retain
 	// the legacy payload-scoped (or global) lookup behavior.
-	effectiveProject := p.Project
-	if outerProject != "" {
-		effectiveProject = outerProject
-	}
-	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
-	observationArgs := []any{p.SourceID, p.TargetID}
-	if effectiveProject != "" {
-		observationQuery = `
-			SELECT count(DISTINCT o.sync_id)
-			FROM observations o
-			LEFT JOIN sessions sess ON sess.id = o.session_id
-			WHERE o.sync_id IN (?, ?)
-			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
-		observationArgs = append(observationArgs, effectiveProject)
-		if outerProject != "" {
-			observationQuery += "\n\t\t\t  AND o.scope = 'project'"
-		}
-	}
+	observationQuery, observationArgs, requiredObservations := relationEndpointPredicate(p.SourceID, p.TargetID, p.Project, outerProject)
 	var obsCount int
 	if err := tx.QueryRow(observationQuery, observationArgs...).Scan(&obsCount); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
-	}
-	requiredObservations := 2
-	if p.SourceID == p.TargetID {
-		requiredObservations = 1
 	}
 	if obsCount < requiredObservations {
 		return ErrRelationFKMissing
@@ -11037,6 +11343,139 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 	}
 
 	return result, nil
+}
+
+// RearmEligibleDeadRelationsForScope gives a retry-cap dead relation one fresh
+// replay window only when its original retryable mutation is now satisfiable in
+// this exact target/project scope. Terminal dead evidence is deliberately left
+// untouched: malformed payloads, mismatched identities, unsupported operations,
+// hash-keyed rows, session dead letters, and non-FK failures cannot satisfy every
+// eligibility predicate below.
+func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (int, error) {
+	const deadThreshold = 5
+	targetKey = normalizeSyncTargetKey(targetKey)
+	project, _ = NormalizeProject(strings.TrimSpace(project))
+	if project == "" {
+		return 0, nil
+	}
+
+	rows, err := s.db.Query(`
+		SELECT sync_id, payload, entity_key, op, reason_code, payload_sync_id
+		FROM sync_apply_deferred
+		WHERE target_key = ?
+		  AND project = ?
+		  AND scope_class = 'scoped'
+		  AND entity = ?
+		  AND apply_status = 'dead'
+		  AND retry_count = ?
+		  AND last_error = ?
+		  AND sync_id = payload_sync_id
+		  AND entity_key = payload_sync_id
+		  AND op = ?
+		ORDER BY first_seen_at
+	`, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
+	if err != nil {
+		return 0, fmt.Errorf("rearm eligible dead relations: list: %w", err)
+	}
+	type deadRow struct {
+		syncID, payload, entityKey, op, reasonCode string
+	}
+	var candidates []deadRow
+	for rows.Next() {
+		var row deadRow
+		var payloadSyncID string
+		if err := rows.Scan(&row.syncID, &row.payload, &row.entityKey, &row.op, &row.reasonCode, &payloadSyncID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("rearm eligible dead relations: scan: %w", err)
+		}
+		candidates = append(candidates, row)
+	}
+	// A driver iteration error stops rows.Next early; without this check the
+	// candidates read before the error would be re-armed and the call would
+	// report success over an incomplete eligible set.
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("rearm eligible dead relations: iterate: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("rearm eligible dead relations: close: %w", err)
+	}
+
+	rearmed := 0
+	for _, row := range candidates {
+		outerProject := ""
+		if row.reasonCode == relationDeferredOuterProjectAuthoritativeReasonCode {
+			outerProject = project
+		}
+		mutation := SyncMutation{
+			Entity:    SyncEntityRelation,
+			EntityKey: row.entityKey,
+			Op:        row.op,
+			Payload:   row.payload,
+			TargetKey: targetKey,
+			Project:   outerProject,
+		}
+		eligible, err := s.relationMutationSatisfiableForReplay(mutation)
+		if err != nil {
+			return rearmed, err
+		}
+		if !eligible {
+			continue
+		}
+		result, err := s.db.Exec(`
+			UPDATE sync_apply_deferred
+			SET apply_status = 'deferred', retry_count = 0, last_attempted_at = datetime('now')
+			WHERE sync_id = ?
+			  AND target_key = ?
+			  AND project = ?
+			  AND scope_class = 'scoped'
+			  AND entity = ?
+			  AND apply_status = 'dead'
+			  AND retry_count = ?
+			  AND last_error = ?
+			  AND sync_id = payload_sync_id
+			  AND entity_key = payload_sync_id
+			  AND op = ?
+		`, row.syncID, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
+		if err != nil {
+			return rearmed, fmt.Errorf("rearm eligible dead relation %s: %w", row.syncID, err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return rearmed, fmt.Errorf("rearm eligible dead relation %s: rows affected: %w", row.syncID, err)
+		}
+		rearmed += int(changed)
+	}
+	return rearmed, nil
+}
+
+// relationMutationSatisfiableForReplay accepts only the same well-formed
+// relation upsert identity that applyRelationUpsertTx would accept before its FK
+// check, then checks both endpoints including tombstones.
+func (s *Store) relationMutationSatisfiableForReplay(mutation SyncMutation) (bool, error) {
+	if mutation.Entity != SyncEntityRelation || mutation.Op != SyncOpUpsert {
+		return false, nil
+	}
+	var payload syncRelationPayload
+	if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
+		return false, nil
+	}
+	payload.SyncID = strings.TrimSpace(payload.SyncID)
+	payload.SourceID = strings.TrimSpace(payload.SourceID)
+	payload.TargetID = strings.TrimSpace(payload.TargetID)
+	payload.Relation = strings.TrimSpace(payload.Relation)
+	payload.JudgmentStatus = strings.TrimSpace(payload.JudgmentStatus)
+	payload.Project, _ = NormalizeProject(strings.TrimSpace(payload.Project))
+	if payload.SyncID == "" || payload.SourceID == "" || payload.TargetID == "" || payload.Relation == "" || payload.JudgmentStatus == "" || strings.TrimSpace(mutation.EntityKey) != payload.SyncID {
+		return false, nil
+	}
+	outerProject, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	query, args, required := relationEndpointPredicate(payload.SourceID, payload.TargetID, payload.Project, outerProject)
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, fmt.Errorf("rearm eligible dead relations: check endpoints: %w", err)
+	}
+	return count >= required, nil
 }
 
 // CountDeferredAndDead returns global administrative totals, including legacy

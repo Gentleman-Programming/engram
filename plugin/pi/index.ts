@@ -51,6 +51,9 @@ const ENGRAM_TOOLS = [
   "mem_review",
   "mem_judge",
   "mem_compare",
+  "mem_list_projects",
+  "mem_pin",
+  "mem_unpin",
 ] as const;
 
 const ENGRAM_TOOL_NAMES = new Set<string>(ENGRAM_TOOLS);
@@ -1123,6 +1126,13 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     reasoning: Type.String({ description: "Brief explanation of the verdict" }),
     model: optionalString("Model identifier for provenance"),
   }),
+  mem_list_projects: Type.Object({}),
+  mem_pin: Type.Object({
+    id: Type.Number({ description: "Observation ID to pin" }),
+  }),
+  mem_unpin: Type.Object({
+    id: Type.Number({ description: "Observation ID to unpin" }),
+  }),
 };
 
 function queryString(params: Record<string, unknown>): string {
@@ -1358,6 +1368,12 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           model: params.model,
         },
       });
+    case "mem_list_projects":
+      return fetch("/projects");
+    case "mem_pin":
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}/pin`, { method: "PUT" });
+    case "mem_unpin":
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}/pin`, { method: "DELETE" });
     default:
       throw new Error(`Unsupported Engram memory tool: ${toolName}`);
   }

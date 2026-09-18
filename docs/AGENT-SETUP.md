@@ -120,7 +120,7 @@ For monorepos, prefer subproject configs such as `backend/.engram/config.json` a
 
 **Recommended first call:** `mem_current_project` — confirms which project Engram detected before you start writing. Returns `project_source` (how it was detected) and `available_projects` (if cwd is ambiguous).
 
-**Cross-project recall:** when the detected project is empty or the wrong one, call `mem_list_projects` to enumerate every known project with counts, then scope `mem_search`/`mem_context` to the project you need. `mem_list_projects` is included in the `agent` profile, and `engram mcp` registers all tools by default — `--tools=agent` is not required.
+**Cross-project recall:** when the detected project is empty or the wrong one, call `mem_list_projects` to enumerate every known project with counts, then scope `mem_search`/`mem_context` to the project you need. `mem_list_projects` is included in the `agent` profile, and `engram mcp` registers all tools by default — `--tools=agent` is not required. The Pi-native `gentle-engram` plugin exposes the same listing over HTTP (`GET /projects`) and also offers `mem_pin`/`mem_unpin` for local observation pin state.
 
 If a write tool returns `ambiguous_project`, the agent must not guess. This happens when the MCP server is started from a parent directory that contains multiple repositories, for example:
 

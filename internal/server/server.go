@@ -466,6 +466,9 @@ func (s *Server) routes() {
 
 	// Stats / diagnostics
 	s.mux.HandleFunc("GET /stats", s.handleStats)
+	// Project listing is read-only and mirrors the MCP mem_list_projects tool and
+	// `engram projects list`, all backed by the same ListProjectsWithStats store query.
+	s.mux.HandleFunc("GET /projects", s.handleListProjects)
 	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
 
 	// Project detection / ownership rescue
@@ -1279,6 +1282,24 @@ func (s *Server) handleCompactionContext(w http.ResponseWriter, r *http.Request)
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]string{"context": context})
+}
+
+// handleListProjects serves the HTTP view of mem_list_projects (engram#675),
+// backed by the same store query as the MCP tool and `engram projects list` so
+// CLI, MCP, and HTTP never diverge. An empty store is a successful empty listing.
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.store.ListProjectsWithStats()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if projects == nil {
+		projects = []store.ProjectStats{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"projects": projects,
+		"count":    len(projects),
+	})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

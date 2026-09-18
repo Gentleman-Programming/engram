@@ -29,6 +29,9 @@ const existingTools = [
   "mem_judge",
   "mem_compare",
   "mem_review",
+  "mem_list_projects",
+  "mem_pin",
+  "mem_unpin",
 ];
 
 test("supported memory tools all have chrome metadata", () => {

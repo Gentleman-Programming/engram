@@ -1930,19 +1930,6 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 			t.Fatalf("set created_at for %q: %v", title, err)
 		}
 	}
-	exportedBeforePin, err := s.ExportProject("engram")
-	if err != nil {
-		t.Fatalf("export project before pin: %v", err)
-	}
-	// exported_at is wall-clock time at second resolution; zero it before
-	// comparing payloads so a second boundary crossed by the real DB work
-	// between the two exports below can't make an otherwise-identical
-	// payload look different.
-	exportedBeforePin.ExportedAt = ""
-	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
-	if err != nil {
-		t.Fatalf("marshal export before pin: %v", err)
-	}
 	var updatedAtBeforePin string
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtBeforePin); err != nil {
 		t.Fatalf("get updated_at before pin: %v", err)
@@ -1990,18 +1977,17 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	}
 	exportedJSON, err := json.Marshal(exported)
 	if err != nil {
-		t.Fatalf("marshal export: %v", err)
+		t.Fatalf("marshal backup export: %v", err)
 	}
-	if strings.Contains(string(exportedJSON), `"pinned"`) {
-		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
+	if !strings.Contains(string(exportedJSON), `"pinned":true`) {
+		t.Fatalf("backup export must preserve pinned state, got %s", exportedJSON)
 	}
-	exported.ExportedAt = ""
-	exportedJSONNoTimestamp, err := json.Marshal(exported)
+	syncJSON, err := json.Marshal(pinned[0])
 	if err != nil {
-		t.Fatalf("marshal export without timestamp: %v", err)
+		t.Fatalf("marshal shared observation: %v", err)
 	}
-	if string(exportedJSONNoTimestamp) != string(exportedBeforePinJSON) {
-		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSONNoTimestamp)
+	if strings.Contains(string(syncJSON), `"pinned"`) {
+		t.Fatalf("pinned state must stay out of shared sync JSON, got %s", syncJSON)
 	}
 
 	if err := s.UnpinObservation(ids[0]); err != nil {
@@ -4656,6 +4642,99 @@ func TestApplyRemoteMutationIdempotent(t *testing.T) {
 	}
 }
 
+// TestStoreHasObservationBySyncIDAnyState pins the tombstone-inclusive
+// existence contract that relation imports rely on: HasObservationBySyncIDAnyState
+// must see live and soft-deleted (tombstoned) rows alike, while
+// GetObservationBySyncID keeps excluding deleted ones.
+func TestStoreHasObservationBySyncIDAnyState(t *testing.T) {
+	s := newTestStore(t)
+
+	create := SyncMutation{
+		Seq:       41,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-session",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-session","project":"engram","directory":"/remote"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, create); err != nil {
+		t.Fatalf("apply session mutation: %v", err)
+	}
+
+	obsMutation := SyncMutation{
+		Seq:       42,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-remote-1",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-remote-1","session_id":"remote-session","type":"decision","title":"Remote","content":"Pulled from cloud","project":"engram","scope":"project"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, obsMutation); err != nil {
+		t.Fatalf("apply observation mutation: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-remote-1")
+	if err != nil {
+		t.Fatalf("check live observation: %v", err)
+	}
+	if !known {
+		t.Fatalf("expected live observation to be visible in any state")
+	}
+
+	absent, err := s.HasObservationBySyncIDAnyState("obs-never-pulled")
+	if err != nil {
+		t.Fatalf("check absent observation: %v", err)
+	}
+	if absent {
+		t.Fatalf("expected absent observation to be invisible in any state")
+	}
+
+	deleteMutation := SyncMutation{
+		Seq:       43,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-remote-1",
+		Op:        SyncOpDelete,
+		Payload:   `{"sync_id":"obs-remote-1","deleted":true}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, deleteMutation); err != nil {
+		t.Fatalf("apply delete mutation: %v", err)
+	}
+	if _, err := s.GetObservationBySyncID("obs-remote-1"); err == nil {
+		t.Fatalf("expected pulled delete to hide observation from GetObservationBySyncID")
+	}
+
+	tombstoned, err := s.HasObservationBySyncIDAnyState("obs-remote-1")
+	if err != nil {
+		t.Fatalf("check tombstoned observation: %v", err)
+	}
+	if !tombstoned {
+		t.Fatalf("expected tombstoned observation to stay visible in any state")
+	}
+}
+
+// TestStoreHasObservationBySyncIDAnyStateClosedStore pins the error path: on a
+// closed store the lookup must fail with the wrapped, identifiable message so
+// callers can tell an infrastructure fault apart from a genuinely absent
+// sync_id instead of reading an error as "not found".
+func TestStoreHasObservationBySyncIDAnyStateClosedStore(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-after-close")
+	if err == nil {
+		t.Fatal("expected HasObservationBySyncIDAnyState on a closed store to fail")
+	}
+	if known {
+		t.Fatal("expected no observation to be reported when the lookup fails")
+	}
+	if !strings.Contains(err.Error(), "check observation sync_id") {
+		t.Fatalf("error = %v, want it to contain %q", err, "check observation sync_id")
+	}
+}
+
 func TestApplyPulledMutationClearsDegradedReasonFields(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.MarkSyncBlocked(DefaultSyncTargetKey, "blocked_unenrolled", "project not enrolled"); err != nil {
@@ -5630,6 +5709,230 @@ func TestMigrationAndHelperEdgeBranches(t *testing.T) {
 			t.Fatalf("expected empty context when no data, got %q", ctx)
 		}
 	})
+}
+
+func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
+	source := newTestStore(t)
+	if err := source.CreateSession("backup-session", "backup-project", "/tmp/backup"); err != nil {
+		t.Fatalf("create source session: %v", err)
+	}
+	sourceID, err := source.AddObservation(AddObservationParams{SessionID: "backup-session", Type: "decision", Title: "source", Content: "source content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add source observation: %v", err)
+	}
+	targetID, err := source.AddObservation(AddObservationParams{SessionID: "backup-session", Type: "decision", Title: "target", Content: "target content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add target observation: %v", err)
+	}
+	if err := source.PinObservation(sourceID); err != nil {
+		t.Fatalf("pin source observation: %v", err)
+	}
+	sourceObservation, err := source.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get source observation: %v", err)
+	}
+	targetObservation, err := source.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get target observation: %v", err)
+	}
+	if _, err := source.SaveRelation(SaveRelationParams{SyncID: "rel-backup-first", SourceID: sourceObservation.SyncID, TargetID: targetObservation.SyncID}); err != nil {
+		t.Fatalf("save first relation: %v", err)
+	}
+	reason := "superseded reason"
+	evidence := `{"evidence":"backup"}`
+	confidence := 0.85
+	if _, err := source.JudgeRelation(JudgeRelationParams{
+		JudgmentID: "rel-backup-first", Relation: RelationSupersedes, Reason: &reason, Evidence: &evidence, Confidence: &confidence,
+		MarkedByActor: "agent:test", MarkedByKind: "agent", MarkedByModel: "test-model", SessionID: "backup-session",
+	}); err != nil {
+		t.Fatalf("judge first relation: %v", err)
+	}
+	if _, err := source.SaveRelation(SaveRelationParams{SyncID: "rel-backup-replacement", SourceID: sourceObservation.SyncID, TargetID: targetObservation.SyncID}); err != nil {
+		t.Fatalf("save replacement relation: %v", err)
+	}
+	if _, err := source.DB().Exec(`UPDATE memory_relations
+		SET superseded_at = ?, superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?)
+		WHERE sync_id = ?`, "2026-01-03T00:00:00Z", "rel-backup-replacement", "rel-backup-first"); err != nil {
+		t.Fatalf("seed supersession metadata: %v", err)
+	}
+
+	exported, err := source.Export()
+	if err != nil {
+		t.Fatalf("export source: %v", err)
+	}
+	bytes, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	var payload struct {
+		Observations []struct {
+			SyncID string `json:"sync_id"`
+			Pinned bool   `json:"pinned"`
+		} `json:"observations"`
+		Relations []struct {
+			SyncID                       string  `json:"sync_id"`
+			Reason                       *string `json:"reason"`
+			Evidence                     *string `json:"evidence"`
+			Confidence                   *float64 `json:"confidence"`
+			JudgmentStatus               string  `json:"judgment_status"`
+			MarkedByActor                *string `json:"marked_by_actor"`
+			MarkedByKind                 *string `json:"marked_by_kind"`
+			MarkedByModel                *string `json:"marked_by_model"`
+			SessionID                    *string `json:"session_id"`
+			SupersededAt                 *string `json:"superseded_at"`
+			SupersededByRelationSyncID   *string `json:"superseded_by_relation_sync_id"`
+		} `json:"relations"`
+	}
+	if err := json.Unmarshal(bytes, &payload); err != nil {
+		t.Fatalf("decode backup payload: %v", err)
+	}
+	if len(payload.Observations) != 2 {
+		t.Fatalf("backup observations = %+v, want two observations", payload.Observations)
+	}
+	pinnedBySyncID := make(map[string]bool, len(payload.Observations))
+	for _, observation := range payload.Observations {
+		pinnedBySyncID[observation.SyncID] = observation.Pinned
+	}
+	for syncID, wantPinned := range map[string]bool{
+		sourceObservation.SyncID: true,
+		targetObservation.SyncID: false,
+	} {
+		gotPinned, found := pinnedBySyncID[syncID]
+		if !found || gotPinned != wantPinned {
+			t.Fatalf("backup pinned state for %q = %t, found=%t, want %t", syncID, gotPinned, found, wantPinned)
+		}
+	}
+	if len(payload.Relations) != 2 {
+		t.Fatalf("backup relations = %+v, want two complete relation records", payload.Relations)
+	}
+	var firstRelation *struct {
+		SyncID                     string  `json:"sync_id"`
+		Reason                     *string `json:"reason"`
+		Evidence                   *string `json:"evidence"`
+		Confidence                 *float64 `json:"confidence"`
+		JudgmentStatus             string  `json:"judgment_status"`
+		MarkedByActor              *string `json:"marked_by_actor"`
+		MarkedByKind               *string `json:"marked_by_kind"`
+		MarkedByModel              *string `json:"marked_by_model"`
+		SessionID                  *string `json:"session_id"`
+		SupersededAt               *string `json:"superseded_at"`
+		SupersededByRelationSyncID *string `json:"superseded_by_relation_sync_id"`
+	}
+	for i := range payload.Relations {
+		if payload.Relations[i].SyncID == "rel-backup-first" {
+			firstRelation = &payload.Relations[i]
+			break
+		}
+	}
+	if firstRelation == nil || firstRelation.Reason == nil || *firstRelation.Reason != "superseded reason" || firstRelation.Evidence == nil || *firstRelation.Evidence != `{"evidence":"backup"}` || firstRelation.Confidence == nil || *firstRelation.Confidence != confidence || firstRelation.JudgmentStatus != JudgmentStatusJudged || firstRelation.MarkedByActor == nil || *firstRelation.MarkedByActor != "agent:test" || firstRelation.MarkedByKind == nil || *firstRelation.MarkedByKind != "agent" || firstRelation.MarkedByModel == nil || *firstRelation.MarkedByModel != "test-model" || firstRelation.SessionID == nil || *firstRelation.SessionID != "backup-session" || firstRelation.SupersededAt == nil || *firstRelation.SupersededAt != "2026-01-03T00:00:00Z" || firstRelation.SupersededByRelationSyncID == nil || *firstRelation.SupersededByRelationSyncID != "rel-backup-replacement" {
+		t.Fatalf("first backup relation = %+v, want complete judgment and supersession metadata", firstRelation)
+	}
+
+	var imported ExportData
+	if err := json.Unmarshal(bytes, &imported); err != nil {
+		t.Fatalf("decode export data: %v", err)
+	}
+	destination := newTestStore(t)
+	if _, err := destination.Import(&imported); err != nil {
+		t.Fatalf("import backup: %v", err)
+	}
+	for syncID, wantPinned := range map[string]bool{
+		sourceObservation.SyncID: true,
+		targetObservation.SyncID: false,
+	} {
+		var restoredPinned bool
+		if err := destination.DB().QueryRow(`SELECT pinned FROM observations WHERE sync_id = ?`, syncID).Scan(&restoredPinned); err != nil || restoredPinned != wantPinned {
+			t.Fatalf("restored pinned state for %q = %t, err=%v, want %t", syncID, restoredPinned, err, wantPinned)
+		}
+	}
+	var restoredReason, restoredEvidence, restoredStatus, restoredActor, restoredKind, restoredModel, restoredSession, restoredSupersededAt, restoredSupersededBy string
+	var restoredConfidence float64
+	if err := destination.DB().QueryRow(`SELECT r.reason, r.evidence, r.confidence, r.judgment_status, r.marked_by_actor, r.marked_by_kind, r.marked_by_model, r.session_id, r.superseded_at, superseding.sync_id
+		FROM memory_relations r
+		LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id
+		WHERE r.sync_id = ?`, "rel-backup-first").Scan(&restoredReason, &restoredEvidence, &restoredConfidence, &restoredStatus, &restoredActor, &restoredKind, &restoredModel, &restoredSession, &restoredSupersededAt, &restoredSupersededBy); err != nil {
+		t.Fatalf("read restored relation: %v", err)
+	}
+	if restoredReason != "superseded reason" || restoredEvidence != `{"evidence":"backup"}` || restoredConfidence != confidence || restoredStatus != JudgmentStatusJudged || restoredActor != "agent:test" || restoredKind != "agent" || restoredModel != "test-model" || restoredSession != "backup-session" || restoredSupersededAt != "2026-01-03T00:00:00Z" || restoredSupersededBy != "rel-backup-replacement" {
+		t.Fatalf("restored relation metadata = reason=%q evidence=%q confidence=%v status=%q actor=%q kind=%q model=%q session=%q superseded_at=%q superseded_by=%q", restoredReason, restoredEvidence, restoredConfidence, restoredStatus, restoredActor, restoredKind, restoredModel, restoredSession, restoredSupersededAt, restoredSupersededBy)
+	}
+
+	t.Run("missing relation endpoint rolls back", func(t *testing.T) {
+		invalid := []byte(`{
+			"version":"0.2.0",
+			"sessions":[{"id":"invalid-backup-session","project":"backup-project","directory":"/tmp/backup","started_at":"2026-01-01T00:00:00Z"}],
+			"observations":[{"sync_id":"obs-valid-endpoint","session_id":"invalid-backup-session","type":"note","title":"valid","content":"valid","project":"backup-project","scope":"project","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+			"relations":[{"sync_id":"rel-invalid-endpoint","source_id":"obs-valid-endpoint","target_id":"obs-missing-endpoint","relation":"related","judgment_status":"judged","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]
+		}`)
+		var data ExportData
+		if err := json.Unmarshal(invalid, &data); err != nil {
+			t.Fatalf("decode invalid backup: %v", err)
+		}
+		destination := newTestStore(t)
+		if _, err := destination.Import(&data); err == nil || !strings.Contains(err.Error(), "relation endpoint") {
+			t.Fatalf("import invalid relation error = %v, want missing endpoint error", err)
+		}
+		for _, table := range []string{"sessions", "observations", "memory_relations"} {
+			var count int
+			if err := destination.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			if count != 0 {
+				t.Fatalf("invalid relation import persisted %d %s rows", count, table)
+			}
+		}
+	})
+}
+
+func TestImportRejectsUnsupportedExportVersion(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("existing-session", "backup-project", "/tmp/existing"); err != nil {
+		t.Fatalf("seed existing session: %v", err)
+	}
+	data := &ExportData{Version: "9.0.0", Sessions: []Session{{ID: "future-session", Project: "backup-project", Directory: "/tmp/future", StartedAt: "2026-01-01T00:00:00Z"}}}
+	if _, err := s.Import(data); err == nil || !strings.Contains(err.Error(), "unsupported export version") {
+		t.Fatalf("future version import error = %v, want unsupported version error", err)
+	}
+	var sessions int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("future version import changed session count to %d, want 1", sessions)
+	}
+}
+
+func TestImportLegacyExportWithoutRelationsAndPinned(t *testing.T) {
+	raw := []byte(`{
+		"version":"0.1.0",
+		"sessions":[{"id":"legacy-backup-session","project":"backup-project","directory":"/tmp/legacy","started_at":"2026-01-01T00:00:00Z"}],
+		"observations":[{"sync_id":"obs-legacy-backup","session_id":"legacy-backup-session","type":"note","title":"legacy","content":"legacy content","project":"backup-project","scope":"project","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]
+	}`)
+	var data ExportData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("decode legacy export: %v", err)
+	}
+	s := newTestStore(t)
+	if _, err := s.Import(&data); err != nil {
+		t.Fatalf("import legacy export: %v", err)
+	}
+	var pinned bool
+	if err := s.DB().QueryRow(`SELECT pinned FROM observations WHERE sync_id = ?`, "obs-legacy-backup").Scan(&pinned); err != nil || pinned {
+		t.Fatalf("legacy pinned state = %t, err=%v, want false", pinned, err)
+	}
+	for _, table := range []string{"sessions", "observations", "memory_relations"} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		want := 0
+		if table != "memory_relations" {
+			want = 1
+		}
+		if count != want {
+			t.Fatalf("legacy import %s count = %d, want %d", table, count, want)
+		}
+	}
 }
 
 func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
@@ -7683,22 +7986,31 @@ func TestEnqueueSessionMutationRejectsBlankKeyAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestInboundSessionDirectoryAdmissionRejectsBlankValues(t *testing.T) {
-	t.Run("pulled mutation", func(t *testing.T) {
-		s := newTestStore(t)
-		err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
-			Seq: 1, Entity: SyncEntitySession, EntityKey: "blank-directory", Op: SyncOpUpsert,
-			Payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`,
+func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		id      string
+		payload string
+	}{
+		{name: "pulled mutation with blank directory", id: "blank-directory", payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`},
+		{name: "pulled mutation with omitted directory", id: "omitted-directory", payload: `{"id":"omitted-directory","project":"engram"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+				Seq: 1, Entity: SyncEntitySession, EntityKey: tc.id, Op: SyncOpUpsert,
+				Payload: tc.payload,
+			})
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
+			}
+			if _, err := s.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid pulled session persisted: %v", err)
+			}
 		})
-		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-			t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
-		}
-		if _, err := s.GetSession("blank-directory"); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("blank pulled session persisted: %v", err)
-		}
-	})
+	}
 
-	t.Run("direct import", func(t *testing.T) {
+	t.Run("direct import with blank directory", func(t *testing.T) {
 		s := newTestStore(t)
 		_, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "engram", Directory: " "}}})
 		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {

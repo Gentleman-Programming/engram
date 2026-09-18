@@ -1277,3 +1277,63 @@ test("pending compaction recovery is injected even when startup remains unavaila
     else process.env.ENGRAM_BIN = originalBin;
   }
 });
+
+test("registered Pi-native mem_list_projects enumerates every known project without scoping", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/projects", body: { projects: [{ name: "engram", observation_count: 12 }], count: 1 } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("list-projects-session");
+
+      const result = await registeredTools.get("mem_list_projects").execute("list-projects", {}, undefined, undefined, ctx);
+
+      const listing = calls.find((call) => call.method === "GET" && call.path.startsWith("/projects"));
+      assert.ok(listing, "mem_list_projects must call GET /projects");
+      assert.equal(new URL(`http://test${listing.path}`).search, "");
+      assert.ok(JSON.stringify(result).includes("engram"));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("registered Pi-native mem_pin and mem_unpin target the observation pin routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "PUT", path: "/observations/42/pin", body: { id: 42, pinned: true } },
+    { method: "DELETE", path: "/observations/42/pin", body: { id: 42, pinned: false } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("pin-session");
+
+      await registeredTools.get("mem_pin").execute("pin", { id: 42 }, undefined, undefined, ctx);
+      await registeredTools.get("mem_unpin").execute("unpin", { id: 42 }, undefined, undefined, ctx);
+
+      const pin = calls.find((call) => call.method === "PUT" && call.path.startsWith("/observations/42/pin"));
+      const unpin = calls.find((call) => call.method === "DELETE" && call.path.startsWith("/observations/42/pin"));
+      assert.ok(pin, "mem_pin must call PUT /observations/{id}/pin");
+      assert.ok(unpin, "mem_unpin must call DELETE /observations/{id}/pin");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
