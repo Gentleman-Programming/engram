@@ -1083,7 +1083,9 @@ func TestCmdSyncStatusExportAndImport(t *testing.T) {
 }
 
 func TestCmdSyncDefaultProjectNoData(t *testing.T) {
-	workDir := filepath.Join(t.TempDir(), "repo-name")
+	fixtureParent := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", fixtureParent)
+	workDir := filepath.Join(fixtureParent, "repo-name")
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
