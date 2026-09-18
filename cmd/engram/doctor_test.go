@@ -173,7 +173,10 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorRepairClassificationMatrix(t *testing.T) {
+// TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant executes every
+// advertised repairable code through cmdDoctorRepair, including the special
+// sync-mutation branch, so help and validation cannot drift from dispatch.
+func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	cfg := testConfig(t)
 	repairable := diagnostic.RepairableCodes()
 	registered := diagnostic.RegisteredCodes()
@@ -229,8 +232,9 @@ func TestCmdDoctorRepairClassificationMatrix(t *testing.T) {
 			withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", code, "--plan")
 			stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
 			want := code + " is a diagnostic-only check with no repair"
-			if !exited || !strings.Contains(stderr, want) || !strings.Contains(stdout, "usage: engram doctor") {
-				t.Fatalf("code=%q exited=%v stdout=%q stderr=%q want=%q", code, exited, stdout, stderr, want)
+			continuation := "engram doctor --check " + code
+			if !exited || !strings.Contains(stderr, want) || !strings.Contains(stderr, continuation) || !strings.Contains(stdout, "usage: engram doctor") {
+				t.Fatalf("code=%q exited=%v stdout=%q stderr=%q want=%q continuation=%q", code, exited, stdout, stderr, want, continuation)
 			}
 		})
 	}
@@ -242,7 +246,7 @@ func TestCmdDoctorRepairClassificationMatrix(t *testing.T) {
 		t.Cleanup(func() { exitFunc = oldExit })
 		withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "not_real", "--plan")
 		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
-		if !exited || !strings.Contains(stderr, "unsupported repair check not_real") || !strings.Contains(stdout, "usage: engram doctor") {
+		if !exited || !strings.Contains(stderr, "unsupported repair check not_real") || strings.Contains(stderr, "engram doctor --check not_real") || !strings.Contains(stdout, "usage: engram doctor") {
 			t.Fatalf("exited=%v stdout=%q stderr=%q", exited, stdout, stderr)
 		}
 	})

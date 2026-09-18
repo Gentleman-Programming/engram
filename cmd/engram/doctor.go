@@ -161,7 +161,7 @@ func cmdDoctorRepair(cfg store.Config) {
 	}
 	if !diagnostic.IsRepairableCode(check) {
 		if _, err := diagnostic.DefaultRegistry().Lookup(check); err == nil {
-			failDoctorRepair(check + " is a diagnostic-only check with no repair")
+			failDoctorRepair(check + " is a diagnostic-only check with no repair; run engram doctor --check " + check)
 			return
 		}
 		failDoctorRepair("unsupported repair check " + check)
