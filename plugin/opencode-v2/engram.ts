@@ -24,11 +24,14 @@
 
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import type { Plugin } from "@opencode/plugin"
+import { Plugin } from "@opencode/plugin"
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-const ENGRAM_PORT = parseInt(process.env.ENGRAM_PORT ?? "7437")
+const PARSED_ENGRAM_PORT = parseInt(process.env.ENGRAM_PORT ?? "", 10)
+const ENGRAM_PORT = Number.isInteger(PARSED_ENGRAM_PORT) && PARSED_ENGRAM_PORT > 0
+  ? PARSED_ENGRAM_PORT
+  : 7437
 const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
 const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
@@ -331,10 +334,10 @@ function appendSystem(system: Array<{ type: "text"; text: string }>, text: strin
 
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
-export default {
+export default Plugin.define({
   id: "engram",
 
-  async setup(ctx: Plugin.Context) {
+  async setup(ctx) {
     const locationDirectory = ctx.location.directory
     const locationProjectID = ctx.location.project?.id ?? ""
 
@@ -924,4 +927,4 @@ export default {
       await Promise.all([...registrationAttempts].map(closeKnownSession))
     }
   },
-}
+})

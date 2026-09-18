@@ -46,6 +46,10 @@ func TestEmbeddedOpenCodeV2PluginMatchesSourceByteForByte(t *testing.T) {
 	if !bytes.Equal(source, embedded) {
 		t.Fatal("embedded OpenCode v2 plugin drifted from plugin/opencode-v2/engram.ts; regenerate the embedded copy")
 	}
+	if !bytes.Contains(source, []byte(`import { Plugin } from "@opencode/plugin"`)) ||
+		!bytes.Contains(source, []byte("export default Plugin.define({")) {
+		t.Fatal("OpenCode v2 plugin must use the Plugin.define entrypoint")
+	}
 }
 
 // resetSetupSeams saves every package-level seam this file overrides and
@@ -68,6 +72,7 @@ func resetSetupSeams(t *testing.T) {
 	oldJSONMarshalFn := jsonMarshalFn
 	oldJSONMarshalIndentFn := jsonMarshalIndentFn
 	oldInjectOpenCodeMCPFn := injectOpenCodeMCPFn
+	oldInjectOpenCodeMCPV2Fn := injectOpenCodeMCPV2Fn
 	oldInjectOpenCodeTUIPluginFn := injectOpenCodeTUIPluginFn
 	oldInjectGeminiMCPFn := injectGeminiMCPFn
 	oldWriteGeminiSystemPromptFn := writeGeminiSystemPromptFn
@@ -95,6 +100,7 @@ func resetSetupSeams(t *testing.T) {
 		jsonMarshalFn = oldJSONMarshalFn
 		jsonMarshalIndentFn = oldJSONMarshalIndentFn
 		injectOpenCodeMCPFn = oldInjectOpenCodeMCPFn
+		injectOpenCodeMCPV2Fn = oldInjectOpenCodeMCPV2Fn
 		injectOpenCodeTUIPluginFn = oldInjectOpenCodeTUIPluginFn
 		injectGeminiMCPFn = oldInjectGeminiMCPFn
 		writeGeminiSystemPromptFn = oldWriteGeminiSystemPromptFn
@@ -1123,6 +1129,62 @@ func TestInstallOpenCodeV2IsIdempotent(t *testing.T) {
 	}
 	if got := strings.Count(string(second), `"engram"`); got != 1 {
 		t.Fatalf("expected exactly one engram entry, got %d", got)
+	}
+}
+
+func TestInstallOpenCodeV2ReadEmbeddedError(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	openCodeReadFile = func(string) ([]byte, error) {
+		return nil, errors.New("boom")
+	}
+
+	_, err := installOpenCodeV2()
+	if err == nil || !strings.Contains(err.Error(), "read embedded opencode-v2 engram.ts") {
+		t.Fatalf("expected OpenCode v2 embedded read error, got %v", err)
+	}
+}
+
+func TestInstallOpenCodeV2WriteError(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	openCodeWriteFileFn = func(string, []byte, os.FileMode) error {
+		return errors.New("write boom")
+	}
+
+	_, err := installOpenCodeV2()
+	if err == nil || !strings.Contains(err.Error(), "write ") {
+		t.Fatalf("expected OpenCode v2 write error, got %v", err)
+	}
+}
+
+func TestInstallOpenCodeV2MCPInjectionFailureIsNonFatal(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	configHome := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	injectOpenCodeMCPV2Fn = func() error {
+		return errors.New("cannot write config")
+	}
+
+	result, err := installOpenCodeV2()
+	if err != nil {
+		t.Fatalf("expected non-fatal OpenCode v2 MCP injection failure, got %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("expected only the plugin file when MCP injection fails, got %d", result.Files)
+	}
+	if result.MCPConfigured {
+		t.Fatal("expected failed OpenCode v2 MCP injection to remain unconfigured")
+	}
+	pluginPath := filepath.Join(configHome, "opencode", "plugins", "engram.ts")
+	if _, err := os.Stat(pluginPath); err != nil {
+		t.Fatalf("expected plugin file to be written: %v", err)
 	}
 }
 
