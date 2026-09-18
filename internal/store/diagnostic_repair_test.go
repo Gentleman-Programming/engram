@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,6 +21,9 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 	seedOrphanedObservationSession(t, s, "obs-empty", "", "alpha", nil)
 	seedOrphanedObservationSession(t, s, "obs-spaces", "  ", "alpha", nil)
 	seedOrphanedObservationSession(t, s, "obs-tab", "\t", "alpha", nil)
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at = CASE sync_id WHEN 'obs-alpha-active' THEN '2026-01-02 00:00:00' WHEN 'obs-alpha-deleted' THEN '2026-01-01 00:00:00' ELSE created_at END`); err != nil {
+		t.Fatalf("set deterministic orphan timestamps: %v", err)
+	}
 	assertForeignKeysEnabled(t, s)
 
 	got, err := s.ListOrphanedObservationSessionEvidence("")
@@ -41,6 +45,9 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 			t.Fatalf("evidence[%d]=%+v, want %+v with first observation timestamp", i, got[i], want[i])
 		}
 	}
+	if got[2].FirstObservedAt != "2026-01-01 00:00:00" {
+		t.Fatalf("first observed at=%q, want earliest timestamp", got[2].FirstObservedAt)
+	}
 
 	scoped, err := s.ListOrphanedObservationSessionEvidence(" Alpha ")
 	if err != nil {
@@ -48,6 +55,29 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 	}
 	if len(scoped) != 2 || scoped[0].Project != "alpha" || scoped[0].SessionID != "missing-1" || scoped[1].SessionID != "missing-2" {
 		t.Fatalf("scoped evidence=%+v", scoped)
+	}
+}
+
+func TestRestoreOrphanedObservationSessionsRollsBackOnFailure(t *testing.T) {
+	s := newTestStore(t)
+	original := s.hooks.exec
+	calls := 0
+	wantErr := errors.New("insert failed")
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		calls++
+		if calls == 2 {
+			return nil, wantErr
+		}
+		return db.Exec(query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = original })
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-a", Project: "engram", StartedAt: "2026-01-01 00:00:00"}, {SessionID: "missing-b", Project: "engram", StartedAt: "2026-01-01 00:00:00"}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error=%v, want %v", err, wantErr)
+	}
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sessions WHERE id IN ('missing-a', 'missing-b')`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("placeholder count=%d err=%v", count, err)
 	}
 }
 
