@@ -458,8 +458,8 @@ type SyncMutationSupersedeAction struct {
 // SyncMutationSupersedeReport is the explicit, non-acknowledging local
 // recovery result for stale pending upserts.
 type SyncMutationSupersedeReport struct {
-	Project string                       `json:"project,omitempty"`
-	Applied bool                         `json:"applied"`
+	Project string                        `json:"project,omitempty"`
+	Applied bool                          `json:"applied"`
 	Actions []SyncMutationSupersedeAction `json:"actions"`
 }
 
@@ -6679,7 +6679,10 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 			target_key        = excluded.target_key,
 			entity_key        = excluded.entity_key,
 			op                = excluded.op,
-			reason_code       = excluded.reason_code,
+			reason_code       = CASE
+				WHEN sync_apply_deferred.reason_code = ? THEN sync_apply_deferred.reason_code
+				ELSE excluded.reason_code
+			END,
 			payload_sync_id   = excluded.payload_sync_id,
 			project           = excluded.project,
 			scope_class       = excluded.scope_class,
@@ -6696,7 +6699,7 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 		WHERE sync_apply_deferred.apply_status <> 'dead'
 		   OR excluded.apply_status = 'dead'
 		   OR ?
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status, rearmFlag, rearmFlag, rearmFlag); err != nil {
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, reasonCode, payloadSyncID, project, scopeClass, status, relationDeferredOuterProjectAuthoritativeReasonCode, rearmFlag, rearmFlag, rearmFlag); err != nil {
 		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 
@@ -9780,6 +9783,36 @@ const relationApplyCleanupSQL = `
 	  AND payload_sync_id IN ('', ?)
 `
 
+// relationEndpointPredicate returns the observation lookup shared by relation
+// apply and dead-letter rearm eligibility. A non-blank outer project requires
+// project-scoped endpoints; otherwise the payload's project retains legacy
+// payload-scoped (or global) endpoint behavior.
+func relationEndpointPredicate(sourceID, targetID, payloadProject, outerProject string) (string, []any, int) {
+	effectiveProject := payloadProject
+	if outerProject != "" {
+		effectiveProject = outerProject
+	}
+	query := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
+	args := []any{sourceID, targetID}
+	if effectiveProject != "" {
+		query = `
+			SELECT count(DISTINCT o.sync_id)
+			FROM observations o
+			LEFT JOIN sessions sess ON sess.id = o.session_id
+			WHERE o.sync_id IN (?, ?)
+			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
+		args = append(args, effectiveProject)
+		if outerProject != "" {
+			query += "\n\t\t\t  AND o.scope = 'project'"
+		}
+	}
+	required := 2
+	if sourceID == targetID {
+		required = 1
+	}
+	return query, args, required
+}
+
 // applyRelationUpsertTx handles a pulled mutation with entity='relation' and
 // op='upsert'. It implements the pull-side behavior for Phase 2:
 //
@@ -9848,31 +9881,10 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	// A non-blank mutation project is authoritative for pulled relations: both
 	// endpoints must use its normalized project scope. Blank outer projects retain
 	// the legacy payload-scoped (or global) lookup behavior.
-	effectiveProject := p.Project
-	if outerProject != "" {
-		effectiveProject = outerProject
-	}
-	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
-	observationArgs := []any{p.SourceID, p.TargetID}
-	if effectiveProject != "" {
-		observationQuery = `
-			SELECT count(DISTINCT o.sync_id)
-			FROM observations o
-			LEFT JOIN sessions sess ON sess.id = o.session_id
-			WHERE o.sync_id IN (?, ?)
-			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
-		observationArgs = append(observationArgs, effectiveProject)
-		if outerProject != "" {
-			observationQuery += "\n\t\t\t  AND o.scope = 'project'"
-		}
-	}
+	observationQuery, observationArgs, requiredObservations := relationEndpointPredicate(p.SourceID, p.TargetID, p.Project, outerProject)
 	var obsCount int
 	if err := tx.QueryRow(observationQuery, observationArgs...).Scan(&obsCount); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
-	}
-	requiredObservations := 2
-	if p.SourceID == p.TargetID {
-		requiredObservations = 1
 	}
 	if obsCount < requiredObservations {
 		return ErrRelationFKMissing
@@ -11312,7 +11324,7 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 	}
 
 	rows, err := s.db.Query(`
-		SELECT sync_id, payload, entity_key, op, payload_sync_id
+		SELECT sync_id, payload, entity_key, op, reason_code, payload_sync_id
 		FROM sync_apply_deferred
 		WHERE target_key = ?
 		  AND project = ?
@@ -11330,13 +11342,13 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 		return 0, fmt.Errorf("rearm eligible dead relations: list: %w", err)
 	}
 	type deadRow struct {
-		syncID, payload, entityKey, op string
+		syncID, payload, entityKey, op, reasonCode string
 	}
 	var candidates []deadRow
 	for rows.Next() {
 		var row deadRow
 		var payloadSyncID string
-		if err := rows.Scan(&row.syncID, &row.payload, &row.entityKey, &row.op, &payloadSyncID); err != nil {
+		if err := rows.Scan(&row.syncID, &row.payload, &row.entityKey, &row.op, &row.reasonCode, &payloadSyncID); err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("rearm eligible dead relations: scan: %w", err)
 		}
@@ -11355,13 +11367,17 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 
 	rearmed := 0
 	for _, row := range candidates {
+		outerProject := ""
+		if row.reasonCode == relationDeferredOuterProjectAuthoritativeReasonCode {
+			outerProject = project
+		}
 		mutation := SyncMutation{
 			Entity:    SyncEntityRelation,
 			EntityKey: row.entityKey,
 			Op:        row.op,
 			Payload:   row.payload,
 			TargetKey: targetKey,
-			Project:   project,
+			Project:   outerProject,
 		}
 		eligible, err := s.relationMutationSatisfiableForReplay(mutation)
 		if err != nil {
@@ -11413,24 +11429,17 @@ func (s *Store) relationMutationSatisfiableForReplay(mutation SyncMutation) (boo
 	payload.TargetID = strings.TrimSpace(payload.TargetID)
 	payload.Relation = strings.TrimSpace(payload.Relation)
 	payload.JudgmentStatus = strings.TrimSpace(payload.JudgmentStatus)
+	payload.Project, _ = NormalizeProject(strings.TrimSpace(payload.Project))
 	if payload.SyncID == "" || payload.SourceID == "" || payload.TargetID == "" || payload.Relation == "" || payload.JudgmentStatus == "" || strings.TrimSpace(mutation.EntityKey) != payload.SyncID {
 		return false, nil
 	}
-	project, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	outerProject, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	query, args, required := relationEndpointPredicate(payload.SourceID, payload.TargetID, payload.Project, outerProject)
 	var count int
-	if err := s.db.QueryRow(`
-		SELECT count(*)
-		FROM observations o
-		LEFT JOIN sessions sess ON sess.id = o.session_id
-		WHERE o.sync_id IN (?, ?)
-		  AND coalesce(nullif(trim(o.project), ''), nullif(trim(sess.project), ''), '') = ?
-	`, payload.SourceID, payload.TargetID, project).Scan(&count); err != nil {
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
 		return false, fmt.Errorf("rearm eligible dead relations: check endpoints: %w", err)
 	}
-	if payload.SourceID == payload.TargetID {
-		return count == 1, nil
-	}
-	return count == 2, nil
+	return count >= required, nil
 }
 
 // CountDeferredAndDead returns global administrative totals, including legacy

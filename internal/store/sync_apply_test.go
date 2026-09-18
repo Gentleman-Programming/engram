@@ -222,8 +222,8 @@ func TestApplyPulledMutation_MissingTargetFloor(t *testing.T) {
 func TestApplyPulledObservationNormalizesAndValidatesIdentity(t *testing.T) {
 	tests := []struct {
 		name, operation string
-		payloadSyncID string
-		wantVisible   int
+		payloadSyncID   string
+		wantVisible     int
 	}{
 		{name: "blank upsert falls back to mutation key", operation: SyncOpUpsert, wantVisible: 1},
 		{name: "blank delete falls back to mutation key", operation: SyncOpDelete, wantVisible: 0},
@@ -672,11 +672,12 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 	const projectB = "project-b"
 
 	tests := []struct {
-		name            string
-		outerProject    string
-		payloadProject  string
-		clearProvenance bool
-		wantApplied     bool
+		name                 string
+		outerProject         string
+		payloadProject       string
+		clearProvenance      bool
+		enqueueBlankOuterDup bool
+		wantApplied          bool
 	}{
 		{
 			name:            "unmarked legacy row replays payload scoped personal endpoints",
@@ -688,6 +689,12 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 			name:           "authoritative outer project remains enforced after replay",
 			outerProject:   projectA,
 			payloadProject: projectB,
+		},
+		{
+			name:                 "blank-project duplicate preserves authoritative replay scope",
+			outerProject:         projectA,
+			payloadProject:       projectA,
+			enqueueBlankOuterDup: true,
 		},
 	}
 
@@ -723,6 +730,13 @@ func TestReplayDeferredRelation_PreservesOriginalOuterProjectAuthority(t *testin
 			if tt.clearProvenance {
 				if _, err := s.db.Exec(`UPDATE sync_apply_deferred SET reason_code = '' WHERE sync_id = ?`, relationSyncID); err != nil {
 					t.Fatalf("clear deferred provenance: %v", err)
+				}
+			}
+			if tt.enqueueBlankOuterDup {
+				duplicate := mutation
+				duplicate.Project = ""
+				if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, duplicate); err != nil {
+					t.Fatalf("EnqueueDeferredRelation blank-project duplicate: %v", err)
 				}
 			}
 
@@ -1515,6 +1529,69 @@ func TestRearmEligibleDeadRelationsForScope(t *testing.T) {
 	}
 }
 
+// TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate keeps
+// authoritative replay restricted to project-scoped endpoints while legacy rows
+// remain satisfiable when duplicate observation rows share one endpoint sync ID.
+func TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate(t *testing.T) {
+	const targetKey = DefaultSyncTargetKey
+	const project = "proj-rearm-predicate"
+
+	s := newTestStore(t)
+	if err := s.CreateSession("session-rearm-predicate", project, "/tmp/rearm-predicate"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sourceObservationID, _ := addTestObsSession(t, s, "session-rearm-predicate", "Personal source", "decision", project, "personal")
+	duplicateSourceObservationID, _ := addTestObsSession(t, s, "session-rearm-predicate", "Duplicate personal source", "decision", project, "personal")
+	targetObservationID, _ := addTestObsSession(t, s, "session-rearm-predicate", "Personal target", "decision", project, "personal")
+	const sourceSyncID = "obs-rearm-predicate-source"
+	const targetSyncID = "obs-rearm-predicate-target"
+	for _, id := range []int64{sourceObservationID, duplicateSourceObservationID} {
+		if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, sourceSyncID, id); err != nil {
+			t.Fatalf("set source sync ID: %v", err)
+		}
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, targetSyncID, targetObservationID); err != nil {
+		t.Fatalf("set target sync ID: %v", err)
+	}
+
+	insertDead := func(syncID, reasonCode string) {
+		t.Helper()
+		payload, err := json.Marshal(syncRelationPayload{
+			SyncID: syncID, SourceID: sourceSyncID, TargetID: targetSyncID,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged, Project: project,
+		})
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		if _, err := s.db.Exec(`
+			INSERT INTO sync_apply_deferred
+				(sync_id, entity, payload, target_key, entity_key, op, reason_code, payload_sync_id, project, scope_class, apply_status, retry_count, last_error, first_seen_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scoped', 'dead', 5, ?, datetime('now'))
+		`, syncID, SyncEntityRelation, string(payload), targetKey, syncID, SyncOpUpsert, reasonCode, syncID, project, ErrRelationFKMissing.Error()); err != nil {
+			t.Fatalf("insert dead row %q: %v", syncID, err)
+		}
+	}
+
+	const authoritativeID = "rel-rearm-authoritative-personal"
+	const legacyID = "rel-rearm-legacy-duplicate"
+	insertDead(authoritativeID, relationDeferredOuterProjectAuthoritativeReasonCode)
+	insertDead(legacyID, "")
+
+	rearmed, err := s.RearmEligibleDeadRelationsForScope(targetKey, project)
+	if err != nil {
+		t.Fatalf("RearmEligibleDeadRelationsForScope: %v", err)
+	}
+	if rearmed != 1 {
+		t.Fatalf("rearmed = %d, want only the legacy relation", rearmed)
+	}
+	if status, retries := getDeferredRow(t, s, authoritativeID); status != "dead" || retries != 5 {
+		t.Fatalf("authoritative personal-endpoint row = (%q, %d), want (dead, 5)", status, retries)
+	}
+	if status, retries := getDeferredRow(t, s, legacyID); status != "deferred" || retries != 0 {
+		t.Fatalf("legacy duplicate-endpoint row = (%q, %d), want (deferred, 0)", status, retries)
+	}
+}
+
 // TestRearmEligibleDeadRelationsForScopeDrainsAllEligibleRows pins that one call
 // re-arms every eligible satisfiable relation, not only the first query batch:
 // finalizeImport invokes this once per import, so a batch limit would strand
@@ -2115,7 +2192,7 @@ func TestEnqueueDeferredRelationReArmsDeadRow(t *testing.T) {
 		enqueueAndDriveToDead(t, s, mut)
 		type deferredState struct {
 			payload, payloadSyncID, entityKey, targetKey, project, scopeClass, applyStatus string
-			retryCount                                                                    int
+			retryCount                                                                     int
 		}
 		readState := func() deferredState {
 			var state deferredState
