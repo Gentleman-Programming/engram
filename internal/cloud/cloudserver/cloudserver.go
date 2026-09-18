@@ -76,6 +76,7 @@ type CloudServer struct {
 	principalState      principalStateStore
 	adminIdentity       AdminIdentityStore
 	managedHasher       *cloudauth.ManagedTokenHasher
+	dashboardScope      func([]string) (dashboard.DashboardStore, error)
 	dashboardSessionKey []byte
 	dashboardAdmin      string
 	port                int
@@ -289,6 +290,7 @@ func (s *CloudServer) routes() {
 			return s.dashboardDisplayName(r)
 		},
 		Store:             dashboardStore,
+		StoreForRequest:   s.dashboardStoreForRequest(dashboardStore),
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
@@ -325,6 +327,43 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("GET /admin/users/{principalID}/grants", s.withAuth(s.handleAdminListGrants))
 	s.mux.HandleFunc("POST /admin/users/{principalID}/grants", s.withAuth(s.handleAdminCreateGrant))
 	s.mux.HandleFunc("POST /admin/users/{principalID}/grants/{project}/revoke", s.withAuth(s.handleAdminRevokeGrant))
+}
+
+// dashboardStoreForRequest creates a fresh immutable view for managed
+// principals. Legacy and local dashboard sessions retain the existing store
+// behavior, while missing grant authority or scoped-store support fails closed.
+func (s *CloudServer) dashboardStoreForRequest(store dashboard.DashboardStore) func(*http.Request) (dashboard.DashboardStore, error) {
+	if store == nil {
+		return nil
+	}
+	return func(r *http.Request) (dashboard.DashboardStore, error) {
+		principal, ok := s.dashboardPrincipalFromRequest(r)
+		if !ok || principal.Source != cloudauth.PrincipalSourceManagedToken {
+			return store, nil
+		}
+		if s.principalProject == nil {
+			return nil, errors.New("managed dashboard scope authorizer is not configured")
+		}
+		projects, err := s.principalProject.EnrolledProjectsForPrincipal(r.Context(), principal)
+		if err != nil {
+			return nil, fmt.Errorf("resolve managed dashboard project grants: %w", err)
+		}
+		var view dashboard.DashboardStore
+		if s.dashboardScope != nil {
+			view, err = s.dashboardScope(projects)
+		} else if cloudStore, ok := s.store.(*cloudstore.CloudStore); ok {
+			view, err = cloudStore.DashboardStoreForProjects(projects)
+		} else {
+			return nil, errors.New("managed dashboard scoped store is not configured")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("build managed dashboard project scope: %w", err)
+		}
+		if view == nil {
+			return nil, errors.New("managed dashboard scoped store is unavailable")
+		}
+		return view, nil
+	}
 }
 
 func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {

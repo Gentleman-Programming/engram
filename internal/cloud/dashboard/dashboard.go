@@ -47,9 +47,13 @@ type MountConfig struct {
 	CanManageManagedUsers func(r *http.Request) bool
 	GetDisplayName        func(r *http.Request) string
 	Store                 DashboardStore
-	ManagedUsers          ManagedUsersStore
-	MaxLoginBodyBytes     int64
-	StatusProvider        SyncStatusProvider
+	// StoreForRequest returns an immutable, request-owned view over Store for
+	// authenticated managed principals. Resolution failures fail the request
+	// closed before a handler can observe the shared store.
+	StoreForRequest   func(r *http.Request) (DashboardStore, error)
+	ManagedUsers      ManagedUsersStore
+	MaxLoginBodyBytes int64
+	StatusProvider    SyncStatusProvider
 }
 
 type DashboardStore interface {
@@ -107,6 +111,26 @@ type handlers struct {
 	cfg MountConfig
 }
 
+type dashboardHandler func(*handlers, http.ResponseWriter, *http.Request)
+
+// requireScopedSession authenticates before deriving a request-local store.
+// The copied handlers value prevents principal-scoped data from entering the
+// process-wide MountConfig or CloudStore cache.
+func (h *handlers) requireScopedSession(next dashboardHandler) http.HandlerFunc {
+	return h.requireSession(func(w http.ResponseWriter, r *http.Request) {
+		scoped := *h
+		if h.cfg.StoreForRequest != nil {
+			store, err := h.cfg.StoreForRequest(r)
+			if err != nil {
+				h.renderStoreError(w, r, "dashboard", "Dashboard data", err)
+				return
+			}
+			scoped.cfg.Store = store
+		}
+		next(&scoped, w, r)
+	})
+}
+
 func Mount(mux *http.ServeMux, cfg MountConfig) {
 	h := &handlers{cfg: cfg}
 
@@ -121,42 +145,44 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("POST /dashboard/login", h.handleLoginSubmit)
 	mux.HandleFunc("POST /dashboard/logout", h.handleLogout)
 
-	mux.HandleFunc("GET /dashboard", h.requireSession(h.handleDashboardHome))
-	mux.HandleFunc("GET /dashboard/", h.requireSession(h.handleDashboardHome))
-	mux.HandleFunc("GET /dashboard/stats", h.requireSession(h.handleDashboardStats))
-	mux.HandleFunc("GET /dashboard/activity", h.requireSession(h.handleDashboardActivity))
-	mux.HandleFunc("GET /dashboard/browser", h.requireSession(h.handleBrowser))
-	mux.HandleFunc("GET /dashboard/browser/observations", h.requireSession(h.handleBrowserObservations))
-	mux.HandleFunc("GET /dashboard/browser/sessions", h.requireSession(h.handleBrowserSessions))
-	mux.HandleFunc("GET /dashboard/browser/sessions/{sessionID}", h.requireSession(h.handleBrowserSessionDetail))
-	mux.HandleFunc("GET /dashboard/browser/prompts", h.requireSession(h.handleBrowserPrompts))
-	mux.HandleFunc("GET /dashboard/projects", h.requireSession(h.handleProjects))
-	mux.HandleFunc("GET /dashboard/projects/{project}", h.requireSession(h.handleProjectDetail))
-	mux.HandleFunc("GET /dashboard/contributors", h.requireSession(h.handleContributors))
-	mux.HandleFunc("GET /dashboard/contributors/list", h.requireSession(h.handleContributorsList))
-	mux.HandleFunc("GET /dashboard/contributors/{contributor}", h.requireSession(h.handleContributorDetail))
-	mux.HandleFunc("GET /dashboard/admin", h.requireSession(h.handleAdmin))
-	mux.HandleFunc("GET /dashboard/admin/projects", h.requireSession(h.handleAdminProjectControls))
+	mux.HandleFunc("GET /dashboard", h.requireScopedSession((*handlers).handleDashboardHome))
+	mux.HandleFunc("GET /dashboard/", h.requireScopedSession((*handlers).handleDashboardHome))
+	mux.HandleFunc("GET /dashboard/stats", h.requireScopedSession((*handlers).handleDashboardStats))
+	mux.HandleFunc("GET /dashboard/activity", h.requireScopedSession((*handlers).handleDashboardActivity))
+	mux.HandleFunc("GET /dashboard/browser", h.requireScopedSession((*handlers).handleBrowser))
+	mux.HandleFunc("GET /dashboard/browser/observations", h.requireScopedSession((*handlers).handleBrowserObservations))
+	mux.HandleFunc("GET /dashboard/browser/sessions", h.requireScopedSession((*handlers).handleBrowserSessions))
+	mux.HandleFunc("GET /dashboard/browser/sessions/{sessionID}", h.requireScopedSession((*handlers).handleBrowserSessionDetail))
+	mux.HandleFunc("GET /dashboard/browser/prompts", h.requireScopedSession((*handlers).handleBrowserPrompts))
+	mux.HandleFunc("GET /dashboard/projects", h.requireScopedSession((*handlers).handleProjects))
+	mux.HandleFunc("GET /dashboard/projects/{project}", h.requireScopedSession((*handlers).handleProjectDetail))
+	mux.HandleFunc("GET /dashboard/contributors", h.requireScopedSession((*handlers).handleContributors))
+	mux.HandleFunc("GET /dashboard/contributors/list", h.requireScopedSession((*handlers).handleContributorsList))
+	mux.HandleFunc("GET /dashboard/contributors/{contributor}", h.requireScopedSession((*handlers).handleContributorDetail))
+	mux.HandleFunc("GET /dashboard/admin", h.requireScopedSession((*handlers).handleAdmin))
+	mux.HandleFunc("GET /dashboard/admin/projects", h.requireScopedSession((*handlers).handleAdminProjectControls))
 	// R4-10: /dashboard/admin/contributors was a dead route (duplicate of /dashboard/contributors
 	// behind an extra admin gate). Removed to avoid confusion.
 
 	// 11 new routes — visual parity + composite-ID detail pages (REQ-106, Design Decision 3).
-	mux.HandleFunc("GET /dashboard/projects/list", h.requireSession(h.handleProjectsList))
-	mux.HandleFunc("GET /dashboard/projects/{name}/observations", h.requireSession(h.handleProjectObservationsPartial))
-	mux.HandleFunc("GET /dashboard/projects/{name}/sessions", h.requireSession(h.handleProjectSessionsPartial))
-	mux.HandleFunc("GET /dashboard/projects/{name}/prompts", h.requireSession(h.handleProjectPromptsPartial))
-	mux.HandleFunc("GET /dashboard/admin/users", h.requireSession(h.handleAdminUsers))
-	mux.HandleFunc("GET /dashboard/admin/users/list", h.requireSession(h.handleAdminUsersList))
-	mux.HandleFunc("GET /dashboard/admin/health", h.requireSession(h.handleAdminHealth))
+	mux.HandleFunc("GET /dashboard/projects/list", h.requireScopedSession((*handlers).handleProjectsList))
+	mux.HandleFunc("GET /dashboard/projects/{name}/observations", h.requireScopedSession((*handlers).handleProjectObservationsPartial))
+	mux.HandleFunc("GET /dashboard/projects/{name}/sessions", h.requireScopedSession((*handlers).handleProjectSessionsPartial))
+	mux.HandleFunc("GET /dashboard/projects/{name}/prompts", h.requireScopedSession((*handlers).handleProjectPromptsPartial))
+	mux.HandleFunc("GET /dashboard/admin/users", h.requireScopedSession((*handlers).handleAdminUsers))
+	mux.HandleFunc("GET /dashboard/admin/users/list", h.requireScopedSession((*handlers).handleAdminUsersList))
+	mux.HandleFunc("GET /dashboard/admin/health", h.requireScopedSession((*handlers).handleAdminHealth))
+	// Sync controls are mutations, not dashboard reads. Keep their established
+	// admin-only store semantics outside request read scoping.
 	mux.HandleFunc("POST /dashboard/admin/projects/{name}/sync", h.requireSession(h.handleAdminSyncTogglePost))
-	mux.HandleFunc("GET /dashboard/admin/projects/{name}/sync/form", h.requireSession(h.handleAdminSyncToggleForm))
-	mux.HandleFunc("GET /dashboard/sessions/{project}/{sessionID}", h.requireSession(h.handleSessionDetail))
-	mux.HandleFunc("GET /dashboard/observations/{project}/{sessionID}/{syncID}", h.requireSession(h.handleObservationDetail))
-	mux.HandleFunc("GET /dashboard/prompts/{project}/{sessionID}/{syncID}", h.requireSession(h.handlePromptDetail))
+	mux.HandleFunc("GET /dashboard/admin/projects/{name}/sync/form", h.requireScopedSession((*handlers).handleAdminSyncToggleForm))
+	mux.HandleFunc("GET /dashboard/sessions/{project}/{sessionID}", h.requireScopedSession((*handlers).handleSessionDetail))
+	mux.HandleFunc("GET /dashboard/observations/{project}/{sessionID}/{syncID}", h.requireScopedSession((*handlers).handleObservationDetail))
+	mux.HandleFunc("GET /dashboard/prompts/{project}/{sessionID}/{syncID}", h.requireScopedSession((*handlers).handlePromptDetail))
 
 	// Audit log routes — admin-gated (REQ-408, REQ-409).
-	mux.HandleFunc("GET /dashboard/admin/audit-log", h.requireSession(h.handleAdminAuditLog))
-	mux.HandleFunc("GET /dashboard/admin/audit-log/list", h.requireSession(h.handleAdminAuditLogList))
+	mux.HandleFunc("GET /dashboard/admin/audit-log", h.requireScopedSession((*handlers).handleAdminAuditLog))
+	mux.HandleFunc("GET /dashboard/admin/audit-log/list", h.requireScopedSession((*handlers).handleAdminAuditLogList))
 }
 
 func Handler() http.Handler {
@@ -656,9 +682,12 @@ func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		if sh, err := h.cfg.Store.SystemHealth(); err == nil {
 			health = &sh
 		}
-		if ctrls, err := h.cfg.Store.ListProjectSyncControls(); err == nil {
-			controls = ctrls
+		ctrls, err := h.cfg.Store.ListProjectSyncControls()
+		if err != nil {
+			h.renderStoreError(w, r, "admin", "Admin", err)
+			return
 		}
+		controls = ctrls
 	}
 	component := AdminPage(health, controls)
 	if isHTMXRequest(r) {
@@ -679,10 +708,12 @@ func (h *handlers) handleAdminProjectControls(w http.ResponseWriter, r *http.Req
 	}
 	var controls []cloudstore.ProjectSyncControl
 	if h.cfg.Store != nil {
-		// Degrade gracefully: empty controls if store fails.
-		if ctrls, err := h.cfg.Store.ListProjectSyncControls(); err == nil {
-			controls = ctrls
+		ctrls, err := h.cfg.Store.ListProjectSyncControls()
+		if err != nil {
+			h.renderStoreError(w, r, "admin", "Project controls", err)
+			return
 		}
+		controls = ctrls
 	}
 	component := AdminProjectsPage(controls)
 	if isHTMXRequest(r) {
@@ -713,10 +744,13 @@ func (h *handlers) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
 			return
 		}
-		// Degrade gracefully: if controls fail, render without badges.
-		if ctrls, err := h.cfg.Store.ListProjectSyncControls(); err == nil {
-			controlsMap = controlsByProject(ctrls)
+		ctrls, err := h.cfg.Store.ListProjectSyncControls()
+		if err != nil {
+			log.Printf("dashboard: project controls store error: %v", err)
+			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
+			return
 		}
+		controlsMap = controlsByProject(ctrls)
 	}
 	// R4-3: re-clamp to real total; re-fetch if requested page was beyond last page.
 	// R5-3: add tier-3 fallback — if clamped re-fetch fails AND rows are empty, attempt page 1.
