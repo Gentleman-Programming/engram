@@ -115,6 +115,7 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 	type session struct {
 		id, project, directory string
 		ended                  bool
+		leased                 bool
 		startedAt              string
 	}
 	tests := []struct {
@@ -182,14 +183,41 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 			},
 			wantStatus: StatusOK,
 		},
+		{
+			name:    "one live lease suppresses recent legacy candidate",
+			project: "engram",
+			sessions: []session{
+				{id: "legacy-recent", project: "engram", directory: "/work/engram"},
+				{id: "leased-current", project: "engram", directory: "/work/engram", leased: true},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "two live leases remain ambiguous",
+			project: "engram",
+			sessions: []session{
+				{id: "leased-a", project: "engram", directory: "/work/engram", leased: true},
+				{id: "leased-b", project: "engram", directory: "/work/engram", leased: true},
+			},
+			wantStatus:       StatusWarning,
+			wantDirectories:  []string{"/work/engram"},
+			wantSessionIDs:   []string{"leased-a", "leased-b"},
+			wantCandidateCnt: 2,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newDiagnosticTestStore(t)
 			for _, session := range tt.sessions {
-				if err := s.CreateSession(session.id, session.project, session.directory); err != nil {
-					t.Fatalf("CreateSession(%q): %v", session.id, err)
+				var err error
+				if session.leased {
+					err = s.StartSession(session.id, session.project, session.directory)
+				} else {
+					err = s.CreateSession(session.id, session.project, session.directory)
+				}
+				if err != nil {
+					t.Fatalf("create session %q: %v", session.id, err)
 				}
 				if session.startedAt != "" {
 					if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, session.startedAt, session.id); err != nil {
@@ -232,6 +260,32 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 				t.Fatalf("evidence=%+v, want project=%q candidates=%d directories=%v session_ids=%v", evidence, tt.project, tt.wantCandidateCnt, tt.wantDirectories, tt.wantSessionIDs)
 			}
 		})
+	}
+}
+
+func TestAmbiguousActiveRuntimeSessionsCheckSafeNextStepNamesSupportedRuntimeActions(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	for _, id := range []string{"leased-a", "leased-b"} {
+		if err := s.StartSession(id, "engram", "/work/engram"); err != nil {
+			t.Fatalf("start session %q: %v", id, err)
+		}
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckAmbiguousActiveRuntimeSessions)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v, want one ambiguous-runtime warning", report)
+	}
+	next := report.Checks[0].Findings[0].SafeNextStep
+	for _, want := range []string{"mem_session_end", "only confirmed stale IDs", "explicit runtime attribution"} {
+		if !strings.Contains(next, want) {
+			t.Fatalf("SafeNextStep=%q, want %q", next, want)
+		}
+	}
+	if strings.Contains(next, "engram session") {
+		t.Fatalf("SafeNextStep promises an unavailable session CLI: %q", next)
 	}
 }
 

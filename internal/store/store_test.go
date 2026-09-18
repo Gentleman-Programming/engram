@@ -14897,6 +14897,69 @@ func TestActiveRuntimeSessionsStaleRowDoesNotBlockLiveSession(t *testing.T) {
 	}
 }
 
+func TestActiveRuntimeSessionsPrefersLiveLeasesPerDirectory(t *testing.T) {
+	s := newTestStore(t)
+	for _, session := range []struct {
+		id, directory string
+		leased        bool
+	}{
+		{id: "legacy-suppressed", directory: "/work/leased"},
+		{id: "live-lease", directory: "/work/leased", leased: true},
+		{id: "legacy-fallback", directory: "/work/legacy"},
+	} {
+		var err error
+		if session.leased {
+			err = s.StartSession(session.id, "engram", session.directory)
+		} else {
+			err = s.CreateSession(session.id, "engram", session.directory)
+		}
+		if err != nil {
+			t.Fatalf("create %s: %v", session.id, err)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = datetime('now', '-1 day') WHERE id = 'legacy-suppressed'`); err != nil {
+		t.Fatalf("backdate suppressed legacy session: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/leased", "/work/legacy")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"legacy-fallback", "live-lease"}) {
+		t.Fatalf("active IDs = %#v, want live lease plus other-directory legacy fallback", ids)
+	}
+	var endedAt *string
+	if err := s.DB().QueryRow(`SELECT ended_at FROM sessions WHERE id = 'legacy-suppressed'`).Scan(&endedAt); err != nil {
+		t.Fatalf("read suppressed legacy session: %v", err)
+	}
+	if endedAt != nil {
+		t.Fatalf("selection must not end suppressed legacy session, ended_at = %q", *endedAt)
+	}
+}
+
+func TestActiveRuntimeSessionsExcludesExpiredOrInvalidLeasesAndKeepsLiveLeaseAmbiguity(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"live-lease-a", "live-lease-b", "expired-lease", "invalid-lease"} {
+		if err := s.StartSession(id, "engram", "/work/engram"); err != nil {
+			t.Fatalf("start %s: %v", id, err)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "2000-01-01 00:00:00", "expired-lease"); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "not-a-timestamp", "invalid-lease"); err != nil {
+		t.Fatalf("invalidate lease: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"live-lease-a", "live-lease-b"}) {
+		t.Fatalf("active IDs = %#v, want only genuinely live leased owners", ids)
+	}
+}
+
 func TestActiveRuntimeSessionsIgnoresManualSaveSessions(t *testing.T) {
 	s := newTestStore(t)
 

@@ -2950,20 +2950,19 @@ const activeRuntimeSessionWindow = "-7 days"
 //   - Scope to the (normalized) project.
 //   - Scope to the current runtime directory.
 //   - Require ended_at IS NULL — ended sessions are never returned.
-//   - Require recent effective activity. ended_at IS NULL alone means "never
-//     closed", not "in use": a session whose process is long gone stays a
-//     candidate forever, and two such rows make resolution fail permanently
-//     for that project and directory (#1101). Effective activity is the last
-//     observation the session recorded, falling back to started_at when it
-//     recorded none. The sessions table carries no pid or heartbeat, so
-//     liveness is not observable; recency of recorded work is.
+//   - A nonblank runtime lease is authoritative: return it only while it is
+//     valid and unexpired. Expired or malformed leases are excluded.
+//   - A live lease suppresses unleased legacy candidates in its directory only.
+//     Where no live lease exists, preserve the legacy effective-activity window:
+//     the latest observation, falling back to started_at, must be recent.
 //   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
 //
 // ActiveRuntimeSessions returns active, non-manual sessions for a project and
 // runtime directories. The directories narrow candidates; callers must not
-// treat them as session identity.
+// treat them as session identity. Selection is read-only: it never ends or
+// repairs historical rows.
 func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]string, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
@@ -2987,16 +2986,39 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 	}
 
 	rows, err := s.queryHook(s.db, `
-		SELECT s.id
-		FROM sessions s
-		LEFT JOIN observations o ON o.session_id = s.id
-		WHERE LOWER(s.project) = ?
-		  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
-		  AND s.ended_at IS NULL
-		  AND s.id NOT LIKE 'manual-save%'
-		GROUP BY s.id
-		HAVING COALESCE(MAX(o.created_at), s.started_at) >= datetime('now', '`+activeRuntimeSessionWindow+`')
-		ORDER BY s.id
+		WITH runtime_candidates AS (
+			SELECT s.id,
+			       s.directory,
+			       s.runtime_lease_expires_at,
+			       COALESCE(MAX(o.created_at), s.started_at) AS effective_activity
+			FROM sessions s
+			LEFT JOIN observations o ON o.session_id = s.id
+			WHERE LOWER(s.project) = ?
+			  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
+			  AND s.ended_at IS NULL
+			  AND s.id NOT LIKE 'manual-save%'
+			GROUP BY s.id
+		), live_leased_directories AS (
+			SELECT directory
+			FROM runtime_candidates
+			WHERE runtime_lease_expires_at IS NOT NULL
+			  AND runtime_lease_expires_at <> ''
+			  AND datetime(runtime_lease_expires_at) > datetime('now')
+			GROUP BY directory
+		)
+		SELECT candidate.id
+		FROM runtime_candidates candidate
+		WHERE (candidate.runtime_lease_expires_at IS NOT NULL
+		       AND candidate.runtime_lease_expires_at <> ''
+		       AND datetime(candidate.runtime_lease_expires_at) > datetime('now'))
+		   OR ((candidate.runtime_lease_expires_at IS NULL OR candidate.runtime_lease_expires_at = '')
+		       AND candidate.effective_activity >= datetime('now', '`+activeRuntimeSessionWindow+`')
+		       AND NOT EXISTS (
+				SELECT 1
+				FROM live_leased_directories live
+				WHERE live.directory = candidate.directory
+			   ))
+		ORDER BY candidate.id
 	`, args...)
 	if err != nil {
 		return nil, err
