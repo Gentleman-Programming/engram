@@ -115,6 +115,7 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 	type session struct {
 		id, project, directory string
 		ended                  bool
+		leased                 bool
 		startedAt              string
 	}
 	tests := []struct {
@@ -182,14 +183,41 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 			},
 			wantStatus: StatusOK,
 		},
+		{
+			name:    "one live lease suppresses recent legacy candidate",
+			project: "engram",
+			sessions: []session{
+				{id: "legacy-recent", project: "engram", directory: "/work/engram"},
+				{id: "leased-current", project: "engram", directory: "/work/engram", leased: true},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "two live leases remain ambiguous",
+			project: "engram",
+			sessions: []session{
+				{id: "leased-a", project: "engram", directory: "/work/engram", leased: true},
+				{id: "leased-b", project: "engram", directory: "/work/engram", leased: true},
+			},
+			wantStatus:       StatusWarning,
+			wantDirectories:  []string{"/work/engram"},
+			wantSessionIDs:   []string{"leased-a", "leased-b"},
+			wantCandidateCnt: 2,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newDiagnosticTestStore(t)
 			for _, session := range tt.sessions {
-				if err := s.CreateSession(session.id, session.project, session.directory); err != nil {
-					t.Fatalf("CreateSession(%q): %v", session.id, err)
+				var err error
+				if session.leased {
+					err = s.StartSession(session.id, session.project, session.directory)
+				} else {
+					err = s.CreateSession(session.id, session.project, session.directory)
+				}
+				if err != nil {
+					t.Fatalf("create session %q: %v", session.id, err)
 				}
 				if session.startedAt != "" {
 					if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, session.startedAt, session.id); err != nil {
@@ -232,6 +260,32 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 				t.Fatalf("evidence=%+v, want project=%q candidates=%d directories=%v session_ids=%v", evidence, tt.project, tt.wantCandidateCnt, tt.wantDirectories, tt.wantSessionIDs)
 			}
 		})
+	}
+}
+
+func TestAmbiguousActiveRuntimeSessionsCheckSafeNextStepNamesSupportedRuntimeActions(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	for _, id := range []string{"leased-a", "leased-b"} {
+		if err := s.StartSession(id, "engram", "/work/engram"); err != nil {
+			t.Fatalf("start session %q: %v", id, err)
+		}
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckAmbiguousActiveRuntimeSessions)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v, want one ambiguous-runtime warning", report)
+	}
+	next := report.Checks[0].Findings[0].SafeNextStep
+	for _, want := range []string{"mem_session_end", "only confirmed stale IDs", "explicit runtime attribution"} {
+		if !strings.Contains(next, want) {
+			t.Fatalf("SafeNextStep=%q, want %q", next, want)
+		}
+	}
+	if strings.Contains(next, "engram session") {
+		t.Fatalf("SafeNextStep promises an unavailable session CLI: %q", next)
 	}
 }
 
@@ -544,6 +598,23 @@ func TestSyncMutationRequiredFieldsReportsCorruptSourceObservations(t *testing.T
 // proves the issue #688 signal survives: once the device uses cloud sync, a
 // project whose pending mutations cannot be delivered is reported as blocked
 // with the enrollment guidance, while the enrolled project stays silent.
+func TestSyncMutationRequiredFieldsCheckSuggestsLocalRepair(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "engram", store.SyncEntitySession, "poison", store.SyncOpUpsert, `{}`)
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	next := report.Checks[0].Findings[0].SafeNextStep
+	if !strings.Contains(next, "engram doctor repair --project engram --check sync_mutation_required_fields --dry-run") || !strings.Contains(next, "cloud-upgrade tooling requires configured cloud sync") {
+		t.Fatalf("local repair guidance=%q", next)
+	}
+}
+
 func TestSyncMutationRequiredFieldsBlocksNonEnrolledBacklogWhenCloudSyncInUse(t *testing.T) {
 	s, cfg := newDiagnosticTestStoreWithConfig(t)
 	if err := s.CreateSession("manual-save-enrolled", "enrolled", "/work/enrolled"); err != nil {
@@ -1082,5 +1153,48 @@ func TestUnownedSessionProjectCheckIsOKWhenEverySessionIsOwned(t *testing.T) {
 	}
 	if report.Status != StatusOK || len(report.Checks[0].Findings) != 0 {
 		t.Fatalf("report = %+v, want ok with no findings", report)
+	}
+}
+
+func TestSyncMutationRequiredFieldsAfterLocalRepairHasNoBlockingWarning(t *testing.T) {
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntityPrompt, "retired-prompt", store.SyncOpUpsert, `{"sync_id":"retired-prompt","session_id":"legacy-session","content":"obsolete","project":"legacy"}`)
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-prompt"}', disposition_at = datetime('now') WHERE entity_key = 'retired-prompt'`); err != nil {
+		t.Fatalf("seed superseded mutation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || report.Summary.Warnings != 0 || report.Summary.Blocked != 0 {
+		t.Fatalf("terminal local repair must not leave a warning: %+v", report)
+	}
+	check := report.Checks[0]
+	if check.Result != StatusOK || check.Severity != SeverityInfo || len(check.Findings) != 1 {
+		t.Fatalf("terminal evidence check=%+v", check)
+	}
+	if finding := check.Findings[0]; finding.ReasonCode != "sync_mutation_superseded" || finding.Severity != SeverityInfo || finding.RequiresConfirmation {
+		t.Fatalf("superseded evidence finding=%+v", finding)
+	}
+}
+
+func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *testing.T) {
+	for _, column := range []string{"disposition_reason", "disposition_evidence", "disposition_at"} {
+		t.Run(column, func(t *testing.T) {
+			s, cfg := newDiagnosticTestStoreWithConfig(t)
+			seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntitySession, "retired-session", store.SyncOpUpsert, `{"id":"retired-session","project":"legacy","directory":"/tmp/legacy"}`)
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), `+column+` = NULL WHERE entity_key = 'retired-session'`); err != nil {
+				t.Fatalf("seed incomplete supersession: %v", err)
+			}
+			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			check := report.Checks[0]
+			if report.Status != StatusBlocked || check.Severity != SeverityBlocking || len(check.Findings) != 1 || check.Findings[0].ReasonCode != "sync_mutation_superseded_evidence_incomplete" {
+				t.Fatalf("incomplete %s report=%+v", column, report)
+			}
+		})
 	}
 }

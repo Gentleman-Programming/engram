@@ -18,6 +18,9 @@ const TOOL_LABELS = {
   mem_judge: "judge",
   mem_compare: "compare",
   mem_review: "review",
+  mem_list_projects: "list projects",
+  mem_pin: "pin",
+  mem_unpin: "unpin",
 };
 
 const ARG_KEYS = {
@@ -40,6 +43,9 @@ const ARG_KEYS = {
   mem_judge: ["judgment_id", "relation"],
   mem_compare: ["memory_id_a", "memory_id_b"],
   mem_review: ["action", "project", "limit", "observation_id", "id"],
+  mem_list_projects: [],
+  mem_pin: ["id"],
+  mem_unpin: ["id"],
 };
 
 export const SUPPORTED_MEMORY_TOOLS = Object.freeze(Object.keys(TOOL_LABELS));

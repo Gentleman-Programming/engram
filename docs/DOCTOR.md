@@ -19,7 +19,7 @@ Flags:
 - `--json` prints the stable diagnostic envelope for agents.
 - `--project PROJECT` scopes checks to a normalized project name.
 - `--check CODE` runs one registered check and fails loudly for unknown codes.
-- `doctor repair` requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`.
+- `doctor repair` supports exactly `invalid_session_identity`, `manual_session_name_project_mismatch`, `session_project_directory_mismatch`, `sync_mutation_required_fields`, and `sync_target_closed_space`. It requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`. `sync_mutation_required_fields` may omit `--project` and the mode; an omitted mode defaults to `--dry-run`. Its optional project scopes title repair, supersession, quarantine, and source-title repair. The diagnostic-only checks are `ambiguous_active_runtime_sessions`, `orphaned_observation_session`, `sqlite_lock_contention`, and `unowned_session_project`; a rejected repair names the corresponding `engram doctor --check <code>` continuation.
 
 ## MCP
 
@@ -61,8 +61,8 @@ The CLI `--json` and MCP tool return:
 
 - `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. A known exact `manual-save-{project}` target takes precedence over directory inference, so it does not produce this competing finding. Unknown manual suffixes and non-manual sessions retain normal trusted-directory behavior. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
 - `manual_session_name_project_mismatch` — warns when a known `manual-save-{suffix}` session name disagrees with its persisted project. The suffix must normalize to a project already evidenced by a local session; a name alone never establishes `project_owned` ownership.
-- `ambiguous_active_runtime_sessions` — warns once per project when two or more active runtime candidates match the same directory. Evidence contains the active-candidate count, involved directories, and session IDs. It uses the same unended, non-manual, seven-day activity-window rules as omitted-session resolution; doctor only reports the ambiguity and never selects, ends, or modifies sessions. Use an explicit session ID for writes in the affected directory.
-- `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: the store journals mutations unconditionally, so a non-enrolled backlog is its normal steady state.
+- `ambiguous_active_runtime_sessions` — warns once per project when two or more active runtime candidates match the same directory. Evidence contains the active-candidate count, involved directories, and session IDs. It uses the same lease-aware selection as omitted-session resolution: valid unexpired local leases take precedence in their own directory, expired or malformed nonblank leases are excluded, and the legacy seven-day effective-activity window applies only when that directory has no live lease. Multiple live leases remain ambiguous. Doctor is diagnostic-only: it never selects, ends, or modifies sessions. End only confirmed stale IDs with `mem_session_end`; otherwise keep explicit runtime attribution with `session_id` on writes.
+- `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: any pending non-enrolled row there is legacy or otherwise pre-existing backlog, because new unenrolled local writes are not journaled.
 - `orphaned_observation_session` — warns when active or soft-deleted observations reference a missing session. Findings are grouped by the stored observation project and session ID. The canonical session cannot be reconstructed automatically, so inspect and recover the data deliberately; no supported repair exists.
 - `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. The listing is deliberately unscoped.
 - Session modes are `shared` and `project_owned`. Runtime and HTTP-created sessions default to `shared`; deterministic CLI and MCP manual-save sessions are `project_owned`. Shared sync can use old peers. Project-owned sync requires a mode-capable manifest (version 2); returning to an older manifest after project-owned sessions exist is unsupported and fails loudly.
@@ -77,9 +77,11 @@ Plain `engram doctor` remains diagnostic-only. Findings that imply data movement
 - `session_project_directory_mismatch`, using trusted `git_remote` or `git_root` evidence from doctor findings.
 - `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions. The known manual target takes precedence over trusted directory evidence; unknown suffixes remain unrepaired.
 
-Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. It derives a sanitized, bounded title from that local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
+Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. Run `engram doctor repair --check sync_mutation_required_fields --dry-run` first (add `--project <project>` to scope it); cloud-upgrade tooling instead requires configured cloud sync. The repair derives a sanitized, bounded title from local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
 
-Repair never deletes or deduplicates rows, never edits sync cursors, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
+The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Superseded evidence missing its reason, evidence, or timestamp remains blocking until manually repaired; complete terminal quarantined and superseded rows remain informational without keeping doctor in warning or blocked status.
+
+Repair never deletes or deduplicates rows, never edits sync cursors, never acknowledges undelivered mutations, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
 
 - `sessions.project`
 - `sessions.ownership_mode` (`project_owned` for a session named `manual-save-{target_project}`, otherwise `shared`)
@@ -88,13 +90,13 @@ Repair never deletes or deduplicates rows, never edits sync cursors, and never w
 
 Title restoration does not create a SQLite backup.
 
-`orphaned_observation_session` and `ambiguous_active_runtime_sessions` are report-only and are not supported by `engram doctor repair`.
+`ambiguous_active_runtime_sessions`, `orphaned_observation_session`, `sqlite_lock_contention`, and `unowned_session_project` are diagnostic-only and are not supported by `engram doctor repair`. SQLite lock contention has no repair.
 
 ### Repair JSON envelope
 
 All repair modes print stable JSON to stdout:
 
-For `sync_mutation_required_fields`, `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`.
+For `sync_mutation_required_fields`, `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence.
 
 ```json
 {

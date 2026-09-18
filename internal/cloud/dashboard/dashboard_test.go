@@ -3197,3 +3197,32 @@ func TestAdminAuditLogListIsPartialOnlyNoLayoutWrapper(t *testing.T) {
 		t.Errorf("handleAdminAuditLogList returned full Layout wrapper for non-HTMX request; got <html> in body")
 	}
 }
+
+func TestDashboardPrincipalSyncControlsHandlersSurfaceErrors(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{errSyncControls: errors.New("invalid sync control")})
+	tests := []struct {
+		name string
+		path string
+		htmx bool
+		want int
+	}{
+		{name: "admin full page", path: "/dashboard/admin?auth=ok", want: http.StatusServiceUnavailable},
+		{name: "admin htmx", path: "/dashboard/admin?auth=ok", htmx: true, want: http.StatusServiceUnavailable},
+		{name: "admin projects full page", path: "/dashboard/admin/projects?auth=ok", want: http.StatusServiceUnavailable},
+		{name: "admin projects htmx", path: "/dashboard/admin/projects?auth=ok", htmx: true, want: http.StatusServiceUnavailable},
+		{name: "projects list fragment", path: "/dashboard/projects/list?auth=ok", htmx: true, want: http.StatusBadGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.htmx {
+				req.Header.Set("HX-Request", "true")
+			}
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("expected %d, got %d body=%q", tt.want, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}

@@ -490,11 +490,44 @@ test("registration enters the cache only after a successful acknowledgement", as
   await runtime.event("session.created", session("runtime"))
   assert.deepEqual(runtime.registeredIDs, ["runtime"])
 
-  for (const expectedRegistrations of [2, 2]) {
+  for (const expectedRegistrations of [2, 3]) {
     const output = toolOutput(undefined)
     await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
     assert.equal(output.args.session_id, "runtime")
     assert.equal(runtime.registeredIDs.length, expectedRegistrations)
+  }
+})
+
+test("OpenCode activity renews a cached root session once per activity wave", async (t) => {
+  const renewal = deferredResponse()
+  const runtime = await createRuntime(t, {
+    registrationResponse: (attempt) => attempt === 2 ? renewal.handler() : httpResponse(),
+  })
+  await runtime.event("session.created", session("runtime"))
+  assert.deepEqual(runtime.registeredIDs, ["runtime"], "session.created remains initial registration")
+
+  const message = { message: {}, parts: [{ type: "text", text: "A sufficiently long root prompt" }] }
+  const first = runtime.chat({ sessionID: "runtime" }, message)
+  const started = await Promise.race([
+    renewal.started.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 25)),
+  ])
+  try {
+    assert.equal(started, true, "cached runtime activity must start a renewal request")
+    const second = runtime.chat({ sessionID: "runtime" }, message)
+    await Promise.resolve()
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime"], "concurrent activity shares the renewal flight")
+
+    renewal.resolve(httpResponse())
+    await Promise.all([first, second])
+    await runtime.after({ tool: "Task", sessionID: "runtime" }, "A".repeat(60))
+
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime", "runtime"], "later non-Engram tool activity renews before use")
+    assert.equal(runtime.requests.filter(({ path }) => path === "/prompts").length, 2)
+    assert.equal(runtime.requests.filter(({ path }) => path === "/observations/passive").length, 1)
+  } finally {
+    renewal.resolve(httpResponse())
+    await first
   }
 })
 
@@ -521,7 +554,7 @@ test("qualified Engram write IDs inject the authoritative root session", async (
   }
 
   assert.deepEqual(runtime.sessionGetIDs, ["root", "leaf"])
-  assert.deepEqual(runtime.registeredIDs, ["root"], "a child must reuse its authoritative root")
+  assert.deepEqual(runtime.registeredIDs, ["root", "root", "root", "root"], "a child must renew the authoritative root, never register itself")
 })
 
 test("subagent sessions resolve to the authoritative parent and never register themselves", () => {
@@ -660,13 +693,13 @@ test("session.updated reparents a known leaf while deletion tombstones dominate 
   const afterUpdate = toolOutput(undefined)
   await runtime.before({ tool: "mem_save", sessionID: "leaf" }, afterUpdate)
   assert.equal(afterUpdate.args.session_id, "new-root")
-  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root"])
+  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root", "old-root", "new-root"])
 
   await runtime.event("session.deleted", { id: "new-root" })
   const deleted = toolOutput()
   await assertNoForward(runtime.before({ tool: "mem_save", sessionID: "leaf" }, deleted), deleted)
   assert.deepEqual(runtime.sessionGetIDs, [])
-  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root"], "deleted descendants must never revive")
+  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root", "old-root", "new-root"], "deleted descendants must never revive")
 })
 
 test("deleting a leaf during its SDK lookup aborts without mutation or registration", async (t) => {
@@ -982,7 +1015,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   const subagent = toolOutput("sub")
   await runtime.before({ tool: "mem_session_summary", sessionID: "sub" }, subagent)
   assert.equal(subagent.args.session_id, "runtime")
-  assert.equal(runtime.registeredIDs.length, 2, "child must reuse the confirmed parent, not register itself")
+  assert.equal(runtime.registeredIDs.length, 3, "child must renew the confirmed parent, not register itself")
 
   const unresolved = toolOutput()
   let resolutionErrorMessage = ""
@@ -993,7 +1026,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   })
   assert.notEqual(resolutionErrorMessage, registrationErrorMessage)
   assert.equal(unresolved.args.session_id, MODEL_SESSION_ID, "failed resolution must not forward MCP arguments")
-  assert.equal(runtime.registeredIDs.length, 2)
+  assert.equal(runtime.registeredIDs.length, 3)
 
   await runtime.event("session.created", { id: "orphan", parentID: "" })
   const orphan = toolOutput(undefined)
@@ -1001,7 +1034,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   await runtime.event("session.updated", session("orphan", "runtime"))
   await runtime.before({ tool: "mem_capture_passive", sessionID: "orphan" }, orphan)
   assert.equal(orphan.args.session_id, "runtime", "a later authoritative mapping must remain retryable")
-  assert.equal(runtime.registeredIDs.length, 2)
+  assert.equal(runtime.registeredIDs.length, 4)
 })
 
 test("a title-only session.created event registers an authoritative root", async (t) => {
@@ -1011,7 +1044,7 @@ test("a title-only session.created event registers an authoritative root", async
   const output = toolOutput(undefined)
   await runtime.before({ tool: "mem_capture_passive", sessionID: "legitimate-root" }, output)
   assert.equal(output.args.session_id, "legitimate-root")
-  assert.deepEqual(runtime.registeredIDs, ["legitimate-root"])
+  assert.deepEqual(runtime.registeredIDs, ["legitimate-root", "legitimate-root"])
   assert.deepEqual(runtime.sessionGetIDs, [], "event-cached roots must not query the SDK")
 })
 
@@ -1081,7 +1114,7 @@ test("deleting a parent invalidates descendants and prevents later writes or re-
     await assert.rejects(runtime.before({ tool: "mem_session_summary", sessionID }, toolOutput(undefined)), RESOLUTION_ERROR)
   }
 
-  assert.deepEqual(runtime.registeredIDs, ["parent"], "invalid descendants must never re-register as top-level sessions")
+  assert.deepEqual(runtime.registeredIDs, ["parent", "parent"], "invalid descendants must never re-register as top-level sessions")
 })
 
 test("plugin disposal closes registered roots, not children, and waits for session ends", async (t) => {
