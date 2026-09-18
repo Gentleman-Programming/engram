@@ -16328,6 +16328,46 @@ func TestRuntimeSessionRegistrationRenewsWithoutChangingSessionIdentity(t *testi
 	}
 }
 
+func TestRuntimeSessionRenewalSkipsLeaseOnlySyncMutationButJournalsIdentityRepair(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	countMutations := func() int {
+		t.Helper()
+		var count int
+		if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`, SyncEntitySession, "runtime-session", SyncOpUpsert).Scan(&count); err != nil {
+			t.Fatalf("count session mutations: %v", err)
+		}
+		return count
+	}
+	if got := countMutations(); got != 1 {
+		t.Fatalf("new runtime session mutations = %d, want 1", got)
+	}
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET acked_at = datetime('now') WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "runtime-session"); err != nil {
+		t.Fatalf("ack initial session mutation: %v", err)
+	}
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("renew runtime session: %v", err)
+	}
+	if got := countMutations(); got != 1 {
+		t.Fatalf("lease-only renewal mutations = %d, want 1", got)
+	}
+
+	if _, err := s.DB().Exec(`UPDATE sessions SET directory = '' WHERE id = ?`, "runtime-session"); err != nil {
+		t.Fatalf("seed blank runtime directory: %v", err)
+	}
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("repair runtime session identity: %v", err)
+	}
+	if got := countMutations(); got != 2 {
+		t.Fatalf("identity repair mutations = %d, want 2", got)
+	}
+}
+
 func TestRuntimeSessionRegistrationRejectsEndedSessions(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {

@@ -2827,6 +2827,7 @@ func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode strin
 		if err != nil {
 			return err
 		}
+		identityRepaired := !found
 		if found {
 			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
 				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
@@ -2834,9 +2835,17 @@ func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode strin
 			if err := sessionProjectWriteError(id, existingProject, existingMode, project); err != nil {
 				return err
 			}
+			var existingDirectory string
+			if err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, id).Scan(&existingDirectory); err != nil {
+				return err
+			}
+			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
 		}
 		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
 			return err
+		}
+		if !identityRepaired {
+			return nil
 		}
 		var persisted Session
 		// sessions.project is read through ifnull() because a database upgraded from
