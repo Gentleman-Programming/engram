@@ -9478,18 +9478,6 @@ func sessionOwnershipTx(tx *sql.Tx, sessionID string) (project, mode string, fou
 	return normalized, strings.TrimSpace(rawMode.String), true, nil
 }
 
-func sessionEndedTx(tx *sql.Tx, sessionID string) (bool, error) {
-	var endedAt sql.NullString
-	err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, sessionID).Scan(&endedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return endedAt.Valid, nil
-}
-
 func sessionProjectWriteError(sessionID, sessionProject, mode, requested string) error {
 	if sessionProject == "" || sessionProject == requested || mode == SessionOwnershipShared {
 		return nil
