@@ -465,3 +465,58 @@ func TestRemoteTransportBuildsRequestURLsFromBasePath(t *testing.T) {
 		t.Fatalf("expected project query on pull endpoints, got %v", requestProjects)
 	}
 }
+
+func TestRemoteTransportAppliesExtraHeadersOnManifest(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access, X-Dup: first, X-Dup: second, Authorization: injected")
+	var got http.Header
+	rt, err := NewRemoteTransport("https://cloud.example.test", "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Header.Clone()
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if got.Get("CF-Access-Client-Id") != "abc.access" {
+		t.Fatalf("CF-Access-Client-Id=%q, want extra header applied", got.Get("CF-Access-Client-Id"))
+	}
+	if got.Get("X-Dup") != "second" {
+		t.Fatalf("X-Dup=%q, want later duplicate to win", got.Get("X-Dup"))
+	}
+	if got.Get("Authorization") != "Bearer token" {
+		t.Fatalf("Authorization=%q, want configured bearer preserved over extra-header override", got.Get("Authorization"))
+	}
+}
+
+func TestRemoteTransportAppliesExtraHeadersOnChunkOperations(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Secret: secret")
+	var headers []http.Header
+	rt, err := NewRemoteTransport("https://cloud.example.test", "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	roundTrip := remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		headers = append(headers, req.Header.Clone())
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})
+	rt.httpClient.Transport = roundTrip
+	rt.writeHTTPClient.Transport = roundTrip
+
+	if _, err := rt.ReadChunk("chunk-1"); err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if err := rt.WriteChunk("chunk-1", []byte(`{"sessions":[]}`), engramsync.ChunkEntry{CreatedBy: "tester", CreatedAt: "2026-04-01T00:00:00Z"}); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	if len(headers) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(headers))
+	}
+	for i, header := range headers {
+		if header.Get("CF-Access-Client-Secret") != "secret" {
+			t.Fatalf("request %d CF-Access-Client-Secret=%q, want extra header applied", i, header.Get("CF-Access-Client-Secret"))
+		}
+	}
+}

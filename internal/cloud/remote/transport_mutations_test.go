@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -373,5 +374,38 @@ func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "server_unsupported") {
 		t.Fatalf("expected log to contain 'server_unsupported', got: %q", logOutput)
+	}
+}
+
+func TestMutationTransportAppliesExtraHeadersOnPushAndPull(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access, Authorization: injected")
+	mt, err := NewMutationTransport("https://cloud.example.test", "token")
+	if err != nil {
+		t.Fatalf("NewMutationTransport: %v", err)
+	}
+	var headers []http.Header
+	mt.httpClient.Transport = remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		headers = append(headers, req.Header.Clone())
+		if strings.Contains(req.URL.Path, "pull") {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"mutations":[],"has_more":false,"latest_seq":3}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"accepted_seqs":[1]}`))}, nil
+	})
+	if _, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}}); err != nil {
+		t.Fatalf("PushMutations: %v", err)
+	}
+	if _, err := mt.PullMutations(0, 10); err != nil {
+		t.Fatalf("PullMutations: %v", err)
+	}
+	if len(headers) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(headers))
+	}
+	for i, header := range headers {
+		if header.Get("CF-Access-Client-Id") != "abc.access" {
+			t.Fatalf("request %d CF-Access-Client-Id=%q, want extra header applied", i, header.Get("CF-Access-Client-Id"))
+		}
+		if header.Get("Authorization") != "Bearer token" {
+			t.Fatalf("request %d Authorization=%q, want configured bearer preserved", i, header.Get("Authorization"))
+		}
 	}
 }

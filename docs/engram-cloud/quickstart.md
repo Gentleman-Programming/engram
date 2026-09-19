@@ -207,6 +207,26 @@ engram sync --cloud --project my-project
 
 > `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is for local/dev smoke only. Never use it in production.
 
+### Extra service headers (zero-trust / proxy deployments)
+
+Deployments behind Cloudflare Access, a reverse proxy, or other zero-trust
+networks must attach extra service headers (for example `CF-Access-Client-Id`
+and `CF-Access-Client-Secret`) to every outgoing cloud sync request. Set them
+once with `ENGRAM_CLOUD_EXTRA_HEADERS` on the CLI machine:
+
+```bash
+export ENGRAM_CLOUD_EXTRA_HEADERS="CF-Access-Client-Id: abc.access, CF-Access-Client-Secret: secret"
+```
+
+The value is a comma-separated list of `Key: Value` pairs parsed once at
+client construction and applied to chunk sync, mutation push/pull, and
+`engram cloud upgrade` requests. Guardrails:
+
+- `Authorization` pairs are rejected: the bearer configured by `ENGRAM_CLOUD_TOKEN` is never overridden.
+- Malformed pairs (missing `:`, empty key or value) are skipped with a warning; header values are never logged.
+- Later duplicate keys override earlier ones.
+- No change in behavior when the variable is unset.
+
 ---
 
 ## Common Failure Reasons
