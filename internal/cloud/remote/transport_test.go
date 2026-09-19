@@ -49,6 +49,7 @@ func TestNewRemoteTransportRequiresHTTPSForBearerToken(t *testing.T) {
 		t.Fatalf("NewRemoteTransport with bearer token over HTTP error = %v, want HTTPS requirement", err)
 	}
 
+	t.Setenv(extraHeadersEnv, "")
 	rt, err := NewRemoteTransport("http://cloud.example.test", "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport tokenless HTTP: %v", err)
@@ -83,6 +84,7 @@ func TestRemoteTransportRejectsBearerTokenHTTPRedirect(t *testing.T) {
 }
 
 func TestRemoteTransportAllowsTokenlessHTTPRedirect(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "")
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
@@ -518,5 +520,12 @@ func TestRemoteTransportAppliesExtraHeadersOnChunkOperations(t *testing.T) {
 		if header.Get("CF-Access-Client-Secret") != "secret" {
 			t.Fatalf("request %d CF-Access-Client-Secret=%q, want extra header applied", i, header.Get("CF-Access-Client-Secret"))
 		}
+	}
+}
+
+func TestNewRemoteTransportRejectsHTTPWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	if _, err := NewRemoteTransport("http://cloud.example.test", "", "proj-a"); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("tokenless HTTP with extra headers error=%v, want HTTPS requirement", err)
 	}
 }

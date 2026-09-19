@@ -1,9 +1,12 @@
 package remote
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strings"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 const extraHeadersEnv = "ENGRAM_CLOUD_EXTRA_HEADERS"
@@ -44,7 +47,7 @@ func parseExtraHeaders(raw string) []extraHeader {
 		key, value, found := strings.Cut(part, ":")
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if !found || key == "" || value == "" || !validExtraHeaderName(key) {
+		if !found || key == "" || value == "" || !httpguts.ValidHeaderFieldName(key) || !httpguts.ValidHeaderFieldValue(value) {
 			log.Printf("[cloud] %s: skipping malformed entry %d (expected \"Key: Value\" pairs separated by commas)", extraHeadersEnv, i+1)
 			continue
 		}
@@ -65,17 +68,13 @@ func parseExtraHeaders(raw string) []extraHeader {
 	return headers
 }
 
-// validExtraHeaderName reports whether key is a usable HTTP header field name:
-// printable ASCII, no colon, comma, or surrounding whitespace. It is a narrow
-// deterministic check sufficient for static operator-supplied headers.
-func validExtraHeaderName(key string) bool {
-	if key == "" {
-		return false
+// validateExtraHeadersScheme applies the same transport-security posture as
+// the bearer token: configured extra headers can carry service credentials,
+// so they are never sent over a plaintext remote URL. Tokenless HTTP remains
+// available for local/dev smoke mode when no extra headers are configured.
+func validateExtraHeadersScheme(baseURL string, headers []extraHeader) error {
+	if len(headers) == 0 || strings.HasPrefix(strings.TrimSpace(baseURL), "https://") {
+		return nil
 	}
-	for _, r := range key {
-		if r <= ' ' || r >= 0x7f || r == ':' || r == ',' {
-			return false
-		}
-	}
-	return true
+	return fmt.Errorf("cloud: %s requires an HTTPS remote URL", extraHeadersEnv)
 }

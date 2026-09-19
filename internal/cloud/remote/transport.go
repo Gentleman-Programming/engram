@@ -94,13 +94,17 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 	if project == "" {
 		return nil, fmt.Errorf("cloud: project is required")
 	}
+	extraHeaders := extraHeadersFromEnv()
+	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
+		return nil, err
+	}
 	return &RemoteTransport{
 		baseURL:         normalized,
 		token:           token,
 		project:         project,
 		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
 		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
-		extraHeaders:    extraHeadersFromEnv(),
+		extraHeaders:    extraHeaders,
 	}, nil
 }
 
@@ -361,11 +365,15 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 	if err != nil {
 		return nil, err
 	}
+	extraHeaders := extraHeadersFromEnv()
+	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
+		return nil, err
+	}
 	return &MutationTransport{
 		baseURL:      normalized,
 		token:        token,
 		httpClient:   newRemoteHTTPClient(ordinaryOperationTimeout, token),
-		extraHeaders: extraHeadersFromEnv(),
+		extraHeaders: extraHeaders,
 	}, nil
 }
 

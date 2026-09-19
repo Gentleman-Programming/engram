@@ -52,6 +52,20 @@ func TestParseExtraHeadersSkipsMalformedPairs(t *testing.T) {
 	}
 }
 
+func TestParseExtraHeadersRejectsInvalidTokenCharactersInName(t *testing.T) {
+	got := parseExtraHeaders("Bad@Header: x, Bad Header: y, Good-Header: z")
+	if len(got) != 1 || got[0] != (extraHeader{key: "Good-Header", value: "z"}) {
+		t.Fatalf("parsed=%+v, want non-token names rejected", got)
+	}
+}
+
+func TestParseExtraHeadersRejectsControlCharactersInValue(t *testing.T) {
+	got := parseExtraHeaders("X-Cr: a\x0db, X-Lf: c\x0ad, X-Nul: \x00, X-OK: fine")
+	if len(got) != 1 || got[0] != (extraHeader{key: "X-OK", value: "fine"}) {
+		t.Fatalf("parsed=%+v, want control characters rejected", got)
+	}
+}
+
 func TestParseExtraHeadersRejectsAuthorization(t *testing.T) {
 	got := parseExtraHeaders("authorization: injected, AUTHORIZATION: injected-2, X-Real: yes")
 	if len(got) != 1 || got[0] != (extraHeader{key: "X-Real", value: "yes"}) {

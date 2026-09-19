@@ -224,6 +224,8 @@ client construction and applied to chunk sync, mutation push/pull, and
 
 - `Authorization` pairs are rejected: the bearer configured by `ENGRAM_CLOUD_TOKEN` is never overridden.
 - Malformed pairs (missing `:`, empty key or value) are skipped with a warning; header values are never logged.
+- Header names and values are validated against the HTTP token/value rules, so a malformed entry cannot stop sync at request time.
+- Configuring extra headers requires an HTTPS remote, mirroring the bearer-token rule; tokenless HTTP stays available for local/dev smoke mode only when the variable is unset.
 - Later duplicate keys override earlier ones.
 - No change in behavior when the variable is unset.
 

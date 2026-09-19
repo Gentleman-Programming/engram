@@ -13,9 +13,12 @@ import (
 	"testing"
 )
 
-// mustNewMutationTransport is a test helper that panics on error.
+// mustNewMutationTransport is a test helper that panics on error. It clears
+// ENGRAM_CLOUD_EXTRA_HEADERS so tokenless httptest transports stay valid
+// regardless of a developer's ambient environment.
 func mustNewMutationTransport(t *testing.T, baseURL, token string) *MutationTransport {
 	t.Helper()
+	t.Setenv(extraHeadersEnv, "")
 	mt, err := NewMutationTransport(baseURL, token)
 	if err != nil {
 		t.Fatalf("NewMutationTransport(%q): %v", baseURL, err)
@@ -354,6 +357,7 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 // When the server returns 404, newMutationHTTPStatusError must emit a log warning
 // containing "server_unsupported" and advice to deploy the server.
 func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -407,5 +411,12 @@ func TestMutationTransportAppliesExtraHeadersOnPushAndPull(t *testing.T) {
 		if header.Get("Authorization") != "Bearer token" {
 			t.Fatalf("request %d Authorization=%q, want configured bearer preserved", i, header.Get("Authorization"))
 		}
+	}
+}
+
+func TestNewMutationTransportRejectsHTTPWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	if _, err := NewMutationTransport("http://cloud.example.test", ""); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("tokenless HTTP with extra headers error=%v, want HTTPS requirement", err)
 	}
 }
