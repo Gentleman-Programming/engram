@@ -16576,9 +16576,13 @@ func TestListOrphanedObservationSessionRepairCandidatesMatchesDetectionPopulatio
 	seedSessionRebuildObservation(t, s, "obs-runtime-soft-deleted", "missing-runtime", "engram", "2026-01-01 09:30:00", "2026-01-03 00:00:00")
 	seedSessionRebuildObservation(t, s, "obs-manual", "manual-save-engram", "engram", "2026-02-03 08:00:00", "")
 	seedSessionRebuildObservation(t, s, "obs-tombstoned", "missing-deleted", "engram", "2026-01-05 00:00:00", "")
+	seedSessionRebuildObservation(t, s, "obs-inactive-tombstone", "missing-inactive", "engram", "2026-01-07 00:00:00", "")
 	seedSessionRebuildObservation(t, s, "obs-other-project", "missing-elsewhere", "beta", "2026-01-06 00:00:00", "")
 	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 1)`, SyncEntitySession, "missing-deleted", "engram"); err != nil {
 		t.Fatalf("seed tombstone: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 0)`, SyncEntitySession, "missing-inactive", "engram"); err != nil {
+		t.Fatalf("seed inactive tombstone: %v", err)
 	}
 
 	got, err := s.ListOrphanedObservationSessionRepairCandidates("engram")
@@ -16588,6 +16592,7 @@ func TestListOrphanedObservationSessionRepairCandidatesMatchesDetectionPopulatio
 	want := []SessionRebuildCandidate{
 		{Project: "engram", SessionID: "manual-save-engram", StartedAt: "2026-02-03 08:00:00", ObservationCount: 1},
 		{Project: "engram", SessionID: "missing-deleted", StartedAt: "2026-01-05 00:00:00", ObservationCount: 1, Tombstoned: true},
+		{Project: "engram", SessionID: "missing-inactive", StartedAt: "2026-01-07 00:00:00", ObservationCount: 1},
 		{Project: "engram", SessionID: "missing-runtime", StartedAt: "2026-01-01 09:30:00", ObservationCount: 2},
 	}
 	if len(got) != len(want) {
@@ -16688,6 +16693,97 @@ func TestApplyOrphanedObservationSessionRepairSkipsTombstonedIDsInsideTransactio
 	}
 	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-kept"); got != 1 {
 		t.Fatalf("untombstoned session missing: count=%d", got)
+	}
+}
+
+// TestApplyOrphanedObservationSessionRepairIgnoresInactiveTombstones pins the
+// tombstone semantics: only an active tombstone proves a session was
+// deliberately deleted. An inactive historical tombstone must neither hide the
+// group from the candidates query nor skip the rebuild inside the transaction.
+func TestApplyOrphanedObservationSessionRepairIgnoresInactiveTombstones(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-inactive", "missing-inactive", "engram", "2026-01-08 00:00:00", "")
+	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 0)`, SyncEntitySession, "missing-inactive", "engram"); err != nil {
+		t.Fatalf("seed inactive tombstone: %v", err)
+	}
+
+	candidates, err := s.ListOrphanedObservationSessionRepairCandidates("engram")
+	if err != nil {
+		t.Fatalf("ListOrphanedObservationSessionRepairCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SessionID != "missing-inactive" || candidates[0].Tombstoned {
+		t.Fatalf("candidates=%+v, want the group planned with Tombstoned=false", candidates)
+	}
+
+	result, err := s.ApplyOrphanedObservationSessionRepair(candidates)
+	if err != nil {
+		t.Fatalf("ApplyOrphanedObservationSessionRepair: %v", err)
+	}
+	if result.Counts.SessionsInserted != 1 || result.Counts.ObservationsLinked != 1 {
+		t.Fatalf("counts=%+v, want the group rebuilt", result.Counts)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-inactive"); got != 1 {
+		t.Fatalf("rebuilt session rows=%d, want 1", got)
+	}
+}
+
+// TestApplyOrphanedObservationSessionRepairKeepsExactPaddedSessionID pins that
+// the repair uses the session id's exact stored bytes: the candidates query
+// groups by the raw o.session_id, so a whitespace-padded but non-blank id must
+// be rebuilt under its exact value and re-link its observations.
+func TestApplyOrphanedObservationSessionRepairKeepsExactPaddedSessionID(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-padded", " abc ", "engram", "2026-01-09 00:00:00", "")
+
+	candidates, err := s.ListOrphanedObservationSessionRepairCandidates("engram")
+	if err != nil {
+		t.Fatalf("ListOrphanedObservationSessionRepairCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SessionID != " abc " {
+		t.Fatalf("candidates=%+v, want the exact padded id", candidates)
+	}
+
+	result, err := s.ApplyOrphanedObservationSessionRepair(candidates)
+	if err != nil {
+		t.Fatalf("ApplyOrphanedObservationSessionRepair: %v", err)
+	}
+	if result.Counts.SessionsInserted != 1 || result.Counts.ObservationsLinked != 1 {
+		t.Fatalf("counts=%+v, want the padded group rebuilt and linked", result.Counts)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, " abc "); got != 1 {
+		t.Fatalf("rows with the exact padded id=%d, want 1", got)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "abc"); got != 0 {
+		t.Fatalf("trim-collapsed session rows=%d, want 0", got)
+	}
+}
+
+// TestApplyOrphanedObservationSessionRepairReturnsBackupPathWhenTransactionFails
+// pins the failure contract: when the apply transaction fails after the
+// pre-repair backup was taken, the returned result still carries the backup
+// path. Here the planned session appears between planning and applying, so the
+// stale plan's placeholder INSERT violates the primary key.
+func TestApplyOrphanedObservationSessionRepairReturnsBackupPathWhenTransactionFails(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-stale", "missing-stale", "engram", "2026-01-10 00:00:00", "")
+	if err := s.CreateSession("missing-stale", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	result, err := s.ApplyOrphanedObservationSessionRepair([]SessionRebuildCandidate{
+		{Project: "engram", SessionID: "missing-stale", StartedAt: "2026-01-10 00:00:00", ObservationCount: 1},
+	})
+	if err == nil {
+		t.Fatalf("result=%+v, want the transaction failure", result)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("backup path lost when the transaction failed")
+	}
+	if _, statErr := os.Stat(result.BackupPath); statErr != nil {
+		t.Fatalf("backup missing: %v", statErr)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-stale"); got != 1 {
+		t.Fatalf("session rows after rollback=%d, want the pre-existing 1", got)
 	}
 }
 

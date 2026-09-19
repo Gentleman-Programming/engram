@@ -287,10 +287,16 @@ func cmdDoctorRepair(cfg store.Config) {
 			}
 			result, err := s.ApplyOrphanedObservationSessionRepair(candidates)
 			if err != nil {
-				failDoctorRepair(err.Error())
+				// The pre-tx backup exists even when the transaction failed, so
+				// the failure output must preserve its path for the user.
+				message := err.Error()
+				if result.BackupPath != "" {
+					message += "; pre-repair backup preserved at " + result.BackupPath
+				}
+				failDoctorRepair(message)
 				return
 			}
-			plan.Status = "applied"
+			plan.Status = orphanRepairApplyStatus(result.Counts.SessionsInserted, len(plan.SessionRebuilds))
 			plan.BackupPath = result.BackupPath
 			plan.Counts.SessionsApplied = result.Counts.SessionsInserted
 			plan.Counts.ObservationsApplied = result.Counts.ObservationsLinked
@@ -332,6 +338,21 @@ func cmdDoctorRepair(cfg store.Config) {
 		plan.Counts.PromptsPlanned = counts.Prompts
 	}
 	writeDoctorRepairJSON(plan)
+}
+
+// orphanRepairApplyStatus derives the honest plan status from what the apply
+// actually inserted versus the planner's non-skipped rebuild actions: an apply
+// that inserted nothing is a noop, one that rebuilt only part of the plan is
+// partial, and only a complete apply is applied.
+func orphanRepairApplyStatus(sessionsInserted int64, planned int) string {
+	switch {
+	case sessionsInserted <= 0:
+		return "noop"
+	case sessionsInserted < int64(planned):
+		return "partial"
+	default:
+		return "applied"
+	}
 }
 
 func failDoctorRepair(message string) {

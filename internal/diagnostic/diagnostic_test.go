@@ -1228,6 +1228,29 @@ func seedDiagnosticOrphanObservationAt(t *testing.T, s *store.Store, syncID, ses
 	}
 }
 
+// TestBuildRepairPlanOrphanedObservationSessionPropagatesStoreFailure pins that
+// a store failure inside the planner is returned to the caller instead of being
+// swallowed into an empty plan or panicking.
+func TestBuildRepairPlanOrphanedObservationSessionPropagatesStoreFailure(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	seedDiagnosticOrphanObservationAt(t, s, "obs-failure", "missing-failure", "engram", "2026-01-05 00:00:00", "")
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckOrphanedObservationSession)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	plan, err := BuildRepairPlan(context.Background(), Scope{Store: s, Project: "engram"}, report, CheckOrphanedObservationSession, RepairModePlan)
+	if err == nil {
+		t.Fatalf("plan=%+v, want the store query error", plan)
+	}
+	if plan.Check != "" || len(plan.SessionRebuilds) != 0 {
+		t.Fatalf("plan=%+v, want the zero plan beside the error", plan)
+	}
+}
+
 // TestBuildRepairPlanOrphanedObservationSessionGroupsAndSkipsTombstones pins
 // the planner contract: one rebuild action per orphan group from the store's
 // candidate query, and a named skip instead of an action when the session id
@@ -1238,8 +1261,14 @@ func TestBuildRepairPlanOrphanedObservationSessionGroupsAndSkipsTombstones(t *te
 	seedDiagnosticOrphanObservationAt(t, s, "obs-a-soft-deleted", "missing-a", "engram", "2026-01-01 09:00:00", "2026-01-03 00:00:00")
 	seedDiagnosticOrphanObservationAt(t, s, "obs-manual", "manual-save-engram", "engram", "2026-02-03 08:00:00", "")
 	seedDiagnosticOrphanObservationAt(t, s, "obs-deleted", "missing-deleted", "engram", "2026-01-05 00:00:00", "")
+	seedDiagnosticOrphanObservationAt(t, s, "obs-inactive", "missing-inactive", "engram", "2026-01-04 00:00:00", "")
 	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 1)`, store.SyncEntitySession, "missing-deleted", "engram"); err != nil {
 		t.Fatalf("seed tombstone: %v", err)
+	}
+	// An inactive historical tombstone must not exclude the group: only an
+	// active tombstone proves the session was deliberately deleted.
+	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 0)`, store.SyncEntitySession, "missing-inactive", "engram"); err != nil {
+		t.Fatalf("seed inactive tombstone: %v", err)
 	}
 
 	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
@@ -1251,12 +1280,13 @@ func TestBuildRepairPlanOrphanedObservationSessionGroupsAndSkipsTombstones(t *te
 		if err != nil {
 			t.Fatalf("BuildRepairPlan: %v", err)
 		}
-		if plan.Status != "noop" && (len(plan.Skipped) != 1 || len(plan.SessionRebuilds) != 2) {
-			t.Fatalf("plan=%+v, want two rebuilds and one tombstone skip", plan)
+		if plan.Status != "noop" && (len(plan.Skipped) != 1 || len(plan.SessionRebuilds) != 3) {
+			t.Fatalf("plan=%+v, want three rebuilds and one tombstone skip", plan)
 		}
 		wantRebuilds := []SessionRebuildAction{
 			{SessionID: "manual-save-engram", Project: "engram", StartedAt: "2026-02-03 08:00:00", ObservationCount: 1},
 			{SessionID: "missing-a", Project: "engram", StartedAt: "2026-01-01 09:00:00", ObservationCount: 2},
+			{SessionID: "missing-inactive", Project: "engram", StartedAt: "2026-01-04 00:00:00", ObservationCount: 1},
 		}
 		if len(plan.SessionRebuilds) != len(wantRebuilds) {
 			t.Fatalf("session_rebuilds=%+v, want %+v", plan.SessionRebuilds, wantRebuilds)

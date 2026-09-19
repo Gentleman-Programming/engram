@@ -1323,7 +1323,11 @@ func seedDoctorOrphanObservationAt(t *testing.T, cfg store.Config, syncID, sessi
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	}()
 	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
 		t.Fatalf("disable foreign keys: %v", err)
 	}
@@ -1429,7 +1433,11 @@ func TestCmdDoctorRepairOrphanedObservationSessionPlanDryRunApplyLifecycle(t *te
 	if err != nil {
 		t.Fatalf("reopen after apply: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close reopened database: %v", err)
+		}
+	}()
 	assertPlaceholder := func(sessionID, project, ownership, timestamp string) {
 		t.Helper()
 		var directory, startedAt, endedAt, gotOwnership, summary string
@@ -1455,5 +1463,67 @@ func TestCmdDoctorRepairOrphanedObservationSessionPlanDryRunApplyLifecycle(t *te
 
 	if second := runRepair("second apply", "--apply"); second["status"] != "noop" || second["backup_path"] != nil {
 		t.Fatalf("second apply=%v, want noop without backup", second)
+	}
+}
+
+// TestOrphanRepairApplyStatusDerivation pins the honest status mapping between
+// what the apply inserted and the planner's non-skipped rebuild actions. The
+// in-transaction skip only fires when an active tombstone appears between
+// planning and applying, which a single-process command test cannot stage
+// deterministically, so the derivation is pinned at the unit level.
+func TestOrphanRepairApplyStatusDerivation(t *testing.T) {
+	cases := []struct {
+		name             string
+		sessionsInserted int64
+		planned          int
+		want             string
+	}{
+		{"nothing inserted is noop", 0, 2, "noop"},
+		{"planned nothing is noop", 0, 0, "noop"},
+		{"partial insert is partial", 1, 2, "partial"},
+		{"complete insert is applied", 2, 2, "applied"},
+	}
+	for _, tc := range cases {
+		if got := orphanRepairApplyStatus(tc.sessionsInserted, tc.planned); got != tc.want {
+			t.Fatalf("%s: orphanRepairApplyStatus(%d, %d)=%q, want %q", tc.name, tc.sessionsInserted, tc.planned, got, tc.want)
+		}
+	}
+}
+
+// TestCmdDoctorRepairOrphanedObservationSessionApplyFailurePreservesBackupPath
+// forces the apply transaction to fail after the pre-repair backup (a BEFORE
+// INSERT trigger stands in for a conflicting writer) and pins that the failure
+// output still tells the user where the backup lives.
+func TestCmdDoctorRepairOrphanedObservationSessionApplyFailurePreservesBackupPath(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	seedDoctorOrphanObservationAt(t, cfg, "obs-blocked", "missing-blocked", "engram", "2026-01-07 00:00:00", "")
+
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER doctor_block_rebuild BEFORE INSERT ON sessions WHEN NEW.id = 'missing-blocked' BEGIN SELECT RAISE(ABORT, 'blocked by test trigger'); END`); err != nil {
+		_ = db.Close()
+		t.Fatalf("create blocking trigger: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
+	oldExit := exitFunc
+	exited := false
+	exitFunc = func(code int) { exited = code != 0 }
+	t.Cleanup(func() { exitFunc = oldExit })
+	_, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if !exited {
+		t.Fatalf("apply must fail (stderr=%q)", stderr)
+	}
+	if !strings.Contains(stderr, "engram doctor repair failed:") || !strings.Contains(stderr, "blocked by test trigger") {
+		t.Fatalf("stderr=%q, want the transaction failure", stderr)
+	}
+	if !strings.Contains(stderr, "pre-repair backup preserved at ") {
+		t.Fatalf("stderr=%q, want the preserved backup path", stderr)
 	}
 }

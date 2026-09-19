@@ -243,14 +243,17 @@ type SessionRebuildResult struct {
 // ListOrphanedObservationSessionRepairCandidates returns the orphan groups the
 // doctor repair can rebuild for a project. It uses the same observation
 // population as ListOrphanedObservationSessionEvidence — including soft-deleted
-// observations — and adds the group's earliest observation timestamp plus the
-// session delete-tombstone flag, so the planner emits one action per group and
-// skips sessions a remote or local delete already retired.
+// observations and raw o.session_id values, so whitespace-padded but non-blank
+// ids are reported with their exact stored bytes — and adds the group's
+// earliest observation timestamp plus the session delete-tombstone flag, so the
+// planner emits one action per group and skips sessions an active remote or
+// local delete already retired. Inactive historical tombstones do not exclude a
+// group: only an active tombstone proves the session was deliberately deleted.
 func (s *Store) ListOrphanedObservationSessionRepairCandidates(project string) ([]SessionRebuildCandidate, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	query := `SELECT ifnull(o.project, ''), o.session_id, MIN(o.created_at), COUNT(*),
-		EXISTS(SELECT 1 FROM sync_delete_tombstones t WHERE t.entity = ? AND t.entity_key = o.session_id)
+		EXISTS(SELECT 1 FROM sync_delete_tombstones t WHERE t.entity = ? AND t.entity_key = o.session_id AND t.active = 1)
 		FROM observations o
 		LEFT JOIN sessions s ON s.id = o.session_id
 		WHERE s.id IS NULL
@@ -290,7 +293,14 @@ func (s *Store) ListOrphanedObservationSessionRepairCandidates(project string) (
 // session can never be selected as an active runtime session. The repair is
 // local-only: it enqueues no sync mutations and touches no sync cursor. A
 // session with an active delete tombstone is skipped defensively inside the
-// transaction, because rebuilding it would resurrect deliberately deleted data.
+// transaction, because rebuilding it would resurrect deliberately deleted data;
+// an inactive historical tombstone does not skip the rebuild. Each candidate's
+// SessionID is used with its exact stored bytes, matching the raw grouping of
+// the candidates query so the placeholder re-links the group's observations.
+//
+// If the transaction fails after the pre-repair backup was taken, the returned
+// result still carries that backup path alongside the error, so the user can
+// find and restore the backup even though nothing was applied.
 func (s *Store) ApplyOrphanedObservationSessionRepair(candidates []SessionRebuildCandidate) (SessionRebuildResult, error) {
 	normalized := normalizeSessionRebuildCandidates(candidates)
 	backupPath, err := s.BackupSQLite()
@@ -303,7 +313,7 @@ func (s *Store) ApplyOrphanedObservationSessionRepair(candidates []SessionRebuil
 	err = s.withTx(func(tx *sql.Tx) error {
 		for _, candidate := range normalized {
 			var tombstoned int
-			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?)`, SyncEntitySession, candidate.SessionID).Scan(&tombstoned); err != nil {
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ? AND active = 1)`, SyncEntitySession, candidate.SessionID).Scan(&tombstoned); err != nil {
 				return fmt.Errorf("check delete tombstone for session %q: %w", candidate.SessionID, err)
 			}
 			if tombstoned == 1 {
@@ -329,7 +339,9 @@ func (s *Store) ApplyOrphanedObservationSessionRepair(candidates []SessionRebuil
 		return nil
 	})
 	if err != nil {
-		return SessionRebuildResult{}, err
+		// Keep the result: BackupPath was set from the pre-tx backup and must
+		// survive the failure so callers can point the user at the backup.
+		return result, err
 	}
 	return result, nil
 }
@@ -338,10 +350,15 @@ func normalizeSessionRebuildCandidates(candidates []SessionRebuildCandidate) []S
 	seen := make(map[string]struct{})
 	out := make([]SessionRebuildCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		candidate.SessionID = strings.TrimSpace(candidate.SessionID)
 		candidate.Project, _ = NormalizeProject(candidate.Project)
 		candidate.StartedAt = strings.TrimSpace(candidate.StartedAt)
-		if candidate.SessionID == "" || candidate.Project == "" || candidate.StartedAt == "" {
+		// Session IDs must keep their exact stored bytes: the candidates query
+		// groups by the raw o.session_id, and both the placeholder INSERT and
+		// the observation-link count must use those bytes or a whitespace-
+		// padded but valid id would be rebuilt under a different key and its
+		// observations would stay orphaned. Only ids that are blank after
+		// trimming are rejected, mirroring the query's trim() guard.
+		if strings.TrimSpace(candidate.SessionID) == "" || candidate.Project == "" || candidate.StartedAt == "" {
 			continue
 		}
 		if _, ok := seen[candidate.SessionID]; ok {
