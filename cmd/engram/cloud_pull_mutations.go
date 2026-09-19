@@ -24,7 +24,7 @@ func cmdCloudPullMutations(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	cc, err := resolveCloudRuntimeConfig(cfg)
 	if err != nil {

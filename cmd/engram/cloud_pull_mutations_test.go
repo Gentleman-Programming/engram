@@ -114,7 +114,7 @@ func TestCloudPullMutations_AppliesRemoteMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	state, err := s.GetSyncState(store.DefaultSyncTargetKey)
 	if err != nil {
 		t.Fatalf("GetSyncState: %v", err)
