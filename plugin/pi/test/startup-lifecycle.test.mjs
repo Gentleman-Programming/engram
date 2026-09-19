@@ -24,15 +24,23 @@ function freePort() {
 
 // A fake `engram serve` that logs every invocation, then either dies before readiness or
 // starts answering /health after `readyAfterMs` — the slow-health window under test.
-async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode }) {
+// `instanceId: "fail"` models a pre-rc.11 binary whose `instance-id` command exits 1, and
+// `cliVersion` gives the `version` probe something to report.
+async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode, instanceId = "ok", cliVersion }) {
   const binPath = join(dir, "fake-engram.cjs");
+  const instanceIdHandler = instanceId === "fail"
+    ? `if (command === "instance-id" || command === resolve("instance-id")) { process.stderr.write("Error: unknown command \\"instance-id\\" for \\"engram\\"\\n"); process.exit(1); }`
+    : `if (command === "instance-id" || command === resolve("instance-id")) { process.stdout.write("00000000000000000000000000000000\\n"); process.exit(0); }`;
+  const versionHandler = cliVersion === undefined
+    ? ""
+    : `if (command === "version" || command === resolve("version")) { process.stdout.write(${JSON.stringify(cliVersion)} + "\\n"); process.exit(0); }`;
   const script = `#!/usr/bin/env node
 const { appendFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
 const syntheticServePath = resolve("serve");
-const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; if (command === "instance-id" || command === resolve("instance-id")) { process.stdout.write("00000000000000000000000000000000\\n"); process.exit(0); }
+const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
@@ -116,7 +124,7 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : { instance_id: "00000000000000000000000000000000" }));
+      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : (options.healthBody ?? { instance_id: "00000000000000000000000000000000" })));
     });
     if (readyServer) await new Promise((resolve, reject) => {
       readyServer.once("error", reject);
@@ -127,7 +135,7 @@ async function withFixture(options, run) {
     });
     const fakeEngram = options.missingBin
       ? { engramBin: join(dir, "engram-does-not-exist") }
-      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode });
+      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode, instanceId: options.instanceId, cliVersion: options.cliVersion });
     if (fakeEngram.nodeOptions) {
       process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
     }
@@ -247,6 +255,108 @@ test("a persistently failing provider does not restart Engram on every tool call
     const spawns = await countSpawns(spawnLog);
     assert.ok(spawns >= 1, "the first call still attempts a real startup");
     assert.ok(spawns <= 2, `50 failing tool calls produced ${spawns} startup attempts, not a bounded retry`);
+  });
+});
+
+test("a pre-v2 server on the port fails closed with legacy guidance and never spawns", async () => {
+  await withFixture({
+    readyServer: true,
+    healthBody: { status: "ok", service: "engram", version: "1.20.0" },
+    cliVersion: "1.20.0",
+  }, async ({ tools, ctx, spawnLog }) => {
+    const memSearch = tools.get("mem_search");
+    const result = await memSearch.execute("call-legacy", { query: "startup" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /predates instance identity \(server 1\.20\.0, CLI 1\.20\.0\)/);
+    assert.match(result.content[0].text, /stop it and start the current binary/);
+    assert.match(result.content[0].text, /Nothing is terminated automatically and memory retries on its own/);
+    assert.match(result.content[0].text, /treat this port as occupied by an unrelated process/);
+    assert.equal(await countSpawns(spawnLog), 0, "a legacy server is never adopted, terminated, or replaced");
+  });
+});
+
+test("a pre-identity release candidate on the port fails closed with legacy guidance", async () => {
+  await withFixture({
+    readyServer: true,
+    healthBody: { status: "ok", service: "engram", version: "2.0.0-rc.10" },
+    cliVersion: "2.0.0-rc.10",
+  }, async ({ tools, ctx, spawnLog }) => {
+    const result = await tools.get("mem_search").execute("call-legacy-rc", { query: "startup" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /predates instance identity \(server 2\.0\.0-rc\.10, CLI 2\.0\.0-rc\.10\)/);
+    assert.equal(await countSpawns(spawnLog), 0, "a legacy server is never adopted, terminated, or replaced");
+  });
+});
+
+test("current and later servers without instance identity fail closed without legacy guidance", async () => {
+  for (const version of ["2.0.0-rc.11", "2.0.0", "2.1.0"]) {
+    await withFixture({
+      readyServer: true,
+      healthBody: { status: "ok", service: "engram", version },
+      cliVersion: version,
+    }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_search").execute(`call-missing-identity-${version}`, { query: "startup" }, undefined, undefined, ctx);
+
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /did not report its instance identity/);
+      assert.match(result.content[0].text, /not proven older than v2\.0\.0-rc\.11/);
+      assert.doesNotMatch(result.content[0].text, /predates instance identity/);
+      assert.equal(await countSpawns(spawnLog), 0, "an identity-incompatible server is never adopted, terminated, or replaced");
+    });
+  }
+});
+
+test("unknown, absent, and malformed versions without instance identity fail closed", async () => {
+  for (const version of [undefined, "unknown", "2.0", "current"]) {
+    await withFixture({
+      readyServer: true,
+      healthBody: { status: "ok", service: "engram", ...(version === undefined ? {} : { version }) },
+    }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_search").execute(`call-unrecognized-version-${version ?? "absent"}`, { query: "startup" }, undefined, undefined, ctx);
+
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /did not report its instance identity/);
+      assert.match(result.content[0].text, /not proven older than v2\.0\.0-rc\.11/);
+      assert.doesNotMatch(result.content[0].text, /predates instance identity/);
+      assert.doesNotMatch(result.content[0].text, /unrelated process/);
+      assert.equal(await countSpawns(spawnLog), 0, "an unverified server is never adopted, terminated, or replaced");
+    });
+  }
+});
+
+test("a pre-rc.11 binary surfaces the upgrade guidance instead of a generic identity error", async () => {
+  await withFixture({ instanceId: "fail" }, async ({ tools, ctx }) => {
+    const result = await tools.get("mem_search").execute("call-oldcli", { query: "startup" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /does not support "instance-id" and predates v2\.0\.0-rc\.11/);
+    assert.match(result.content[0].text, /Upgrade the binary, or point ENGRAM_BIN at the current one/);
+  });
+});
+
+test("a missing binary is reported as not found, not as an outdated version", async () => {
+  await withFixture({ missingBin: true }, async ({ tools, ctx }) => {
+    const result = await tools.get("mem_save").execute("call-noent", { content: "x" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /could not be found/);
+    assert.doesNotMatch(result.content[0].text, /predates v2\.0\.0-rc\.11/);
+  });
+});
+
+test("a foreign server keeps the byte-identical ownership mismatch message", async () => {
+  await withFixture({
+    readyServer: true,
+    healthBody: { status: "ok", service: "engram", version: "2.0.0", instance_id: "ffffffffffffffffffffffffffffffff" },
+    cliVersion: "2.0.0",
+  }, async ({ tools, ctx, spawnLog }) => {
+    const result = await tools.get("mem_search").execute("call-foreign", { query: "startup" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /: Engram server ownership mismatch at http:\/\/127\.0\.0\.1:\d+\. Run mem_doctor/);
+    assert.equal(await countSpawns(spawnLog), 0, "a foreign server is never adopted, terminated, or replaced");
   });
 });
 

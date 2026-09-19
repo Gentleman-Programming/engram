@@ -145,6 +145,7 @@ var (
 		}
 		return runner.RunAll(ctx, scope)
 	}
+	buildRepairPlan = diagnostic.BuildRepairPlan
 
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
