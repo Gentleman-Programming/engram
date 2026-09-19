@@ -94,6 +94,7 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
+	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
 
 func printDoctorRepairUsage() {
@@ -101,6 +102,23 @@ func printDoctorRepairUsage() {
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
 	_, _ = fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
+	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
+}
+
+func diagnosticOnlyCheckCodes() []string {
+	repairable := make(map[string]bool, len(diagnostic.RepairableCodes()))
+	for _, code := range diagnostic.RepairableCodes() {
+		repairable[code] = true
+	}
+
+	registered := diagnostic.RegisteredCodes()
+	diagnosticOnly := make([]string, 0, len(registered)-len(repairable))
+	for _, code := range registered {
+		if !repairable[code] {
+			diagnosticOnly = append(diagnosticOnly, code)
+		}
+	}
+	return diagnosticOnly
 }
 
 func cmdDoctorRepair(cfg store.Config) {
@@ -217,7 +235,7 @@ func cmdDoctorRepair(cfg store.Config) {
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
 			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
-			Superseded             []store.SyncMutationSupersedeAction         `json:"superseded"`
+			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
 		}{report, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
@@ -230,9 +248,33 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair(err.Error())
 		return
 	}
-	plan, err := diagnostic.BuildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
+	plan, err := buildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
 	if err != nil {
 		failDoctorRepair(err.Error())
+		return
+	}
+	if check == diagnostic.CheckOrphanedObservationSession {
+		plan.Counts.SessionsPlanned = int64(len(plan.PlaceholderSessions))
+		for _, action := range plan.PlaceholderSessions {
+			plan.Counts.ObservationsPlanned += action.ObservationCount
+		}
+		if mode == diagnostic.RepairModeApply && len(plan.PlaceholderSessions) > 0 {
+			applied, err := s.RestoreOrphanedObservationSessions(plan.PlaceholderSessions)
+			if err != nil {
+				failDoctorRepair(err.Error())
+				return
+			}
+			if len(applied) > 0 {
+				plan.Status = "applied"
+			} else {
+				plan.Status = "noop"
+			}
+			for _, action := range applied {
+				plan.Counts.SessionsApplied++
+				plan.Counts.ObservationsApplied += action.ObservationCount
+			}
+		}
+		writeDoctorRepairJSON(plan)
 		return
 	}
 	if check == diagnostic.CheckSyncTargetClosedSpace {

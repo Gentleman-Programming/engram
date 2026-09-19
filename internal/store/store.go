@@ -103,18 +103,22 @@ var (
 	// ErrPulledSessionDirectoryInvalid identifies a pulled or imported session that
 	// has no concrete directory and therefore cannot be admitted as cloud state.
 	ErrPulledSessionDirectoryInvalid = errors.New("pulled session directory is invalid")
+	// errPulledParentSessionMissing can arise only after a pulled observation or
+	// prompt upsert proves its parent session is absent in the current transaction.
+	errPulledParentSessionMissing = errors.New("pulled parent session is missing")
 )
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Session struct {
-	ID            string  `json:"id"`
-	Project       string  `json:"project"`
-	OwnershipMode string  `json:"ownership_mode,omitempty"`
-	Directory     string  `json:"directory"`
-	StartedAt     string  `json:"started_at"`
-	EndedAt       *string `json:"ended_at,omitempty"`
-	Summary       *string `json:"summary,omitempty"`
+	ID                    string  `json:"id"`
+	Project               string  `json:"project"`
+	OwnershipMode         string  `json:"ownership_mode,omitempty"`
+	Directory             string  `json:"directory"`
+	StartedAt             string  `json:"started_at"`
+	EndedAt               *string `json:"ended_at,omitempty"`
+	Summary               *string `json:"summary,omitempty"`
+	RuntimeLeaseExpiresAt *string `json:"-"`
 }
 
 // SessionProjectConflictError identifies a strict registration that would reuse
@@ -338,6 +342,7 @@ const (
 
 	SyncSessionIdentityInvalidReasonCode     = "sync_session_identity_invalid"
 	SyncObservationIdentityInvalidReasonCode = "sync_observation_identity_invalid"
+	SyncParentSessionMissingReasonCode       = "pulled_parent_session_missing"
 
 	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
 	// relation carried a non-blank outer mutation project. Unmarked legacy rows
@@ -1134,7 +1139,8 @@ func (s *Store) migrate() error {
 			directory  TEXT NOT NULL,
 			started_at TEXT NOT NULL DEFAULT (datetime('now')),
 			ended_at   TEXT,
-			summary    TEXT
+			summary    TEXT,
+			runtime_lease_expires_at TEXT
 		);
 
 			CREATE TABLE IF NOT EXISTS observations (
@@ -1309,6 +1315,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfNotExists("sessions", "ownership_mode", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sessions", "runtime_lease_expires_at", "TEXT"); err != nil {
 		return err
 	}
 	// Legacy rows remain unclassified unless their persisted identity proves a
@@ -2793,12 +2802,24 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	})
 }
 
-// StartSession registers a new session or idempotently starts an active one.
-// It refuses to reuse an ended session ID so MCP callers cannot silently strand
-// later writes on a fallback session.
+// runtimeSessionLeaseDuration bounds local runtime-session liveness. It is not
+// synchronized and never changes a session's terminal state.
+const runtimeSessionLeaseDuration = "+30 minutes"
+
+// StartSession registers a shared runtime session or renews its local lease.
 func (s *Store) StartSession(id, project, directory string) error {
+	return s.StartSessionWithOwnershipMode(id, project, directory, SessionOwnershipShared)
+}
+
+// StartSessionWithOwnershipMode registers a runtime session or renews its local
+// lease. It preserves the existing session identity and refuses to reopen an
+// ended session; EndSession remains terminal truth.
+func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
 	if err := validateSessionID(id); err != nil {
 		return err
+	}
+	if !validSessionOwnershipMode(mode) {
+		return fmt.Errorf("%w %q", ErrInvalidSessionOwnershipMode, mode)
 	}
 	project, _ = NormalizeProject(project)
 	if strings.TrimSpace(project) == "" {
@@ -2806,24 +2827,29 @@ func (s *Store) StartSession(id, project, directory string) error {
 	}
 
 	return s.withTx(func(tx *sql.Tx) error {
-		ended, err := sessionEndedTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if ended {
-			return ErrSessionAlreadyEnded
-		}
 		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
 		if err != nil {
 			return err
 		}
+		identityRepaired := !found
 		if found {
+			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
+				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
+			}
 			if err := sessionProjectWriteError(id, existingProject, existingMode, project); err != nil {
 				return err
 			}
+			var existingDirectory string
+			if err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, id).Scan(&existingDirectory); err != nil {
+				return err
+			}
+			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
 		}
-		if err := s.startSessionTx(tx, id, project, directory, SessionOwnershipShared); err != nil {
+		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
 			return err
+		}
+		if !identityRepaired {
+			return nil
 		}
 		var persisted Session
 		// sessions.project is read through ifnull() because a database upgraded from
@@ -2893,14 +2919,14 @@ func (s *Store) EndSession(id string, summary string) error {
 
 func (s *Store) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id,
+		`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary, runtime_lease_expires_at FROM sessions WHERE id = ?`, id,
 	)
 	var sess Session
 	// A database upgraded from the schema where sessions.project was nullable
 	// still carries NULL ownership, so the column must be read as nullable or
 	// every caller that inspects a legacy session dies on an opaque scan error.
 	var project sql.NullString
-	if err := row.Scan(&sess.ID, &project, &sess.OwnershipMode, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary); err != nil {
+	if err := row.Scan(&sess.ID, &project, &sess.OwnershipMode, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary, &sess.RuntimeLeaseExpiresAt); err != nil {
 		return nil, err
 	}
 	sess.Project = project.String
@@ -2928,20 +2954,19 @@ const activeRuntimeSessionWindow = "-7 days"
 //   - Scope to the (normalized) project.
 //   - Scope to the current runtime directory.
 //   - Require ended_at IS NULL — ended sessions are never returned.
-//   - Require recent effective activity. ended_at IS NULL alone means "never
-//     closed", not "in use": a session whose process is long gone stays a
-//     candidate forever, and two such rows make resolution fail permanently
-//     for that project and directory (#1101). Effective activity is the last
-//     observation the session recorded, falling back to started_at when it
-//     recorded none. The sessions table carries no pid or heartbeat, so
-//     liveness is not observable; recency of recorded work is.
+//   - A nonblank runtime lease is authoritative: return it only while it is
+//     valid and unexpired. Expired or malformed leases are excluded.
+//   - A live lease suppresses unleased legacy candidates in its directory only.
+//     Where no live lease exists, preserve the legacy effective-activity window:
+//     the latest observation, falling back to started_at, must be recent.
 //   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
 //
 // ActiveRuntimeSessions returns active, non-manual sessions for a project and
 // runtime directories. The directories narrow candidates; callers must not
-// treat them as session identity.
+// treat them as session identity. Selection is read-only: it never ends or
+// repairs historical rows.
 func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]string, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
@@ -2965,16 +2990,39 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 	}
 
 	rows, err := s.queryHook(s.db, `
-		SELECT s.id
-		FROM sessions s
-		LEFT JOIN observations o ON o.session_id = s.id
-		WHERE LOWER(s.project) = ?
-		  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
-		  AND s.ended_at IS NULL
-		  AND s.id NOT LIKE 'manual-save%'
-		GROUP BY s.id
-		HAVING COALESCE(MAX(o.created_at), s.started_at) >= datetime('now', '`+activeRuntimeSessionWindow+`')
-		ORDER BY s.id
+		WITH runtime_candidates AS (
+			SELECT s.id,
+			       s.directory,
+			       s.runtime_lease_expires_at,
+			       COALESCE(MAX(o.created_at), s.started_at) AS effective_activity
+			FROM sessions s
+			LEFT JOIN observations o ON o.session_id = s.id
+			WHERE LOWER(s.project) = ?
+			  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
+			  AND s.ended_at IS NULL
+			  AND s.id NOT LIKE 'manual-save%'
+			GROUP BY s.id
+		), live_leased_directories AS (
+			SELECT directory
+			FROM runtime_candidates
+			WHERE runtime_lease_expires_at IS NOT NULL
+			  AND runtime_lease_expires_at <> ''
+			  AND datetime(runtime_lease_expires_at) > datetime('now')
+			GROUP BY directory
+		)
+		SELECT candidate.id
+		FROM runtime_candidates candidate
+		WHERE (candidate.runtime_lease_expires_at IS NOT NULL
+		       AND candidate.runtime_lease_expires_at <> ''
+		       AND datetime(candidate.runtime_lease_expires_at) > datetime('now'))
+		   OR ((candidate.runtime_lease_expires_at IS NULL OR candidate.runtime_lease_expires_at = '')
+		       AND candidate.effective_activity >= datetime('now', '`+activeRuntimeSessionWindow+`')
+		       AND NOT EXISTS (
+				SELECT 1
+				FROM live_leased_directories live
+				WHERE live.directory = candidate.directory
+			   ))
+		ORDER BY candidate.id
 	`, args...)
 	if err != nil {
 		return nil, err
@@ -6510,12 +6558,16 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 				return err
 			} else if !handled {
-				if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
-					if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
-						return err
+				if handled, err := s.recordPulledParentSessionFailureTx(tx, targetKey, mutation, applyErr); err != nil {
+					return err
+				} else if !handled {
+					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
+							return err
+						}
+					} else {
+						return applyErr
 					}
-				} else {
-					return applyErr
 				}
 			}
 		}
@@ -6570,6 +6622,54 @@ func relationApplyFailureSyncID(status, targetKey string, mutation SyncMutation)
 // recordRelationApplyFailureTx records relation failures that are safe to
 // acknowledge while preserving the existing fail-fast behavior for other
 // entities and errors.
+// recordPulledParentSessionFailureTx defers only the private signal produced by
+// the pulled upsert precondition. Arbitrary SQLite errors remain fail-closed.
+func (s *Store) recordPulledParentSessionFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, applyErr error) (bool, error) {
+	if !errors.Is(applyErr, errPulledParentSessionMissing) {
+		return false, nil
+	}
+	if err := s.deferPulledParentSessionTx(tx, targetKey, mutation); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func requirePulledParentSessionTx(tx *sql.Tx, sessionID string) error {
+	var parentExists int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&parentExists); err != nil {
+		return err
+	}
+	if parentExists == 0 {
+		return fmt.Errorf("%w: session %q", errPulledParentSessionMissing, sessionID)
+	}
+	return nil
+}
+
+func (s *Store) deferPulledParentSessionTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
+	syncID := pulledIdentityDeadLetterSyncID(targetKey, mutation)
+	project := pulledIdentityEvidenceProject(mutation)
+	scopeClass := "target_scoped"
+	if project != "" {
+		scopeClass = "scoped"
+	}
+	if _, err := s.execHook(tx, `
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, target_key, remote_seq, entity_key, op, reason_code, project, scope_class, apply_status, retry_count, first_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deferred', 0, datetime('now'))
+		ON CONFLICT(sync_id) DO UPDATE SET
+			entity = excluded.entity, payload = excluded.payload, target_key = excluded.target_key,
+			remote_seq = excluded.remote_seq, entity_key = excluded.entity_key, op = excluded.op,
+			reason_code = excluded.reason_code, project = excluded.project, scope_class = excluded.scope_class,
+			last_attempted_at = datetime('now')
+		WHERE sync_apply_deferred.apply_status <> 'dead'`,
+		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op,
+		SyncParentSessionMissingReasonCode, project, scopeClass,
+	); err != nil {
+		return fmt.Errorf("defer pulled parent session: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, applyErr error) (bool, error) {
 	if mutation.Entity != SyncEntityRelation {
 		return false, nil
@@ -6749,9 +6849,9 @@ func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation)
 // retry safety: a failed chunk import leaves no partial semantic mutations.
 //
 // It shares ApplyPulledMutation's skip-plus-evidence rule for invalid session
-// and observation identities: such a mutation is quarantined and the rest of
-// the chunk still applies, so one permanently malformed identity cannot block
-// the chunk forever.
+// and observation identities, plus deferred handling for observation and prompt
+// upserts whose parent session is absent, so either condition cannot block the
+// chunk forever.
 // A payload that does not even decode stays fail-closed and rolls back the
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
@@ -6791,12 +6891,16 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 				if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 				} else if !handled {
-					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
-						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
-							return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+					if handled, err := s.recordPulledParentSessionFailureTx(tx, targetKey, mutation, applyErr); err != nil {
+						return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+					} else if !handled {
+						if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+							if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
+								return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+							}
+						} else {
+							return fmt.Errorf("apply chunk mutation %d: %w", i, applyErr)
 						}
-					} else {
-						return fmt.Errorf("apply chunk mutation %d: %w", i, applyErr)
 					}
 				}
 			}
@@ -8086,13 +8190,14 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string)
 
 func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory, mode string) error {
 	result, err := s.execHook(tx,
-		`INSERT INTO sessions (id, project, ownership_mode, directory) VALUES (?, ?, ?, ?)
+		`INSERT INTO sessions (id, project, ownership_mode, directory, runtime_lease_expires_at) VALUES (?, ?, ?, ?, datetime('now', ?))
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
-		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END
+		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END,
+		   runtime_lease_expires_at = excluded.runtime_lease_expires_at
 		 WHERE sessions.ended_at IS NULL`,
-		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		id, project, mode, directory, runtimeSessionLeaseDuration, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err
@@ -9433,18 +9538,6 @@ func sessionOwnershipTx(tx *sql.Tx, sessionID string) (project, mode string, fou
 	return normalized, strings.TrimSpace(rawMode.String), true, nil
 }
 
-func sessionEndedTx(tx *sql.Tx, sessionID string) (bool, error) {
-	var endedAt sql.NullString
-	err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, sessionID).Scan(&endedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return endedAt.Valid, nil
-}
-
 func sessionProjectWriteError(sessionID, sessionProject, mode, requested string) error {
 	if sessionProject == "" || sessionProject == requested || mode == SessionOwnershipShared {
 		return nil
@@ -9733,6 +9826,11 @@ func pulledIdentityEvidenceProject(mutation SyncMutation) string {
 			}
 		case SyncEntityObservation:
 			var payload syncObservationPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(derefString(payload.Project))
+			}
+		case SyncEntityPrompt:
+			var payload syncPromptPayload
 			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
 				project = strings.TrimSpace(derefString(payload.Project))
 			}
@@ -10194,6 +10292,9 @@ func validateSessionMutationIdentity(payloadID, entityKey string) error {
 }
 
 func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayload) error {
+	if err := requirePulledParentSessionTx(tx, payload.SessionID); err != nil {
+		return err
+	}
 	revisionCount := maxInt(payload.RevisionCount, 1)
 	duplicateCount := maxInt(payload.DuplicateCount, 1)
 	createdAt := strings.TrimSpace(payload.CreatedAt)
@@ -10314,10 +10415,13 @@ func (s *Store) applyPromptUpsertTx(tx *sql.Tx, payload syncPromptPayload) error
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	if err == nil && isStalePromptUpsert(payload, tombstoneDeletedAt) {
+		return nil
+	}
+	if err := requirePulledParentSessionTx(tx, payload.SessionID); err != nil {
+		return err
+	}
 	if err == nil {
-		if isStalePromptUpsert(payload, tombstoneDeletedAt) {
-			return nil
-		}
 		if _, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE sync_id = ?`, payload.SyncID); err != nil {
 			return err
 		}
@@ -11312,7 +11416,11 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		})
 
 		if applyErr == nil {
-			// Success: applyRelationUpsertTx already deleted the deferred row.
+			// Relation applies remove their own retry row; observation and prompt
+			// replay removes the exact deferred mutation after it succeeds.
+			if _, err := s.execHook(s.db, `DELETE FROM sync_apply_deferred WHERE sync_id = ?`, row.syncID); err != nil {
+				return result, fmt.Errorf("ReplayDeferred: remove applied row: %w", err)
+			}
 			result.Succeeded++
 			log.Printf("[store] replayDeferred: applied sync_id=%s", row.syncID)
 			continue
@@ -11321,7 +11429,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		// Classify the error and update the deferred row.
 		newRetry := row.retryCount + 1
 		var newStatus string
-		if errors.Is(applyErr, ErrRelationFKMissing) && newRetry < deadThreshold {
+		if (errors.Is(applyErr, ErrRelationFKMissing) || errors.Is(applyErr, errPulledParentSessionMissing)) && newRetry < deadThreshold {
 			// Still retryable.
 			newStatus = "deferred"
 			result.Failed++

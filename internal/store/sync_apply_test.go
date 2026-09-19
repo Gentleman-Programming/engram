@@ -45,6 +45,207 @@ func applyRelationMutation(t *testing.T, s *Store, m SyncMutation) error {
 	})
 }
 
+func TestApplyPulledMutationMissingParentSession(t *testing.T) {
+	const (
+		parentSessionID = "missing-parent-session"
+		project         = "missing-parent-project"
+	)
+
+	tests := []struct {
+		name, entity, entityKey string
+		payload                 func(t *testing.T) string
+		countQuery              string
+	}{
+		{
+			name:      "observation",
+			entity:    SyncEntityObservation,
+			entityKey: "missing-parent-observation",
+			payload: func(t *testing.T) string {
+				t.Helper()
+				projectValue := project
+				raw, err := json.Marshal(syncObservationPayload{
+					SyncID: "missing-parent-observation", SessionID: parentSessionID,
+					Type: "decision", Title: "Missing parent", Content: "defer until the session arrives",
+					Project: &projectValue, Scope: "project",
+				})
+				if err != nil {
+					t.Fatalf("marshal observation payload: %v", err)
+				}
+				return string(raw)
+			},
+			countQuery: `SELECT count(*) FROM observations WHERE sync_id = ?`,
+		},
+		{
+			name:      "prompt",
+			entity:    SyncEntityPrompt,
+			entityKey: "missing-parent-prompt",
+			payload: func(t *testing.T) string {
+				t.Helper()
+				projectValue := project
+				raw, err := json.Marshal(syncPromptPayload{
+					SyncID: "missing-parent-prompt", SessionID: parentSessionID,
+					Content: "defer until the session arrives", Project: &projectValue,
+				})
+				if err != nil {
+					t.Fatalf("marshal prompt payload: %v", err)
+				}
+				return string(raw)
+			},
+			countQuery: `SELECT count(*) FROM user_prompts WHERE sync_id = ?`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			mutation := SyncMutation{
+				Seq: 7, Entity: tt.entity, EntityKey: tt.entityKey, Op: SyncOpUpsert,
+				Payload: tt.payload(t), Project: project,
+			}
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+				t.Fatalf("apply missing-parent mutation: %v", err)
+			}
+
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("get sync state: %v", err)
+			}
+			if state.LastPulledSeq != mutation.Seq {
+				t.Fatalf("last pulled sequence = %d, want %d", state.LastPulledSeq, mutation.Seq)
+			}
+
+			deferred, err := s.ListDeferred(ListDeferredOptions{Status: "deferred"})
+			if err != nil || len(deferred) != 1 {
+				t.Fatalf("deferred evidence = %+v, err=%v", deferred, err)
+			}
+			evidence := deferred[0]
+			if evidence.Entity != mutation.Entity || evidence.PayloadRaw != mutation.Payload || evidence.TargetKey != DefaultSyncTargetKey || evidence.RemoteSeq != mutation.Seq || evidence.EntityKey != mutation.EntityKey || evidence.Op != mutation.Op || evidence.ReasonCode != "pulled_parent_session_missing" {
+				t.Fatalf("deferred evidence = %+v", evidence)
+			}
+
+			if err := s.CreateSession(parentSessionID, project, "/tmp/missing-parent"); err != nil {
+				t.Fatalf("create parent session: %v", err)
+			}
+			result, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, project)
+			if err != nil {
+				t.Fatalf("replay deferred: %v", err)
+			}
+			if result.Retried != 1 || result.Succeeded != 1 {
+				t.Fatalf("replay result = %+v, want one successful retry", result)
+			}
+			if got := scalarInt(t, s, tt.countQuery, mutation.EntityKey); got != 1 {
+				t.Fatalf("applied records = %d, want 1", got)
+			}
+			if got := countDeferredRows(t, s, evidence.SyncID); got != 0 {
+				t.Fatalf("deferred evidence remains = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestApplyPulledChunkMissingParentSession(t *testing.T) {
+	const (
+		parentSessionID = "missing-parent-chunk-session"
+		project         = "missing-parent-chunk-project"
+	)
+
+	tests := []struct {
+		name, entity, entityKey string
+		payload                 func(t *testing.T) string
+		countQuery              string
+	}{
+		{
+			name:      "observation",
+			entity:    SyncEntityObservation,
+			entityKey: "missing-parent-chunk-observation",
+			payload: func(t *testing.T) string {
+				t.Helper()
+				projectValue := project
+				raw, err := json.Marshal(syncObservationPayload{
+					SyncID: "missing-parent-chunk-observation", SessionID: parentSessionID,
+					Type: "decision", Title: "Missing chunk parent", Content: "defer until the chunk parent arrives",
+					Project: &projectValue, Scope: "project",
+				})
+				if err != nil {
+					t.Fatalf("marshal observation payload: %v", err)
+				}
+				return string(raw)
+			},
+			countQuery: `SELECT count(*) FROM observations WHERE sync_id = ?`,
+		},
+		{
+			name:      "prompt",
+			entity:    SyncEntityPrompt,
+			entityKey: "missing-parent-chunk-prompt",
+			payload: func(t *testing.T) string {
+				t.Helper()
+				projectValue := project
+				raw, err := json.Marshal(syncPromptPayload{
+					SyncID: "missing-parent-chunk-prompt", SessionID: parentSessionID,
+					Content: "defer until the chunk parent arrives", Project: &projectValue,
+				})
+				if err != nil {
+					t.Fatalf("marshal prompt payload: %v", err)
+				}
+				return string(raw)
+			},
+			countQuery: `SELECT count(*) FROM user_prompts WHERE sync_id = ?`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			chunkID := "missing-parent-chunk-" + tt.name
+			mutation := SyncMutation{
+				Entity: tt.entity, EntityKey: tt.entityKey, Op: SyncOpUpsert,
+				Payload: tt.payload(t), Project: project,
+			}
+			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, chunkID, []SyncMutation{mutation}); err != nil {
+				t.Fatalf("apply missing-parent chunk: %v", err)
+			}
+
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("get sync state: %v", err)
+			}
+			if state.LastPulledSeq != 1 {
+				t.Fatalf("last pulled sequence = %d, want 1", state.LastPulledSeq)
+			}
+			chunks, err := s.GetSyncedChunksForTarget(DefaultSyncTargetKey)
+			if err != nil || !chunks[chunkID] {
+				t.Fatalf("synced chunks = %v, err=%v", chunks, err)
+			}
+
+			deferred, err := s.ListDeferred(ListDeferredOptions{Status: "deferred"})
+			if err != nil || len(deferred) != 1 {
+				t.Fatalf("deferred evidence = %+v, err=%v", deferred, err)
+			}
+			evidence := deferred[0]
+			if evidence.Entity != mutation.Entity || evidence.PayloadRaw != mutation.Payload || evidence.TargetKey != DefaultSyncTargetKey || evidence.RemoteSeq != 1 || evidence.EntityKey != mutation.EntityKey || evidence.Op != mutation.Op || evidence.ReasonCode != "pulled_parent_session_missing" {
+				t.Fatalf("deferred evidence = %+v", evidence)
+			}
+
+			if err := s.CreateSession(parentSessionID, project, "/tmp/missing-parent-chunk"); err != nil {
+				t.Fatalf("create parent session: %v", err)
+			}
+			result, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, project)
+			if err != nil {
+				t.Fatalf("replay deferred: %v", err)
+			}
+			if result.Retried != 1 || result.Succeeded != 1 {
+				t.Fatalf("replay result = %+v, want one successful retry", result)
+			}
+			if got := scalarInt(t, s, tt.countQuery, mutation.EntityKey); got != 1 {
+				t.Fatalf("applied records = %d, want 1", got)
+			}
+			if got := countDeferredRows(t, s, evidence.SyncID); got != 0 {
+				t.Fatalf("deferred evidence remains = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestApplyPulledMutation_CloudUpsertRespectsRemoteTombstoneFloor(t *testing.T) {
 	floor := int64(10)
 	tests := []struct {

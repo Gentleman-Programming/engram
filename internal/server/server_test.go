@@ -4101,3 +4101,63 @@ func TestListProjectsEndpointEmptyStore(t *testing.T) {
 		t.Fatalf("expected empty successful listing, got count=%d projects=%v", body.Count, body.Projects)
 	}
 }
+
+func TestHandleCreateSessionRenewsRuntimeLeaseAndRejectsEndedSession(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	body := `{"id":"runtime-http","project":"runtime-project","directory":"/runtime","ownership_mode":"project_owned"}`
+
+	post := func() *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		return rec
+	}
+
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("initial POST /sessions = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	before, err := st.GetSession("runtime-http")
+	if err != nil {
+		t.Fatalf("get initial runtime session: %v", err)
+	}
+	if _, err := st.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "2001-02-03 04:05:06", "runtime-http"); err != nil {
+		t.Fatalf("seed expired runtime lease: %v", err)
+	}
+
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("renewing POST /sessions = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.GetSession("runtime-http")
+	if err != nil {
+		t.Fatalf("get renewed runtime session: %v", err)
+	}
+	if after.StartedAt != before.StartedAt || after.Project != "runtime-project" || after.OwnershipMode != store.SessionOwnershipProjectOwned || after.EndedAt != nil {
+		t.Fatalf("renewed HTTP runtime session = %#v, want unchanged session identity", after)
+	}
+	var future int
+	if err := st.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-http").Scan(&future); err != nil {
+		t.Fatalf("check renewed runtime lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatal("renewing POST /sessions did not persist a future runtime lease")
+	}
+
+	if err := st.EndSession("runtime-http", "complete"); err != nil {
+		t.Fatalf("end runtime session: %v", err)
+	}
+	rec := post()
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST /sessions for ended runtime session = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Code      string `json:"code"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode ended-session response: %v", err)
+	}
+	if response.Code != "session_already_ended" || response.SessionID != "runtime-http" {
+		t.Fatalf("ended-session response = %#v", response)
+	}
+}

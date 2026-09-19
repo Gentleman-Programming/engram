@@ -4954,6 +4954,18 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
+	if err := s.CreateSession("missing-session", "engram", "/tmp/missing-session"); err != nil {
+		t.Fatalf("create observation parent: %v", err)
+	}
+	injectedObservationWriteErr := errors.New("injected observation foreign-key failure")
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO observations") {
+			return nil, injectedObservationWriteErr
+		}
+		return originalExec(db, query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = originalExec })
 
 	badChunk := []SyncMutation{
 		{
@@ -4970,8 +4982,8 @@ func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 		},
 	}
 
-	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); err == nil {
-		t.Fatal("expected chunk apply error for invalid observation payload")
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); !errors.Is(err, injectedObservationWriteErr) {
+		t.Fatalf("chunk apply error = %v, want injected observation write error", err)
 	}
 	if _, err := s.GetSession("chunk-session"); err == nil {
 		t.Fatal("expected chunk session upsert to roll back after failed chunk apply")
@@ -8176,18 +8188,46 @@ func TestApplyPulledChunkObservationIdentityInvalidQuarantinesAndContinues(t *te
 
 func TestApplyPulledChunkObservationFailuresRemainClosed(t *testing.T) {
 	valid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "closed-valid", Op: SyncOpUpsert, Payload: `{"sync_id":"closed-valid","session_id":"closed-parent","type":"decision","title":"valid","content":"must roll back","project":"engram","scope":"project"}`}
+	injectedForeignKeyErr := errors.New("injected foreign-key failure")
 	tests := []struct {
-		name string
-		bad  SyncMutation
+		name    string
+		bad     SyncMutation
+		wantErr error
+		setup   func(t *testing.T, s *Store)
 	}{
 		{name: "decode error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "decode-invalid", Op: SyncOpUpsert, Payload: "not JSON"}},
-		{name: "unrelated foreign key error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "missing-parent", Op: SyncOpUpsert, Payload: `{"sync_id":"missing-parent","session_id":"missing-parent-session","type":"decision","title":"missing parent","content":"must not quarantine","project":"engram","scope":"project"}`}},
+		{
+			name:    "injected foreign key error",
+			bad:     SyncMutation{Entity: SyncEntityObservation, EntityKey: "injected-fk", Op: SyncOpUpsert, Payload: `{"sync_id":"injected-fk","session_id":"injected-fk-parent","type":"decision","title":"injected FK","content":"must not quarantine","project":"engram","scope":"project"}`},
+			wantErr: injectedForeignKeyErr,
+			setup: func(t *testing.T, s *Store) {
+				t.Helper()
+				if err := s.CreateSession("injected-fk-parent", "engram", "/tmp/injected-fk-parent"); err != nil {
+					t.Fatalf("create observation parent: %v", err)
+				}
+				originalExec := s.hooks.exec
+				s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+					if strings.Contains(query, "INSERT INTO observations") {
+						return nil, injectedForeignKeyErr
+					}
+					return originalExec(db, query, args...)
+				}
+				t.Cleanup(func() { s.hooks.exec = originalExec })
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
-			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid}); err == nil {
+			if tc.setup != nil {
+				tc.setup(t, s)
+			}
+			err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid})
+			if err == nil {
 				t.Fatal("ApplyPulledChunk succeeded for a fail-closed observation error")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ApplyPulledChunk error = %v, want injected error", err)
 			}
 			if _, err := s.GetObservationBySyncID(valid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
 				t.Fatalf("valid observation applied despite rollback: %v", err)
@@ -14897,6 +14937,69 @@ func TestActiveRuntimeSessionsStaleRowDoesNotBlockLiveSession(t *testing.T) {
 	}
 }
 
+func TestActiveRuntimeSessionsPrefersLiveLeasesPerDirectory(t *testing.T) {
+	s := newTestStore(t)
+	for _, session := range []struct {
+		id, directory string
+		leased        bool
+	}{
+		{id: "legacy-suppressed", directory: "/work/leased"},
+		{id: "live-lease", directory: "/work/leased", leased: true},
+		{id: "legacy-fallback", directory: "/work/legacy"},
+	} {
+		var err error
+		if session.leased {
+			err = s.StartSession(session.id, "engram", session.directory)
+		} else {
+			err = s.CreateSession(session.id, "engram", session.directory)
+		}
+		if err != nil {
+			t.Fatalf("create %s: %v", session.id, err)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = datetime('now', '-1 day') WHERE id = 'legacy-suppressed'`); err != nil {
+		t.Fatalf("backdate suppressed legacy session: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/leased", "/work/legacy")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"legacy-fallback", "live-lease"}) {
+		t.Fatalf("active IDs = %#v, want live lease plus other-directory legacy fallback", ids)
+	}
+	var endedAt *string
+	if err := s.DB().QueryRow(`SELECT ended_at FROM sessions WHERE id = 'legacy-suppressed'`).Scan(&endedAt); err != nil {
+		t.Fatalf("read suppressed legacy session: %v", err)
+	}
+	if endedAt != nil {
+		t.Fatalf("selection must not end suppressed legacy session, ended_at = %q", *endedAt)
+	}
+}
+
+func TestActiveRuntimeSessionsExcludesExpiredOrInvalidLeasesAndKeepsLiveLeaseAmbiguity(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"live-lease-a", "live-lease-b", "expired-lease", "invalid-lease"} {
+		if err := s.StartSession(id, "engram", "/work/engram"); err != nil {
+			t.Fatalf("start %s: %v", id, err)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "2000-01-01 00:00:00", "expired-lease"); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "not-a-timestamp", "invalid-lease"); err != nil {
+		t.Fatalf("invalidate lease: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"live-lease-a", "live-lease-b"}) {
+		t.Fatalf("active IDs = %#v, want only genuinely live leased owners", ids)
+	}
+}
+
 func TestActiveRuntimeSessionsIgnoresManualSaveSessions(t *testing.T) {
 	s := newTestStore(t)
 
@@ -16272,5 +16375,166 @@ func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatalf("small budget output produced invalid UTF-8: %q", got)
+	}
+}
+
+func TestRuntimeSessionRegistrationPersistsLocalLease(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+
+	session, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get runtime session: %v", err)
+	}
+	if session.RuntimeLeaseExpiresAt == nil || *session.RuntimeLeaseExpiresAt == "" {
+		t.Fatalf("runtime session lease = %v, want future expiry", session.RuntimeLeaseExpiresAt)
+	}
+	var future int
+	if err := s.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-session").Scan(&future); err != nil {
+		t.Fatalf("check runtime lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatalf("runtime session lease must be in the future, got %q", *session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionRegistrationRenewsWithoutChangingSessionIdentity(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ?, runtime_lease_expires_at = ? WHERE id = ?`, "2001-02-03 04:05:06", "2001-02-03 04:05:06", "runtime-session"); err != nil {
+		t.Fatalf("seed expired lease: %v", err)
+	}
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/ignored", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("renew runtime session: %v", err)
+	}
+
+	session, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get renewed runtime session: %v", err)
+	}
+	if session.StartedAt != "2001-02-03 04:05:06" || session.Project != "runtime-project" || session.OwnershipMode != SessionOwnershipProjectOwned || session.EndedAt != nil {
+		t.Fatalf("renewed runtime session = %#v, want original identity and active terminal state", session)
+	}
+	var future int
+	if err := s.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-session").Scan(&future); err != nil {
+		t.Fatalf("check renewed lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatalf("renewal did not replace expired runtime lease: %#v", session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionRenewalSkipsLeaseOnlySyncMutationButJournalsIdentityRepair(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	countMutations := func() int {
+		t.Helper()
+		var count int
+		if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`, SyncEntitySession, "runtime-session", SyncOpUpsert).Scan(&count); err != nil {
+			t.Fatalf("count session mutations: %v", err)
+		}
+		return count
+	}
+	if got := countMutations(); got != 1 {
+		t.Fatalf("new runtime session mutations = %d, want 1", got)
+	}
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET acked_at = datetime('now') WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "runtime-session"); err != nil {
+		t.Fatalf("ack initial session mutation: %v", err)
+	}
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("renew runtime session: %v", err)
+	}
+	if got := countMutations(); got != 1 {
+		t.Fatalf("lease-only renewal mutations = %d, want 1", got)
+	}
+
+	if _, err := s.DB().Exec(`UPDATE sessions SET directory = '' WHERE id = ?`, "runtime-session"); err != nil {
+		t.Fatalf("seed blank runtime directory: %v", err)
+	}
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("repair runtime session identity: %v", err)
+	}
+	if got := countMutations(); got != 2 {
+		t.Fatalf("identity repair mutations = %d, want 2", got)
+	}
+}
+
+func TestRuntimeSessionRegistrationRejectsEndedSessions(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	if err := s.EndSession("runtime-session", "complete"); err != nil {
+		t.Fatalf("end runtime session: %v", err)
+	}
+	before, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get ended runtime session: %v", err)
+	}
+
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("renew ended runtime session error = %v, want ErrSessionAlreadyEnded", err)
+	}
+	after, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get ended runtime session after renewal: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("ended runtime session changed: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestCreateSessionDoesNotCreateRuntimeLease(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("manual-session", "manual-project", "/manual"); err != nil {
+		t.Fatalf("create manual session: %v", err)
+	}
+
+	session, err := s.GetSession("manual-session")
+	if err != nil {
+		t.Fatalf("get manual session: %v", err)
+	}
+	if session.RuntimeLeaseExpiresAt != nil {
+		t.Fatalf("manual session lease = %q, want nil", *session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionLeaseStaysOutOfSyncAndExportPayloads(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+
+	var mutationPayload string
+	if err := s.DB().QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "runtime-session").Scan(&mutationPayload); err != nil {
+		t.Fatalf("read runtime session mutation: %v", err)
+	}
+	if strings.Contains(mutationPayload, "runtime_lease_expires_at") {
+		t.Fatalf("sync mutation leaked runtime lease: %s", mutationPayload)
+	}
+
+	exported, err := s.Export()
+	if err != nil {
+		t.Fatalf("export runtime session: %v", err)
+	}
+	exportPayload, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal runtime export: %v", err)
+	}
+	if strings.Contains(string(exportPayload), "runtime_lease_expires_at") {
+		t.Fatalf("export leaked runtime lease: %s", exportPayload)
 	}
 }

@@ -125,7 +125,7 @@ func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scop
 			Message:              fmt.Sprintf("Project %q has %d active runtime session candidates across %d directory or directories.", project, len(ambiguousIDs), len(ambiguousDirectories)),
 			Why:                  "Omitted-session writes fail closed when multiple active runtime sessions match the same project and directory, so doctor reports the ambiguity without selecting or changing a session.",
 			Evidence:             mustJSON(map[string]any{"project": project, "active_candidate_count": len(ambiguousIDs), "directories": ambiguousDirectories, "session_ids": ambiguousIDs}),
-			SafeNextStep:         "Use an explicit session ID for writes in the affected directory; doctor does not select, end, or modify sessions.",
+			SafeNextStep:         "Use `mem_session_end` to end only confirmed stale IDs; otherwise keep explicit runtime attribution with `session_id` on writes. Doctor is diagnostic-only and never selects, ends, or modifies sessions.",
 			RequiresConfirmation: true,
 		})
 	}
@@ -621,7 +621,7 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("%d observation(s) reference missing session %q.", item.ObservationCount, item.SessionID),
 			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically.",
 			Evidence:             mustJSON(item),
-			SafeNextStep:         "Inspect and recover the affected data deliberately. The canonical session cannot be reconstructed automatically, and no supported repair exists.",
+			SafeNextStep:         "Review the affected reference, then run `engram doctor repair --project <project> --check orphaned_observation_session --plan`; apply only after confirming the local placeholder session is appropriate.",
 			RequiresConfirmation: true,
 		})
 	}
