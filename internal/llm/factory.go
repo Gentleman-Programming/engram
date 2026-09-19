@@ -8,7 +8,7 @@ import (
 // ─── Sentinel errors ──────────────────────────────────────────────────────────
 
 // ErrInvalidRunnerName is returned by NewRunner when the name argument does not
-// match a known runner identifier ("claude" | "opencode").
+// match a known runner identifier ("claude" | "opencode" | "minimax").
 var ErrInvalidRunnerName = errors.New("invalid runner name")
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@ var ErrInvalidRunnerName = errors.New("invalid runner name")
 // Supported values:
 //   - "claude"    → *ClaudeRunner (shells out to the claude CLI)
 //   - "opencode"  → *OpenCodeRunner (shells out to the opencode CLI)
+//   - "minimax"   → *MiniMaxRunner (calls the MiniMax hosted API over HTTP)
 //
 // For any other value, including the empty string, a descriptive error is
 // returned that names the ENGRAM_AGENT_CLI environment variable and the
@@ -33,15 +34,18 @@ func NewRunner(name string) (AgentRunner, error) {
 	case "opencode":
 		return NewOpenCodeRunner(), nil
 
+	case "minimax":
+		return NewMiniMaxRunner(), nil
+
 	case "":
 		return nil, fmt.Errorf(
-			"%w: ENGRAM_AGENT_CLI is not set; supported values are: claude, opencode",
+			"%w: ENGRAM_AGENT_CLI is not set; supported values are: claude, opencode, minimax",
 			ErrInvalidRunnerName,
 		)
 
 	default:
 		return nil, fmt.Errorf(
-			"%w: %q is not a recognized runner; set ENGRAM_AGENT_CLI to one of: claude, opencode",
+			"%w: %q is not a recognized runner; set ENGRAM_AGENT_CLI to one of: claude, opencode, minimax",
 			ErrInvalidRunnerName,
 			name,
 		)
