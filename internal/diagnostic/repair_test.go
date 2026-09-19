@@ -81,6 +81,65 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 	}
 }
 
+// TestBuildRepairPlanOrphanedSessionRejectsWhitespaceEvidence proves the
+// orphaned-session planner treats whitespace-only SessionID and FirstObservedAt
+// values as invalid and skips them deterministically instead of planning a
+// placeholder the store could never apply.
+func TestBuildRepairPlanOrphanedSessionRejectsWhitespaceEvidence(t *testing.T) {
+	tests := []struct {
+		name      string
+		evidence  store.OrphanedObservationSessionEvidence
+		wantPlans int
+		wantSkip  string
+	}{
+		{
+			name:     "whitespace-only session id",
+			evidence: store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: " \t\n ", ObservationCount: 1, FirstObservedAt: "2026-01-01 00:00:00"},
+			wantSkip: "invalid_orphaned_session_evidence",
+		},
+		{
+			name:     "whitespace-only first observed timestamp",
+			evidence: store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: "missing-session", ObservationCount: 1, FirstObservedAt: "  \n "},
+			wantSkip: "invalid_orphaned_session_evidence",
+		},
+		{
+			name:      "complete evidence plans placeholder",
+			evidence:  store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: "missing-session", ObservationCount: 1, FirstObservedAt: "2026-01-01 00:00:00"},
+			wantPlans: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report := Report{Checks: []CheckResult{{
+				CheckID: CheckOrphanedObservationSession,
+				Result:  "warning",
+				Findings: []Finding{{
+					CheckID:    CheckOrphanedObservationSession,
+					ReasonCode: CheckOrphanedObservationSession,
+					Message:    "test finding",
+					Evidence:   mustJSON(tc.evidence),
+				}},
+			}}}
+			plan, err := BuildRepairPlan(context.Background(), Scope{}, report, CheckOrphanedObservationSession, RepairModePlan)
+			if err != nil {
+				t.Fatalf("BuildRepairPlan: %v", err)
+			}
+			if len(plan.PlaceholderSessions) != tc.wantPlans {
+				t.Fatalf("placeholders=%+v", plan.PlaceholderSessions)
+			}
+			if tc.wantSkip == "" {
+				if len(plan.Skipped) != 0 {
+					t.Fatalf("skipped=%+v", plan.Skipped)
+				}
+				return
+			}
+			if len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != tc.wantSkip {
+				t.Fatalf("skipped=%+v, want %q", plan.Skipped, tc.wantSkip)
+			}
+		})
+	}
+}
+
 func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -166,7 +166,7 @@ func planOrphanedObservationSessionRepair(plan *RepairPlan, report Report) {
 				continue
 			}
 			project := normalizeProjectName(evidence.Project)
-			if evidence.SessionID == "" || project == "" || evidence.FirstObservedAt == "" {
+			if strings.TrimSpace(evidence.SessionID) == "" || project == "" || strings.TrimSpace(evidence.FirstObservedAt) == "" {
 				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: evidence.SessionID, ReasonCode: "invalid_orphaned_session_evidence", Message: "orphaned session repair requires a non-blank session ID, project, and first observation timestamp"})
 				continue
 			}
