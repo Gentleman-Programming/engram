@@ -124,9 +124,16 @@ func validateBearerBaseURL(baseURL, token string) (string, string, error) {
 func newRemoteHTTPClient(timeout time.Duration, requireHTTPSRedirect bool) *http.Client {
 	client := &http.Client{Timeout: timeout}
 	if requireHTTPSRedirect {
-		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			if req.URL.Scheme != "https" {
 				return fmt.Errorf("cloud: redirect requires HTTPS")
+			}
+			// Go already drops the bearer on cross-host redirects, but configured
+			// extra headers (which can carry service credentials) would be
+			// forwarded verbatim. Never follow a redirect away from the original
+			// hostname; ports may differ (e.g. load-balanced endpoints).
+			if len(via) > 0 && req.URL.Hostname() != via[0].URL.Hostname() {
+				return fmt.Errorf("cloud: redirect to a different host is rejected to keep configured credentials private")
 			}
 			return nil
 		}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -552,5 +553,42 @@ func TestRemoteTransportRejectsHTTPRedirectWithExtraHeaders(t *testing.T) {
 	_, err = rt.ReadManifest()
 	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("ReadManifest redirect error = %v, want HTTPS requirement", err)
+	}
+}
+
+func TestRemoteTransportRejectsCrossHostRedirectWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	crossHostHit := false
+	crossHost := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		crossHostHit = true
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer crossHost.Close()
+
+	// Rewrite the redirect target host to localhost so the hostname differs
+	// from the 127.0.0.1 source; the redirect must never be followed.
+	crossHostURL, err := url.Parse(crossHost.URL)
+	if err != nil {
+		t.Fatalf("parse cross-host URL: %v", err)
+	}
+	crossHostURL.Host = "localhost:" + crossHostURL.Port()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, crossHostURL.String(), http.StatusFound)
+	}))
+	defer source.Close()
+
+	rt, err := NewRemoteTransport(source.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = source.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Fatalf("ReadManifest cross-host redirect error = %v, want different-host rejection", err)
+	}
+	if crossHostHit {
+		t.Fatal("configured extra headers reached a different HTTPS host")
 	}
 }
