@@ -16917,6 +16917,30 @@ func TestStaleOpenSessionsSelection(t *testing.T) {
 		}
 	})
 
+	t.Run("selects sessions whose newest observation is RFC3339-formatted", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-rfc3339", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		obsID, err := s.AddObservation(AddObservationParams{SessionID: "sess-rfc3339", Type: "note", Title: "t", Content: "c", Project: "proj"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		// Imported observations may carry RFC3339 timestamps: the raw 'T' sorts
+		// above the space-format cutoff, so only datetime() normalization lets
+		// this same-day observation keep the session stale.
+		ageObservation(t, s, obsID, "2026-09-18T05:00:00Z")
+
+		stale, err := s.StaleOpenSessions(now, time.Hour, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 1 || stale[0].ID != "sess-rfc3339" {
+			t.Fatalf("stale = %#v, want only sess-rfc3339", stale)
+		}
+		if stale[0].LastActivity != "2026-09-18 05:00:00" {
+			t.Fatalf("last activity = %q, want datetime-normalized %q", stale[0].LastActivity, "2026-09-18 05:00:00")
+		}
+	})
+
 	t.Run("boundary session exactly at the cutoff is not stale", func(t *testing.T) {
 		s := newTestStore(t)
 		seedOpenSession(t, s, "sess-boundary", "proj", "/work", sqliteSeedTime(now.Add(-cutoff)))
@@ -17064,6 +17088,72 @@ func TestEndSessionsBulk(t *testing.T) {
 		}
 		if other.EndedAt != nil {
 			t.Fatalf("other project session ended_at = %v, want NULL", *other.EndedAt)
+		}
+	})
+
+	t.Run("ends sessions whose newest observation is RFC3339-formatted", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		seedOpenSession(t, s, "bulk-rfc3339", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		obsID, err := s.AddObservation(AddObservationParams{SessionID: "bulk-rfc3339", Type: "note", Title: "t", Content: "c", Project: "proj"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		// Same-day RFC3339 observation before the cutoff: raw string comparison
+		// would keep the session fresh, datetime() normalization ends it.
+		ageObservation(t, s, obsID, "2026-09-18T05:00:00Z")
+
+		ended, err := s.EndSessionsBulk(now, time.Hour, "")
+		if err != nil {
+			t.Fatalf("EndSessionsBulk: %v", err)
+		}
+		if len(ended) != 1 || ended[0] != "bulk-rfc3339" {
+			t.Fatalf("ended = %#v, want only bulk-rfc3339", ended)
+		}
+		sess, err := s.GetSession("bulk-rfc3339")
+		if err != nil {
+			t.Fatalf("get bulk-rfc3339: %v", err)
+		}
+		if sess.EndedAt == nil || *sess.EndedAt == "" {
+			t.Fatalf("bulk-rfc3339: expected ended_at to be set")
+		}
+	})
+
+	t.Run("rejects non-positive staleness windows", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		seedOpenSession(t, s, "bulk-guard", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+
+		for _, olderThan := range []time.Duration{0, -time.Hour} {
+			ended, err := s.EndSessionsBulk(now, olderThan, "")
+			if !errors.Is(err, ErrInvalidStalenessWindow) {
+				t.Fatalf("EndSessionsBulk(olderThan=%v) error = %v, want ErrInvalidStalenessWindow", olderThan, err)
+			}
+			if len(ended) != 0 {
+				t.Fatalf("ended = %#v, want none", ended)
+			}
+		}
+
+		sess, err := s.GetSession("bulk-guard")
+		if err != nil {
+			t.Fatalf("get bulk-guard: %v", err)
+		}
+		if sess.EndedAt != nil {
+			t.Fatalf("bulk-guard ended_at = %v, want NULL", *sess.EndedAt)
+		}
+		// One pending end journal per ended session is the regression signal;
+		// the guard must leave the create upsert untouched. The journal dedups
+		// by replacing the pending create upsert, so the total-count delta is
+		// the wrong measure.
+		var mutations int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND json_extract(payload, '$.ended_at') IS NOT NULL`,
+			SyncEntitySession, "bulk-guard",
+		).Scan(&mutations); err != nil {
+			t.Fatalf("count sync mutations: %v", err)
+		}
+		if mutations != 0 {
+			t.Fatalf("sync_mutations rows for bulk-guard = %d, want 0", mutations)
 		}
 	})
 

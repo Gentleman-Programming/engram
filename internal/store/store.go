@@ -59,6 +59,7 @@ var (
 	ErrSessionAlreadyEnded         = errors.New("session has already ended")
 	ErrSessionHasObservations      = errors.New("session still has observations")
 	ErrSessionDeleteBlocked        = errors.New("session deletion is blocked while cloud sync enrollment is active")
+	ErrInvalidStalenessWindow      = errors.New("staleness window must be positive")
 	ErrObservationNotFound         = errors.New("observation not found")
 	ErrPromptNotFound              = errors.New("prompt not found")
 	ErrProjectNotFound             = errors.New("project not found")
@@ -3027,15 +3028,21 @@ type StaleOpenSession struct {
 const sqliteTimeLayout = "2006-01-02 15:04:05"
 
 // staleOpenSessionQuery builds the shared read-only selection of open sessions
-// whose effective last activity predates a cutoff. The caller appends the
-// cutoff as the final bind argument. When project is empty every project is
+// whose effective last activity predates a cutoff. Stored timestamps are
+// normalized through datetime() before comparison: imported observations may
+// carry RFC3339 values while local writes use sqliteTimeLayout, and raw string
+// comparison would misorder the two formats. datetime() yields NULL for
+// unparseable values, so as a fail-safe garbage activity never selects a
+// session: MAX ignores the NULL rows and COALESCE falls back to started_at.
+// The caller appends the cutoff as the final bind argument, normalized by
+// datetime(?) in the HAVING clause. When project is empty every project is
 // selected; otherwise LOWER() keeps the filter consistent with
 // ActiveRuntimeSessions, and NULL or blank project rows never match because
 // neither LOWER(NULL) nor ” equals a named project.
 func staleOpenSessionQuery(project string) (string, []any) {
 	query := `
 		SELECT s.id, ifnull(s.project, ''), ifnull(s.directory, ''), s.started_at,
-		       COALESCE(MAX(o.created_at), s.started_at)
+		       COALESCE(MAX(datetime(o.created_at)), datetime(s.started_at))
 		FROM sessions s
 		LEFT JOIN observations o ON o.session_id = s.id
 		WHERE s.ended_at IS NULL`
@@ -3046,7 +3053,7 @@ func staleOpenSessionQuery(project string) (string, []any) {
 	}
 	query += `
 		GROUP BY s.id
-		HAVING COALESCE(MAX(o.created_at), s.started_at) < ?
+		HAVING COALESCE(MAX(datetime(o.created_at)), datetime(s.started_at)) < datetime(?)
 		ORDER BY s.id`
 	return query, args
 }
@@ -3083,8 +3090,12 @@ func (s *Store) StaleOpenSessions(now time.Time, olderThan time.Duration, projec
 // transaction: it re-selects the matches, sets ended_at without touching any
 // summary, and journals one sync mutation per ended session, so a cloud mirror
 // can never observe a partially applied batch. It returns the ended IDs in
-// selection order.
+// selection order. Non-positive olderThan values are rejected with
+// ErrInvalidStalenessWindow.
 func (s *Store) EndSessionsBulk(now time.Time, olderThan time.Duration, project string) ([]string, error) {
+	if olderThan <= 0 {
+		return nil, ErrInvalidStalenessWindow
+	}
 	cutoff := now.Add(-olderThan).UTC().Format(sqliteTimeLayout)
 	var ended []string
 	if err := s.withTx(func(tx *sql.Tx) error {
