@@ -103,6 +103,9 @@ var (
 	// ErrPulledSessionDirectoryInvalid identifies a pulled or imported session that
 	// has no concrete directory and therefore cannot be admitted as cloud state.
 	ErrPulledSessionDirectoryInvalid = errors.New("pulled session directory is invalid")
+	// errPulledParentSessionMissing can arise only after a pulled observation or
+	// prompt upsert proves its parent session is absent in the current transaction.
+	errPulledParentSessionMissing = errors.New("pulled parent session is missing")
 )
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -339,6 +342,7 @@ const (
 
 	SyncSessionIdentityInvalidReasonCode     = "sync_session_identity_invalid"
 	SyncObservationIdentityInvalidReasonCode = "sync_observation_identity_invalid"
+	SyncParentSessionMissingReasonCode       = "pulled_parent_session_missing"
 
 	// relationDeferredOuterProjectAuthoritativeReasonCode records that a deferred
 	// relation carried a non-blank outer mutation project. Unmarked legacy rows
@@ -6554,12 +6558,16 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 				return err
 			} else if !handled {
-				if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
-					if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
-						return err
+				if handled, err := s.recordPulledParentSessionFailureTx(tx, targetKey, mutation, applyErr); err != nil {
+					return err
+				} else if !handled {
+					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
+							return err
+						}
+					} else {
+						return applyErr
 					}
-				} else {
-					return applyErr
 				}
 			}
 		}
@@ -6614,6 +6622,54 @@ func relationApplyFailureSyncID(status, targetKey string, mutation SyncMutation)
 // recordRelationApplyFailureTx records relation failures that are safe to
 // acknowledge while preserving the existing fail-fast behavior for other
 // entities and errors.
+// recordPulledParentSessionFailureTx defers only the private signal produced by
+// the pulled upsert precondition. Arbitrary SQLite errors remain fail-closed.
+func (s *Store) recordPulledParentSessionFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, applyErr error) (bool, error) {
+	if !errors.Is(applyErr, errPulledParentSessionMissing) {
+		return false, nil
+	}
+	if err := s.deferPulledParentSessionTx(tx, targetKey, mutation); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func requirePulledParentSessionTx(tx *sql.Tx, sessionID string) error {
+	var parentExists int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&parentExists); err != nil {
+		return err
+	}
+	if parentExists == 0 {
+		return fmt.Errorf("%w: session %q", errPulledParentSessionMissing, sessionID)
+	}
+	return nil
+}
+
+func (s *Store) deferPulledParentSessionTx(tx *sql.Tx, targetKey string, mutation SyncMutation) error {
+	syncID := pulledIdentityDeadLetterSyncID(targetKey, mutation)
+	project := pulledIdentityEvidenceProject(mutation)
+	scopeClass := "target_scoped"
+	if project != "" {
+		scopeClass = "scoped"
+	}
+	if _, err := s.execHook(tx, `
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, target_key, remote_seq, entity_key, op, reason_code, project, scope_class, apply_status, retry_count, first_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deferred', 0, datetime('now'))
+		ON CONFLICT(sync_id) DO UPDATE SET
+			entity = excluded.entity, payload = excluded.payload, target_key = excluded.target_key,
+			remote_seq = excluded.remote_seq, entity_key = excluded.entity_key, op = excluded.op,
+			reason_code = excluded.reason_code, project = excluded.project, scope_class = excluded.scope_class,
+			last_attempted_at = datetime('now')
+		WHERE sync_apply_deferred.apply_status <> 'dead'`,
+		syncID, mutation.Entity, mutation.Payload, targetKey, mutation.Seq, mutation.EntityKey, mutation.Op,
+		SyncParentSessionMissingReasonCode, project, scopeClass,
+	); err != nil {
+		return fmt.Errorf("defer pulled parent session: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, applyErr error) (bool, error) {
 	if mutation.Entity != SyncEntityRelation {
 		return false, nil
@@ -6793,9 +6849,9 @@ func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation)
 // retry safety: a failed chunk import leaves no partial semantic mutations.
 //
 // It shares ApplyPulledMutation's skip-plus-evidence rule for invalid session
-// and observation identities: such a mutation is quarantined and the rest of
-// the chunk still applies, so one permanently malformed identity cannot block
-// the chunk forever.
+// and observation identities, plus deferred handling for observation and prompt
+// upserts whose parent session is absent, so either condition cannot block the
+// chunk forever.
 // A payload that does not even decode stays fail-closed and rolls back the
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
@@ -6835,12 +6891,16 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 				if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 				} else if !handled {
-					if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
-						if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
-							return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+					if handled, err := s.recordPulledParentSessionFailureTx(tx, targetKey, mutation, applyErr); err != nil {
+						return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+					} else if !handled {
+						if reasonCode, quarantined := pulledIdentityInvalidReasonCode(applyErr); quarantined {
+							if err := s.deadLetterPulledIdentityTx(tx, targetKey, mutation, reasonCode); err != nil {
+								return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+							}
+						} else {
+							return fmt.Errorf("apply chunk mutation %d: %w", i, applyErr)
 						}
-					} else {
-						return fmt.Errorf("apply chunk mutation %d: %w", i, applyErr)
 					}
 				}
 			}
@@ -9769,6 +9829,11 @@ func pulledIdentityEvidenceProject(mutation SyncMutation) string {
 			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
 				project = strings.TrimSpace(derefString(payload.Project))
 			}
+		case SyncEntityPrompt:
+			var payload syncPromptPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err == nil {
+				project = strings.TrimSpace(derefString(payload.Project))
+			}
 		}
 	}
 	project, _ = NormalizeProject(project)
@@ -10227,6 +10292,9 @@ func validateSessionMutationIdentity(payloadID, entityKey string) error {
 }
 
 func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayload) error {
+	if err := requirePulledParentSessionTx(tx, payload.SessionID); err != nil {
+		return err
+	}
 	revisionCount := maxInt(payload.RevisionCount, 1)
 	duplicateCount := maxInt(payload.DuplicateCount, 1)
 	createdAt := strings.TrimSpace(payload.CreatedAt)
@@ -10347,10 +10415,13 @@ func (s *Store) applyPromptUpsertTx(tx *sql.Tx, payload syncPromptPayload) error
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	if err == nil && isStalePromptUpsert(payload, tombstoneDeletedAt) {
+		return nil
+	}
+	if err := requirePulledParentSessionTx(tx, payload.SessionID); err != nil {
+		return err
+	}
 	if err == nil {
-		if isStalePromptUpsert(payload, tombstoneDeletedAt) {
-			return nil
-		}
 		if _, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE sync_id = ?`, payload.SyncID); err != nil {
 			return err
 		}
@@ -11345,7 +11416,11 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		})
 
 		if applyErr == nil {
-			// Success: applyRelationUpsertTx already deleted the deferred row.
+			// Relation applies remove their own retry row; observation and prompt
+			// replay removes the exact deferred mutation after it succeeds.
+			if _, err := s.execHook(s.db, `DELETE FROM sync_apply_deferred WHERE sync_id = ?`, row.syncID); err != nil {
+				return result, fmt.Errorf("ReplayDeferred: remove applied row: %w", err)
+			}
 			result.Succeeded++
 			log.Printf("[store] replayDeferred: applied sync_id=%s", row.syncID)
 			continue
@@ -11354,7 +11429,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		// Classify the error and update the deferred row.
 		newRetry := row.retryCount + 1
 		var newStatus string
-		if errors.Is(applyErr, ErrRelationFKMissing) && newRetry < deadThreshold {
+		if (errors.Is(applyErr, ErrRelationFKMissing) || errors.Is(applyErr, errPulledParentSessionMissing)) && newRetry < deadThreshold {
 			// Still retryable.
 			newStatus = "deferred"
 			result.Failed++
