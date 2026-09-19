@@ -5782,17 +5782,17 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 			Pinned bool   `json:"pinned"`
 		} `json:"observations"`
 		Relations []struct {
-			SyncID                       string  `json:"sync_id"`
-			Reason                       *string `json:"reason"`
-			Evidence                     *string `json:"evidence"`
-			Confidence                   *float64 `json:"confidence"`
-			JudgmentStatus               string  `json:"judgment_status"`
-			MarkedByActor                *string `json:"marked_by_actor"`
-			MarkedByKind                 *string `json:"marked_by_kind"`
-			MarkedByModel                *string `json:"marked_by_model"`
-			SessionID                    *string `json:"session_id"`
-			SupersededAt                 *string `json:"superseded_at"`
-			SupersededByRelationSyncID   *string `json:"superseded_by_relation_sync_id"`
+			SyncID                     string   `json:"sync_id"`
+			Reason                     *string  `json:"reason"`
+			Evidence                   *string  `json:"evidence"`
+			Confidence                 *float64 `json:"confidence"`
+			JudgmentStatus             string   `json:"judgment_status"`
+			MarkedByActor              *string  `json:"marked_by_actor"`
+			MarkedByKind               *string  `json:"marked_by_kind"`
+			MarkedByModel              *string  `json:"marked_by_model"`
+			SessionID                  *string  `json:"session_id"`
+			SupersededAt               *string  `json:"superseded_at"`
+			SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
 		} `json:"relations"`
 	}
 	if err := json.Unmarshal(bytes, &payload); err != nil {
@@ -5818,17 +5818,17 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 		t.Fatalf("backup relations = %+v, want two complete relation records", payload.Relations)
 	}
 	var firstRelation *struct {
-		SyncID                     string  `json:"sync_id"`
-		Reason                     *string `json:"reason"`
-		Evidence                   *string `json:"evidence"`
+		SyncID                     string   `json:"sync_id"`
+		Reason                     *string  `json:"reason"`
+		Evidence                   *string  `json:"evidence"`
 		Confidence                 *float64 `json:"confidence"`
-		JudgmentStatus             string  `json:"judgment_status"`
-		MarkedByActor              *string `json:"marked_by_actor"`
-		MarkedByKind               *string `json:"marked_by_kind"`
-		MarkedByModel              *string `json:"marked_by_model"`
-		SessionID                  *string `json:"session_id"`
-		SupersededAt               *string `json:"superseded_at"`
-		SupersededByRelationSyncID *string `json:"superseded_by_relation_sync_id"`
+		JudgmentStatus             string   `json:"judgment_status"`
+		MarkedByActor              *string  `json:"marked_by_actor"`
+		MarkedByKind               *string  `json:"marked_by_kind"`
+		MarkedByModel              *string  `json:"marked_by_model"`
+		SessionID                  *string  `json:"session_id"`
+		SupersededAt               *string  `json:"superseded_at"`
+		SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
 	}
 	for i := range payload.Relations {
 		if payload.Relations[i].SyncID == "rel-backup-first" {
@@ -16537,4 +16537,636 @@ func TestRuntimeSessionLeaseStaysOutOfSyncAndExportPayloads(t *testing.T) {
 	if strings.Contains(string(exportPayload), "runtime_lease_expires_at") {
 		t.Fatalf("export leaked runtime lease: %s", exportPayload)
 	}
+}
+
+// ─── EndSessionStrict (issue #1247) ──────────────────────────────────────────
+
+func TestEndSessionStrictStatuses(t *testing.T) {
+	t.Run("unknown id reports not_found with no timestamp", func(t *testing.T) {
+		s := newTestStore(t)
+
+		res, err := s.EndSessionStrict("no-such-session", nil)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if res.Status != SessionEndStatusNotFound {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusNotFound)
+		}
+		if res.EndedAt != nil {
+			t.Fatalf("ended_at = %q, want nil for not_found", *res.EndedAt)
+		}
+	})
+
+	t.Run("already ended id reports already_ended and preserves original ended_at and summary", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-sess", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if err := s.EndSession("strict-sess", "original summary"); err != nil {
+			t.Fatalf("end session: %v", err)
+		}
+		// Backdate ended_at so a second end cannot fake preservation by writing
+		// the same wall-clock second.
+		if _, err := s.db.Exec(`UPDATE sessions SET ended_at = '2020-01-02 03:04:05' WHERE id = ?`, "strict-sess"); err != nil {
+			t.Fatalf("backdate ended_at: %v", err)
+		}
+		var mutationsBefore int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-sess").Scan(&mutationsBefore); err != nil {
+			t.Fatalf("count journal before: %v", err)
+		}
+
+		res, err := s.EndSessionStrict("strict-sess", nil)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if res.Status != SessionEndStatusAlreadyEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusAlreadyEnded)
+		}
+		if res.EndedAt == nil || *res.EndedAt != "2020-01-02 03:04:05" {
+			t.Fatalf("result ended_at = %v, want the original 2020-01-02 03:04:05", res.EndedAt)
+		}
+
+		sess, err := s.GetSession("strict-sess")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.EndedAt == nil || *sess.EndedAt != "2020-01-02 03:04:05" {
+			t.Fatalf("ended_at = %v, want preserved 2020-01-02 03:04:05", sess.EndedAt)
+		}
+		if sess.Summary == nil || *sess.Summary != "original summary" {
+			t.Fatalf("summary = %v, want preserved \"original summary\"", sess.Summary)
+		}
+
+		var mutationsAfter int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-sess").Scan(&mutationsAfter); err != nil {
+			t.Fatalf("count journal after: %v", err)
+		}
+		if mutationsAfter != mutationsBefore {
+			t.Fatalf("already_ended journal entries %d -> %d, want unchanged", mutationsBefore, mutationsAfter)
+		}
+	})
+
+	t.Run("already ended id ignores a new summary", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("strict-sess2", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if _, err := s.EndSessionStrict("strict-sess2", nil); err != nil {
+			t.Fatalf("end session: %v", err)
+		}
+		replacement := "replacement summary"
+		res, err := s.EndSessionStrict("strict-sess2", &replacement)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if res.Status != SessionEndStatusAlreadyEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusAlreadyEnded)
+		}
+		sess, err := s.GetSession("strict-sess2")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.Summary != nil {
+			t.Fatalf("summary = %q, want still NULL", *sess.Summary)
+		}
+	})
+
+	t.Run("fresh id reports ended and journals the mutation", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-fresh", "proj", "/tmp/fresh"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+
+		summary := "wrapped up"
+		res, err := s.EndSessionStrict("strict-fresh", &summary)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if res.Status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusEnded)
+		}
+
+		sess, err := s.GetSession("strict-fresh")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.EndedAt == nil || *sess.EndedAt == "" {
+			t.Fatalf("expected ended_at to be set, got %+v", sess.EndedAt)
+		}
+		if res.EndedAt == nil || *res.EndedAt != *sess.EndedAt {
+			t.Fatalf("result ended_at = %v, want the just-written %v", res.EndedAt, sess.EndedAt)
+		}
+		if sess.Summary == nil || *sess.Summary != "wrapped up" {
+			t.Fatalf("summary = %v, want \"wrapped up\"", sess.Summary)
+		}
+
+		var journal int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`,
+			SyncEntitySession, "strict-fresh",
+		).Scan(&journal); err != nil {
+			t.Fatalf("count journal: %v", err)
+		}
+		if journal != 1 {
+			t.Fatalf("pending session journal entries = %d, want 1", journal)
+		}
+	})
+
+	t.Run("blank id is rejected without store access", func(t *testing.T) {
+		s := newTestStore(t)
+
+		if _, err := s.EndSessionStrict("   ", nil); !errors.Is(err, ErrSessionIDRequired) {
+			t.Fatalf("error = %v, want ErrSessionIDRequired", err)
+		}
+	})
+}
+
+// TestEndSessionStrictSummaryNeverClobbers pins the fill-only summary
+// semantics: the supplied summary fills an empty one, and an already-recorded
+// summary wins (COALESCE(summary, ?) ordering), so ending with a summary can
+// never erase what an earlier phase recorded.
+func TestEndSessionStrictSummaryNeverClobbers(t *testing.T) {
+	t.Run("existing summary wins over the supplied one", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-keep", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if _, err := s.db.Exec(`UPDATE sessions SET summary = ? WHERE id = ?`, "earlier note", "strict-keep"); err != nil {
+			t.Fatalf("seed existing summary: %v", err)
+		}
+
+		replacement := "replacement summary"
+		res, err := s.EndSessionStrict("strict-keep", &replacement)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if res.Status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusEnded)
+		}
+
+		sess, err := s.GetSession("strict-keep")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.EndedAt == nil || *sess.EndedAt == "" {
+			t.Fatalf("expected the session to still be ended, got ended_at %+v", sess.EndedAt)
+		}
+		if sess.Summary == nil || *sess.Summary != "earlier note" {
+			t.Fatalf("summary = %v, want preserved \"earlier note\"", sess.Summary)
+		}
+	})
+
+	t.Run("supplied summary fills an empty summary", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-fill", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+
+		summary := "wrapped up"
+		res, err := s.EndSessionStrict("strict-fill", &summary)
+		if err != nil {
+			t.Fatalf("EndSessionStrict: %v", err)
+		}
+		if res.Status != SessionEndStatusEnded {
+			t.Fatalf("status = %q, want %q", res.Status, SessionEndStatusEnded)
+		}
+
+		sess, err := s.GetSession("strict-fill")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.Summary == nil || *sess.Summary != "wrapped up" {
+			t.Fatalf("summary = %v, want \"wrapped up\"", sess.Summary)
+		}
+	})
+}
+
+// TestSessionEndJournalFailureRollsBack pins the atomicity contract shared by
+// the strict and bulk end paths: a failed sync_mutations journal insert must
+// abort the whole transaction, so a cloud mirror can never observe a half-
+// applied end (a session still open locally but already ended upstream, or an
+// end mutation without its session row).
+func TestSessionEndJournalFailureRollsBack(t *testing.T) {
+	t.Run("EndSessionStrict leaves the session open", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		if err := s.CreateSession("strict-rollback", "proj", "/tmp/strict"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		var journalBefore int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-rollback").Scan(&journalBefore); err != nil {
+			t.Fatalf("count journal before: %v", err)
+		}
+
+		originalExec := s.hooks.exec
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "INSERT INTO sync_mutations") {
+				return nil, errors.New("journal unavailable")
+			}
+			return originalExec(db, query, args...)
+		}
+		t.Cleanup(func() { s.hooks.exec = originalExec })
+
+		if _, err := s.EndSessionStrict("strict-rollback", nil); err == nil {
+			t.Fatal("expected the journal failure to fail the end")
+		}
+
+		sess, err := s.GetSession("strict-rollback")
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if sess.EndedAt != nil {
+			t.Fatalf("ended_at = %v, want NULL after the rollback", *sess.EndedAt)
+		}
+		var journalAfter int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-rollback").Scan(&journalAfter); err != nil {
+			t.Fatalf("count journal after: %v", err)
+		}
+		if journalAfter != journalBefore {
+			t.Fatalf("journal rows %d -> %d, want unchanged (no end mutation survived)", journalBefore, journalAfter)
+		}
+	})
+
+	t.Run("EndSessionsBulk rolls back the whole batch after an earlier session updated", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+		seedOpenSession(t, s, "bulk-rb-a", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		seedOpenSession(t, s, "bulk-rb-b", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		var journalBefore int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key IN (?, ?)`, SyncEntitySession, "bulk-rb-a", "bulk-rb-b").Scan(&journalBefore); err != nil {
+			t.Fatalf("count journal before: %v", err)
+		}
+
+		originalExec := s.hooks.exec
+		syncInserts := 0
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "INSERT INTO sync_mutations") {
+				syncInserts++
+				// Selection order is by ID, so the second journal insert belongs
+				// to bulk-rb-b and fires only after bulk-rb-a already updated.
+				if syncInserts == 2 {
+					return nil, errors.New("journal unavailable")
+				}
+			}
+			return originalExec(db, query, args...)
+		}
+		t.Cleanup(func() { s.hooks.exec = originalExec })
+
+		if _, err := s.EndSessionsBulk(now, 30*24*time.Hour, ""); err == nil {
+			t.Fatal("expected the mid-batch journal failure to fail the whole batch")
+		}
+		if syncInserts != 2 {
+			t.Fatalf("sync_mutations inserts attempted = %d, want 2 (first ended, second failed)", syncInserts)
+		}
+
+		for _, id := range []string{"bulk-rb-a", "bulk-rb-b"} {
+			sess, err := s.GetSession(id)
+			if err != nil {
+				t.Fatalf("get %s: %v", id, err)
+			}
+			if sess.EndedAt != nil {
+				t.Fatalf("%s: ended_at = %v, want NULL after the whole-batch rollback", id, *sess.EndedAt)
+			}
+		}
+		var journalAfter int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key IN (?, ?)`, SyncEntitySession, "bulk-rb-a", "bulk-rb-b").Scan(&journalAfter); err != nil {
+			t.Fatalf("count journal after: %v", err)
+		}
+		if journalAfter != journalBefore {
+			t.Fatalf("journal rows %d -> %d, want unchanged (no end mutation survived)", journalBefore, journalAfter)
+		}
+	})
+}
+
+// ─── Stale open sessions: bulk selection and end (issue #1247) ───────────────
+
+// sqliteSeedTime formats a wall-clock instant the way datetime('now') stores
+// timestamps, so seeded rows compare naturally against store queries.
+func sqliteSeedTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// seedOpenSession creates an open session and backdates its started_at.
+func seedOpenSession(t *testing.T, s *Store, id, project, directory, startedAt string) {
+	t.Helper()
+	if err := s.CreateSession(id, project, directory); err != nil {
+		t.Fatalf("create session %s: %v", id, err)
+	}
+	ageSession(t, s, id, startedAt)
+}
+
+func TestStaleOpenSessionsSelection(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	cutoff := 30 * 24 * time.Hour
+
+	t.Run("selects only open sessions past the last-activity age", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-stale", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		// Old start but recent observation: the COALESCE proxy keeps it fresh.
+		seedOpenSession(t, s, "sess-recent-obs", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		obsID, err := s.AddObservation(AddObservationParams{SessionID: "sess-recent-obs", Type: "note", Title: "t", Content: "c", Project: "proj"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		ageObservation(t, s, obsID, sqliteSeedTime(now.Add(-time.Hour)))
+		seedOpenSession(t, s, "sess-fresh", "proj", "/work", sqliteSeedTime(now.Add(-time.Hour)))
+		// Ended session: never selected, however old.
+		seedOpenSession(t, s, "sess-ended", "proj", "/work", sqliteSeedTime(now.Add(-90*24*time.Hour)))
+		if err := s.EndSession("sess-ended", ""); err != nil {
+			t.Fatalf("end session: %v", err)
+		}
+
+		stale, err := s.StaleOpenSessions(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 1 || stale[0].ID != "sess-stale" {
+			t.Fatalf("stale = %#v, want only sess-stale", stale)
+		}
+		if stale[0].Project != "proj" || stale[0].Directory != "/work" {
+			t.Fatalf("stale row = %#v, want seeded project and directory", stale[0])
+		}
+		if stale[0].LastActivity != stale[0].StartedAt {
+			t.Fatalf("last activity = %q, want fallback to started_at %q", stale[0].LastActivity, stale[0].StartedAt)
+		}
+	})
+
+	t.Run("session with observations reports the newest observation as last activity", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-obs", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		obsID, err := s.AddObservation(AddObservationParams{SessionID: "sess-obs", Type: "note", Title: "t", Content: "c", Project: "proj"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		// The observation is old enough to keep the session stale, but newer
+		// than started_at, so it wins the COALESCE proxy.
+		obsTime := sqliteSeedTime(now.Add(-35 * 24 * time.Hour))
+		ageObservation(t, s, obsID, obsTime)
+
+		stale, err := s.StaleOpenSessions(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 1 || stale[0].LastActivity != obsTime {
+			t.Fatalf("stale = %#v, want last activity %q", stale, obsTime)
+		}
+	})
+
+	t.Run("selects sessions whose newest observation is RFC3339-formatted", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-rfc3339", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		obsID, err := s.AddObservation(AddObservationParams{SessionID: "sess-rfc3339", Type: "note", Title: "t", Content: "c", Project: "proj"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		// Imported observations may carry RFC3339 timestamps: the raw 'T' sorts
+		// above the space-format cutoff, so only datetime() normalization lets
+		// this same-day observation keep the session stale.
+		ageObservation(t, s, obsID, "2026-09-18T05:00:00Z")
+
+		stale, err := s.StaleOpenSessions(now, time.Hour, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 1 || stale[0].ID != "sess-rfc3339" {
+			t.Fatalf("stale = %#v, want only sess-rfc3339", stale)
+		}
+		if stale[0].LastActivity != "2026-09-18 05:00:00" {
+			t.Fatalf("last activity = %q, want datetime-normalized %q", stale[0].LastActivity, "2026-09-18 05:00:00")
+		}
+	})
+
+	t.Run("boundary session exactly at the cutoff is not stale", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-boundary", "proj", "/work", sqliteSeedTime(now.Add(-cutoff)))
+
+		stale, err := s.StaleOpenSessions(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 0 {
+			t.Fatalf("stale = %#v, want none at the exact cutoff", stale)
+		}
+	})
+
+	t.Run("project filter matches case-insensitively", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-mixed", "engram", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		// Raw update plants a non-normalized project name like legacy databases carry.
+		if _, err := s.db.Exec(`UPDATE sessions SET project = 'Engram' WHERE id = ?`, "sess-mixed"); err != nil {
+			t.Fatalf("seed mixed-case project: %v", err)
+		}
+
+		stale, err := s.StaleOpenSessions(now, cutoff, "ENGRAM")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 1 || stale[0].ID != "sess-mixed" {
+			t.Fatalf("stale = %#v, want sess-mixed via case-insensitive project match", stale)
+		}
+	})
+
+	t.Run("NULL and blank project rows never match a project filter", func(t *testing.T) {
+		s := newTestStoreWithNullableLegacySessions(t,
+			legacyNullProjectSession{"sess-null-proj", "<NULL>"},
+			legacyNullProjectSession{"sess-blank-proj", "  "},
+		)
+		ageSession(t, s, "sess-null-proj", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		ageSession(t, s, "sess-blank-proj", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+
+		filtered, err := s.StaleOpenSessions(now, cutoff, "proj")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions filtered: %v", err)
+		}
+		if len(filtered) != 0 {
+			t.Fatalf("filtered stale = %#v, want no NULL/blank project matches", filtered)
+		}
+
+		unfiltered, err := s.StaleOpenSessions(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions unfiltered: %v", err)
+		}
+		if len(unfiltered) != 2 {
+			t.Fatalf("unfiltered stale = %#v, want both rows", unfiltered)
+		}
+		for _, sess := range unfiltered {
+			if sess.Project != "" && sess.Project != "  " {
+				t.Fatalf("row project = %q, want raw or empty project value", sess.Project)
+			}
+		}
+	})
+
+	t.Run("returns rows in id order", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "sess-b", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		seedOpenSession(t, s, "sess-a", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+
+		stale, err := s.StaleOpenSessions(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("StaleOpenSessions: %v", err)
+		}
+		if len(stale) != 2 || stale[0].ID != "sess-a" || stale[1].ID != "sess-b" {
+			t.Fatalf("stale = %#v, want [sess-a sess-b] in selection order", stale)
+		}
+	})
+}
+
+func TestEndSessionsBulk(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	cutoff := 30 * 24 * time.Hour
+
+	t.Run("ends every stale open session in one pass", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj-a")
+		enrollTestProject(t, s, "proj-b")
+		seedOpenSession(t, s, "bulk-stale-b", "proj-b", "/work-b", sqliteSeedTime(now.Add(-60*24*time.Hour)))
+		seedOpenSession(t, s, "bulk-stale-a", "proj-a", "/work-a", sqliteSeedTime(now.Add(-40*24*time.Hour)))
+		seedOpenSession(t, s, "bulk-fresh", "proj-a", "/work-a", sqliteSeedTime(now.Add(-time.Hour)))
+
+		ended, err := s.EndSessionsBulk(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("EndSessionsBulk: %v", err)
+		}
+		if len(ended) != 2 || ended[0] != "bulk-stale-a" || ended[1] != "bulk-stale-b" {
+			t.Fatalf("ended = %#v, want [bulk-stale-a bulk-stale-b] in selection order", ended)
+		}
+
+		for _, id := range ended {
+			sess, err := s.GetSession(id)
+			if err != nil {
+				t.Fatalf("get %s: %v", id, err)
+			}
+			if sess.EndedAt == nil || *sess.EndedAt == "" {
+				t.Fatalf("%s: expected ended_at to be set", id)
+			}
+			if sess.Summary != nil {
+				t.Fatalf("%s: summary = %q, want untouched NULL", id, *sess.Summary)
+			}
+			// One pending upsert per ended session, carrying the new ended_at.
+			// The journal dedups by replacing the pending create upsert, so the
+			// total-count delta is the wrong measure.
+			var pending int
+			if err := s.db.QueryRow(
+				`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND json_extract(payload, '$.ended_at') IS NOT NULL`,
+				SyncEntitySession, id,
+			).Scan(&pending); err != nil {
+				t.Fatalf("count end journal for %s: %v", id, err)
+			}
+			if pending != 1 {
+				t.Fatalf("pending end journal entries for %s = %d, want 1", id, pending)
+			}
+		}
+		fresh, err := s.GetSession("bulk-fresh")
+		if err != nil {
+			t.Fatalf("get fresh: %v", err)
+		}
+		if fresh.EndedAt != nil {
+			t.Fatalf("fresh session ended_at = %v, want NULL", *fresh.EndedAt)
+		}
+	})
+
+	t.Run("project filter ends only the matching project", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "filter-stale", "proj-a", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		seedOpenSession(t, s, "filter-other", "proj-b", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+
+		ended, err := s.EndSessionsBulk(now, cutoff, "PROJ-A")
+		if err != nil {
+			t.Fatalf("EndSessionsBulk: %v", err)
+		}
+		if len(ended) != 1 || ended[0] != "filter-stale" {
+			t.Fatalf("ended = %#v, want only filter-stale", ended)
+		}
+		other, err := s.GetSession("filter-other")
+		if err != nil {
+			t.Fatalf("get other: %v", err)
+		}
+		if other.EndedAt != nil {
+			t.Fatalf("other project session ended_at = %v, want NULL", *other.EndedAt)
+		}
+	})
+
+	t.Run("ends sessions whose newest observation is RFC3339-formatted", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		seedOpenSession(t, s, "bulk-rfc3339", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+		obsID, err := s.AddObservation(AddObservationParams{SessionID: "bulk-rfc3339", Type: "note", Title: "t", Content: "c", Project: "proj"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		// Same-day RFC3339 observation before the cutoff: raw string comparison
+		// would keep the session fresh, datetime() normalization ends it.
+		ageObservation(t, s, obsID, "2026-09-18T05:00:00Z")
+
+		ended, err := s.EndSessionsBulk(now, time.Hour, "")
+		if err != nil {
+			t.Fatalf("EndSessionsBulk: %v", err)
+		}
+		if len(ended) != 1 || ended[0] != "bulk-rfc3339" {
+			t.Fatalf("ended = %#v, want only bulk-rfc3339", ended)
+		}
+		sess, err := s.GetSession("bulk-rfc3339")
+		if err != nil {
+			t.Fatalf("get bulk-rfc3339: %v", err)
+		}
+		if sess.EndedAt == nil || *sess.EndedAt == "" {
+			t.Fatalf("bulk-rfc3339: expected ended_at to be set")
+		}
+	})
+
+	t.Run("rejects non-positive staleness windows", func(t *testing.T) {
+		s := newTestStore(t)
+		enrollTestProject(t, s, "proj")
+		seedOpenSession(t, s, "bulk-guard", "proj", "/work", sqliteSeedTime(now.Add(-45*24*time.Hour)))
+
+		for _, olderThan := range []time.Duration{0, -time.Hour} {
+			ended, err := s.EndSessionsBulk(now, olderThan, "")
+			if !errors.Is(err, ErrInvalidStalenessWindow) {
+				t.Fatalf("EndSessionsBulk(olderThan=%v) error = %v, want ErrInvalidStalenessWindow", olderThan, err)
+			}
+			if len(ended) != 0 {
+				t.Fatalf("ended = %#v, want none", ended)
+			}
+		}
+
+		sess, err := s.GetSession("bulk-guard")
+		if err != nil {
+			t.Fatalf("get bulk-guard: %v", err)
+		}
+		if sess.EndedAt != nil {
+			t.Fatalf("bulk-guard ended_at = %v, want NULL", *sess.EndedAt)
+		}
+		// One pending end journal per ended session is the regression signal;
+		// the guard must leave the create upsert untouched. The journal dedups
+		// by replacing the pending create upsert, so the total-count delta is
+		// the wrong measure.
+		var mutations int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND json_extract(payload, '$.ended_at') IS NOT NULL`,
+			SyncEntitySession, "bulk-guard",
+		).Scan(&mutations); err != nil {
+			t.Fatalf("count sync mutations: %v", err)
+		}
+		if mutations != 0 {
+			t.Fatalf("sync_mutations rows for bulk-guard = %d, want 0", mutations)
+		}
+	})
+
+	t.Run("nothing stale ends nothing", func(t *testing.T) {
+		s := newTestStore(t)
+		seedOpenSession(t, s, "only-fresh", "proj", "/work", sqliteSeedTime(now.Add(-time.Hour)))
+
+		ended, err := s.EndSessionsBulk(now, cutoff, "")
+		if err != nil {
+			t.Fatalf("EndSessionsBulk: %v", err)
+		}
+		if len(ended) != 0 {
+			t.Fatalf("ended = %#v, want none", ended)
+		}
+	})
 }

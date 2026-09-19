@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
 	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
@@ -22,6 +23,7 @@ const (
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
+	CheckStaleOpenSessions                = "stale_open_sessions"
 )
 
 // ReasonQuarantinedPulledSessionIdentity marks a finding of
@@ -43,6 +45,7 @@ type OrphanedObservationSessionCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 type AmbiguousActiveRuntimeSessionsCheck struct{}
+type StaleOpenSessionsCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -58,6 +61,9 @@ func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessio
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
 	return CheckAmbiguousActiveRuntimeSessions
+}
+func (StaleOpenSessionsCheck) Code() string {
+	return CheckStaleOpenSessions
 }
 
 func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
@@ -130,6 +136,65 @@ func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scop
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"projects_evaluated": len(projects)}, findings), nil
+}
+
+// staleOpenSessionsThreshold is the fixed staleness window for the
+// stale_open_sessions doctor check: an open session with no effective activity
+// for more than 30 days is very likely a dead process row.
+const (
+	staleOpenSessionsThreshold     = 30 * 24 * time.Hour
+	staleOpenSessionsThresholdDays = 30
+)
+
+// StaleOpenSessionsCheck reports open sessions whose effective last activity
+// (the newest observation, falling back to started_at) is older than the
+// threshold. It is strictly read-only: doctor surfaces the evidence and points
+// at the session end CLI, but never mutates sessions. The store query inherits
+// scope.Project so a project-scoped doctor run reports only that project's
+// stale sessions instead of every project's; an unscoped run keeps the empty
+// filter and sees them all.
+func (c StaleOpenSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	stale, err := scope.Store.StaleOpenSessions(scope.Now, staleOpenSessionsThreshold, scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	if len(stale) == 0 {
+		return resultFromFindings(c.Code(), map[string]any{"stale_count": 0, "threshold_days": staleOpenSessionsThresholdDays}, nil), nil
+	}
+
+	byProject := make(map[string]int)
+	oldest, newestStale := stale[0].LastActivity, stale[0].LastActivity
+	for _, sess := range stale {
+		byProject[sess.Project]++
+		// Timestamps share the datetime('now') format, so lexicographic
+		// comparison is chronological comparison.
+		if sess.LastActivity < oldest {
+			oldest = sess.LastActivity
+		}
+		if sess.LastActivity > newestStale {
+			newestStale = sess.LastActivity
+		}
+	}
+
+	evidence := map[string]any{
+		"stale_count":    len(stale),
+		"by_project":     byProject,
+		"oldest":         oldest,
+		"newest_stale":   newestStale,
+		"threshold_days": staleOpenSessionsThresholdDays,
+	}
+	findings := []Finding{{
+		CheckID:              c.Code(),
+		Severity:             SeverityWarning,
+		ReasonCode:           c.Code(),
+		Message:              fmt.Sprintf("%d open session(s) have had no recorded activity for more than %d days.", len(stale), staleOpenSessionsThresholdDays),
+		Why:                  "Sessions carry no heartbeat, so last recorded activity is the liveness proxy; long-idle open rows accumulate forever and skew session resolution for their projects.",
+		Evidence:             mustJSON(evidence),
+		SafeNextStep:         "review with `engram session end --by-age 720h --project <name>` (dry-run by default) and add --apply when appropriate",
+		RequiresConfirmation: true,
+	}}
+	return resultFromFindings(c.Code(), evidence, findings), nil
 }
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
