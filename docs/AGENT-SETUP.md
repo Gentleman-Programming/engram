@@ -86,7 +86,7 @@ ENGRAM_URL=http://127.0.0.1:7437 pi
 
 ### Local server ownership
 
-Loopback reachability is not an ownership boundary. Engram stores an opaque identity in each local data directory and default-managed Claude Code, Codex, Pi, and OpenCode startups only adopt a matching local server. A different or older local server without that identity is reported instead of silently sharing memory. Set an explicit `ENGRAM_URL` to opt into an external server, or use `ENGRAM_PORT` or `ENGRAM_SOCKET` to isolate local servers.
+Loopback reachability is not an ownership boundary. Engram stores an opaque identity in each local data directory and default-managed Claude Code, Codex, Pi, and OpenCode startups only adopt a matching local server. A different or older local server without that identity is reported instead of silently sharing memory, and the report distinguishes the two cases: a server answering without an identity predates this check and is named as outdated together with the version it reports and the restart command for its supervisor, while a server answering with a different identity is a genuine second instance to isolate with `ENGRAM_URL` or `ENGRAM_PORT`. Set an explicit `ENGRAM_URL` to opt into an external server, or use `ENGRAM_PORT` or `ENGRAM_SOCKET` to isolate local servers.
 
 Use a custom Engram binary for MCP tools and local auto-start:
 

@@ -128,7 +128,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
+- Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "2.0.0", "instance_id": "<32 hex chars>"}`. Once the server has compared its own build against the installed binary it also reports `binary_stale` (boolean) and `binary_version_on_disk` (string); both fields are omitted until that comparison has a result.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
@@ -526,6 +526,9 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
 | `ENGRAM_NO_UPDATE_CHECK`        | Set to `1` to disable GitHub release update checks for every caller, including the TUI. `true`, `yes`, and `on` are also accepted.                                                                                                                       | (unset — eligible commands check for updates) |
+| `ENGRAM_BIN`                   | Absolute path to the Engram binary. `engram serve` compares its own build against this binary, and the Pi extension uses it for local auto-start. A relative value is ignored and `engram` is resolved from `PATH` instead. | (unset — `engram` resolved from `PATH`) |
+| `ENGRAM_RESTART_ON_UPGRADE`     | Controls the self-restart of `engram serve` after its binary is replaced: `1`, `true` or `on` forces it even when no supervisor is detected, `0`, `false` or `off` disables it so the finding is only logged. | (unset — supervision is detected) |
+| `ENGRAM_SELFCHECK_INTERVAL`     | Go duration between background binary checks in `engram serve` (for example `30s`, `10m`). `0` disables the periodic check while the startup check still runs; an invalid value falls back to `5m`. | `5m` |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
 | `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `engram sync --cloud`.                                                                                                                                                                                  | (unset)              |
 | `ENGRAM_DATABASE_URL`           | Postgres DSN for `engram cloud serve`.                                                                                                                                                                                                                    | (unset)              |
@@ -1384,7 +1387,7 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 ## Running as a Service
 
-Without a service supervisor, `engram serve` dies whenever the binary is replaced (e.g. on `brew upgrade engram`) or the host reboots, and autosync stops silently. The templates below restart it automatically. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
+Without a service supervisor, `engram serve` is started once and then left alone: it keeps running the build it was started from even after `brew upgrade engram` replaces that file, and it stops for good when the host reboots. Autosync then either runs an old build silently or stops silently. The templates below restart it automatically. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
 
 ### Using systemd (Linux)
 
@@ -1414,7 +1417,7 @@ WantedBy=default.target
 
 ### Using launchd (macOS)
 
-This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` automatically after `brew upgrade engram` replaces the binary, so autosync survives upgrades.
+This is the recommended setup for Homebrew users on macOS. `KeepAlive=true` relaunches `engram serve` whenever the process exits, which is what makes the service survive a crash or a reboot. It cannot by itself survive `brew upgrade engram`: replacing the file leaves the already-running process untouched, and launchd only relaunches a job that has already exited. `engram serve` closes that gap itself — see [Upgrading a running server](#upgrading-a-running-server).
 
 1. Find your binary path: `which engram` (typically `/opt/homebrew/bin/engram` on Apple Silicon or `/usr/local/bin/engram` on Intel)
 2. Create the data dir if missing: `mkdir -p ~/.engram`
@@ -1464,6 +1467,19 @@ This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`
 To unload (stop and disable): `launchctl unload ~/Library/LaunchAgents/com.gentleman-programming.engram.plist`. To reload after editing the plist: unload, then load again.
 
 > **Note on `brew upgrade`:** launchd does not expand `$HOME` or `~` inside plist values, which is why the template uses literal absolute paths.
+
+### Upgrading a running server
+
+Replacing the binary does not restart a process that is already running: it keeps executing the old build, and a supervisor only relaunches a job that has exited. `engram serve` therefore compares its own build version against the installed binary (`$ENGRAM_BIN` when set, otherwise `engram` on `PATH`) and acts on the result:
+
+| Situation | Behaviour |
+| --- | --- |
+| A different version is installed, our own executable file is gone or is that same file, and a supervisor is detected (launchd, or systemd with its own process evidence) | logs both versions and exits `75`, so the supervisor starts the installed binary |
+| A different version is installed, but it is a different installation (for example `PATH` points at a second checkout) | logs the finding and keeps serving: exiting would relaunch the same old binary |
+| The version cannot be determined, or the running build is a `dev` build | logs the finding and keeps serving |
+| No supervisor is detected | logs the finding and keeps serving |
+
+The startup check runs before the listener binds, and a background check repeats every `ENGRAM_SELFCHECK_INTERVAL` (default `5m`), so a server that becomes stale while it runs also converges. `ENGRAM_RESTART_ON_UPGRADE=1` forces the restart path on a supervisor this detection does not recognise, and `ENGRAM_RESTART_ON_UPGRADE=0` disables it entirely. `GET /health` reports the outcome as `binary_stale` and `binary_version_on_disk`.
 
 ### Using Windows Task Scheduler
 

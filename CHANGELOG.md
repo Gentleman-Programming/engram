@@ -21,6 +21,10 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Server lifecycle
+
+- **feat(serve):** a supervised `engram serve` now notices that the binary it was started from was replaced and exits `75` so the supervisor starts the installed build. `brew upgrade` never restarts services, and a supervisor cannot relaunch a process that never exits, so the documented launchd and systemd templates never actually survived an upgrade: the daemon kept serving the previous release until a reboot. The comparison is conservative on purpose — when the installed binary is a different installation rather than a replacement of our own file, when the version cannot be determined, when the running build is a `dev` build, or when no supervisor is detected, the finding is logged and the server keeps serving, so a restart loop is impossible. `GET /health` gains the additive `binary_stale` and `binary_version_on_disk` fields, and a port owned by our own instance id running a different version now warns instead of staying silent.
+
 ### Memory core
 
 - **fix(project):** make project-scoped reads consistent across CLI and local HTTP. Omitted selectors now resolve the canonical current project; use `--all` or `all_projects=true` for an intentional global read. Search, timeline, stats, export, Obsidian export, conflict inspection, recent lists, review, prompts, and sync status now validate explicit selectors through the shared resolver. Sync status rejects `all_projects=true` because it has no aggregate provider. This is a compatibility change for callers that relied on omitted reads being global.
@@ -55,6 +59,8 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 - **fix(cloud):** dashboard login/bootstrap audit events no longer send the legacy admin/sync principal's synthetic ID (e.g. `legacy:admin`) as `ActorPrincipalID`, which the real Postgres-backed audit table rejects (a non-numeric value against a `BIGINT` foreign key); this previously would have made every legacy admin dashboard login fail with a 500 once an admin identity store was configured.
 
 ### Pi package (`pi-engram`)
+
+- **fix(pi):** name an outdated local server instead of reporting it as a foreign one. A daemon still running the previous release answers `/health` without `instance_id`, which the plugin collapsed into the same `foreign` state as a genuinely different instance and reported as an ownership mismatch whose only advice was `mem_doctor` — a diagnostic that routes through this same startup path and returns the identical error. An answer without a usable identity is now `outdated`, reported with the version the server gives and the restart command for its supervisor (launchd, systemd user, or a manual restart), while `foreign` keeps its meaning for a real mismatch. A release skew on an otherwise healthy server warns once and never blocks, and a failure the plugin diagnosed itself no longer receives the generic `mem_doctor` advice.
 
 - **fix(plugin):** declare `@earendil-works/pi-tui` as an optional peer dependency instead of a hard `^0.74.0` dependency. The extension only renders `Text` from it while running inside pi, which always ships its own copy; the hard dependency gave npm a legal reason to hoist a `0.74.x` over the `^0.84.x` range declared by the installed pi-coding-agent and crash every pi child spawn with `SyntaxError: ... does not provide an export named 'TuiMainScreen'`. With the peer declaration the host's copy wins, npm never auto-installs a second pi-tui, and the range `>=0.74.0` accepts both pi-tui lines the plugin is verified against ([#853](https://github.com/Gentleman-Programming/engram/issues/853)).
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.
