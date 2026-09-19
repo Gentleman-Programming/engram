@@ -40,6 +40,16 @@ engram sync --cloud --project smoke-project
 engram sync --cloud --status --project smoke-project
 ```
 
+### 4b) Pull cloud mutations on demand
+
+`engram sync` moves project chunks. Fine-grained cloud mutations (observations, prompts, session updates) normally flow through the background autosync worker (`ENGRAM_CLOUD_AUTOSYNC=1`). When autosync is off, or you want an explicit, on-demand pull right now, use:
+
+```bash
+engram cloud pull-mutations
+```
+
+The command pulls since the local cursor, applies each mutation, advances `last_pulled_seq`, and replays deferred relations. It is an explicit operator action that never changes the automatic sync policy. Output lists how many mutations were pulled and from which projects; `No new cloud mutations to pull.` means the store is already current.
+
 ### 5) Verify browser dashboard
 
 Open:
