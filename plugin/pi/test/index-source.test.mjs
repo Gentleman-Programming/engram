@@ -354,7 +354,7 @@ function buildEnsureSessionForTest(engramFetch) {
     .replace("const body: SessionBody", "const body")
     .replace("let acknowledgement: unknown;", "let acknowledgement;");
   const factory = new Function("knownSessions", "registeredSessionProjects", "sessionRegistrationsInFlight", "sessionRegistrationProjects", "sessionProjectConflict", "sessionProjectConflictFromResponse", "engramFetch", "project", "directory", `
-    return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch) {
+    return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch, renew = false) {
       ${body}
     };
   `);
@@ -413,7 +413,7 @@ function sessionCtx(id, sink) {
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch, true\)[\s\S]*project: activeProject/);
 });
 
 test("mem_save_prompt returns a prompt-scoped identity", () => {
@@ -1335,6 +1335,30 @@ test("session registration requires acknowledgement and failed acknowledgement r
   assert.equal(calls, 2);
 });
 
+test("renewal bypasses the acknowledged session short-circuit while coalescing in-flight work", async () => {
+  let releaseRenewal;
+  const renewal = new Promise((resolve) => { releaseRenewal = resolve; });
+  let calls = 0;
+  const { ensureSession, knownSessions } = buildEnsureSessionForTest(async () => {
+    calls += 1;
+    if (calls === 2) await renewal;
+    return { status: "created" };
+  });
+
+  await ensureSession("runtime");
+  assert.equal(knownSessions.has("engram:runtime"), true, "initial registration stays cached for identity ownership");
+
+  const firstRenewal = ensureSession("runtime", "engram", undefined, true);
+  await Promise.resolve();
+  const secondRenewal = ensureSession("runtime", "engram", undefined, true);
+  assert.equal(calls, 2, "parallel renewal requests share one POST /sessions");
+
+  releaseRenewal();
+  await Promise.all([firstRenewal, secondRenewal]);
+  await ensureSession("runtime", "engram", undefined, true);
+  assert.equal(calls, 3, "a later activity renews the cached runtime session");
+});
+
 test("session compaction strictly registers before forwarding its summary", () => {
   const compactStart = source.indexOf('pi.on("session_compact"');
   const compactEnd = source.indexOf('\n  pi.on("before_agent_start"', compactStart);
@@ -1342,7 +1366,7 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(compactEnd, -1, "session_compact handler end not found");
   const compactHandler = source.slice(compactStart, compactEnd);
 
-  const registration = compactHandler.indexOf("await ensureSession(sessionId);");
+  const registration = compactHandler.indexOf("await ensureSession(sessionId, project, engramFetch, true);");
   const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(sessionId, summary);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");

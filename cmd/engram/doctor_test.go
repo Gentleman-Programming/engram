@@ -155,7 +155,6 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 		{name: "multiple sync mutation modes", args: []string{"engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--dry-run", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "missing project", args: []string{"engram", "doctor", "repair", "--check", "session_project_directory_mismatch", "--plan"}, want: "--project is required"},
 		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "not_real", "--plan"}, want: "unsupported repair check"},
-		{name: "orphaned observation session is report only", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "orphaned_observation_session", "--apply"}, want: "orphaned_observation_session is a diagnostic-only check with no repair"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,6 +179,17 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	cfg := testConfig(t)
 	repairable := diagnostic.RepairableCodes()
 	registered := diagnostic.RegisteredCodes()
+	repairableSet := make(map[string]bool, len(repairable))
+	for _, code := range repairable {
+		repairableSet[code] = true
+	}
+	diagnosticOnly := make([]string, 0, len(registered)-len(repairable))
+	for _, code := range registered {
+		if !repairableSet[code] {
+			diagnosticOnly = append(diagnosticOnly, code)
+		}
+	}
+	wantDiagnosticOnly := "diagnostic-only checks with no repair: " + strings.Join(diagnosticOnly, ", ")
 
 	withArgs(t, "engram", "doctor", "--help")
 	usage, usageErr := captureOutput(t, func() { cmdDoctor(cfg) })
@@ -188,6 +198,9 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	}
 	if !strings.Contains(usage, "checks: "+strings.Join(registered, ", ")) {
 		t.Fatalf("usage lost registered checks: %q", usage)
+	}
+	if !strings.Contains(usage, wantDiagnosticOnly) {
+		t.Fatalf("usage diagnostic-only checks=%q want %q", usage, wantDiagnosticOnly)
 	}
 
 	withArgs(t, "engram", "doctor", "repair", "--help")
@@ -198,10 +211,11 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 	if !strings.Contains(repairUsage, "repairable checks: "+strings.Join(repairable, ", ")) {
 		t.Fatalf("repair usage repairable checks=%q", repairUsage)
 	}
+	if !strings.Contains(repairUsage, wantDiagnosticOnly) {
+		t.Fatalf("repair usage diagnostic-only checks=%q want %q", repairUsage, wantDiagnosticOnly)
+	}
 
-	repairableSet := make(map[string]bool, len(repairable))
 	for _, code := range repairable {
-		repairableSet[code] = true
 		args := []string{"engram", "doctor", "repair", "--check", code, "--plan"}
 		if code != diagnostic.CheckSyncMutationRequiredFields {
 			args = append(args, "--project", "engram")
@@ -521,7 +535,12 @@ func TestCmdDoctorTextOutput(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
+// TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder
+// proves the full plan/dry-run/apply flow: apply creates an immediately ended,
+// project-owned placeholder with no directory and no session sync mutation,
+// preserves the observation, and reports a noop with zero applied sessions on
+// the idempotent rerun.
+func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t *testing.T) {
 	cfg := testConfig(t)
 	initDoctorStore(t, cfg)
 	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
@@ -532,7 +551,7 @@ func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
 		PRAGMA foreign_keys = OFF;
 		INSERT INTO observations
 			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
-		VALUES ('obs-orphan', 'missing-session', 'bugfix', 'orphan', 'content', 'engram', 'project', 'obs-orphan', 1, 1, datetime('now'), datetime('now'));
+		VALUES ('obs-orphan', 'missing-session', 'bugfix', 'orphan', 'content', 'engram', 'project', 'obs-orphan', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
 	`); err != nil {
 		_ = db.Close()
 		t.Fatalf("seed orphaned observation: %v", err)
@@ -541,47 +560,101 @@ func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
 		t.Fatalf("close seeded database: %v", err)
 	}
 
-	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "orphaned_observation_session")
-	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
-	if stderr != "" {
-		t.Fatalf("json stderr=%q", stderr)
+	runRepair := func(mode string) map[string]any {
+		t.Helper()
+		withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", mode)
+		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatalf("%s stderr=%q", mode, stderr)
+		}
+		return decodeRepairPlan(t, stdout)
 	}
-	report := decodeDoctorReport(t, stdout)
-	check := report["checks"].([]any)[0].(map[string]any)
-	finding := check["findings"].([]any)[0].(map[string]any)
-	if report["status"] != "warning" || check["check_id"] != "orphaned_observation_session" || finding["requires_confirmation"] != true {
-		t.Fatalf("json report=%v", report)
+	for _, mode := range []string{"--plan", "--dry-run"} {
+		plan := runRepair(mode)
+		if len(plan["placeholder_sessions"].([]any)) != 1 || plan["counts"].(map[string]any)["sessions_planned"] != float64(1) || plan["counts"].(map[string]any)["observations_planned"] != float64(1) {
+			t.Fatalf("%s plan=%v", mode, plan)
+		}
 	}
-
-	withArgs(t, "engram", "doctor", "--project", "engram", "--check", "orphaned_observation_session")
-	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
-	if stderr != "" || !strings.Contains(stdout, "orphaned_observation_session") || !strings.Contains(stdout, "missing-session") {
-		t.Fatalf("text stderr=%q stdout=%q", stderr, stdout)
-	}
-
-	oldExit := exitFunc
-	exited := false
-	exitFunc = func(code int) { exited = code != 0 }
-	t.Cleanup(func() { exitFunc = oldExit })
-	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
-	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
-	if !exited || !strings.Contains(stdout, "usage: engram doctor repair") || !strings.Contains(stderr, "orphaned_observation_session is a diagnostic-only check with no repair") {
-		t.Fatalf("repair exited=%v stdout=%q stderr=%q", exited, stdout, stderr)
-	}
-	if _, err := os.Stat(filepath.Join(cfg.DataDir, "backups")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported repair created backup directory: %v", err)
+	applied := runRepair("--apply")
+	if applied["status"] != "applied" || applied["counts"].(map[string]any)["sessions_applied"] != float64(1) || applied["counts"].(map[string]any)["observations_applied"] != float64(1) {
+		t.Fatalf("apply=%v", applied)
 	}
 	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
 	if err != nil {
 		t.Fatalf("reopen database: %v", err)
 	}
-	defer db.Close()
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = 'obs-orphan'`).Scan(&count); err != nil {
-		t.Fatalf("count orphaned observations: %v", err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	}()
+	var project, ownership, directory, startedAt, endedAt string
+	if err := db.QueryRow(`SELECT project, ownership_mode, directory, started_at, ended_at FROM sessions WHERE id = 'missing-session'`).Scan(&project, &ownership, &directory, &startedAt, &endedAt); err != nil {
+		t.Fatalf("read placeholder: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("unsupported repair changed observations: count=%d", count)
+	if project != "engram" || ownership != store.SessionOwnershipProjectOwned || directory != "" || startedAt != "2026-01-01 00:00:00" || endedAt != startedAt {
+		t.Fatalf("placeholder project=%q ownership=%q directory=%q started=%q ended=%q", project, ownership, directory, startedAt, endedAt)
+	}
+	var observations, mutations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = 'obs-orphan'`).Scan(&observations); err != nil || observations != 1 {
+		t.Fatalf("observations=%d err=%v", observations, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = 'session' AND entity_key = 'missing-session'`).Scan(&mutations); err != nil || mutations != 0 {
+		t.Fatalf("session mutations=%d err=%v", mutations, err)
+	}
+	if rerun := runRepair("--apply"); rerun["status"] != "noop" || rerun["counts"].(map[string]any)["sessions_applied"] != float64(0) {
+		t.Fatalf("rerun=%v", rerun)
+	}
+}
+
+// TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop
+// proves the reporting boundary uses the store's actual insert result when a
+// session appears after diagnostics planned an orphan placeholder.
+func TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := db.Exec(`
+		PRAGMA foreign_keys = OFF;
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES ('obs-orphan', 'existing-session', 'bugfix', 'orphan', 'content', 'engram', 'project', 'obs-orphan', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed orphaned observation: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seeded database: %v", err)
+	}
+
+	oldBuildRepairPlan := buildRepairPlan
+	buildRepairPlan = func(ctx context.Context, scope diagnostic.Scope, report diagnostic.Report, check string, mode diagnostic.RepairMode) (diagnostic.RepairPlan, error) {
+		plan, err := diagnostic.BuildRepairPlan(ctx, scope, report, check, mode)
+		if err != nil {
+			return plan, err
+		}
+		if err := scope.Store.CreateSession("existing-session", "engram", "/work/engram"); err != nil {
+			return diagnostic.RepairPlan{}, err
+		}
+		return plan, nil
+	}
+	t.Cleanup(func() { buildRepairPlan = oldBuildRepairPlan })
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	plan := decodeRepairPlan(t, stdout)
+	if len(plan["placeholder_sessions"].([]any)) != 1 || plan["status"] != "noop" {
+		t.Fatalf("apply=%v", plan)
+	}
+	counts := plan["counts"].(map[string]any)
+	if counts["sessions_planned"] != float64(1) || counts["observations_planned"] != float64(1) || counts["sessions_applied"] != float64(0) || counts["observations_applied"] != float64(0) {
+		t.Fatalf("apply counts=%v", counts)
 	}
 }
 

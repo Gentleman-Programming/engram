@@ -516,10 +516,10 @@ export const Engram: Plugin = async (ctx) => {
    *
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
-  async function ensureSession(sessionId: string): Promise<boolean> {
+  async function ensureSession(sessionId: string, renew = false): Promise<boolean> {
       if (disposed || !await ensureResolvedProject() || disposed) return false
     if (!sessionId || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId)) return false
-    if (knownSessions.has(sessionId)) return true
+    if (!renew && knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
     if (subAgentSessions.has(sessionId)) return false
     const inFlight = registeringSessions.get(sessionId)
@@ -658,7 +658,7 @@ export const Engram: Plugin = async (ctx) => {
 
       // Only capture non-trivial prompts (>10 chars)
       if (finalContent.length > 10) {
-        const registered = await ensureSession(sessionId)
+        const registered = await ensureSession(sessionId, true)
         const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
         if (!registered || confirmedSessionID !== sessionId) return
         await engramFetch("/prompts", {
@@ -684,7 +684,7 @@ export const Engram: Plugin = async (ctx) => {
       if (!authoritativeSessionID) {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
       }
-      const registered = await ensureSession(authoritativeSessionID)
+      const registered = await ensureSession(authoritativeSessionID, true)
       const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
       if (confirmedSessionID !== authoritativeSessionID) {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
@@ -702,7 +702,7 @@ export const Engram: Plugin = async (ctx) => {
       // input.sessionID comes from OpenCode — always available
       const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
       if (!sessionId) return
-      const registered = await ensureSession(sessionId)
+      const registered = await ensureSession(sessionId, true)
       const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
       if (!registered || confirmedSessionID !== sessionId) return
       toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
@@ -832,7 +832,7 @@ export const Engram: Plugin = async (ctx) => {
       // Runtime compaction context must never cross session boundaries. If the
       // authoritative session cannot be resolved or registered, skip this
       // injection rather than falling back to project-wide manual context.
-      if (sessionId && await ensureSession(sessionId)) {
+      if (sessionId && await ensureSession(sessionId, true)) {
         const data = await engramFetch(
           `/context/compaction?session_id=${encodeURIComponent(sessionId)}`
         )

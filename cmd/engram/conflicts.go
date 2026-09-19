@@ -296,7 +296,7 @@ func cmdConflictsScan(cfg store.Config) {
 
 	var projectFlag, sinceFlag string
 	allProjects := false
-	dryRun := true // default
+	dryRunFlag := false // Tracks explicit --dry-run; apply=false preserves the default.
 	apply := false
 	maxInsert := 100
 	limit := 0
@@ -324,11 +324,9 @@ func cmdConflictsScan(cfg store.Config) {
 				i++
 			}
 		case "--dry-run":
-			dryRun = true
-			apply = false
+			dryRunFlag = true
 		case "--apply":
 			apply = true
-			dryRun = false
 		case "--max-insert":
 			if i+1 < len(args) {
 				if n, err := strconv.Atoi(args[i+1]); err == nil {
@@ -393,7 +391,7 @@ func cmdConflictsScan(cfg store.Config) {
 	}
 
 	// Explicit mutex enforcement
-	if dryRun && apply {
+	if dryRunFlag && apply {
 		fmt.Fprintln(os.Stderr, "error: --dry-run and --apply are mutually exclusive")
 		exitFunc(1)
 		return
