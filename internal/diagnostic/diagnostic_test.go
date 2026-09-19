@@ -355,7 +355,7 @@ func TestOrphanedObservationSessionCheckReportsGroupedEvidence(t *testing.T) {
 	if evidence.Project != "engram" || evidence.SessionID != "missing-session" || evidence.ObservationCount != 1 {
 		t.Fatalf("evidence=%+v", evidence)
 	}
-	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "cannot be reconstructed") || !strings.Contains(finding.SafeNextStep, "no supported repair") {
+	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "engram doctor repair --check "+CheckOrphanedObservationSession) || !strings.Contains(finding.SafeNextStep, ReasonSessionDeleteTombstoned) {
 		t.Fatalf("finding guidance=%+v", finding)
 	}
 }
@@ -1196,5 +1196,95 @@ func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *te
 				t.Fatalf("incomplete %s report=%+v", column, report)
 			}
 		})
+	}
+}
+
+// seedDiagnosticOrphanObservationAt inserts an orphan observation with explicit
+// timestamps so planner tests can pin the MIN(created_at) grouping.
+func seedDiagnosticOrphanObservationAt(t *testing.T, s *store.Store, syncID, sessionID, project, createdAt, deletedAt string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := s.DB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("database connection: %v", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+			t.Errorf("restore foreign keys: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close database connection: %v", err)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at, deleted_at)
+		VALUES (?, ?, 'bugfix', 'orphan', 'content', ?, 'project', ?, 1, 1, ?, ?, ?)
+	`, syncID, sessionID, project, syncID, createdAt, createdAt, deletedAt); err != nil {
+		t.Fatalf("seed orphan observation %q: %v", syncID, err)
+	}
+}
+
+// TestBuildRepairPlanOrphanedObservationSessionGroupsAndSkipsTombstones pins
+// the planner contract: one rebuild action per orphan group from the store's
+// candidate query, and a named skip instead of an action when the session id
+// carries a delete tombstone.
+func TestBuildRepairPlanOrphanedObservationSessionGroupsAndSkipsTombstones(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	seedDiagnosticOrphanObservationAt(t, s, "obs-a-late", "missing-a", "engram", "2026-01-02 10:00:00", "")
+	seedDiagnosticOrphanObservationAt(t, s, "obs-a-soft-deleted", "missing-a", "engram", "2026-01-01 09:00:00", "2026-01-03 00:00:00")
+	seedDiagnosticOrphanObservationAt(t, s, "obs-manual", "manual-save-engram", "engram", "2026-02-03 08:00:00", "")
+	seedDiagnosticOrphanObservationAt(t, s, "obs-deleted", "missing-deleted", "engram", "2026-01-05 00:00:00", "")
+	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 1)`, store.SyncEntitySession, "missing-deleted", "engram"); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+
+	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
+		report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckOrphanedObservationSession)
+		if err != nil {
+			t.Fatalf("RunOne: %v", err)
+		}
+		plan, err := BuildRepairPlan(context.Background(), Scope{Store: s, Project: "engram"}, report, CheckOrphanedObservationSession, mode)
+		if err != nil {
+			t.Fatalf("BuildRepairPlan: %v", err)
+		}
+		if plan.Status != "noop" && (len(plan.Skipped) != 1 || len(plan.SessionRebuilds) != 2) {
+			t.Fatalf("plan=%+v, want two rebuilds and one tombstone skip", plan)
+		}
+		wantRebuilds := []SessionRebuildAction{
+			{SessionID: "manual-save-engram", Project: "engram", StartedAt: "2026-02-03 08:00:00", ObservationCount: 1},
+			{SessionID: "missing-a", Project: "engram", StartedAt: "2026-01-01 09:00:00", ObservationCount: 2},
+		}
+		if len(plan.SessionRebuilds) != len(wantRebuilds) {
+			t.Fatalf("session_rebuilds=%+v, want %+v", plan.SessionRebuilds, wantRebuilds)
+		}
+		for i := range wantRebuilds {
+			if plan.SessionRebuilds[i] != wantRebuilds[i] {
+				t.Fatalf("session_rebuilds[%d]=%+v, want %+v", i, plan.SessionRebuilds[i], wantRebuilds[i])
+			}
+		}
+		if len(plan.Skipped) != 1 || plan.Skipped[0].SessionID != "missing-deleted" || plan.Skipped[0].ReasonCode != ReasonSessionDeleteTombstoned {
+			t.Fatalf("skipped=%+v, want the tombstoned group", plan.Skipped)
+		}
+		if len(plan.Actions) != 0 {
+			t.Fatalf("actions=%+v, want no reclassification actions", plan.Actions)
+		}
+	}
+
+	// Empty store: the planner must report a noop instead of an empty plan.
+	empty := newDiagnosticTestStore(t)
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: empty, Project: "engram"}, CheckOrphanedObservationSession)
+	if err != nil {
+		t.Fatalf("RunOne empty: %v", err)
+	}
+	plan, err := BuildRepairPlan(context.Background(), Scope{Store: empty, Project: "engram"}, report, CheckOrphanedObservationSession, RepairModePlan)
+	if err != nil {
+		t.Fatalf("BuildRepairPlan empty: %v", err)
+	}
+	if plan.Status != "noop" || len(plan.SessionRebuilds) != 0 || len(plan.Skipped) != 0 {
+		t.Fatalf("empty plan=%+v, want noop", plan)
 	}
 }

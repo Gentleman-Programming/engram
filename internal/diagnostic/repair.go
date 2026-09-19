@@ -26,6 +26,7 @@ var repairImplementations = map[string]struct{}{
 	CheckInvalidSessionIdentity:           {},
 	CheckSyncMutationRequiredFields:       {},
 	CheckSyncTargetClosedSpace:            {},
+	CheckOrphanedObservationSession:       {},
 }
 
 // RepairableCodes returns the registered repair implementations in stable
@@ -79,16 +80,26 @@ type SyncTargetCleanupAction struct {
 	StateRemoved        bool   `json:"state_removed"`
 }
 
+// SessionRebuildAction identifies one orphaned observation reference group
+// doctor can heal by inserting a placeholder parent session locally.
+type SessionRebuildAction struct {
+	SessionID        string `json:"session_id"`
+	Project          string `json:"project"`
+	StartedAt        string `json:"started_at"`
+	ObservationCount int64  `json:"observation_count"`
+}
+
 type RepairPlan struct {
-	Project       string                    `json:"project"`
-	Check         string                    `json:"check"`
-	Mode          RepairMode                `json:"mode"`
-	Status        string                    `json:"status"`
-	Actions       []ProjectReclassifyAction `json:"actions"`
-	TargetActions []SyncTargetCleanupAction `json:"target_actions,omitempty"`
-	Skipped       []RepairSkip              `json:"skipped,omitempty"`
-	Counts        RepairCounts              `json:"counts"`
-	BackupPath    string                    `json:"backup_path,omitempty"`
+	Project         string                    `json:"project"`
+	Check           string                    `json:"check"`
+	Mode            RepairMode                `json:"mode"`
+	Status          string                    `json:"status"`
+	Actions         []ProjectReclassifyAction `json:"actions"`
+	TargetActions   []SyncTargetCleanupAction `json:"target_actions,omitempty"`
+	SessionRebuilds []SessionRebuildAction    `json:"session_rebuilds,omitempty"`
+	Skipped         []RepairSkip              `json:"skipped,omitempty"`
+	Counts          RepairCounts              `json:"counts"`
+	BackupPath      string                    `json:"backup_path,omitempty"`
 }
 
 func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check string, mode RepairMode) (RepairPlan, error) {
@@ -120,15 +131,46 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 		if err := planForeignSyncTargetCleanup(&plan, scope); err != nil {
 			return RepairPlan{}, err
 		}
+	case CheckOrphanedObservationSession:
+		if err := planOrphanedObservationSessionRepair(&plan, scope); err != nil {
+			return RepairPlan{}, err
+		}
 	default:
 		return RepairPlan{}, fmt.Errorf("unsupported repair check %q", check)
 	}
 
 	dedupeAndSortRepairPlan(&plan)
-	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 {
+	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 && len(plan.SessionRebuilds) == 0 {
 		plan.Status = "noop"
 	}
 	return plan, nil
+}
+
+// planOrphanedObservationSessionRepair classifies each orphan group from the
+// store's own candidate query — the same observation population the diagnostic
+// check reports — instead of parsing doctor finding evidence.
+func planOrphanedObservationSessionRepair(plan *RepairPlan, scope Scope) error {
+	candidates, err := scope.Store.ListOrphanedObservationSessionRepairCandidates(plan.Project)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if candidate.Tombstoned {
+			plan.Skipped = append(plan.Skipped, RepairSkip{
+				SessionID:  candidate.SessionID,
+				ReasonCode: ReasonSessionDeleteTombstoned,
+				Message:    "session has a delete tombstone; rebuilding it would resurrect deliberately deleted data",
+			})
+			continue
+		}
+		plan.SessionRebuilds = append(plan.SessionRebuilds, SessionRebuildAction{
+			SessionID:        candidate.SessionID,
+			Project:          candidate.Project,
+			StartedAt:        candidate.StartedAt,
+			ObservationCount: candidate.ObservationCount,
+		})
+	}
+	return nil
 }
 
 func planForeignSyncTargetCleanup(plan *RepairPlan, scope Scope) error {
@@ -252,6 +294,15 @@ func dedupeAndSortRepairPlan(plan *RepairPlan) {
 		plan.TargetActions = append(plan.TargetActions, action)
 	}
 	sort.Slice(plan.TargetActions, func(i, j int) bool { return plan.TargetActions[i].TargetKey < plan.TargetActions[j].TargetKey })
+	rebuilds := map[string]SessionRebuildAction{}
+	for _, action := range plan.SessionRebuilds {
+		rebuilds[action.SessionID] = action
+	}
+	plan.SessionRebuilds = plan.SessionRebuilds[:0]
+	for _, action := range rebuilds {
+		plan.SessionRebuilds = append(plan.SessionRebuilds, action)
+	}
+	sort.Slice(plan.SessionRebuilds, func(i, j int) bool { return plan.SessionRebuilds[i].SessionID < plan.SessionRebuilds[j].SessionID })
 	sort.Slice(plan.Skipped, func(i, j int) bool {
 		if plan.Skipped[i].SessionID == plan.Skipped[j].SessionID {
 			return plan.Skipped[i].ReasonCode < plan.Skipped[j].ReasonCode

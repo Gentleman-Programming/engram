@@ -16538,3 +16538,234 @@ func TestRuntimeSessionLeaseStaysOutOfSyncAndExportPayloads(t *testing.T) {
 		t.Fatalf("export leaked runtime lease: %s", exportPayload)
 	}
 }
+
+// seedSessionRebuildObservation inserts one observation whose parent session
+// does not exist, with explicit timestamps so repair tests can pin the
+// MIN(created_at) grouping. It mirrors seedOrphanedObservationSession but
+// controls created_at and deleted_at.
+func seedSessionRebuildObservation(t *testing.T, s *Store, syncID, sessionID, project, createdAt, deletedAt string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := s.DB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("database connection: %v", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+			t.Errorf("restore foreign keys: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close database connection: %v", err)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at, deleted_at)
+		VALUES (?, ?, 'bugfix', 'orphan', 'content', ?, 'project', ?, 1, 1, ?, ?, ?)
+	`, syncID, sessionID, project, syncID, createdAt, createdAt, deletedAt); err != nil {
+		t.Fatalf("seed orphan observation %q: %v", syncID, err)
+	}
+}
+
+func TestListOrphanedObservationSessionRepairCandidatesMatchesDetectionPopulation(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-runtime-late", "missing-runtime", "engram", "2026-01-02 10:00:00", "")
+	seedSessionRebuildObservation(t, s, "obs-runtime-soft-deleted", "missing-runtime", "engram", "2026-01-01 09:30:00", "2026-01-03 00:00:00")
+	seedSessionRebuildObservation(t, s, "obs-manual", "manual-save-engram", "engram", "2026-02-03 08:00:00", "")
+	seedSessionRebuildObservation(t, s, "obs-tombstoned", "missing-deleted", "engram", "2026-01-05 00:00:00", "")
+	seedSessionRebuildObservation(t, s, "obs-other-project", "missing-elsewhere", "beta", "2026-01-06 00:00:00", "")
+	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 1)`, SyncEntitySession, "missing-deleted", "engram"); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+
+	got, err := s.ListOrphanedObservationSessionRepairCandidates("engram")
+	if err != nil {
+		t.Fatalf("ListOrphanedObservationSessionRepairCandidates: %v", err)
+	}
+	want := []SessionRebuildCandidate{
+		{Project: "engram", SessionID: "manual-save-engram", StartedAt: "2026-02-03 08:00:00", ObservationCount: 1},
+		{Project: "engram", SessionID: "missing-deleted", StartedAt: "2026-01-05 00:00:00", ObservationCount: 1, Tombstoned: true},
+		{Project: "engram", SessionID: "missing-runtime", StartedAt: "2026-01-01 09:30:00", ObservationCount: 2},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("candidates=%+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidate[%d]=%+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestApplyOrphanedObservationSessionRepairInsertsTerminalPlaceholdersWithBackup(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-runtime-late", "missing-runtime", "engram", "2026-01-02 10:00:00", "")
+	seedSessionRebuildObservation(t, s, "obs-runtime-soft-deleted", "missing-runtime", "engram", "2026-01-01 09:30:00", "2026-01-03 00:00:00")
+	seedSessionRebuildObservation(t, s, "obs-manual", "manual-save-engram", "engram", "2026-02-03 08:00:00", "")
+	beforeSyncState := scalarString(t, s, `SELECT COALESCE(group_concat(target_key || ':' || last_acked_seq || ':' || last_pulled_seq, ','), '') FROM sync_state`)
+	beforeMutations := scalarString(t, s, `SELECT COALESCE(group_concat(seq || ':' || entity || ':' || entity_key, ','), '') FROM sync_mutations`)
+
+	result, err := s.ApplyOrphanedObservationSessionRepair([]SessionRebuildCandidate{
+		{Project: "engram", SessionID: "missing-runtime", StartedAt: "2026-01-01 09:30:00", ObservationCount: 2},
+		{Project: "engram", SessionID: "manual-save-engram", StartedAt: "2026-02-03 08:00:00", ObservationCount: 1},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOrphanedObservationSessionRepair: %v", err)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("expected backup path")
+	}
+	if _, err := os.Stat(result.BackupPath); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if filepath.Dir(result.BackupPath) != filepath.Join(s.cfg.DataDir, "backups") {
+		t.Fatalf("backup path outside backups dir: %s", result.BackupPath)
+	}
+	if result.Counts.SessionsInserted != 2 || result.Counts.ObservationsLinked != 3 {
+		t.Fatalf("counts=%+v", result.Counts)
+	}
+
+	assertSessionRebuildPlaceholder := func(sessionID, project, ownership, timestamp string) {
+		t.Helper()
+		var directory, startedAt, endedAt, gotOwnership, summary string
+		if err := s.DB().QueryRow(`SELECT directory, started_at, ended_at, ifnull(ownership_mode, ''), ifnull(summary, '') FROM sessions WHERE id = ? AND project = ?`, sessionID, project).Scan(&directory, &startedAt, &endedAt, &gotOwnership, &summary); err != nil {
+			t.Fatalf("read rebuilt session %q: %v", sessionID, err)
+		}
+		if directory != "" || startedAt != timestamp || endedAt != timestamp || gotOwnership != ownership {
+			t.Fatalf("rebuilt session %q directory=%q started_at=%q ended_at=%q ownership=%q", sessionID, directory, startedAt, endedAt, gotOwnership)
+		}
+		if !strings.HasPrefix(summary, "placeholder rebuilt by doctor repair (orphaned_observation_session) ") {
+			t.Fatalf("rebuilt session %q summary=%q", sessionID, summary)
+		}
+	}
+	assertSessionRebuildPlaceholder("missing-runtime", "engram", SessionOwnershipShared, "2026-01-01 09:30:00")
+	assertSessionRebuildPlaceholder("manual-save-engram", "engram", SessionOwnershipProjectOwned, "2026-02-03 08:00:00")
+
+	// LOCAL-ONLY: the repair journals nothing and touches no sync cursor.
+	if got := scalarString(t, s, `SELECT COALESCE(group_concat(target_key || ':' || last_acked_seq || ':' || last_pulled_seq, ','), '') FROM sync_state`); got != beforeSyncState {
+		t.Fatalf("sync_state changed: before=%q after=%q", beforeSyncState, got)
+	}
+	if got := scalarString(t, s, `SELECT COALESCE(group_concat(seq || ':' || entity || ':' || entity_key, ','), '') FROM sync_mutations`); got != beforeMutations {
+		t.Fatalf("sync_mutations changed: before=%q after=%q", beforeMutations, got)
+	}
+
+	// Idempotent workflow: after the apply, no rebuild candidates remain.
+	remaining, err := s.ListOrphanedObservationSessionRepairCandidates("engram")
+	if err != nil {
+		t.Fatalf("re-list candidates: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("candidates remain after apply: %+v", remaining)
+	}
+}
+
+func TestApplyOrphanedObservationSessionRepairSkipsTombstonedIDsInsideTransaction(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-deleted", "missing-deleted", "engram", "2026-01-05 00:00:00", "")
+	seedSessionRebuildObservation(t, s, "obs-kept", "missing-kept", "engram", "2026-01-06 00:00:00", "")
+
+	// The tombstone appears after planning, so only the in-transaction re-check
+	// can prevent resurrecting the deleted session.
+	if _, err := s.DB().Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 1)`, SyncEntitySession, "missing-deleted", "engram"); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+
+	result, err := s.ApplyOrphanedObservationSessionRepair([]SessionRebuildCandidate{
+		{Project: "engram", SessionID: "missing-deleted", StartedAt: "2026-01-05 00:00:00", ObservationCount: 1},
+		{Project: "engram", SessionID: "missing-kept", StartedAt: "2026-01-06 00:00:00", ObservationCount: 1},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOrphanedObservationSessionRepair: %v", err)
+	}
+	if result.Counts.SessionsInserted != 1 || result.Counts.ObservationsLinked != 1 {
+		t.Fatalf("counts=%+v, want only the untombstoned session", result.Counts)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-deleted"); got != 0 {
+		t.Fatalf("tombstoned session inserted: count=%d", got)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-kept"); got != 1 {
+		t.Fatalf("untombstoned session missing: count=%d", got)
+	}
+}
+
+func TestRebuiltPlaceholderSessionsAreNeverActiveRuntimeSessions(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-rebuilt", "missing-rebuilt", "engram", "2026-01-05 00:00:00", "")
+	if err := s.CreateSession("live-runtime", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	result, err := s.ApplyOrphanedObservationSessionRepair([]SessionRebuildCandidate{
+		{Project: "engram", SessionID: "missing-rebuilt", StartedAt: "2026-01-05 00:00:00", ObservationCount: 1},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOrphanedObservationSessionRepair: %v", err)
+	}
+	if result.Counts.SessionsInserted != 1 {
+		t.Fatalf("counts=%+v", result.Counts)
+	}
+
+	active, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(active) != 1 || active[0] != "live-runtime" {
+		t.Fatalf("active=%v, want only live-runtime", active)
+	}
+	if ended := scalarString(t, s, `SELECT ended_at FROM sessions WHERE id = ?`, "missing-rebuilt"); ended != "2026-01-05 00:00:00" {
+		t.Fatalf("rebuilt session ended_at=%q, want the started_at timestamp", ended)
+	}
+}
+
+func TestOrphanedSessionRepairUnblocksDeferredPulledObservation(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionRebuildObservation(t, s, "obs-local-orphan", "orphan-parent", "engram", "2026-01-05 00:00:00", "")
+
+	// A pulled observation whose parent session is missing is parked in
+	// sync_apply_deferred with the pulled_parent_session_missing reason.
+	mutation := SyncMutation{
+		Seq:       1,
+		Entity:    SyncEntityObservation,
+		EntityKey: "remote-obs",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"remote-obs","session_id":"orphan-parent","type":"decision","title":"Remote","content":"remote content","project":"engram","scope":"project"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatalf("ApplyPulledMutation: %v", err)
+	}
+	deferred, err := s.ListDeferred(ListDeferredOptions{})
+	if err != nil || len(deferred) != 1 {
+		t.Fatalf("ListDeferred=%+v err=%v, want one parked row", deferred, err)
+	}
+	if deferred[0].ReasonCode != SyncParentSessionMissingReasonCode || deferred[0].EntityKey != "remote-obs" {
+		t.Fatalf("deferred row=%+v, want pulled_parent_session_missing for remote-obs", deferred[0])
+	}
+
+	candidates, err := s.ListOrphanedObservationSessionRepairCandidates("engram")
+	if err != nil {
+		t.Fatalf("ListOrphanedObservationSessionRepairCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SessionID != "orphan-parent" {
+		t.Fatalf("candidates=%+v, want the orphan-parent group", candidates)
+	}
+	if _, err := s.ApplyOrphanedObservationSessionRepair(candidates); err != nil {
+		t.Fatalf("ApplyOrphanedObservationSessionRepair: %v", err)
+	}
+
+	replay, err := s.ReplayDeferred()
+	if err != nil {
+		t.Fatalf("ReplayDeferred: %v", err)
+	}
+	if replay.Retried != 1 || replay.Succeeded != 1 || replay.Failed != 0 || replay.Dead != 0 {
+		t.Fatalf("replay=%+v, want the parked row to apply", replay)
+	}
+	if rows := scalarInt(t, s, `SELECT COUNT(*) FROM sync_apply_deferred`); rows != 0 {
+		t.Fatalf("deferred rows=%d, want the applied row removed", rows)
+	}
+	if applied := scalarInt(t, s, `SELECT COUNT(*) FROM observations WHERE sync_id = 'remote-obs' AND session_id = 'orphan-parent'`); applied != 1 {
+		t.Fatalf("replayed observation rows=%d, want 1 under the rebuilt parent", applied)
+	}
+}

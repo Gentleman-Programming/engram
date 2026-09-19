@@ -275,6 +275,29 @@ func cmdDoctorRepair(cfg store.Config) {
 		writeDoctorRepairJSON(plan)
 		return
 	}
+	if check == diagnostic.CheckOrphanedObservationSession {
+		plan.Counts.SessionsPlanned = int64(len(plan.SessionRebuilds))
+		for _, action := range plan.SessionRebuilds {
+			plan.Counts.ObservationsPlanned += action.ObservationCount
+		}
+		if mode == diagnostic.RepairModeApply && len(plan.SessionRebuilds) > 0 {
+			candidates := make([]store.SessionRebuildCandidate, 0, len(plan.SessionRebuilds))
+			for _, action := range plan.SessionRebuilds {
+				candidates = append(candidates, store.SessionRebuildCandidate{Project: action.Project, SessionID: action.SessionID, StartedAt: action.StartedAt})
+			}
+			result, err := s.ApplyOrphanedObservationSessionRepair(candidates)
+			if err != nil {
+				failDoctorRepair(err.Error())
+				return
+			}
+			plan.Status = "applied"
+			plan.BackupPath = result.BackupPath
+			plan.Counts.SessionsApplied = result.Counts.SessionsInserted
+			plan.Counts.ObservationsApplied = result.Counts.ObservationsLinked
+		}
+		writeDoctorRepairJSON(plan)
+		return
+	}
 	actions := make([]store.SessionProjectReclassification, 0, len(plan.Actions))
 	for _, action := range plan.Actions {
 		actions = append(actions, store.SessionProjectReclassification{SessionID: action.SessionID, FromProject: action.FromProject, ToProject: action.ToProject})

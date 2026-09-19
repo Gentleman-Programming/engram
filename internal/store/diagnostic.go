@@ -218,6 +218,141 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 	return evidence, nil
 }
 
+// SessionRebuildCandidate is one orphaned observation reference group that
+// doctor repair can heal by inserting a placeholder parent session.
+type SessionRebuildCandidate struct {
+	Project          string
+	SessionID        string
+	StartedAt        string
+	ObservationCount int64
+	Tombstoned       bool
+}
+
+// SessionRebuildCounts reports what one orphaned-session repair apply changed.
+type SessionRebuildCounts struct {
+	SessionsInserted   int64
+	ObservationsLinked int64
+}
+
+// SessionRebuildResult is the outcome of one orphaned-session repair apply.
+type SessionRebuildResult struct {
+	Counts     SessionRebuildCounts
+	BackupPath string
+}
+
+// ListOrphanedObservationSessionRepairCandidates returns the orphan groups the
+// doctor repair can rebuild for a project. It uses the same observation
+// population as ListOrphanedObservationSessionEvidence — including soft-deleted
+// observations — and adds the group's earliest observation timestamp plus the
+// session delete-tombstone flag, so the planner emits one action per group and
+// skips sessions a remote or local delete already retired.
+func (s *Store) ListOrphanedObservationSessionRepairCandidates(project string) ([]SessionRebuildCandidate, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	query := `SELECT ifnull(o.project, ''), o.session_id, MIN(o.created_at), COUNT(*),
+		EXISTS(SELECT 1 FROM sync_delete_tombstones t WHERE t.entity = ? AND t.entity_key = o.session_id)
+		FROM observations o
+		LEFT JOIN sessions s ON s.id = o.session_id
+		WHERE s.id IS NULL
+			AND length(trim(o.session_id, char(9) || char(10) || char(13) || ' ')) > 0`
+	args := []any{SyncEntitySession}
+	if project != "" {
+		query += ` AND o.project = ?`
+		args = append(args, project)
+	}
+	query += ` GROUP BY ifnull(o.project, ''), o.session_id ORDER BY ifnull(o.project, ''), o.session_id`
+
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]SessionRebuildCandidate, 0)
+	for rows.Next() {
+		var item SessionRebuildCandidate
+		if err := rows.Scan(&item.Project, &item.SessionID, &item.StartedAt, &item.ObservationCount, &item.Tombstoned); err != nil {
+			return nil, closeRowsWithError(rows, err)
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, closeRowsWithError(rows, err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+// ApplyOrphanedObservationSessionRepair inserts one placeholder parent session
+// per planned orphan group. The placeholder is terminal by construction:
+// ended_at is set to the group's earliest observation timestamp, so the rebuilt
+// session can never be selected as an active runtime session. The repair is
+// local-only: it enqueues no sync mutations and touches no sync cursor. A
+// session with an active delete tombstone is skipped defensively inside the
+// transaction, because rebuilding it would resurrect deliberately deleted data.
+func (s *Store) ApplyOrphanedObservationSessionRepair(candidates []SessionRebuildCandidate) (SessionRebuildResult, error) {
+	normalized := normalizeSessionRebuildCandidates(candidates)
+	backupPath, err := s.BackupSQLite()
+	if err != nil {
+		return SessionRebuildResult{}, err
+	}
+	var result SessionRebuildResult
+	result.BackupPath = backupPath
+	summary := "placeholder rebuilt by doctor repair (orphaned_observation_session) " + time.Now().UTC().Format("2006-01-02")
+	err = s.withTx(func(tx *sql.Tx) error {
+		for _, candidate := range normalized {
+			var tombstoned int
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?)`, SyncEntitySession, candidate.SessionID).Scan(&tombstoned); err != nil {
+				return fmt.Errorf("check delete tombstone for session %q: %w", candidate.SessionID, err)
+			}
+			if tombstoned == 1 {
+				continue
+			}
+			res, err := s.execHook(tx, `INSERT INTO sessions (id, project, directory, started_at, ended_at, ownership_mode, summary)
+				VALUES (?, ?, '', ?, ?, CASE WHEN ? = 'manual-save-' || ? THEN 'project_owned' ELSE 'shared' END, ?)`,
+				candidate.SessionID, candidate.Project, candidate.StartedAt, candidate.StartedAt, candidate.SessionID, candidate.Project, summary)
+			if err != nil {
+				return fmt.Errorf("rebuild session %q: %w", candidate.SessionID, err)
+			}
+			inserted, _ := res.RowsAffected()
+			if inserted != 1 {
+				return fmt.Errorf("rebuild session %q", candidate.SessionID)
+			}
+			result.Counts.SessionsInserted += inserted
+			var linked int64
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = ?`, candidate.SessionID).Scan(&linked); err != nil {
+				return fmt.Errorf("count observations for rebuilt session %q: %w", candidate.SessionID, err)
+			}
+			result.Counts.ObservationsLinked += linked
+		}
+		return nil
+	})
+	if err != nil {
+		return SessionRebuildResult{}, err
+	}
+	return result, nil
+}
+
+func normalizeSessionRebuildCandidates(candidates []SessionRebuildCandidate) []SessionRebuildCandidate {
+	seen := make(map[string]struct{})
+	out := make([]SessionRebuildCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate.SessionID = strings.TrimSpace(candidate.SessionID)
+		candidate.Project, _ = NormalizeProject(candidate.Project)
+		candidate.StartedAt = strings.TrimSpace(candidate.StartedAt)
+		if candidate.SessionID == "" || candidate.Project == "" || candidate.StartedAt == "" {
+			continue
+		}
+		if _, ok := seen[candidate.SessionID]; ok {
+			continue
+		}
+		seen[candidate.SessionID] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
+}
+
 // ListPendingProjectMutations returns pending cloud mutations for one project,
 // or all projects when project is empty, without enrollment filtering. Doctor
 // needs to diagnose blocked metadata even when a project is not enrolled.
