@@ -197,6 +197,7 @@ function buildInitializeEngramServerForTest({
   const classSource = extractErrorClassSource("EngramServerDiagnosisError");
   const outdatedBody = extractFunctionBody("outdatedEngramServerMessage", "{\n  const reported");
   const skewBody = extractFunctionBody("warnEngramVersionSkewOnce", "{\n  if (engramVersionSkewWarned)");
+  const foreignBody = extractFunctionBody("foreignEngramServerMessage", "{\n  return [");
   const factory = new Function(
     "CONFIGURED_ENGRAM_URL",
     "probeEngramHealth",
@@ -217,6 +218,9 @@ function buildInitializeEngramServerForTest({
     const localEngramVersion = () => localVersion;
     function outdatedEngramServerMessage(url, serverVersion) {
       ${outdatedBody}
+    }
+    function foreignEngramServerMessage(url) {
+      ${foreignBody}
     }
     function warnEngramVersionSkewOnce(serverVersion, localVersion) {
       ${skewBody}
@@ -284,6 +288,7 @@ function buildStartupErrorMessageForTest({
   const normalizeBody = extractFunctionBody("normalizeInitializationError", "{\n  if (error instanceof EngramServerDiagnosisError) return error;");
   const outdatedBody = extractFunctionBody("outdatedEngramServerMessage", "{\n  const reported");
   const skewBody = extractFunctionBody("warnEngramVersionSkewOnce", "{\n  if (engramVersionSkewWarned)");
+  const foreignBody = extractFunctionBody("foreignEngramServerMessage", "{\n  return [");
   const factory = new Function(
     "CONFIGURED_ENGRAM_URL",
     "probeEngramHealth",
@@ -304,6 +309,9 @@ function buildStartupErrorMessageForTest({
     const localEngramVersion = () => localVersion;
     function outdatedEngramServerMessage(url, serverVersion) {
       ${outdatedBody}
+    }
+    function foreignEngramServerMessage(url) {
+      ${foreignBody}
     }
     function warnEngramVersionSkewOnce(serverVersion, localVersion) {
       ${skewBody}
@@ -966,6 +974,8 @@ test("a foreign owner reaches the user as its own diagnosis, without generic adv
 
   const message = await startupErrorMessage();
   assert.match(message, /Engram server ownership mismatch at http:\/\/127\.0\.0\.1:7437/);
+  assert.match(message, /ENGRAM_URL/);
+  assert.match(message, /ENGRAM_PORT/);
   assert.doesNotMatch(message, /mem_doctor/);
   assert.doesNotMatch(message, /verify ENGRAM_URL\/ENGRAM_BIN/);
   assert.doesNotMatch(message, /could not initialize the Engram memory provider/);

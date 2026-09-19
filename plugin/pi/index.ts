@@ -518,6 +518,17 @@ function outdatedEngramServerMessage(url: string, serverVersion: string): string
   ].join("\n");
 }
 
+// A different instance owns the port, so this session must not share its memory. The mismatch is a
+// complete diagnosis on its own, but it is a dead end unless it also names the two ways out.
+function foreignEngramServerMessage(url: string): string {
+  return [
+    `Engram server ownership mismatch at ${url}: the server answering there belongs to a different Engram data directory, so this session will not share its memory.`,
+    "Either stop that server, or give this session a server of its own:",
+    "- Point this session at that server deliberately with ENGRAM_URL.",
+    "- Or set ENGRAM_PORT to a free port so this session starts a server of its own.",
+  ].join("\n");
+}
+
 let localEngramInstanceID = "";
 
 function waitUnref(ms: number): Promise<void> {
@@ -762,7 +773,7 @@ async function initializeEngramServer(): Promise<void> {
   if (health === "foreign") {
     // A genuinely different instance: this really is an ownership mismatch, and it is already a
     // complete diagnosis, so it skips the generic wrapper's advice too.
-    throw new EngramServerDiagnosisError(`Engram server ownership mismatch at ${ENGRAM_URL}`);
+    throw new EngramServerDiagnosisError(foreignEngramServerMessage(ENGRAM_URL));
   }
   // An outdated server fails exactly like a foreign one — memory stays off rather than being
   // shared with a server this plugin cannot identify — but the message names the real condition
