@@ -1,9 +1,11 @@
 package version
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -270,16 +272,33 @@ func TestCheckLatestUsesGitHubToken(t *testing.T) {
 }
 
 func TestUpdateInstructions(t *testing.T) {
-	msg := updateInstructions()
-	if msg == "" {
-		t.Fatal("expected non-empty update instructions")
-	}
-	if runtime.GOOS != "darwin" && !strings.Contains(msg, "github.com/Gentleman-Programming/engram/v2/cmd/engram@latest") {
-		t.Fatalf("update instructions = %q, want v2 Go install command", msg)
-	}
-	if runtime.GOOS != "linux" && !strings.Contains(msg, "https://github.com/Gentleman-Programming/engram/releases/latest") {
-		t.Fatalf("update instructions = %q, want canonical GitHub Releases URL", msg)
-	}
+	t.Run("non-mise install keeps today's per-OS instructions unchanged", func(t *testing.T) {
+		clearMiseEnv(t)
+		withUserHomeDir(t, "", errors.New("no home directory"))
+		withCurrentExecutable(t, "/usr/local/bin/engram", nil)
+
+		msg := updateInstructions()
+		if msg == "" {
+			t.Fatal("expected non-empty update instructions")
+		}
+		if runtime.GOOS != "darwin" && !strings.Contains(msg, "github.com/Gentleman-Programming/engram/v2/cmd/engram@latest") {
+			t.Fatalf("update instructions = %q, want v2 Go install command", msg)
+		}
+		if runtime.GOOS != "linux" && !strings.Contains(msg, "https://github.com/Gentleman-Programming/engram/releases/latest") {
+			t.Fatalf("update instructions = %q, want canonical GitHub Releases URL", msg)
+		}
+	})
+
+	t.Run("mise-managed install gets a mise upgrade hint", func(t *testing.T) {
+		clearMiseEnv(t)
+		root := t.TempDir()
+		t.Setenv("MISE_INSTALLS_DIR", root)
+		withCurrentExecutable(t, filepath.Join(root, "go", "1.25.10", "bin", "engram"), nil)
+
+		if got := updateInstructions(); !strings.Contains(got, "mise upgrade engram") {
+			t.Errorf("updateInstructions() = %q, want it to contain %q", got, "mise upgrade engram")
+		}
+	})
 }
 
 func withCheckServer(t *testing.T, handler http.Handler) {
