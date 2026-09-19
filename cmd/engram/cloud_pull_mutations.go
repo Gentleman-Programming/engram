@@ -36,11 +36,11 @@ func cmdCloudPullMutations(cfg store.Config) {
 		fatal(fmt.Errorf("cloud server is missing: configure server URL with `engram cloud config --server <url>`"))
 		return
 	}
+
+	// An empty token is allowed: ENGRAM_CLOUD_INSECURE_NO_AUTH servers accept
+	// unauthenticated mutation pull. A server that does require auth rejects
+	// the request with 401, which surfaces through the existing auth guidance.
 	token := strings.TrimSpace(cc.Token)
-	if token == "" {
-		fatal(fmt.Errorf("cloud token is missing: set ENGRAM_CLOUD_TOKEN or store it with `engram cloud config --token <token>`"))
-		return
-	}
 
 	remoteMT, err := remote.NewMutationTransport(serverURL, token)
 	if err != nil {

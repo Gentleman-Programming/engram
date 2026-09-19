@@ -209,6 +209,24 @@ func TestCloudPullMutations_AuthFailure(t *testing.T) {
 	}
 }
 
+// TestCloudPullMutations_NoAuthMode asserts that the command works when the
+// cloud config has no token: ENGRAM_CLOUD_INSECURE_NO_AUTH servers accept
+// unauthenticated mutation pull (issue #327, code review follow-up).
+func TestCloudPullMutations_NoAuthMode(t *testing.T) {
+	srv := mutationPullTestServer(t, []map[string]any{
+		mutationTestSession(7, "sess-7", "proj-a"),
+	})
+	cfg := setupPullMutationsConfig(t, srv.URL, "")
+
+	stdout, _, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); ok {
+		t.Fatal("cloud pull-mutations fataled without a token; expected success in no-auth mode")
+	}
+	if !strings.Contains(stdout, "Pulled 1") {
+		t.Fatalf("expected 1 pulled mutation in no-auth mode, got stdout:\n%s", stdout)
+	}
+}
+
 // TestCloudPullMutations_MissingServerConfig asserts a clear failure when no
 // cloud server URL is configured.
 func TestCloudPullMutations_MissingServerConfig(t *testing.T) {
