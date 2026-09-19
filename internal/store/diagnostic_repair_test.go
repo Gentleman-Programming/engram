@@ -161,6 +161,66 @@ func TestRestoreOrphanedObservationSessionsTreatsMatchingExistingSessionAsNoop(t
 	}
 }
 
+// TestRestoreOrphanedObservationSessionsRecomputesStaleMetadata proves the
+// store derives the placeholder's observation count and earliest timestamp
+// from the current observations inside the transaction, so a stale planned or
+// caller-supplied action can never persist outdated placeholder metadata. The
+// recomputed set includes soft-deleted observations, matching the diagnostic
+// evidence query.
+func TestRestoreOrphanedObservationSessionsRecomputesStaleMetadata(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-stale-active", "missing-stale", "engram", nil)
+	seedOrphanedObservationSession(t, s, "obs-stale-deleted", "missing-stale", "engram", "2026-01-15 00:00:00")
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at = CASE sync_id WHEN 'obs-stale-active' THEN '2026-01-20 00:00:00' WHEN 'obs-stale-deleted' THEN '2026-01-10 00:00:00' ELSE created_at END`); err != nil {
+		t.Fatalf("set deterministic orphan timestamps: %v", err)
+	}
+
+	applied, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-stale", Project: "engram", ObservationCount: 99, StartedAt: "2099-01-01 00:00:00"}})
+	if err != nil {
+		t.Fatalf("RestoreOrphanedObservationSessions: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied=%+v", applied)
+	}
+	if applied[0].ObservationCount != 2 || applied[0].StartedAt != "2026-01-10 00:00:00" {
+		t.Fatalf("applied=%+v, want recomputed count 2 and earliest timestamp", applied[0])
+	}
+	if got := scalarString(t, s, `SELECT started_at FROM sessions WHERE id = ?`, "missing-stale"); got != "2026-01-10 00:00:00" {
+		t.Fatalf("started_at=%q, want recomputed earliest timestamp", got)
+	}
+	if got := scalarString(t, s, `SELECT ended_at FROM sessions WHERE id = ?`, "missing-stale"); got != "2026-01-10 00:00:00" {
+		t.Fatalf("ended_at=%q, want immediately-ended placeholder", got)
+	}
+	if got := scalarString(t, s, `SELECT ownership_mode FROM sessions WHERE id = ?`, "missing-stale"); got != SessionOwnershipProjectOwned {
+		t.Fatalf("ownership_mode=%q", got)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM observations WHERE session_id = ?`, "missing-stale"); got != 2 {
+		t.Fatalf("observations=%d, want 2 preserved", got)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "missing-stale"); got != 0 {
+		t.Fatalf("session mutations=%d, want 0", got)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRejectsMissingObservationTimestamp
+// proves the store fails closed when the current observations have no usable
+// created_at value, persisting no placeholder with fabricated metadata.
+func TestRestoreOrphanedObservationSessionsRejectsMissingObservationTimestamp(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-no-time", "missing-no-time", "engram", nil)
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at = '   ' WHERE sync_id = 'obs-no-time'`); err != nil {
+		t.Fatalf("blank created_at: %v", err)
+	}
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-no-time", Project: "engram", StartedAt: "2026-01-01 00:00:00"}})
+	if err == nil || !strings.Contains(err.Error(), "first observation timestamp") {
+		t.Fatalf("error=%v, want first-observation-timestamp failure", err)
+	}
+	if count := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-no-time"); count != 0 {
+		t.Fatalf("placeholder count=%d, want 0", count)
+	}
+}
+
 func TestListOrphanedObservationSessionEvidencePropagatesQueryFailure(t *testing.T) {
 	s := newTestStore(t)
 	wantErr := errors.New("diagnostic query failed")

@@ -233,7 +233,10 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 // placeholders for confirmed missing session references. It validates the
 // current observation evidence and any existing session ownership inside one
 // transaction, so a stale or direct caller cannot attach a session ID to the
-// wrong project. It never updates observations or emits sync mutations.
+// wrong project. The placeholder's observation count and start time are
+// re-derived from the current observations in the same transaction, so stale
+// planned metadata can never persist. It never updates observations or emits
+// sync mutations.
 func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlaceholder) ([]OrphanedSessionPlaceholder, error) {
 	applied := make([]OrphanedSessionPlaceholder, 0, len(actions))
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -275,9 +278,29 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 				return fmt.Errorf("orphaned session %q evidence belongs to a different project", action.SessionID)
 			}
 
+			// Re-derive the observation metadata inside the transaction: the
+			// planned or caller-supplied values can be stale by apply time, and
+			// the placeholder must reflect the current observation set (active
+			// and soft-deleted rows, matching the diagnostic evidence query).
+			var observationCount int64
+			var firstObservedAt sql.NullString
+			if err := tx.QueryRow(`SELECT COUNT(*), MIN(created_at) FROM observations WHERE session_id = ?`, action.SessionID).Scan(&observationCount, &firstObservedAt); err != nil {
+				return err
+			}
+			startedAt := ""
+			if firstObservedAt.Valid {
+				startedAt = strings.TrimSpace(firstObservedAt.String)
+			}
+			if observationCount == 0 {
+				return fmt.Errorf("orphaned session %q has no supporting observations", action.SessionID)
+			}
+			if startedAt == "" {
+				return fmt.Errorf("orphaned session %q has no first observation timestamp", action.SessionID)
+			}
+
 			result, err := s.execHook(tx, `INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
 				VALUES (?, ?, ?, '', ?, ?, 'Recovered local placeholder for orphaned observations.')`,
-				action.SessionID, project, SessionOwnershipProjectOwned, action.StartedAt, action.StartedAt)
+				action.SessionID, project, SessionOwnershipProjectOwned, startedAt, startedAt)
 			if err != nil {
 				return err
 			}
@@ -289,6 +312,8 @@ func (s *Store) RestoreOrphanedObservationSessions(actions []OrphanedSessionPlac
 				return fmt.Errorf("orphaned session %q placeholder insert affected %d rows", action.SessionID, changed)
 			}
 			action.Project = project
+			action.ObservationCount = observationCount
+			action.StartedAt = startedAt
 			applied = append(applied, action)
 		}
 		return nil
