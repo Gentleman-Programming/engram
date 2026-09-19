@@ -1017,6 +1017,20 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 				}
 			}
 
+			// Legacy local chunks may reference sessions that no longer exist in
+			// any chunk. Recover those stubs before applying, because missing
+			// observation and prompt parents can now defer without returning an
+			// error from ApplyPulledChunk.
+			if mode == importModeLocal {
+				recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)
+				if recoveryErr != nil {
+					return nil, recoveryErr
+				}
+				if recovered {
+					chunk = recoveredChunk
+				}
+			}
+
 			// Issue #1135: in cloud mode, drop relation upserts whose endpoints
 			// are provably unsatisfiable before apply. A filtered chunk that
 			// still fails re-enters the normal retry loop below with its
