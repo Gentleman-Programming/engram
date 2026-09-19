@@ -3,6 +3,13 @@ name: PR Validation
 on:
   pull_request:
     types: [opened, edited, labeled, unlabeled, synchronize]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   check-issue-reference:
@@ -10,22 +17,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify PR links an issue
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const body = context.payload.pull_request.body || '';
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const matches = [...body.matchAll(issuePattern)];
+            let pulls = [context.payload.pull_request];
+            if (context.eventName === 'merge_group') try {
+              pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.payload.merge_group.head_sha,
+              });
+              const pullNumbers = [...new Set(pulls.map((pull) => pull.number))];
+              if (pullNumbers.length === 0) throw new Error('could not resolve associated pull requests');
+              pulls = await Promise.all(pullNumbers.map(async (pull_number) => (
+                await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number })
+              ).data));
+            } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
 
-            if (matches.length === 0) {
+            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const failures = [];
+            for (const pull of pulls) {
+              const matches = [...(pull.body || '').matchAll(issuePattern)];
+              if (matches.length === 0) {
+                failures.push(`PR #${pull.number}: no closing issue reference found`);
+                continue;
+              }
+              core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[1]).join(', ')}`);
+            }
+
+            if (failures.length > 0) {
               core.setFailed(
                 '❌ PR must reference an approved issue.\n' +
-                'Add "Closes #N", "Fixes #N", or "Resolves #N" to the PR body.\n' +
-                'See CONTRIBUTING.md for the full contribution workflow.'
+                'Add "Closes #N", "Fixes #N", or "Resolves #N" to every PR body.\n' +
+                failures.join('\n')
               );
-            } else {
-              const issueNumbers = matches.map(m => m[1]).join(', ');
-              core.info(`✅ Found issue reference(s): #${issueNumbers}`);
             }
 
   check-issue-approved:
@@ -34,48 +60,52 @@ jobs:
     needs: check-issue-reference
     steps:
       - name: Verify linked issue is approved
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const body = context.payload.pull_request.body || '';
+            let pulls = [context.payload.pull_request];
+            if (context.eventName === 'merge_group') try {
+              pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.payload.merge_group.head_sha,
+              });
+              const pullNumbers = [...new Set(pulls.map((pull) => pull.number))];
+              if (pullNumbers.length === 0) throw new Error('could not resolve associated pull requests');
+              pulls = await Promise.all(pullNumbers.map(async (pull_number) => (
+                await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number })
+              ).data));
+            } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
+
             const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const matches = [...body.matchAll(issuePattern)];
-
-            if (matches.length === 0) {
-              core.setFailed('❌ No issue reference found in PR body.');
-              return;
-            }
-
             const failures = [];
-
-            for (const match of matches) {
-              const issueNumber = parseInt(match[1], 10);
-              core.info(`Checking issue #${issueNumber} for status:approved label...`);
-
-              let issue;
-              try {
-                const response = await github.rest.issues.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNumber,
-                });
-                issue = response.data;
-              } catch (err) {
-                failures.push(`Issue #${issueNumber}: could not be fetched (${err.message})`);
+            for (const pull of pulls) {
+              const matches = [...(pull.body || '').matchAll(issuePattern)];
+              if (matches.length === 0) {
+                failures.push(`PR #${pull.number}: no closing issue reference found`);
                 continue;
               }
 
-              const labels = issue.labels.map(l => l.name);
-              core.info(`Issue #${issueNumber} labels: ${labels.join(', ') || '(none)'}`);
-
-              if (!labels.includes('status:approved')) {
-                failures.push(
-                  `Issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label. ` +
-                  `A maintainer must approve the issue before a PR can be merged.`
-                );
-              } else {
-                core.info(`✅ Issue #${issueNumber} has status:approved`);
+              for (const match of matches) {
+                const issueNumber = parseInt(match[1], 10);
+                core.info(`Checking PR #${pull.number} issue #${issueNumber} for status:approved label...`);
+                try {
+                  const issue = (await github.rest.issues.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                  })).data;
+                  const labels = issue.labels.map((label) => label.name);
+                  if (!labels.includes('status:approved')) {
+                    failures.push(`PR #${pull.number} issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label.`);
+                  } else {
+                    core.info(`✅ PR #${pull.number} issue #${issueNumber} has status:approved`);
+                  }
+                } catch (err) {
+                  failures.push(`PR #${pull.number} issue #${issueNumber}: could not be fetched (${err.message})`);
+                }
               }
             }
 

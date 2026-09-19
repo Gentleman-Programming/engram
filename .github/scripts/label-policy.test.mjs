@@ -119,18 +119,22 @@ test('runs PR label policy from the trusted base with current API labels', () =>
   assert.doesNotMatch(labelWorkflow, /name: Check PR Label Policy/);
   assert.match(
     labelWorkflow,
-    /^  check-label-policy:\r?\n    name: Check PR Has type:\* Label\r?\n    runs-on: ubuntu-latest\r?\n    concurrency:\r?\n      group: \$\{\{ github\.workflow \}\}-type-label-\$\{\{ github\.event\.pull_request\.number \}\}\r?\n      cancel-in-progress: true$/m,
+    /^  check-label-policy:\r?\n    name: Check PR Has type:\* Label\r?\n    runs-on: ubuntu-latest\r?\n    concurrency:\r?\n      group: \$\{\{ github\.workflow \}\}-type-label-\$\{\{ github\.event\.pull_request\.number \|\| github\.run_id \}\}\r?\n      cancel-in-progress: true$/m,
   );
   assert.match(labelWorkflow, /^  pull-requests: read$/m);
-  assert.match(labelWorkflow, /id: current-labels/);
+  assert.doesNotMatch(labelWorkflow, /merge_group\.head_ref/);
+  assert.match(labelWorkflow, /github\.paginate\(/);
+  assert.match(labelWorkflow, /github\.rest\.repos\.listPullRequestsAssociatedWithCommit/);
+  assert.match(labelWorkflow, /commit_sha: context\.payload\.merge_group\.head_sha/);
+  assert.match(labelWorkflow, /new Set\(pulls\.map\(\(pull\) => pull\.number\)\)/);
+  assert.match(labelWorkflow, /could not resolve associated pull requests/);
   assert.match(labelWorkflow, /github\.rest\.pulls\.get\(\{/);
-  assert.match(labelWorkflow, /pull_number: context\.issue\.number/);
-  assert.match(labelWorkflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
-  assert.match(labelWorkflow, /PR_LABELS: \$\{\{ steps\.current-labels\.outputs\.result \}\}/);
+  assert.match(labelWorkflow, /for \(const pull of pulls\)/);
+  assert.match(labelWorkflow, /validateLabels\(policy, pull\.labels\.map\(\(label\) => label\.name\), 'pull-request'\)/);
+  assert.match(labelWorkflow, /github\.event\.merge_group\.base_sha.*github\.event\.pull_request\.base\.sha/);
   assert.doesNotMatch(labelWorkflow, /github\.event\.pull_request\.labels|context\.payload\.pull_request\.labels/);
   assert.doesNotMatch(labelWorkflow, /pull_request\.head|head\.sha/);
-  assert.match(labelWorkflow, /--labels-json "\$PR_LABELS"/);
-  assert.doesNotMatch(labelWorkflow, /--labels-json '\$\{\{/);
+  assert.match(labelWorkflow, /await import\(.*label-policy\.mjs/);
 });
 
 test('documents the PR label policy as a required status check', () => {

@@ -121,13 +121,15 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		"pull_request_target:",
 		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
 		"permissions:\n  contents: read\n  pull-requests: read",
-		"check-label-policy:\n    name: Check PR Has type:* Label\n    runs-on: ubuntu-latest\n    concurrency:\n      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number }}\n      cancel-in-progress: true",
-		"id: current-labels",
+		"check-label-policy:\n    name: Check PR Has type:* Label\n    runs-on: ubuntu-latest\n    concurrency:\n      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number || github.run_id }}\n      cancel-in-progress: true",
+		"github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit",
+		"commit_sha: context.payload.merge_group.head_sha",
+		"new Set(pulls.map((pull) => pull.number))",
+		"could not resolve associated pull requests",
 		"github.rest.pulls.get({",
-		"pull_number: context.issue.number",
-		"ref: ${{ github.event.pull_request.base.sha }}",
+		"validateLabels(policy, pull.labels.map((label) => label.name), 'pull-request')",
+		"github.event.merge_group.base_sha || github.event.pull_request.base.sha",
 		"persist-credentials: false",
-		"PR_LABELS: ${{ steps.current-labels.outputs.result }}",
 	} {
 		if !strings.Contains(labelCheck, required) {
 			t.Errorf("%s does not contain %q", labelCheckPath, required)
