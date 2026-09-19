@@ -490,20 +490,34 @@ func (m *Manager) cycle(ctx context.Context) {
 	m.mu.Unlock()
 
 	// Push, then pull.
+	// A push blocked solely by non-enrolled pending mutations must not prevent
+	// the pull step (#1273): on consumer machines, pending mutations of
+	// never-enrolled projects would otherwise freeze inbound replication for
+	// enrolled projects indefinitely.
+	var blockedPending *nonEnrolledPendingError
 	if err := m.push(ctx); err != nil {
-		var blocked *nonEnrolledPendingError
-		if errors.As(err, &blocked) {
-			m.recordBlocked(err.Error(), constants.ReasonNonEnrolledPendingMutations)
+		if !errors.As(err, &blockedPending) {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
 			return
 		}
-		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
-		return
 	}
 
 	if err := m.pull(ctx); err != nil {
 		reasonCode := classifyTransportError(err)
 		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
+		return
+	}
+
+	if blockedPending != nil {
+		// Retain the degraded (blocked) status with enrollment guidance for the
+		// non-enrolled backlog, but advance LastSyncAt to record that inbound
+		// replication succeeded this cycle.
+		m.recordBlocked(blockedPending.Error(), constants.ReasonNonEnrolledPendingMutations)
+		now := time.Now()
+		m.mu.Lock()
+		m.status.LastSyncAt = &now
+		m.mu.Unlock()
 		return
 	}
 

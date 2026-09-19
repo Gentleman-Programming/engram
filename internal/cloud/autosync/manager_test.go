@@ -2,6 +2,7 @@ package autosync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -2034,8 +2035,10 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
 		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
 	}
-	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
-		t.Fatalf("expected blocked cycle to skip pull, got %d", got)
+	// #1273: pending mutations of non-enrolled projects must not prevent the
+	// pull step for enrolled projects, so pull still runs on a blocked push.
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected pull to run despite non-enrolled pending mutations, got %d", got)
 	}
 	if len(ls.ackedSeqs) != 0 {
 		t.Fatalf("expected no acked mutations, got %v", ls.ackedSeqs)
@@ -2054,6 +2057,100 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 	}
 	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
 		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	}
+	if st.LastSyncAt == nil || time.Since(*st.LastSyncAt) > 5*time.Second {
+		t.Fatalf("expected LastSyncAt advanced after successful pull, got %v", st.LastSyncAt)
+	}
+}
+
+// TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist
+// verifies the #1273 fix end to end: when only non-enrolled projects have
+// pending mutations, the cycle must still run the pull step, apply inbound
+// mutations, retain the degraded blocked status with user guidance, and
+// advance LastSyncAt so operators can see replication is not frozen.
+func TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 2},
+		{Project: "beta", Count: 1},
+	}
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{
+		Mutations: []PulledMutation{
+			{Seq: 1, Project: "gamma", Entity: "observation", EntityKey: "obs-1", Op: "upsert", Payload: json.RawMessage(`{"v":1}`)},
+			{Seq: 2, Project: "gamma", Entity: "observation", EntityKey: "obs-2", Op: "upsert", Payload: json.RawMessage(`{"v":2}`)},
+		},
+	}
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected pull to execute despite non-enrolled pending mutations, got %d", got)
+	}
+	if len(ls.appliedMuts) != 2 {
+		t.Fatalf("expected 2 pulled mutations applied, got %d", len(ls.appliedMuts))
+	}
+	if ls.appliedMuts[0].Project != "gamma" || ls.appliedMuts[0].Seq != 1 || ls.appliedMuts[1].Seq != 2 {
+		t.Fatalf("unexpected applied mutations: %+v", ls.appliedMuts)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed {
+		t.Fatalf("expected blocked (push_failed) status, got %q", st.Phase)
+	}
+	if st.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected non-enrolled reason code, got %q", st.ReasonCode)
+	}
+	if !strings.Contains(st.ReasonMessage, "engram cloud enroll <project>") {
+		t.Fatalf("expected reason message to contain enrollment guidance, got %q", st.ReasonMessage)
+	}
+	if st.LastSyncAt == nil || time.Since(*st.LastSyncAt) > 5*time.Second {
+		t.Fatalf("expected LastSyncAt advanced after successful pull, got %v", st.LastSyncAt)
+	}
+	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
+		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	}
+}
+
+// TestManagerPullFailureOverridesNonEnrolledBlocked verifies that when pull()
+// itself fails after a blocked push (non-enrolled pending mutations exist), the
+// cycle records the classified transport failure instead of a blocked state:
+// the inbound sync did not succeed, so no LastSyncAt advance but a proper
+// failure with backoff.
+func TestManagerPullFailureOverridesNonEnrolledBlocked(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 2},
+	}
+	tr := newFakeTransport()
+	tr.pullErr = &fakeAuthErr{code: 401}
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected pull to execute despite non-enrolled pending mutations, got %d", got)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePullFailed {
+		t.Fatalf("expected pull_failed status, got %q", st.Phase)
+	}
+	if st.ReasonCode != "auth_required" {
+		t.Fatalf("expected auth_required reason code, got %q", st.ReasonCode)
+	}
+	if st.ConsecutiveFailures != 1 {
+		t.Fatalf("expected 1 consecutive failure, got %d", st.ConsecutiveFailures)
+	}
+	if st.BackoffUntil == nil {
+		t.Fatal("expected backoff scheduled after pull transport failure")
+	}
+	if ls.blockedReason != "" {
+		t.Fatalf("expected no blocked state persisted when pull fails, got %q", ls.blockedReason)
 	}
 }
 
