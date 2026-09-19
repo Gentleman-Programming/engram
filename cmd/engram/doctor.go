@@ -235,7 +235,7 @@ func cmdDoctorRepair(cfg store.Config) {
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
 			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
-			Superseded             []store.SyncMutationSupersedeAction         `json:"superseded"`
+			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
 		}{report, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
@@ -251,6 +251,30 @@ func cmdDoctorRepair(cfg store.Config) {
 	plan, err := diagnostic.BuildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
 	if err != nil {
 		failDoctorRepair(err.Error())
+		return
+	}
+	if check == diagnostic.CheckOrphanedObservationSession {
+		plan.Counts.SessionsPlanned = int64(len(plan.PlaceholderSessions))
+		for _, action := range plan.PlaceholderSessions {
+			plan.Counts.ObservationsPlanned += action.ObservationCount
+		}
+		if mode == diagnostic.RepairModeApply && len(plan.PlaceholderSessions) > 0 {
+			applied, err := s.RestoreOrphanedObservationSessions(plan.PlaceholderSessions)
+			if err != nil {
+				failDoctorRepair(err.Error())
+				return
+			}
+			if len(applied) > 0 {
+				plan.Status = "applied"
+			} else {
+				plan.Status = "noop"
+			}
+			for _, action := range applied {
+				plan.Counts.SessionsApplied++
+				plan.Counts.ObservationsApplied += action.ObservationCount
+			}
+		}
+		writeDoctorRepairJSON(plan)
 		return
 	}
 	if check == diagnostic.CheckSyncTargetClosedSpace {
