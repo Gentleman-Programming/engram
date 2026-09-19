@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
@@ -253,6 +254,33 @@ func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "injected close failure") {
 		t.Fatalf("expected close error in stderr, got:\n%s", stderr)
+	}
+}
+
+// TestPrintCloudPullMutationsResult_ReportsDeferredReplaysOnEmptyPull asserts
+// the deferred-replay rows are still reported when no new mutations were
+// applied: PullMutations replays pending deferred work for touched projects, so
+// an empty remote response can still change local state (CodeRabbit
+// outside-diff follow-up).
+func TestPrintCloudPullMutationsResult_ReportsDeferredReplaysOnEmptyPull(t *testing.T) {
+	report := autosync.PullReport{
+		Applied: 0,
+		Replays: []autosync.ProjectReplay{
+			{Project: "proj-a", Retried: 2, Succeeded: 1, Failed: 0, Dead: 1},
+		},
+	}
+
+	stdout, _, recovered := captureOutputAndRecover(t, func() {
+		printCloudPullMutationsResult(report)
+	})
+	if recovered != nil {
+		t.Fatalf("printCloudPullMutationsResult panicked: %v", recovered)
+	}
+	if !strings.Contains(stdout, "No new cloud mutations to pull.") {
+		t.Fatalf("expected no-new-mutations message, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Deferred relations replayed for proj-a: 2 retried, 1 succeeded, 0 failed, 1 dead") {
+		t.Fatalf("deferred replays must be reported even with zero applied mutations, got:\n%s", stdout)
 	}
 }
 

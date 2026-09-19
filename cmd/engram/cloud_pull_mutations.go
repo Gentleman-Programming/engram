@@ -90,14 +90,17 @@ func executeCloudPullMutations(s *store.Store, cfg store.Config) (autosync.PullR
 }
 
 // printCloudPullMutationsResult renders the pull report for the operator.
+// Deferred replays are always reported, even when no new mutations were
+// applied: PullMutations replays pending deferred work for touched projects,
+// so an empty remote response can still change local state.
 func printCloudPullMutationsResult(report autosync.PullReport) {
 	if report.Applied == 0 {
 		fmt.Println("No new cloud mutations to pull.")
-		return
-	}
-	fmt.Printf("Pulled %d cloud mutation(s) from %d project(s).\n", report.Applied, len(report.ProjectsTouched))
-	if len(report.ProjectsTouched) > 0 {
-		fmt.Printf("  Projects: %s\n", strings.Join(report.ProjectsTouched, ", "))
+	} else {
+		fmt.Printf("Pulled %d cloud mutation(s) from %d project(s).\n", report.Applied, len(report.ProjectsTouched))
+		if len(report.ProjectsTouched) > 0 {
+			fmt.Printf("  Projects: %s\n", strings.Join(report.ProjectsTouched, ", "))
+		}
 	}
 	for _, replay := range report.Replays {
 		if replay.Retried > 0 {

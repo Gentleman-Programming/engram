@@ -48,7 +48,7 @@ engram sync --cloud --status --project smoke-project
 engram cloud pull-mutations
 ```
 
-The command pulls since the local cursor, applies each mutation, advances `last_pulled_seq`, and replays deferred relations. It is an explicit operator action that never changes the automatic sync policy. Output lists how many mutations were pulled and from which projects; `No new cloud mutations to pull.` means the store is already current. No token is required when the server runs in insecure local-dev mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`).
+The command pulls since the local cursor, applies each mutation, advances `last_pulled_seq`, and replays deferred relations. It is an explicit operator action that never changes the automatic sync policy. Output lists how many mutations were pulled and from which projects, plus any deferred-relation replays. `No new cloud mutations to pull.` means there were no new remote mutations; deferred replays (if any) are still reported. No token is required when the server runs in insecure local-dev mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`).
 
 ### 5) Verify browser dashboard
 
