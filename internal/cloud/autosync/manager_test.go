@@ -18,27 +18,30 @@ import (
 // ─── Fakes ───────────────────────────────────────────────────────────────────
 
 type fakeLocalStore struct {
-	mu                sync.Mutex
-	mutations         []store.SyncMutation
-	syncState         *store.SyncState
-	leaseOwner        string
-	leaseCalls        int
-	pushErr           error
-	pullErr           error
-	failureMessage    string
-	failureReason     string
-	blockedReason     string
-	blockedMessage    string
-	appliedMuts       []store.SyncMutation
-	acquireGranted    bool
-	ackedSeqs         []int64
-	ackErr            error
-	healthyCalls      int
-	nonEnrolledCounts []store.PendingSyncMutationProjectCount
-	deferredProjects  []string
-	listDeferredErr   error
-	listedTargets     []string
-	replayedScopes    []string
+	mu                            sync.Mutex
+	mutations                     []store.SyncMutation
+	syncState                     *store.SyncState
+	leaseOwner                    string
+	leaseCalls                    int
+	pushErr                       error
+	pullErr                       error
+	failureMessage                string
+	failureReason                 string
+	blockedReason                 string
+	blockedMessage                string
+	blockedWithSyncSuccessReason  string
+	blockedWithSyncSuccessMessage string
+	blockedWithSyncSuccessCalls   int
+	appliedMuts                   []store.SyncMutation
+	acquireGranted                bool
+	ackedSeqs                     []int64
+	ackErr                        error
+	healthyCalls                  int
+	nonEnrolledCounts             []store.PendingSyncMutationProjectCount
+	deferredProjects              []string
+	listDeferredErr               error
+	listedTargets                 []string
+	replayedScopes                []string
 }
 
 func newFakeLocalStore() *fakeLocalStore {
@@ -193,7 +196,12 @@ func (s *fakeLocalStore) MarkSyncBlocked(_, reasonCode, message string) error {
 }
 
 func (s *fakeLocalStore) MarkSyncBlockedWithSyncSuccess(_, reasonCode, message string) error {
-	return s.MarkSyncBlocked("", reasonCode, message)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockedWithSyncSuccessReason = reasonCode
+	s.blockedWithSyncSuccessMessage = message
+	s.blockedWithSyncSuccessCalls++
+	return nil
 }
 
 func (s *fakeLocalStore) MarkSyncHealthy(_ string) error {
@@ -2059,8 +2067,11 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 			t.Fatalf("expected reason message to contain %q, got %q", want, st.ReasonMessage)
 		}
 	}
-	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
-		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	if ls.blockedWithSyncSuccessCalls != 1 {
+		t.Fatalf("expected durable blocked-with-sync-success persisted once, got %d", ls.blockedWithSyncSuccessCalls)
+	}
+	if ls.blockedWithSyncSuccessReason != st.ReasonCode || ls.blockedWithSyncSuccessMessage != st.ReasonMessage {
+		t.Fatalf("expected durable blocked state persisted, reason=%q message=%q", ls.blockedWithSyncSuccessReason, ls.blockedWithSyncSuccessMessage)
 	}
 	if st.LastSyncAt == nil {
 		t.Fatal("expected LastSyncAt set after successful pull, got nil")
@@ -2115,8 +2126,14 @@ func TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist(t *
 	if st.LastSyncAt == nil {
 		t.Fatal("expected LastSyncAt set after successful pull, got nil")
 	}
-	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
-		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	if ls.blockedWithSyncSuccessCalls != 1 {
+		t.Fatalf("expected durable blocked-with-sync-success persisted once, got %d", ls.blockedWithSyncSuccessCalls)
+	}
+	if ls.blockedWithSyncSuccessReason != st.ReasonCode || ls.blockedWithSyncSuccessMessage != st.ReasonMessage {
+		t.Fatalf("expected durable blocked state persisted, reason=%q message=%q", ls.blockedWithSyncSuccessReason, ls.blockedWithSyncSuccessMessage)
+	}
+	if ls.blockedReason != "" {
+		t.Fatalf("expected plain MarkSyncBlocked not used, got %q", ls.blockedReason)
 	}
 }
 
@@ -2153,8 +2170,8 @@ func TestManagerPullFailureOverridesNonEnrolledBlocked(t *testing.T) {
 	if st.BackoffUntil == nil {
 		t.Fatal("expected backoff scheduled after pull transport failure")
 	}
-	if ls.blockedReason != "" {
-		t.Fatalf("expected no blocked state persisted when pull fails, got %q", ls.blockedReason)
+	if ls.blockedReason != "" || ls.blockedWithSyncSuccessCalls != 0 {
+		t.Fatalf("expected no blocked state persisted when pull fails, blocked=%q durableCalls=%d", ls.blockedReason, ls.blockedWithSyncSuccessCalls)
 	}
 	if st.LastSyncAt != nil {
 		t.Fatalf("expected LastSyncAt to remain nil when pull fails, got %v", *st.LastSyncAt)

@@ -4488,16 +4488,11 @@ func TestMarkSyncBlockedWithSyncSuccessAdvancesLastSuccessAt(t *testing.T) {
 	s := newTestStore(t)
 	targetKey := "cloud:proj-a"
 
-	if err := s.MarkSyncHealthy(targetKey); err != nil {
-		t.Fatalf("mark healthy: %v", err)
+	// Seed a stale last_success_at so the replacement is observable without
+	// depending on wall-clock timing.
+	if _, err := s.db.Exec(`UPDATE sync_state SET last_success_at = ? WHERE target_key = ?`, "2020-01-01 00:00:00", targetKey); err != nil {
+		t.Fatalf("seed stale last_success_at: %v", err)
 	}
-	before, err := s.GetSyncState(targetKey)
-	if err != nil || before.LastSuccessAt == nil {
-		t.Fatalf("healthy state last success = %v, err=%v", before.LastSuccessAt, err)
-	}
-	// SQLite datetime('now') has 1s resolution: ensure the blocked-with-success
-	// stamp lands on a different second so the advancement is observable.
-	time.Sleep(time.Second + 50*time.Millisecond)
 
 	if err := s.MarkSyncBlockedWithSyncSuccess(targetKey, "non_enrolled_pending_mutations", "project(s) not enrolled"); err != nil {
 		t.Fatalf("mark blocked with sync success: %v", err)
@@ -4512,8 +4507,8 @@ func TestMarkSyncBlockedWithSyncSuccessAdvancesLastSuccessAt(t *testing.T) {
 	if state.ReasonCode == nil || *state.ReasonCode != "non_enrolled_pending_mutations" {
 		t.Fatalf("expected degraded reason code persisted, got %v", state.ReasonCode)
 	}
-	if state.LastSuccessAt == nil || *state.LastSuccessAt == *before.LastSuccessAt {
-		t.Fatalf("expected last_success_at advanced, before=%q after=%v", *before.LastSuccessAt, state.LastSuccessAt)
+	if state.LastSuccessAt == nil || *state.LastSuccessAt == "2020-01-01 00:00:00" {
+		t.Fatalf("expected last_success_at replaced, got %v", state.LastSuccessAt)
 	}
 }
 
