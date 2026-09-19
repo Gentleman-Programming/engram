@@ -214,6 +214,18 @@ class SessionProjectConflictError extends Error {
   }
 }
 
+// A startup failure this plugin already diagnosed: the server holding the port is too old to
+// identify itself, or it is a different instance. Those two messages are complete on their own —
+// they name the condition and the fix — so the generic startup wrapper must pass them through
+// instead of appending `mem_doctor` advice (a diagnostic that reaches this same server through
+// this same failing startup path) and a hint to verify a URL that is not what is wrong.
+class EngramServerDiagnosisError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EngramServerDiagnosisError";
+  }
+}
+
 function sessionProjectConflictFromResponse(error: unknown, sessionId: string, requestedProject: string): SessionProjectConflictError | undefined {
   if (!(error instanceof EngramHttpError) || error.status !== 409 || !error.data || typeof error.data !== "object") return undefined;
   const data = error.data as Record<string, unknown>;
@@ -388,14 +400,30 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
 
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
 // told us nothing either way. Only "ready" is proof that a server is answering, so nothing
-// but "ready" may be read as "a server is already there".
-type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign";
+// but "ready" may be read as "a server is already there". "foreign" is a different, fully
+// identified instance, while "outdated" is a server too old to report any identity at all:
+// the two need opposite advice, so they must never collapse into one state.
+type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "outdated";
 
 function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
   const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
   const id = result.status === 0 ? result.stdout.trim() : "";
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Engram could not resolve its local server identity");
   return id;
+}
+
+// The installed binary's release, read through the same bounded spawn shape as the instance id
+// and used only to diagnose a version mismatch. A missing binary, a failed command, or an
+// unparseable line yields "" so the comparison is skipped instead of being allowed to fail
+// startup.
+function localEngramVersion(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
+  try {
+    const result = spawnSync(ENGRAM_BIN, ["version"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
+    if (result.status !== 0 || typeof result.stdout !== "string") return "";
+    return /\bengram\s+(\S+)\s*$/.exec(result.stdout.trim())?.[1] ?? "";
+  } catch {
+    return "";
+  }
 }
 
 // Node reports a refused localhost connection through several shapes: a bare Error whose
@@ -416,6 +444,17 @@ function isConnectionRefusedError(error: unknown): boolean {
   return (error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error);
 }
 
+// The version reported by the last probed /health response. It is a side channel because the
+// probe's return value stays the coarse health state every caller already reads, while only the
+// startup path needs the string — to explain a version mismatch, or to name the release of a
+// server too old to identify itself.
+let probedEngramServerVersion = "";
+
+// A server that answers /health without a usable instance_id cannot be ours — that field is
+// exactly the identity this plugin compares — and it cannot be proven foreign either: it is an
+// older release that predates the field. Reading it as a foreign instance told users to run
+// mem_doctor, which reaches this same server through this same failing startup path and
+// therefore explains nothing. Memory still stays off; only the diagnosis changes.
 async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
@@ -423,8 +462,11 @@ async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
     });
     if (!res.ok) return "indeterminate";
     if (!expectedID) return "ready";
-    const health = await res.json() as { instance_id?: unknown };
-    return health.instance_id === expectedID ? "ready" : "foreign";
+    const health = await res.json() as { instance_id?: unknown; version?: unknown };
+    probedEngramServerVersion = typeof health.version === "string" ? health.version.trim() : "";
+    const reportedID = typeof health.instance_id === "string" ? health.instance_id.trim() : "";
+    if (!reportedID) return "outdated";
+    return reportedID === expectedID ? "ready" : "foreign";
   } catch (error) {
     if (isTimeoutError(error)) return "indeterminate";
     if (isConnectionRefusedError(error)) {
@@ -436,6 +478,44 @@ async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
 
 async function isEngramRunning(expectedID = ""): Promise<boolean> {
 	return (await probeEngramHealth(expectedID)) === "ready";
+}
+
+// Two legitimate installs can share one machine, so a version mismatch is a warning and never a
+// failure: taking memory away over a version string would be worse than the mismatch itself. It
+// is reported once per process because initialization is retried, and only when both sides
+// report a real, comparable release — "dev" is a local build, not a skew.
+let engramVersionSkewWarned = false;
+
+function warnEngramVersionSkewOnce(serverVersion: string, localVersion: string): boolean {
+  if (engramVersionSkewWarned) return false;
+  if (!serverVersion || !localVersion) return false;
+  if (serverVersion === "dev" || localVersion === "dev") return false;
+  if (serverVersion === localVersion) return false;
+  engramVersionSkewWarned = true;
+  try {
+    process.stderr.write(`[engram] Engram server at ${ENGRAM_URL} is running ${serverVersion} while the installed engram binary is ${localVersion}; restart the server so both run the same release.\n`);
+  } catch {
+    // A diagnostic must never be able to break startup.
+  }
+  return true;
+}
+
+// The reported version is optional, so the sentence has to hold up with and without it. Naming
+// the version is what lets the user match the running process against the binary they must
+// restart, and the restart recipe replaces "run mem_doctor": that diagnostic reaches this same
+// server through this same failing startup path and therefore explains nothing. Sharing memory
+// with an unidentified server stays refused — this message only says how to fix it.
+function outdatedEngramServerMessage(url: string, serverVersion: string): string {
+  const reported = serverVersion
+    ? `It reports version ${serverVersion}, which predates the instance identity this plugin compares.`
+    : "It predates the instance identity this plugin compares.";
+  return [
+    `Engram server at ${url} is too old for this plugin: ${reported}`,
+    "Restart it so the running process is the installed engram binary:",
+    "- macOS (launchd): launchctl kickstart -k gui/$UID/com.gentleman-programming.engram",
+    "- Linux (systemd user): systemctl --user restart engram",
+    "- Manual: stop the running `engram serve` process, then start it again with `engram serve`.",
+  ].join("\n");
 }
 
 let localEngramInstanceID = "";
@@ -672,8 +752,24 @@ async function initializeEngramServer(): Promise<void> {
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
   const health = await probeEngramHealth(instanceID);
-  if (health === "ready") return;
-  if (health === "foreign") throw new Error(`Engram server ownership mismatch at ${ENGRAM_URL}`);
+  if (health === "ready") {
+    // The local binary is spawned only when the server actually reported a version, and a
+    // failure to read it must never turn a healthy server into a startup failure.
+    const localVersion = probedEngramServerVersion ? localEngramVersion(Math.max(1, deadline - Date.now())) : "";
+    warnEngramVersionSkewOnce(probedEngramServerVersion, localVersion);
+    return;
+  }
+  if (health === "foreign") {
+    // A genuinely different instance: this really is an ownership mismatch, and it is already a
+    // complete diagnosis, so it skips the generic wrapper's advice too.
+    throw new EngramServerDiagnosisError(`Engram server ownership mismatch at ${ENGRAM_URL}`);
+  }
+  // An outdated server fails exactly like a foreign one — memory stays off rather than being
+  // shared with a server this plugin cannot identify — but the message names the real condition
+  // and the real fix instead of an ownership mismatch that never existed.
+  if (health === "outdated") {
+    throw new EngramServerDiagnosisError(outdatedEngramServerMessage(ENGRAM_URL, probedEngramServerVersion));
+  }
 
   // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
   // aborted probe, a DNS failure, an error shape we do not recognize — means we have no
@@ -949,8 +1045,11 @@ async function initialize(cwd: string): Promise<void> {
 }
 
 // Startup failures reach the agent as prose, so give every one of them the same shape and
-// the same actionable prefix instead of leaking a raw spawn or readiness message.
+// the same actionable prefix instead of leaking a raw spawn or readiness message. The exceptions
+// are the failures this plugin diagnosed itself: appending generic advice there would send the
+// user to a diagnostic that cannot help and to a URL that is not the problem.
 function normalizeInitializationError(error: unknown): Error {
+  if (error instanceof EngramServerDiagnosisError) return error;
   const message = error instanceof Error ? error.message : String(error);
   return new Error(
     `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_BIN.`,

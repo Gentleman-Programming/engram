@@ -23,9 +23,14 @@ function freePort() {
 }
 
 // A fake `engram serve` that logs every invocation, then either dies before readiness or
-// starts answering /health after `readyAfterMs` — the slow-health window under test.
-async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode }) {
+// starts answering /health after `readyAfterMs` — the slow-health window under test. The
+// `version` subcommand and the /health `version` field are wired to the same release, so a
+// fixture can model an installed binary that matches the daemon and one that does not.
+async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode, localVersion }) {
   const binPath = join(dir, "fake-engram.cjs");
+  const reportedVersion = localVersion === undefined ? "" : `engram ${localVersion}\n`;
+  const healthPayload = { instance_id: "00000000000000000000000000000000" };
+  if (localVersion !== undefined) healthPayload.version = localVersion;
   const script = `#!/usr/bin/env node
 const { appendFileSync } = require("node:fs");
 const { createServer } = require("node:http");
@@ -33,6 +38,7 @@ const { resolve } = require("node:path");
 
 const syntheticServePath = resolve("serve");
 const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; if (command === "instance-id" || command === resolve("instance-id")) { process.stdout.write("00000000000000000000000000000000\\n"); process.exit(0); }
+if (command === "version" || command === resolve("version")) { process.stdout.write(${JSON.stringify(reportedVersion)}); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
@@ -44,7 +50,7 @@ if (isServe) {
     return;
   }
   res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ instance_id: "00000000000000000000000000000000" }));
+  res.end(JSON.stringify(${JSON.stringify(healthPayload)}));
 });
 // The port was picked by a probe socket that has since closed, so another process can win it
 // in between. Retry the bind for a bounded window instead of dying on a lost race.
@@ -116,7 +122,9 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : { instance_id: "00000000000000000000000000000000" }));
+      response.end(JSON.stringify(request.url.startsWith("/project/current")
+        ? { project: "fake-project" }
+        : options.readyHealth ?? { instance_id: "00000000000000000000000000000000" }));
     });
     if (readyServer) await new Promise((resolve, reject) => {
       readyServer.once("error", reject);
@@ -127,7 +135,7 @@ async function withFixture(options, run) {
     });
     const fakeEngram = options.missingBin
       ? { engramBin: join(dir, "engram-does-not-exist") }
-      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode });
+      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode, localVersion: options.localVersion });
     if (fakeEngram.nodeOptions) {
       process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
     }
@@ -266,4 +274,107 @@ test("loading the plugin leaves the checkout's node_modules untouched", async ()
       `${stub} was replaced by a test double; the suite must not write into the real node_modules`,
     );
   }
+});
+
+// ─── Health classification through the real startup path ─────────────────────────────────
+// A daemon left over from a previous release answers /health without `instance_id`, because
+// the field did not exist when it was built. Memory must stay off rather than be shared with a
+// server this plugin cannot identify — that part does not change — but the failure has to name
+// the real condition (that old server, its version) and the real fix (restart it).
+
+async function withStderrCaptured(body) {
+  const originalWrite = process.stderr.write;
+  const written = [];
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    return await body(written);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
+test("a server too old to report an instance_id fails startup with the restart recipe", async () => {
+  await withFixture(
+    { readyServer: true, readyHealth: { status: "ok", version: "1.0.0" }, localVersion: "2.0.0" },
+    async ({ hooks, tools, ctx, statusCalls, spawnLog }) => {
+      await hooks.get("session_start")({}, ctx);
+      assert.equal(statusCalls.length, 1);
+      assert.match(statusCalls[0][1], /· offline$/, "an unidentified server is never adopted as ours");
+      assert.equal(await countSpawns(spawnLog), 0, "a port that answers is never raced with a second server");
+
+      const result = await tools.get("mem_search").execute("call-old", { query: "startup" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /too old for this plugin/);
+      assert.match(result.content[0].text, /1\.0\.0/, "the failure must name the version the old server reports");
+      assert.match(result.content[0].text, /launchctl kickstart -k gui\/\$UID\/com\.gentleman-programming\.engram/);
+      assert.match(result.content[0].text, /systemctl --user restart engram/);
+      assert.match(result.content[0].text, /stop the running `engram serve` process/);
+      assert.doesNotMatch(result.content[0].text, /mem_doctor/, "the agent must not be sent to a diagnostic that fails identically");
+      assert.doesNotMatch(result.content[0].text, /verify ENGRAM_URL\/ENGRAM_BIN/);
+      assert.doesNotMatch(result.content[0].text, /could not initialize the Engram memory provider/);
+    },
+  );
+});
+
+test("a foreign owner reaches the agent as its own diagnosis, without generic advice", async () => {
+  await withFixture(
+    { readyServer: true, readyHealth: { instance_id: "ffffffffffffffffffffffffffffffff" }, localVersion: "2.0.0" },
+    async ({ hooks, tools, ctx, spawnLog }) => {
+      await hooks.get("session_start")({}, ctx);
+      assert.equal(await countSpawns(spawnLog), 0, "a port owned by another instance is never raced with a second server");
+
+      const result = await tools.get("mem_search").execute("call-foreign", { query: "startup" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /Engram server ownership mismatch/);
+      assert.doesNotMatch(result.content[0].text, /mem_doctor/);
+      assert.doesNotMatch(result.content[0].text, /verify ENGRAM_URL\/ENGRAM_BIN/);
+    },
+  );
+});
+
+test("an unclassified startup failure keeps today's generic advice", async () => {
+  await withFixture({ exitCode: 1 }, async ({ tools, ctx }) => {
+    const result = await tools.get("mem_search").execute("call-generic", { query: "startup" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /could not initialize the Engram memory provider at http:\/\/127\.0\.0\.1:\d+/);
+    assert.match(result.content[0].text, /Run mem_doctor or start Engram manually, and verify ENGRAM_URL\/ENGRAM_BIN\./);
+  });
+});
+
+test("a matching identity on a different release warns once and keeps serving memory", async () => {
+  await withStderrCaptured(async (written) => {
+    await withFixture(
+      { readyServer: true, readyHealth: { instance_id: "00000000000000000000000000000000", version: "1.0.0" }, localVersion: "2.0.0" },
+      async ({ hooks, ctx, statusCalls }) => {
+        const sessionStart = hooks.get("session_start");
+        await sessionStart({}, ctx);
+        await hooks.get("before_agent_start")({ systemPrompt: "base", prompt: "recall past work" }, ctx);
+
+        assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]], "version skew must not take memory away");
+        const skewWarnings = written.filter((chunk) => /is running 1\.0\.0/.test(chunk));
+        assert.equal(skewWarnings.length, 1, "skew is reported once, not once per hook");
+        assert.match(skewWarnings[0], /1\.0\.0/);
+        assert.match(skewWarnings[0], /2\.0\.0/);
+        assert.match(skewWarnings[0], /restart/i);
+      },
+    );
+  });
+});
+
+test("a matching identity on the same release stays silent", async () => {
+  await withStderrCaptured(async (written) => {
+    await withFixture(
+      { readyServer: true, readyHealth: { instance_id: "00000000000000000000000000000000", version: "2.0.0" }, localVersion: "2.0.0" },
+      async ({ hooks, ctx, statusCalls }) => {
+        await hooks.get("session_start")({}, ctx);
+
+        assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]]);
+        assert.deepEqual(written.filter((chunk) => /version/i.test(chunk)), [], "a matching release is not skew");
+      },
+    );
+  });
 });

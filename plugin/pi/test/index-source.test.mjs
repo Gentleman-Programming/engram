@@ -26,6 +26,22 @@ function flush(times = 2) {
     : new Promise((resolve) => setTimeout(resolve, 0)).then(() => flush(times - 1));
 }
 
+// Error classes are declarations, not functions, so the body extractor above cannot see them.
+// The declaration is returned as plain JavaScript, the same way the callers of the function
+// extractor drop the type annotations they do not need at runtime.
+function extractErrorClassSource(name) {
+  const start = source.indexOf(`class ${name} extends Error {`);
+  assert.notEqual(start, -1, `${name} declaration not found`);
+  const bodyStart = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1).replace("constructor(message: string)", "constructor(message)");
+  }
+  throw new Error(`${name} declaration not found`);
+}
+
 function buildAwaitWithAbortForTest() {
   const body = extractFunctionBody("awaitWithAbort", "{\n  if (!signal)")
     .replace("new Promise<T>", "new Promise")
@@ -173,18 +189,38 @@ function buildInitializeEngramServerForTest({
   waitForEngramReadiness,
   timeoutMs = 10000,
   instanceID = "00000000000000000000000000000000",
+  serverVersion = "",
+  localVersion = "",
+  stderrWrite,
 }) {
   const body = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
+  const classSource = extractErrorClassSource("EngramServerDiagnosisError");
+  const outdatedBody = extractFunctionBody("outdatedEngramServerMessage", "{\n  const reported");
+  const skewBody = extractFunctionBody("warnEngramVersionSkewOnce", "{\n  if (engramVersionSkewWarned)");
   const factory = new Function(
     "CONFIGURED_ENGRAM_URL",
     "probeEngramHealth",
     "spawnAndWaitForEngram",
     "waitForEngramReadiness",
+    "ENGRAM_URL",
     "ENGRAM_STARTUP_TIMEOUT_MS",
     "instanceID",
+    "serverVersion",
+    "localVersion",
+    "process",
     `
+    ${classSource}
     let localEngramInstanceID = "";
+    let probedEngramServerVersion = serverVersion;
+    let engramVersionSkewWarned = false;
     const localInstanceID = () => instanceID;
+    const localEngramVersion = () => localVersion;
+    function outdatedEngramServerMessage(url, serverVersion) {
+      ${outdatedBody}
+    }
+    function warnEngramVersionSkewOnce(serverVersion, localVersion) {
+      ${skewBody}
+    }
     async function initializeEngramServer() {
       ${body}
     }
@@ -196,13 +232,17 @@ function buildInitializeEngramServerForTest({
     probeEngramHealth,
     spawnAndWaitForEngram,
     waitForEngramReadiness,
+    "http://127.0.0.1:7437",
     timeoutMs,
     instanceID,
+    serverVersion,
+    localVersion,
+    stderrWrite ? { stderr: { write: stderrWrite } } : process,
   );
 }
 
 function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
-  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { instance_id?: unknown };", "const health = await res.json();");
+  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { instance_id?: unknown; version?: unknown };", "const health = await res.json();");
   const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
     .replace("value as Record<string, unknown>", "value");
   const refusalBody = extractFunctionBody("isConnectionRefusedError", "{\n  return");
@@ -218,14 +258,117 @@ function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
     function isConnectionRefusedError(error) {
       ${refusalBody}
     }
-    async function probeEngramHealth() {
+    let probedEngramServerVersion = "";
+    async function probeEngramHealth(expectedID = "") {
       ${body}
     }
+    probeEngramHealth.probedVersion = () => probedEngramServerVersion;
     return probeEngramHealth;
     `,
   );
   return factory(fetch, isTimeoutError, "http://127.0.0.1:7437", { timeout: () => undefined });
 }
+
+// The message a user finally reads is the initializer's failure after the wrapper has shaped it,
+// so this composes the real marker class, the real initializer, and the real wrapper instead of
+// asserting the wrapper's decision in isolation.
+function buildStartupErrorMessageForTest({
+  probeEngramHealth,
+  serverVersion = "",
+  localVersion = "",
+  spawnAndWaitForEngram = async () => assert.fail("an answered port must not spawn a second server"),
+  waitForEngramReadiness = async () => assert.fail("an answered port must not be waited for"),
+}) {
+  const classSource = extractErrorClassSource("EngramServerDiagnosisError");
+  const initializeBody = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
+  const normalizeBody = extractFunctionBody("normalizeInitializationError", "{\n  if (error instanceof EngramServerDiagnosisError) return error;");
+  const outdatedBody = extractFunctionBody("outdatedEngramServerMessage", "{\n  const reported");
+  const skewBody = extractFunctionBody("warnEngramVersionSkewOnce", "{\n  if (engramVersionSkewWarned)");
+  const factory = new Function(
+    "CONFIGURED_ENGRAM_URL",
+    "probeEngramHealth",
+    "spawnAndWaitForEngram",
+    "waitForEngramReadiness",
+    "ENGRAM_URL",
+    "ENGRAM_STARTUP_TIMEOUT_MS",
+    "instanceID",
+    "serverVersion",
+    "localVersion",
+    "process",
+    `
+    ${classSource}
+    let localEngramInstanceID = "";
+    let probedEngramServerVersion = serverVersion;
+    let engramVersionSkewWarned = false;
+    const localInstanceID = () => instanceID;
+    const localEngramVersion = () => localVersion;
+    function outdatedEngramServerMessage(url, serverVersion) {
+      ${outdatedBody}
+    }
+    function warnEngramVersionSkewOnce(serverVersion, localVersion) {
+      ${skewBody}
+    }
+    async function initializeEngramServer() {
+      ${initializeBody}
+    }
+    function normalizeInitializationError(error) {
+      ${normalizeBody}
+    }
+    return async function startupErrorMessage() {
+      try {
+        await initializeEngramServer();
+      } catch (error) {
+        return normalizeInitializationError(error).message;
+      }
+      return "";
+    };
+    `,
+  );
+  return factory(
+    undefined,
+    probeEngramHealth,
+    spawnAndWaitForEngram,
+    waitForEngramReadiness,
+    "http://127.0.0.1:7437",
+    10000,
+    "00000000000000000000000000000000",
+    serverVersion,
+    localVersion,
+    process,
+  );
+}
+
+// The two diagnostics under test are pure string logic, so they are exercised directly
+// instead of through a startup run.
+function buildOutdatedEngramServerMessageForTest() {
+  const body = extractFunctionBody("outdatedEngramServerMessage", "{\n  const reported");
+  return new Function(`
+    function outdatedEngramServerMessage(url, serverVersion) {
+      ${body}
+    }
+    return outdatedEngramServerMessage;
+  `)();
+}
+
+function buildWarnEngramVersionSkewOnceForTest(write) {
+  const body = extractFunctionBody("warnEngramVersionSkewOnce", "{\n  if (engramVersionSkewWarned)");
+  const factory = new Function("process", "ENGRAM_URL", `
+    let engramVersionSkewWarned = false;
+    function warnEngramVersionSkewOnce(serverVersion, localVersion) {
+      ${body}
+    }
+    return warnEngramVersionSkewOnce;
+  `);
+  return factory({ stderr: { write } }, "http://127.0.0.1:7437");
+}
+
+// A response body shape a /health endpoint can really return. The classification turns on the
+// presence and type of `instance_id`, so each case is built as data rather than as a stub.
+function healthResponse(payload) {
+  return { ok: true, async json() { return payload; } };
+}
+
+const EXPECTED_INSTANCE_ID = "00000000000000000000000000000000";
 
 // The retry backoff is clock-driven, so the test owns the clock: nothing here sleeps, and a
 // backoff window is crossed by moving `clock.now` instead of by waiting for wall time.
@@ -648,6 +791,196 @@ test("timeout-shaped health errors remain indeterminate", async () => {
     });
     assert.equal(await probeEngramHealth(), "indeterminate");
   }
+});
+
+// ─── Health classification: an unidentified server is outdated, not foreign ──────────────
+// A daemon from an older release answers /health without `instance_id`, because the field did
+// not exist yet. Collapsing that into "foreign" claimed an ownership mismatch and sent the user
+// to a diagnostic that fails through this very startup path, so the classification has to name
+// the real condition while keeping the same refusal to share memory with an unknown server.
+
+test("a server that reports no usable instance_id while an identity is expected is outdated", async () => {
+  for (const payload of [
+    { status: "ok", version: "1.0.0" },
+    { status: "ok", instance_id: null, version: "1.0.0" },
+    { status: "ok", instance_id: "", version: "1.0.0" },
+    { status: "ok", instance_id: "   ", version: "1.0.0" },
+    { status: "ok", instance_id: 17, version: "1.0.0" },
+  ]) {
+    const probeEngramHealth = buildProbeEngramHealthForTest({ fetch: async () => healthResponse(payload), isTimeoutError: () => false });
+    assert.equal(await probeEngramHealth(EXPECTED_INSTANCE_ID), "outdated", `${JSON.stringify(payload)} must classify as outdated`);
+    assert.equal(probeEngramHealth.probedVersion(), "1.0.0", "the outdated diagnosis has to name what that server reports");
+  }
+});
+
+test("a matching instance_id is ready and a different one is still foreign", async () => {
+  const ours = buildProbeEngramHealthForTest({
+    fetch: async () => healthResponse({ instance_id: EXPECTED_INSTANCE_ID, version: "2.0.0" }),
+    isTimeoutError: () => false,
+  });
+  assert.equal(await ours(EXPECTED_INSTANCE_ID), "ready");
+  assert.equal(ours.probedVersion(), "2.0.0", "the probe records the version its diagnostics may have to name");
+
+  const other = buildProbeEngramHealthForTest({
+    fetch: async () => healthResponse({ instance_id: "ffffffffffffffffffffffffffffffff", version: "2.0.0" }),
+    isTimeoutError: () => false,
+  });
+  assert.equal(await other(EXPECTED_INSTANCE_ID), "foreign");
+});
+
+test("no expected identity keeps every answering server ready", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({ fetch: async () => healthResponse({ status: "ok" }), isTimeoutError: () => false });
+  assert.equal(await probeEngramHealth(), "ready");
+  assert.equal(await probeEngramHealth(""), "ready");
+});
+
+test("an outdated server is a live server, never a refusal or an inconclusive probe", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({ fetch: async () => healthResponse({ status: "ok" }), isTimeoutError: () => false });
+  assert.equal(await probeEngramHealth(EXPECTED_INSTANCE_ID), "outdated", "a non-ready state must not be read as nothing listening");
+});
+
+test("the outdated diagnosis names the URL, the reported version, and every restart command", () => {
+  const message = buildOutdatedEngramServerMessageForTest()("http://127.0.0.1:7437", "1.0.0");
+  assert.match(message, /http:\/\/127\.0\.0\.1:7437/, "the user must know which server answered");
+  assert.match(message, /1\.0\.0/, "the reported version is what lets the user match the process to restart");
+  assert.match(message, /predates the instance identity/);
+  assert.match(message, /launchctl kickstart -k gui\/\$UID\/com\.gentleman-programming\.engram/);
+  assert.match(message, /systemctl --user restart engram/);
+  assert.match(message, /stop the running `engram serve` process/);
+  assert.match(message, /`engram serve`/);
+  assert.doesNotMatch(message, /mem_doctor/, "the diagnostic route fails through this same startup path");
+  assert.doesNotMatch(message, /share|shared/i, "an unidentified server is never offered as a shared memory backend");
+});
+
+test("the outdated diagnosis stays actionable when the server reports no version", () => {
+  const message = buildOutdatedEngramServerMessageForTest()("http://127.0.0.1:7437", "");
+  assert.match(message, /http:\/\/127\.0\.0\.1:7437/);
+  assert.match(message, /predates the instance identity/);
+  assert.match(message, /systemctl --user restart engram/);
+  assert.doesNotMatch(message, /version\s+(undefined|null|"")/);
+  assert.doesNotMatch(message, /mem_doctor/);
+});
+
+test("an outdated server blocks startup exactly like a foreign one, with a better diagnosis", async () => {
+  let spawns = 0;
+  let readinessWaits = 0;
+  const outdated = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "outdated",
+    serverVersion: "1.0.0",
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+  await assert.rejects(outdated(), (error) => {
+    assert.match(error.message, /too old for this plugin/);
+    assert.match(error.message, /1\.0\.0/);
+    assert.match(error.message, /launchctl kickstart -k gui\/\$UID\//);
+    assert.match(error.message, /systemctl --user restart engram/);
+    assert.doesNotMatch(error.message, /mem_doctor/);
+    assert.doesNotMatch(error.message, /ownership mismatch/);
+    return true;
+  });
+  assert.equal(spawns, 0, "an answered port is never raced with a second server");
+  assert.equal(readinessWaits, 0);
+
+  const foreign = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "foreign",
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+  await assert.rejects(foreign(), /Engram server ownership mismatch at http:\/\/127\.0\.0\.1:7437/);
+  assert.equal(spawns, 0);
+  assert.equal(readinessWaits, 0);
+});
+
+test("version skew between our server and the installed binary warns once and never blocks", async () => {
+  const written = [];
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "ready",
+    serverVersion: "1.0.0",
+    localVersion: "2.0.0",
+    spawnAndWaitForEngram: async () => assert.fail("a healthy server of ours must not spawn a second one"),
+    waitForEngramReadiness: async () => assert.fail("a healthy server of ours must not be waited for"),
+    stderrWrite: (chunk) => { written.push(String(chunk)); },
+  });
+
+  await initializeEngramServer();
+  await initializeEngramServer();
+
+  assert.equal(written.length, 1, "skew is reported once per process, not once per initialization");
+  assert.match(written[0], /1\.0\.0/);
+  assert.match(written[0], /2\.0\.0/);
+  assert.match(written[0], /restart/i);
+});
+
+test("version skew is compared only when both sides report a real version", () => {
+  const written = [];
+  const warn = buildWarnEngramVersionSkewOnceForTest((chunk) => { written.push(String(chunk)); });
+
+  assert.equal(warn("2.0.0", "2.0.0"), false, "an equal version is not skew");
+  assert.equal(warn("", "1.0.0"), false);
+  assert.equal(warn("2.0.0", ""), false);
+  assert.equal(warn("dev", "1.0.0"), false, "a local build must not be reported as an upgrade");
+  assert.equal(warn("2.0.0", "dev"), false);
+  assert.deepEqual(written, [], "a skipped comparison must not emit anything");
+
+  // A skipped comparison must not burn the one warning a real skew is entitled to.
+  assert.equal(warn("3.0.0", "1.0.0"), true);
+  assert.equal(warn("3.0.0", "1.0.0"), false);
+  assert.equal(written.length, 1);
+  assert.match(written[0], /3\.0\.0/);
+  assert.match(written[0], /1\.0\.0/);
+});
+
+test("a diagnostic sink that throws cannot fail startup", () => {
+  const warn = buildWarnEngramVersionSkewOnceForTest(() => { throw new Error("stderr is closed"); });
+  assert.equal(warn("2.0.0", "1.0.0"), true);
+});
+
+// ─── What the user finally reads ─────────────────────────────────────────────────────────
+// A failure this plugin already diagnosed itself — an outdated server, a foreign owner — has to
+// reach the user exactly as written. `mem_doctor` reaches the same server through this same
+// failing startup path and explains nothing, and for these two states neither the URL nor the
+// binary identity is what is wrong: the identity is precisely what was compared.
+
+test("an outdated server reaches the user as its own diagnosis, without generic advice", async () => {
+  const startupErrorMessage = buildStartupErrorMessageForTest({
+    probeEngramHealth: async () => "outdated",
+    serverVersion: "1.0.0",
+  });
+
+  const message = await startupErrorMessage();
+  assert.match(message, /Engram server at http:\/\/127\.0\.0\.1:7437 is too old for this plugin/);
+  assert.match(message, /1\.0\.0/);
+  assert.match(message, /launchctl kickstart -k gui\/\$UID\/com\.gentleman-programming\.engram/);
+  assert.match(message, /systemctl --user restart engram/);
+  assert.match(message, /stop the running `engram serve` process/);
+  assert.doesNotMatch(message, /mem_doctor/, "mem_doctor cannot diagnose a condition it reaches through this same path");
+  assert.doesNotMatch(message, /verify ENGRAM_URL\/ENGRAM_BIN/);
+  assert.doesNotMatch(message, /could not initialize the Engram memory provider/, "the diagnosis is the whole message");
+});
+
+test("a foreign owner reaches the user as its own diagnosis, without generic advice", async () => {
+  const startupErrorMessage = buildStartupErrorMessageForTest({
+    probeEngramHealth: async () => "foreign",
+  });
+
+  const message = await startupErrorMessage();
+  assert.match(message, /Engram server ownership mismatch at http:\/\/127\.0\.0\.1:7437/);
+  assert.doesNotMatch(message, /mem_doctor/);
+  assert.doesNotMatch(message, /verify ENGRAM_URL\/ENGRAM_BIN/);
+  assert.doesNotMatch(message, /could not initialize the Engram memory provider/);
+});
+
+test("an unclassified startup failure keeps today's generic advice", async () => {
+  const startupErrorMessage = buildStartupErrorMessageForTest({
+    probeEngramHealth: async () => "refused",
+    spawnAndWaitForEngram: async () => { throw new Error("Engram server exited before readiness (code 1)"); },
+  });
+
+  const message = await startupErrorMessage();
+  assert.match(message, /could not initialize the Engram memory provider at http:\/\/127\.0\.0\.1:7437/);
+  assert.match(message, /Engram server exited before readiness \(code 1\)/);
+  assert.match(message, /Run mem_doctor or start Engram manually, and verify ENGRAM_URL\/ENGRAM_BIN\./);
 });
 
 test("a definitive refusal spawns once and awaits spawned-server readiness", async () => {
