@@ -28,6 +28,7 @@ type RemoteTransport struct {
 	project         string
 	httpClient      *http.Client
 	writeHTTPClient *http.Client
+	extraHeaders    []extraHeader
 }
 
 type HTTPStatusError struct {
@@ -93,12 +94,18 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 	if project == "" {
 		return nil, fmt.Errorf("cloud: project is required")
 	}
+	extraHeaders := extraHeadersFromEnv()
+	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
+		return nil, err
+	}
+	requireHTTPSRedirect := token != "" || len(extraHeaders) > 0
 	return &RemoteTransport{
 		baseURL:         normalized,
 		token:           token,
 		project:         project,
-		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
-		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
+		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, requireHTTPSRedirect),
+		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, requireHTTPSRedirect),
+		extraHeaders:    extraHeaders,
 	}, nil
 }
 
@@ -114,17 +121,41 @@ func validateBearerBaseURL(baseURL, token string) (string, string, error) {
 	return normalized, token, nil
 }
 
-func newRemoteHTTPClient(timeout time.Duration, token string) *http.Client {
+func newRemoteHTTPClient(timeout time.Duration, requireHTTPSRedirect bool) *http.Client {
 	client := &http.Client{Timeout: timeout}
-	if token != "" {
-		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+	if requireHTTPSRedirect {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			if req.URL.Scheme != "https" {
-				return fmt.Errorf("cloud: bearer token redirect requires HTTPS")
+				return fmt.Errorf("cloud: redirect requires HTTPS")
+			}
+			// Go already drops the bearer on cross-origin redirects, but
+			// configured extra headers (which can carry service credentials)
+			// would be forwarded verbatim. Never follow a redirect away from
+			// the original normalized origin (scheme, hostname, effective
+			// port); path-only and same-origin redirects remain allowed.
+			if len(via) > 0 && redirectOrigin(req.URL) != redirectOrigin(via[0].URL) {
+				return fmt.Errorf("cloud: redirect to a different origin is rejected to keep configured credentials private")
 			}
 			return nil
 		}
 	}
 	return client
+}
+
+// redirectOrigin returns the normalized scheme://host:port identity used to
+// decide whether a redirect keeps configured credentials on the same origin.
+func redirectOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme + "://" + host + ":" + port
 }
 
 func validateBaseURL(raw string) (string, error) {
@@ -169,11 +200,16 @@ func (rt *RemoteTransport) endpointURL(query url.Values, parts ...string) (strin
 	return parsed.String(), nil
 }
 
-func (rt *RemoteTransport) setAuthorization(req *http.Request) {
-	if rt.token == "" {
-		return
+// applyHeaders sets the configured bearer authorization (when a token is
+// present) followed by the statically configured ENGRAM_CLOUD_EXTRA_HEADERS on
+// every outgoing request.
+func (rt *RemoteTransport) applyHeaders(req *http.Request) {
+	if rt.token != "" {
+		req.Header.Set("Authorization", "Bearer "+rt.token)
 	}
-	req.Header.Set("Authorization", "Bearer "+rt.token)
+	for _, header := range rt.extraHeaders {
+		req.Header.Set(header.key, header.value)
+	}
 }
 
 func (rt *RemoteTransport) ReadManifest() (*engramsync.Manifest, error) {
@@ -185,7 +221,7 @@ func (rt *RemoteTransport) ReadManifest() (*engramsync.Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud: build manifest request: %w", err)
 	}
-	rt.setAuthorization(req)
+	rt.applyHeaders(req)
 
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -242,7 +278,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 		return fmt.Errorf("cloud: build push request: %w", err)
 	}
 	req.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
-	rt.setAuthorization(req)
+	rt.applyHeaders(req)
 
 	resp, err := rt.writeHTTPClient.Do(req)
 	if err != nil {
@@ -266,7 +302,7 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 		return nil, fmt.Errorf("cloud: build pull request: %w", err)
 	}
 	req.Header.Set("Accept", chunkcodec.CompressedEnvelopeContentType())
-	rt.setAuthorization(req)
+	rt.applyHeaders(req)
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cloud: pull chunk %s: %w", chunkID, err)
@@ -341,9 +377,10 @@ func (rt *RemoteTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse
 // Unlike RemoteTransport (which handles chunk-level sync), this operates on the
 // mutation journal and supports cursor-based pull.
 type MutationTransport struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL      string
+	token        string
+	httpClient   *http.Client
+	extraHeaders []extraHeader
 }
 
 // NewMutationTransport creates a MutationTransport. baseURL must be a valid HTTP(S) URL;
@@ -353,16 +390,28 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 	if err != nil {
 		return nil, err
 	}
+	extraHeaders := extraHeadersFromEnv()
+	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
+		return nil, err
+	}
+	requireHTTPSRedirect := token != "" || len(extraHeaders) > 0
 	return &MutationTransport{
-		baseURL:    normalized,
-		token:      token,
-		httpClient: newRemoteHTTPClient(ordinaryOperationTimeout, token),
+		baseURL:      normalized,
+		token:        token,
+		httpClient:   newRemoteHTTPClient(ordinaryOperationTimeout, requireHTTPSRedirect),
+		extraHeaders: extraHeaders,
 	}, nil
 }
 
-func (mt *MutationTransport) setAuthorization(req *http.Request) {
+// applyHeaders sets the configured bearer authorization (when a token is
+// present) followed by the statically configured ENGRAM_CLOUD_EXTRA_HEADERS on
+// every outgoing request.
+func (mt *MutationTransport) applyHeaders(req *http.Request) {
 	if mt.token != "" {
 		req.Header.Set("Authorization", "Bearer "+mt.token)
+	}
+	for _, header := range mt.extraHeaders {
+		req.Header.Set(header.key, header.value)
 	}
 }
 
@@ -380,7 +429,7 @@ func (mt *MutationTransport) PushMutations(entries []MutationEntry) ([]int64, er
 		return nil, fmt.Errorf("cloud: build mutation push request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	mt.setAuthorization(req)
+	mt.applyHeaders(req)
 
 	resp, err := mt.httpClient.Do(req)
 	if err != nil {
@@ -411,7 +460,7 @@ func (mt *MutationTransport) PullMutations(sinceSeq int64, limit int) (*PullMuta
 	if err != nil {
 		return nil, fmt.Errorf("cloud: build mutation pull request: %w", err)
 	}
-	mt.setAuthorization(req)
+	mt.applyHeaders(req)
 
 	resp, err := mt.httpClient.Do(req)
 	if err != nil {

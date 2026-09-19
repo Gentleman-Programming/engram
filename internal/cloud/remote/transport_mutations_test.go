@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +13,12 @@ import (
 	"testing"
 )
 
-// mustNewMutationTransport is a test helper that panics on error.
+// mustNewMutationTransport is a test helper that panics on error. It clears
+// ENGRAM_CLOUD_EXTRA_HEADERS so tokenless httptest transports stay valid
+// regardless of a developer's ambient environment.
 func mustNewMutationTransport(t *testing.T, baseURL, token string) *MutationTransport {
 	t.Helper()
+	t.Setenv(extraHeadersEnv, "")
 	mt, err := NewMutationTransport(baseURL, token)
 	if err != nil {
 		t.Fatalf("NewMutationTransport(%q): %v", baseURL, err)
@@ -297,24 +301,24 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("allows authenticated HTTPS redirects", func(t *testing.T) {
+	t.Run("allows authenticated redirects on the same origin", func(t *testing.T) {
 		type requestDetails struct {
 			method        string
 			authorization string
 		}
 		targetRequests := make(chan requestDetails, 1)
-		targetServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/sync/mutations/push" {
+				http.Redirect(w, r, "/sync/mutations/push-target", http.StatusTemporaryRedirect)
+				return
+			}
 			targetRequests <- requestDetails{method: r.Method, authorization: r.Header.Get("Authorization")}
 			_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
 		}))
-		defer targetServer.Close()
-		sourceServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, targetServer.URL+r.URL.Path, http.StatusTemporaryRedirect)
-		}))
-		defer sourceServer.Close()
+		defer server.Close()
 
-		transport := mustNewMutationTransport(t, sourceServer.URL, "token")
-		transport.httpClient.Transport = sourceServer.Client().Transport
+		transport := mustNewMutationTransport(t, server.URL, "token")
+		transport.httpClient.Transport = server.Client().Transport
 		if _, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}}); err != nil {
 			t.Fatalf("authenticated HTTPS redirect push: %v", err)
 		}
@@ -338,8 +342,8 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 		transport := mustNewMutationTransport(t, secureServer.URL, "token")
 		transport.httpClient.Transport = secureServer.Client().Transport
 		_, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}})
-		if err == nil || !strings.Contains(err.Error(), "bearer token redirect requires HTTPS") {
-			t.Fatalf("HTTPS downgrade redirect error = %v, want bearer HTTPS redirect error", err)
+		if err == nil || !strings.Contains(err.Error(), "redirect requires HTTPS") {
+			t.Fatalf("HTTPS downgrade redirect error = %v, want HTTPS redirect error", err)
 		}
 		if downgraded {
 			t.Fatal("HTTPS downgrade redirect reached the HTTP server")
@@ -353,6 +357,7 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 // When the server returns 404, newMutationHTTPStatusError must emit a log warning
 // containing "server_unsupported" and advice to deploy the server.
 func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -373,5 +378,45 @@ func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "server_unsupported") {
 		t.Fatalf("expected log to contain 'server_unsupported', got: %q", logOutput)
+	}
+}
+
+func TestMutationTransportAppliesExtraHeadersOnPushAndPull(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access, Authorization: injected")
+	mt, err := NewMutationTransport("https://cloud.example.test", "token")
+	if err != nil {
+		t.Fatalf("NewMutationTransport: %v", err)
+	}
+	var headers []http.Header
+	mt.httpClient.Transport = remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		headers = append(headers, req.Header.Clone())
+		if strings.Contains(req.URL.Path, "pull") {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"mutations":[],"has_more":false,"latest_seq":3}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"accepted_seqs":[1]}`))}, nil
+	})
+	if _, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}}); err != nil {
+		t.Fatalf("PushMutations: %v", err)
+	}
+	if _, err := mt.PullMutations(0, 10); err != nil {
+		t.Fatalf("PullMutations: %v", err)
+	}
+	if len(headers) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(headers))
+	}
+	for i, header := range headers {
+		if header.Get("CF-Access-Client-Id") != "abc.access" {
+			t.Fatalf("request %d CF-Access-Client-Id=%q, want extra header applied", i, header.Get("CF-Access-Client-Id"))
+		}
+		if header.Get("Authorization") != "Bearer token" {
+			t.Fatalf("request %d Authorization=%q, want configured bearer preserved", i, header.Get("Authorization"))
+		}
+	}
+}
+
+func TestNewMutationTransportRejectsHTTPWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	if _, err := NewMutationTransport("http://cloud.example.test", ""); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("tokenless HTTP with extra headers error=%v, want HTTPS requirement", err)
 	}
 }

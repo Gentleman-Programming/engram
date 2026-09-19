@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,7 @@ func TestNewRemoteTransportRequiresHTTPSForBearerToken(t *testing.T) {
 		t.Fatalf("NewRemoteTransport with bearer token over HTTP error = %v, want HTTPS requirement", err)
 	}
 
+	t.Setenv(extraHeadersEnv, "")
 	rt, err := NewRemoteTransport("http://cloud.example.test", "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport tokenless HTTP: %v", err)
@@ -83,6 +85,7 @@ func TestRemoteTransportRejectsBearerTokenHTTPRedirect(t *testing.T) {
 }
 
 func TestRemoteTransportAllowsTokenlessHTTPRedirect(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "")
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
@@ -463,5 +466,158 @@ func TestRemoteTransportBuildsRequestURLsFromBasePath(t *testing.T) {
 	}
 	if len(requestProjects) != 2 || requestProjects[0] != "proj-a" || requestProjects[1] != "proj-a" {
 		t.Fatalf("expected project query on pull endpoints, got %v", requestProjects)
+	}
+}
+
+func TestRemoteTransportAppliesExtraHeadersOnManifest(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access, X-Dup: first, X-Dup: second, Authorization: injected")
+	var got http.Header
+	rt, err := NewRemoteTransport("https://cloud.example.test", "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Header.Clone()
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if got.Get("CF-Access-Client-Id") != "abc.access" {
+		t.Fatalf("CF-Access-Client-Id=%q, want extra header applied", got.Get("CF-Access-Client-Id"))
+	}
+	if got.Get("X-Dup") != "second" {
+		t.Fatalf("X-Dup=%q, want later duplicate to win", got.Get("X-Dup"))
+	}
+	if got.Get("Authorization") != "Bearer token" {
+		t.Fatalf("Authorization=%q, want configured bearer preserved over extra-header override", got.Get("Authorization"))
+	}
+}
+
+func TestRemoteTransportAppliesExtraHeadersOnChunkOperations(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Secret: secret")
+	var headers []http.Header
+	rt, err := NewRemoteTransport("https://cloud.example.test", "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	roundTrip := remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		headers = append(headers, req.Header.Clone())
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})
+	rt.httpClient.Transport = roundTrip
+	rt.writeHTTPClient.Transport = roundTrip
+
+	if _, err := rt.ReadChunk("chunk-1"); err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if err := rt.WriteChunk("chunk-1", []byte(`{"sessions":[]}`), engramsync.ChunkEntry{CreatedBy: "tester", CreatedAt: "2026-04-01T00:00:00Z"}); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	if len(headers) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(headers))
+	}
+	for i, header := range headers {
+		if header.Get("CF-Access-Client-Secret") != "secret" {
+			t.Fatalf("request %d CF-Access-Client-Secret=%q, want extra header applied", i, header.Get("CF-Access-Client-Secret"))
+		}
+	}
+}
+
+func TestNewRemoteTransportRejectsHTTPWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	if _, err := NewRemoteTransport("http://cloud.example.test", "", "proj-a"); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("tokenless HTTP with extra headers error=%v, want HTTPS requirement", err)
+	}
+}
+
+func TestRemoteTransportRejectsHTTPRedirectWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	insecure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("extra-header request reached HTTP redirect target")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer insecure.Close()
+
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, insecure.URL, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	rt, err := NewRemoteTransport(secure.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = secure.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("ReadManifest redirect error = %v, want HTTPS requirement", err)
+	}
+}
+
+func TestRemoteTransportRejectsCrossHostRedirectWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	crossHostHit := false
+	crossHost := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		crossHostHit = true
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer crossHost.Close()
+
+	// Rewrite the redirect target host to localhost so the hostname differs
+	// from the 127.0.0.1 source; the redirect must never be followed.
+	crossHostURL, err := url.Parse(crossHost.URL)
+	if err != nil {
+		t.Fatalf("parse cross-host URL: %v", err)
+	}
+	crossHostURL.Host = "localhost:" + crossHostURL.Port()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, crossHostURL.String(), http.StatusFound)
+	}))
+	defer source.Close()
+
+	rt, err := NewRemoteTransport(source.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = source.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "different origin") {
+		t.Fatalf("ReadManifest cross-host redirect error = %v, want different-origin rejection", err)
+	}
+	if crossHostHit {
+		t.Fatal("configured extra headers reached a different HTTPS host")
+	}
+}
+
+func TestRemoteTransportRejectsCrossPortRedirectWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	crossPortHit := false
+	crossPort := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		crossPortHit = true
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer crossPort.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, crossPort.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	rt, err := NewRemoteTransport(source.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = source.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "different origin") {
+		t.Fatalf("ReadManifest cross-port redirect error = %v, want different-origin rejection", err)
+	}
+	if crossPortHit {
+		t.Fatal("configured extra headers reached a different HTTPS origin (port)")
 	}
 }
