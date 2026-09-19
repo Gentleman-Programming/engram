@@ -160,6 +160,20 @@ func agentAdapters() []agentAdapter {
 				"Verify ~/.config/kilo/AGENTS.md has the Memory Protocol block",
 			},
 		},
+		{
+			slug:        "commandcode",
+			description: "CommandCode — MCP registration in ~/.commandcode/mcp.json plus AGENTS.md Memory Protocol",
+			mcpPath:     commandcodeMCPPath,
+			mcpFormat:   commandCodeObject,
+			instructions: []instrSurface{
+				{path: commandcodeAgentsPath, style: markerBlock, body: memoryProtocolMarkdown},
+			},
+			postInstall: []string{
+				"Restart the CommandCode session so MCP config is reloaded",
+				"Verify ~/.commandcode/mcp.json includes mcpServers.engram",
+				"Verify ~/.commandcode/AGENTS.md has the Memory Protocol block",
+			},
+		},
 	}
 }
 
@@ -290,4 +304,23 @@ func kilocodeConfigPath() string {
 
 func kilocodeAgentsPath() string {
 	return filepath.Join(kilocodeConfigDir(), "AGENTS.md")
+}
+
+// ─── CommandCode paths ───────────────────────────────────────────────────────
+//
+// CommandCode stores user-scope MCP servers in ~/.commandcode/mcp.json
+// (top-level "mcpServers") and user-tier memory in ~/.commandcode/AGENTS.md,
+// which is re-read every request alongside project and subdirectory tiers.
+
+func commandcodeDir() string {
+	home, _ := userHome()
+	return filepath.Join(home, ".commandcode")
+}
+
+func commandcodeMCPPath() string {
+	return filepath.Join(commandcodeDir(), "mcp.json")
+}
+
+func commandcodeAgentsPath() string {
+	return filepath.Join(commandcodeDir(), "AGENTS.md")
 }
