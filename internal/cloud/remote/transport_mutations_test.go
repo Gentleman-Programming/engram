@@ -301,24 +301,24 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("allows authenticated HTTPS redirects", func(t *testing.T) {
+	t.Run("allows authenticated redirects on the same origin", func(t *testing.T) {
 		type requestDetails struct {
 			method        string
 			authorization string
 		}
 		targetRequests := make(chan requestDetails, 1)
-		targetServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/sync/mutations/push" {
+				http.Redirect(w, r, "/sync/mutations/push-target", http.StatusTemporaryRedirect)
+				return
+			}
 			targetRequests <- requestDetails{method: r.Method, authorization: r.Header.Get("Authorization")}
 			_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
 		}))
-		defer targetServer.Close()
-		sourceServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, targetServer.URL+r.URL.Path, http.StatusTemporaryRedirect)
-		}))
-		defer sourceServer.Close()
+		defer server.Close()
 
-		transport := mustNewMutationTransport(t, sourceServer.URL, "token")
-		transport.httpClient.Transport = sourceServer.Client().Transport
+		transport := mustNewMutationTransport(t, server.URL, "token")
+		transport.httpClient.Transport = server.Client().Transport
 		if _, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}}); err != nil {
 			t.Fatalf("authenticated HTTPS redirect push: %v", err)
 		}

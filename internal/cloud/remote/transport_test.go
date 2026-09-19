@@ -585,10 +585,39 @@ func TestRemoteTransportRejectsCrossHostRedirectWithExtraHeaders(t *testing.T) {
 	rt.httpClient.Transport = source.Client().Transport
 
 	_, err = rt.ReadManifest()
-	if err == nil || !strings.Contains(err.Error(), "different host") {
-		t.Fatalf("ReadManifest cross-host redirect error = %v, want different-host rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "different origin") {
+		t.Fatalf("ReadManifest cross-host redirect error = %v, want different-origin rejection", err)
 	}
 	if crossHostHit {
 		t.Fatal("configured extra headers reached a different HTTPS host")
+	}
+}
+
+func TestRemoteTransportRejectsCrossPortRedirectWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	crossPortHit := false
+	crossPort := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		crossPortHit = true
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer crossPort.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, crossPort.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	rt, err := NewRemoteTransport(source.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = source.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "different origin") {
+		t.Fatalf("ReadManifest cross-port redirect error = %v, want different-origin rejection", err)
+	}
+	if crossPortHit {
+		t.Fatal("configured extra headers reached a different HTTPS origin (port)")
 	}
 }

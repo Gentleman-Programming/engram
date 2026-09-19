@@ -128,17 +128,34 @@ func newRemoteHTTPClient(timeout time.Duration, requireHTTPSRedirect bool) *http
 			if req.URL.Scheme != "https" {
 				return fmt.Errorf("cloud: redirect requires HTTPS")
 			}
-			// Go already drops the bearer on cross-host redirects, but configured
-			// extra headers (which can carry service credentials) would be
-			// forwarded verbatim. Never follow a redirect away from the original
-			// hostname; ports may differ (e.g. load-balanced endpoints).
-			if len(via) > 0 && req.URL.Hostname() != via[0].URL.Hostname() {
-				return fmt.Errorf("cloud: redirect to a different host is rejected to keep configured credentials private")
+			// Go already drops the bearer on cross-origin redirects, but
+			// configured extra headers (which can carry service credentials)
+			// would be forwarded verbatim. Never follow a redirect away from
+			// the original normalized origin (scheme, hostname, effective
+			// port); path-only and same-origin redirects remain allowed.
+			if len(via) > 0 && redirectOrigin(req.URL) != redirectOrigin(via[0].URL) {
+				return fmt.Errorf("cloud: redirect to a different origin is rejected to keep configured credentials private")
 			}
 			return nil
 		}
 	}
 	return client
+}
+
+// redirectOrigin returns the normalized scheme://host:port identity used to
+// decide whether a redirect keeps configured credentials on the same origin.
+func redirectOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme + "://" + host + ":" + port
 }
 
 func validateBaseURL(raw string) (string, error) {
