@@ -170,6 +170,20 @@ var (
 
 	exitFunc = os.Exit
 
+	// staleBinaryProbe compares the running version with the version reported by
+	// the engram binary installed on disk. Injectable so tests never execute a
+	// real engram binary.
+	staleBinaryProbe = func(ctx context.Context, current string) server.StaleBinaryReport {
+		return server.CheckStaleBinary(ctx, current, server.DefaultSelfCheckDeps())
+	}
+
+	// supervisionProbe observes the process context that decides whether a
+	// supervisor will relaunch this process. Injectable so tests never depend on
+	// the environment that runs the suite.
+	supervisionProbe = func() server.SupervisionContext {
+		return server.ReadSupervisionContext(server.DefaultSupervisionDeps())
+	}
+
 	notifySignals = signal.Notify
 	stopSignals   = signal.Stop
 
@@ -868,6 +882,15 @@ func cmdServe(cfg store.Config) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Stale-binary self-check. An upgrade replaces the binary on disk while this
+	// process keeps running the previous release, and nothing else tells it. The
+	// startup check runs before the listener binds so an exiting process never
+	// takes the port; the periodic re-check lets a long-lived daemon converge
+	// without a reboot.
+	if startServeSelfCheck(ctx, srv, version) {
+		return
+	}
+
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
 	// BW7: tryStartAutosync returns (status provider, stop func) so the signal
 	// handler can call mgrStop() before os.Exit, giving the manager time to
@@ -904,6 +927,95 @@ func cmdServe(cfg store.Config) {
 	if err := startHTTP(srv); err != nil {
 		fatal(err)
 	}
+}
+
+// selfCheckExitCode is the POSIX EX_TEMPFAIL status used to ask a supervisor for
+// a restart. Both documented service templates restart on any exit
+// (launchd KeepAlive, systemd Restart=always) and 75 also restarts a unit
+// configured with Restart=on-failure.
+const selfCheckExitCode = 75
+
+// runServeSelfCheck performs one stale-binary check. It publishes the finding to
+// GET /health, reports a stale binary once, and returns true when this process
+// should stop serving so a supervisor can relaunch the new binary.
+//
+// It never exits for a different install, for an unsupervised process, for an
+// unknown on-disk version, or when ENGRAM_RESTART_ON_UPGRADE forbids it: those
+// findings only get reported, which is what keeps a restart loop impossible.
+// logUnknown additionally reports the "cannot compare" outcome, which is worth
+// saying once at startup and pure noise on every later re-check.
+func runServeSelfCheck(ctx context.Context, srv *server.Server, current string, logUnknown bool) bool {
+	report := staleBinaryProbe(ctx, current)
+	if !report.Known {
+		if logUnknown {
+			log.Printf("[engram] stale binary check: could not compare the running version with the binary installed on disk; continuing to serve")
+		}
+		return false
+	}
+
+	srv.SetBinaryStatus(report.Stale, report.OnDisk)
+	if !report.Stale {
+		return false
+	}
+
+	decision := supervisionProbe().Decide()
+	if report.Actionable && decision.Supervised {
+		log.Printf("[engram] stale binary: running engram %s but %s is installed on disk; exiting with code %d so %s relaunches the new binary",
+			report.Running, report.OnDisk, selfCheckExitCode, decision.Source)
+		exitFunc(selfCheckExitCode)
+		return true
+	}
+
+	log.Printf("[engram] stale binary: running engram %s but %s is installed on disk; continuing to serve (%s)",
+		report.Running, report.OnDisk, selfCheckHoldReason(report, decision))
+	return false
+}
+
+// selfCheckHoldReason explains, for operators, why a stale binary was not acted
+// on. Callers only reach it when the override disabled the self-exit, the finding
+// was not actionable, or the process is not supervised, so every branch reports
+// instead of exiting.
+func selfCheckHoldReason(report server.StaleBinaryReport, decision server.SupervisorDecision) string {
+	switch {
+	case decision.Disabled:
+		return "ENGRAM_RESTART_ON_UPGRADE is off"
+	case !report.Actionable:
+		return "the on-disk binary is a different install"
+	default:
+		return "not supervised"
+	}
+}
+
+// startServeSelfCheck performs the startup stale-binary check and, when that
+// check does not ask for a restart, re-runs it every ENGRAM_SELFCHECK_INTERVAL
+// until ctx is cancelled so a long-lived daemon converges without a reboot. It
+// returns true when this process must stop serving so a supervisor can relaunch
+// the new binary; no periodic re-check is started in that case.
+func startServeSelfCheck(ctx context.Context, srv *server.Server, current string) bool {
+	if runServeSelfCheck(ctx, srv, current, true) {
+		return true
+	}
+
+	interval := server.ParseSelfCheckInterval(os.Getenv(server.SelfCheckIntervalEnvVar))
+	if interval <= 0 {
+		return false
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if runServeSelfCheck(ctx, srv, current, false) {
+					return
+				}
+			}
+		}
+	}()
+	return false
 }
 
 type serveOptions struct {

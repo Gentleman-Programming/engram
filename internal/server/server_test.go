@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -4159,5 +4161,128 @@ func TestHandleCreateSessionRenewsRuntimeLeaseAndRejectsEndedSession(t *testing.
 	}
 	if response.Code != "session_already_ended" || response.SessionID != "runtime-http" {
 		t.Fatalf("ended-session response = %#v", response)
+	}
+}
+
+// ─── Stale-binary diagnostics (D4/D5) ────────────────────────────────────────
+
+func healthPayload(t *testing.T, srv *Server) map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /health = %d, want 200", rec.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode GET /health: %v", err)
+	}
+	return payload
+}
+
+func TestHealthOmitsBinaryDiagnosticsUntilTheCheckRan(t *testing.T) {
+	srv := New(nil, 0)
+	srv.SetVersion("2.0.0")
+
+	payload := healthPayload(t, srv)
+	for _, key := range []string{"binary_stale", "binary_version_on_disk"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("GET /health reported %q before the self-check produced a result: %v", key, payload)
+		}
+	}
+	if payload["service"] != "engram" || payload["status"] != "ok" || payload["version"] != "2.0.0" {
+		t.Fatalf("GET /health changed its existing contract: %v", payload)
+	}
+}
+
+func TestHealthReportsBinaryDiagnosticsAdditively(t *testing.T) {
+	tests := []struct {
+		name       string
+		stale      bool
+		onDisk     string
+		wantStale  bool
+		wantOnDisk string
+	}{
+		{name: "stale binary reported", stale: true, onDisk: "2.1.0", wantStale: true, wantOnDisk: "2.1.0"},
+		{name: "current binary reported", stale: false, onDisk: "2.0.0", wantStale: false, wantOnDisk: "2.0.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(nil, 0)
+			srv.SetVersion("2.0.0")
+			srv.SetBinaryStatus(tt.stale, tt.onDisk)
+
+			payload := healthPayload(t, srv)
+			stale, ok := payload["binary_stale"]
+			if !ok {
+				t.Fatalf("GET /health omitted binary_stale: %v", payload)
+			}
+			if stale != tt.wantStale {
+				t.Fatalf("binary_stale = %v, want %v", stale, tt.wantStale)
+			}
+			if onDisk := payload["binary_version_on_disk"]; onDisk != tt.wantOnDisk {
+				t.Fatalf("binary_version_on_disk = %v, want %q", onDisk, tt.wantOnDisk)
+			}
+			if payload["service"] != "engram" || payload["status"] != "ok" || payload["version"] != "2.0.0" {
+				t.Fatalf("GET /health changed its existing contract: %v", payload)
+			}
+		})
+	}
+}
+
+func TestInstanceOwnsPortStillYieldsAndWarnsOnVersionSkew(t *testing.T) {
+	tests := []struct {
+		name         string
+		ownerVersion string
+		ourVersion   string
+		wantWarning  bool
+	}{
+		{name: "same version stays silent", ownerVersion: "2.0.0", ourVersion: "2.0.0"},
+		{name: "an older owner warns", ownerVersion: "1.0.0", ourVersion: "2.0.0", wantWarning: true},
+		{name: "a silent owner stays silent", ownerVersion: "", ourVersion: "2.0.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				jsonResponse(w, http.StatusOK, map[string]any{
+					"service":     "engram",
+					"status":      "ok",
+					"version":     tt.ownerVersion,
+					"instance_id": "shared-instance",
+				})
+			}))
+			defer owner.Close()
+
+			port, err := strconv.Atoi(strings.TrimPrefix(owner.URL, "http://127.0.0.1:"))
+			if err != nil {
+				t.Fatalf("parse owner port from %q: %v", owner.URL, err)
+			}
+
+			srv := New(nil, port)
+			srv.instanceID = "shared-instance"
+			srv.SetVersion(tt.ourVersion)
+
+			var logs bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previous) })
+
+			if !srv.instanceOwnsPort() {
+				t.Fatal("a matching instance_id must still mean the port is owned by this identity")
+			}
+
+			got := logs.String()
+			if !tt.wantWarning {
+				if got != "" {
+					t.Fatalf("unexpected log output for a matching version: %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.ownerVersion) || !strings.Contains(got, tt.ourVersion) {
+				t.Fatalf("warning %q must name both the owner version %q and ours %q", got, tt.ownerVersion, tt.ourVersion)
+			}
+		})
 	}
 }

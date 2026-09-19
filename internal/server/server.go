@@ -88,6 +88,14 @@ type Server struct {
 	// version is reported by GET /health and defaults to "dev" for local builds.
 	version    string
 	instanceID string
+
+	// binaryStatusMu guards the additive stale-binary diagnostics published by
+	// the self-check and read by GET /health. They stay omitted until the check
+	// has produced a result, so /health never depends on the check having run.
+	binaryStatusMu      sync.RWMutex
+	binaryStale         bool
+	binaryVersionOnDisk string
+	binaryStatusKnown   bool
 }
 
 func New(s *store.Store, port int) *Server {
@@ -109,6 +117,24 @@ func (s *Server) SetOnWrite(fn func()) {
 // SetVersion sets the release version reported by GET /health.
 func (s *Server) SetVersion(v string) {
 	s.version = v
+}
+
+// SetBinaryStatus publishes the stale-binary self-check finding to GET /health.
+// Both fields are additive diagnostics and stay omitted while the comparison is
+// unknown, so a server whose check never ran keeps its previous response shape.
+func (s *Server) SetBinaryStatus(stale bool, onDiskVersion string) {
+	s.binaryStatusMu.Lock()
+	defer s.binaryStatusMu.Unlock()
+	s.binaryStale = stale
+	s.binaryVersionOnDisk = onDiskVersion
+	s.binaryStatusKnown = true
+}
+
+// binaryStatus returns the published stale-binary finding and whether one exists.
+func (s *Server) binaryStatus() (stale bool, onDiskVersion string, known bool) {
+	s.binaryStatusMu.RLock()
+	defer s.binaryStatusMu.RUnlock()
+	return s.binaryStale, s.binaryVersionOnDisk, s.binaryStatusKnown
 }
 
 // SetSyncStatus configures the sync status provider for the /sync/status endpoint.
@@ -308,10 +334,12 @@ func (s *Server) instanceOwnsPort() bool {
 		if err == nil {
 			var health struct {
 				InstanceID string `json:"instance_id"`
+				Version    string `json:"version"`
 			}
 			err = json.NewDecoder(response.Body).Decode(&health)
 			_ = response.Body.Close()
 			if err == nil && health.InstanceID == s.instanceID {
+				s.warnVersionSkewOnOwnedPort(health.Version)
 				return true
 			}
 			return false
@@ -319,6 +347,19 @@ func (s *Server) instanceOwnsPort() bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+// warnVersionSkewOnOwnedPort reports that the port is held by this same identity
+// running a different build. The stale owner is never killed or taken over — the
+// return semantics of instanceOwnsPort stay exactly the same — but silently
+// yielding to it is what hid a replaced binary from the user.
+func (s *Server) warnVersionSkewOnOwnedPort(ownerVersion string) {
+	ownerVersion = strings.TrimSpace(ownerVersion)
+	if ownerVersion == "" || ownerVersion == strings.TrimSpace(s.version) {
+		return
+	}
+	log.Printf("[engram] port %d is owned by this instance running engram %s while this build is %s; restart engram serve to pick up the new binary",
+		s.port, ownerVersion, s.version)
 }
 
 // Close stops the active listener and removes only the socket created by this
@@ -494,12 +535,19 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"status":      "ok",
 		"service":     "engram",
 		"version":     s.version,
 		"instance_id": s.instanceID,
-	})
+	}
+	// Additive diagnostics: omitted until the self-check compared the running
+	// binary with the one on disk.
+	if stale, onDiskVersion, known := s.binaryStatus(); known {
+		payload["binary_stale"] = stale
+		payload["binary_version_on_disk"] = onDiskVersion
+	}
+	jsonResponse(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
