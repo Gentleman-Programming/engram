@@ -255,6 +255,7 @@ function buildLocalEngramVersionForTest({ spawnSync }) {
 
 function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
   const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { version?: unknown; instance_id?: unknown };", "const health = await res.json();");
+  const preIdentityVersionBody = extractFunctionBody("isPreIdentityEngramVersion", "{\n  const match");
   const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
     .replace("value as Record<string, unknown>", "value");
   const refusalBody = extractFunctionBody("isConnectionRefusedError", "{\n  return");
@@ -270,6 +271,9 @@ function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
     }
     function isConnectionRefusedError(error) {
       ${refusalBody}
+    }
+    function isPreIdentityEngramVersion(version) {
+      ${preIdentityVersionBody}
     }
     async function probeEngramHealth(expectedID = "") {
       ${body}
@@ -831,13 +835,17 @@ test("timeout-shaped health errors remain indeterminate", async () => {
   }
 });
 
-test("the identity probe classifies present, different, and absent instance IDs", async () => {
+test("the identity probe classifies matching, foreign, legacy, and identity-missing servers", async () => {
   const id = "00000000000000000000000000000000";
   const cases = [
     { body: { status: "ok", version: "2.0.0", instance_id: id }, expectedID: id, expected: "ready" },
     { body: { status: "ok", version: "2.0.0", instance_id: "ffffffffffffffffffffffffffffffff" }, expectedID: id, expected: "foreign" },
     { body: { status: "ok", service: "engram", version: "1.20.0" }, expectedID: id, expected: "legacy" },
-    { body: { status: "ok", instance_id: "" }, expectedID: id, expected: "legacy" },
+    { body: { status: "ok", service: "engram", version: "2.0.0-rc.10" }, expectedID: id, expected: "legacy" },
+    { body: { status: "ok", version: "2.0.0-rc.11" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", version: "2.0.0" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", version: "later" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", instance_id: "" }, expectedID: id, expected: "identity_missing" },
     { body: { status: "ok", instance_id: id }, expectedID: "", expected: "ready" },
     { body: { status: "ok" }, expectedID: "", expected: "ready" },
   ];

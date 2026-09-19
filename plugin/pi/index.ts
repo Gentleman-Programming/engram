@@ -397,8 +397,39 @@ class DeterministicStartupError extends Error {}
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
 // told us nothing either way. Only "ready" is proof that a server is answering, so nothing
 // but "ready" may be read as "a server is already there". "foreign" is a live server owned
-// by a different identity; "legacy" is a live server too old to report one.
-type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "legacy";
+// by a different identity; "legacy" is a live server provably too old to report one.
+type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "legacy" | "identity_missing";
+
+// Instance identity first shipped in v2.0.0-rc.11. A missing identity is legacy only when a
+// valid SemVer health version is strictly older than that release; every other shape fails
+// closed because it cannot establish ownership.
+function isPreIdentityEngramVersion(version: string): boolean {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+  if (!match) return false;
+
+  const [major, minor, patch] = match.slice(1, 4).map(Number);
+  if (major < 2) return true;
+  if (major !== 2 || minor !== 0 || patch !== 0) return false;
+
+  const prerelease = match[4]?.split(".");
+  if (!prerelease || prerelease.some((identifier) => /^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith("0"))) return false;
+
+  const identityRelease = ["rc", "11"];
+  for (let index = 0; index < Math.max(prerelease.length, identityRelease.length); index += 1) {
+    const actual = prerelease[index];
+    const expected = identityRelease[index];
+    if (actual === undefined) return true;
+    if (expected === undefined) return false;
+    if (actual === expected) continue;
+
+    const actualNumeric = /^\d+$/.test(actual);
+    const expectedNumeric = /^\d+$/.test(expected);
+    if (actualNumeric && expectedNumeric) return Number(actual) < Number(expected);
+    if (actualNumeric !== expectedNumeric) return actualNumeric;
+    return actual < expected;
+  }
+  return false;
+}
 
 function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
   const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
@@ -462,10 +493,11 @@ async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
     if (!expectedID) return "ready";
     const health = await res.json() as { version?: unknown; instance_id?: unknown };
     engramServerVersion = typeof health.version === "string" && health.version.trim().length > 0 ? health.version : "unknown";
-    // A 200 without a usable instance_id is not a foreign owner: it is the signature of a
-    // pre-v2 server that predates instance identity entirely (engram#1255). Classifying it
-    // as legacy keeps the owner question answerable instead of collapsing both shapes.
-    if (typeof health.instance_id !== "string" || health.instance_id.length === 0) return "legacy";
+    // A missing identity proves neither ownership nor age. Only a recognized release older
+    // than v2.0.0-rc.11 is legacy; current, unknown, and malformed versions fail closed.
+    if (typeof health.instance_id !== "string" || health.instance_id.length === 0) {
+      return isPreIdentityEngramVersion(engramServerVersion) ? "legacy" : "identity_missing";
+    }
     return health.instance_id === expectedID ? "ready" : "foreign";
   } catch (error) {
     if (isTimeoutError(error)) return "indeterminate";
@@ -492,6 +524,10 @@ let engramServerVersion = "unknown";
 // "unknown".
 function legacyEngramServerMessage(): string {
   return `Engram server at ${ENGRAM_URL} predates instance identity (server ${engramServerVersion}, CLI ${localEngramVersion()}). An older Engram left running by the upgrade is the likely cause: stop it and start the current binary. Nothing is terminated automatically and memory retries on its own. If nothing was upgraded recently, treat this port as occupied by an unrelated process.`;
+}
+
+function missingInstanceIdentityMessage(): string {
+  return `Engram server at ${ENGRAM_URL} did not report its instance identity (server ${engramServerVersion}). Its version is not proven older than v2.0.0-rc.11, so this response is incompatible with identity verification. Verify or upgrade the server, then retry. Nothing is terminated automatically and memory retries on its own.`;
 }
 
 function waitUnref(ms: number): Promise<void> {
@@ -732,6 +768,7 @@ async function initializeEngramServer(): Promise<void> {
   // is never adopted and never terminated. Only the message and the retry cadence differ.
   if (health === "foreign") throw new DeterministicStartupError(`Engram server ownership mismatch at ${ENGRAM_URL}`);
   if (health === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage());
+  if (health === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage());
 
   // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
   // aborted probe, a DNS failure, an error shape we do not recognize — means we have no

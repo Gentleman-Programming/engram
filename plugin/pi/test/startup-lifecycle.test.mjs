@@ -276,6 +276,56 @@ test("a pre-v2 server on the port fails closed with legacy guidance and never sp
   });
 });
 
+test("a pre-identity release candidate on the port fails closed with legacy guidance", async () => {
+  await withFixture({
+    readyServer: true,
+    healthBody: { status: "ok", service: "engram", version: "2.0.0-rc.10" },
+    cliVersion: "2.0.0-rc.10",
+  }, async ({ tools, ctx, spawnLog }) => {
+    const result = await tools.get("mem_search").execute("call-legacy-rc", { query: "startup" }, undefined, undefined, ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /predates instance identity \(server 2\.0\.0-rc\.10, CLI 2\.0\.0-rc\.10\)/);
+    assert.equal(await countSpawns(spawnLog), 0, "a legacy server is never adopted, terminated, or replaced");
+  });
+});
+
+test("current and later servers without instance identity fail closed without legacy guidance", async () => {
+  for (const version of ["2.0.0-rc.11", "2.0.0", "2.1.0"]) {
+    await withFixture({
+      readyServer: true,
+      healthBody: { status: "ok", service: "engram", version },
+      cliVersion: version,
+    }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_search").execute(`call-missing-identity-${version}`, { query: "startup" }, undefined, undefined, ctx);
+
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /did not report its instance identity/);
+      assert.match(result.content[0].text, /not proven older than v2\.0\.0-rc\.11/);
+      assert.doesNotMatch(result.content[0].text, /predates instance identity/);
+      assert.equal(await countSpawns(spawnLog), 0, "an identity-incompatible server is never adopted, terminated, or replaced");
+    });
+  }
+});
+
+test("unknown, absent, and malformed versions without instance identity fail closed", async () => {
+  for (const version of [undefined, "unknown", "2.0", "current"]) {
+    await withFixture({
+      readyServer: true,
+      healthBody: { status: "ok", service: "engram", ...(version === undefined ? {} : { version }) },
+    }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_search").execute(`call-unrecognized-version-${version ?? "absent"}`, { query: "startup" }, undefined, undefined, ctx);
+
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /did not report its instance identity/);
+      assert.match(result.content[0].text, /not proven older than v2\.0\.0-rc\.11/);
+      assert.doesNotMatch(result.content[0].text, /predates instance identity/);
+      assert.doesNotMatch(result.content[0].text, /unrelated process/);
+      assert.equal(await countSpawns(spawnLog), 0, "an unverified server is never adopted, terminated, or replaced");
+    });
+  }
+});
+
 test("a pre-rc.11 binary surfaces the upgrade guidance instead of a generic identity error", async () => {
   await withFixture({ instanceId: "fail" }, async ({ tools, ctx }) => {
     const result = await tools.get("mem_search").execute("call-oldcli", { query: "startup" }, undefined, undefined, ctx);

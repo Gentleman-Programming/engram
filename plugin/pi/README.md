@@ -196,6 +196,8 @@ If you only want HTTP session capture against an already running Engram server, 
 
 When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi replays only safe reads and idempotent session registration after health returns `2xx`; other writes report the transport failure instead of risking a duplicate mutation.
 
+A local `/health` response without `instance_id` is treated as legacy only when it reports a recognized version older than `2.0.0-rc.11`, the release that introduced instance identity. Current, unknown, absent, or malformed versions without identity fail closed with identity-verification guidance; Pi does not adopt, terminate, or replace that server automatically.
+
 ## Configuration
 
 ### Existing Engram server
