@@ -4480,6 +4480,43 @@ func TestMarkSyncBlockedResetsConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// TestMarkSyncBlockedWithSyncSuccessAdvancesLastSuccessAt verifies that the
+// #1273 path (push blocked by non-enrolled mutations, pull succeeded) persists
+// the degraded lifecycle and enrollment reason while advancing last_success_at
+// without marking the target healthy.
+func TestMarkSyncBlockedWithSyncSuccessAdvancesLastSuccessAt(t *testing.T) {
+	s := newTestStore(t)
+	targetKey := "cloud:proj-a"
+
+	if err := s.MarkSyncHealthy(targetKey); err != nil {
+		t.Fatalf("mark healthy: %v", err)
+	}
+	before, err := s.GetSyncState(targetKey)
+	if err != nil || before.LastSuccessAt == nil {
+		t.Fatalf("healthy state last success = %v, err=%v", before.LastSuccessAt, err)
+	}
+	// SQLite datetime('now') has 1s resolution: ensure the blocked-with-success
+	// stamp lands on a different second so the advancement is observable.
+	time.Sleep(time.Second + 50*time.Millisecond)
+
+	if err := s.MarkSyncBlockedWithSyncSuccess(targetKey, "non_enrolled_pending_mutations", "project(s) not enrolled"); err != nil {
+		t.Fatalf("mark blocked with sync success: %v", err)
+	}
+	state, err := s.GetSyncState(targetKey)
+	if err != nil {
+		t.Fatalf("get sync state: %v", err)
+	}
+	if state.Lifecycle != SyncLifecycleDegraded {
+		t.Fatalf("expected degraded lifecycle, got %q", state.Lifecycle)
+	}
+	if state.ReasonCode == nil || *state.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected degraded reason code persisted, got %v", state.ReasonCode)
+	}
+	if state.LastSuccessAt == nil || *state.LastSuccessAt == *before.LastSuccessAt {
+		t.Fatalf("expected last_success_at advanced, before=%q after=%v", *before.LastSuccessAt, state.LastSuccessAt)
+	}
+}
+
 func TestMarkSyncHealthyCreatesSyncStateWhenMissing(t *testing.T) {
 	s := newTestStore(t)
 	targetKey := "cloud:proj-a"

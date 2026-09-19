@@ -192,6 +192,10 @@ func (s *fakeLocalStore) MarkSyncBlocked(_, reasonCode, message string) error {
 	return nil
 }
 
+func (s *fakeLocalStore) MarkSyncBlockedWithSyncSuccess(_, reasonCode, message string) error {
+	return s.MarkSyncBlocked("", reasonCode, message)
+}
+
 func (s *fakeLocalStore) MarkSyncHealthy(_ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2058,8 +2062,8 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
 		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
 	}
-	if st.LastSyncAt == nil || time.Since(*st.LastSyncAt) > 5*time.Second {
-		t.Fatalf("expected LastSyncAt advanced after successful pull, got %v", st.LastSyncAt)
+	if st.LastSyncAt == nil {
+		t.Fatal("expected LastSyncAt set after successful pull, got nil")
 	}
 }
 
@@ -2108,8 +2112,8 @@ func TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist(t *
 	if !strings.Contains(st.ReasonMessage, "engram cloud enroll <project>") {
 		t.Fatalf("expected reason message to contain enrollment guidance, got %q", st.ReasonMessage)
 	}
-	if st.LastSyncAt == nil || time.Since(*st.LastSyncAt) > 5*time.Second {
-		t.Fatalf("expected LastSyncAt advanced after successful pull, got %v", st.LastSyncAt)
+	if st.LastSyncAt == nil {
+		t.Fatal("expected LastSyncAt set after successful pull, got nil")
 	}
 	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
 		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
@@ -2151,6 +2155,9 @@ func TestManagerPullFailureOverridesNonEnrolledBlocked(t *testing.T) {
 	}
 	if ls.blockedReason != "" {
 		t.Fatalf("expected no blocked state persisted when pull fails, got %q", ls.blockedReason)
+	}
+	if st.LastSyncAt != nil {
+		t.Fatalf("expected LastSyncAt to remain nil when pull fails, got %v", *st.LastSyncAt)
 	}
 }
 

@@ -6414,6 +6414,30 @@ func (s *Store) MarkSyncAuthRequired(targetKey, message string) error {
 	return s.MarkSyncBlocked(targetKey, "auth_required", message)
 }
 
+// MarkSyncBlockedWithSyncSuccess records a degraded blocked state (e.g.
+// enrollment guidance for a non-enrolled backlog) while advancing
+// last_success_at: inbound replication succeeded this cycle even though pushes
+// remain blocked. The target is NOT marked healthy — lifecycle stays degraded
+// with the reason code and message intact (issue #1273).
+func (s *Store) MarkSyncBlockedWithSyncSuccess(targetKey, reasonCode, message string) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return nil
+	}
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := s.getSyncStateTx(tx, targetKey); err != nil {
+			return err
+		}
+		_, err := s.execHook(tx,
+			`UPDATE sync_state
+			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = ?, reason_message = ?, last_error = ?, last_success_at = datetime('now'), updated_at = datetime('now')
+			 WHERE target_key = ?`,
+			SyncLifecycleDegraded, reasonCode, message, message, targetKey,
+		)
+		return err
+	})
+}
+
 func (s *Store) MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error {
 	return s.MarkSyncFailureWithReason(targetKey, "transport_failed", message, backoffUntil)
 }

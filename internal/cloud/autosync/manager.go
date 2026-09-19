@@ -130,6 +130,13 @@ type reasonAwareFailureStore interface {
 	MarkSyncFailureWithReason(targetKey, reasonCode, message string, backoffUntil time.Time) error
 }
 
+// blockedSuccessReportingStore persists the last successful inbound sync even
+// while the push side stays blocked (non-enrolled pending mutations), so
+// persisted last_success_at keeps advancing without marking the target healthy.
+type blockedSuccessReportingStore interface {
+	MarkSyncBlockedWithSyncSuccess(targetKey, reasonCode, message string) error
+}
+
 type projectTransportFailure struct {
 	project string
 	err     error
@@ -511,13 +518,9 @@ func (m *Manager) cycle(ctx context.Context) {
 
 	if blockedPending != nil {
 		// Retain the degraded (blocked) status with enrollment guidance for the
-		// non-enrolled backlog, but advance LastSyncAt to record that inbound
-		// replication succeeded this cycle.
-		m.recordBlocked(blockedPending.Error(), constants.ReasonNonEnrolledPendingMutations)
-		now := time.Now()
-		m.mu.Lock()
-		m.status.LastSyncAt = &now
-		m.mu.Unlock()
+		// non-enrolled backlog, and record that inbound replication succeeded
+		// this cycle: LastSyncAt advances (memory + store, when supported).
+		m.recordBlockedWithInboundSuccess(blockedPending.Error(), constants.ReasonNonEnrolledPendingMutations)
 		return
 	}
 
@@ -820,15 +823,21 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	_ = m.store.MarkSyncFailure(m.cfg.TargetKey, msg, bu)
 }
 
-func (m *Manager) recordBlocked(msg, reasonCode string) {
+func (m *Manager) recordBlockedWithInboundSuccess(msg, reasonCode string) {
+	now := time.Now()
 	m.mu.Lock()
 	m.status.Phase = PhasePushFailed
 	m.status.LastError = msg
 	m.status.ReasonCode = reasonCode
 	m.status.ReasonMessage = msg
 	m.status.BackoffUntil = nil
+	m.status.LastSyncAt = &now
 	m.mu.Unlock()
 
+	if s, ok := m.store.(blockedSuccessReportingStore); ok {
+		_ = s.MarkSyncBlockedWithSyncSuccess(m.cfg.TargetKey, reasonCode, msg)
+		return
+	}
 	_ = m.store.MarkSyncBlocked(m.cfg.TargetKey, reasonCode, msg)
 }
 
