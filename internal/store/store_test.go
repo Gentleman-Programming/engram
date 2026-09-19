@@ -4954,6 +4954,18 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
+	if err := s.CreateSession("missing-session", "engram", "/tmp/missing-session"); err != nil {
+		t.Fatalf("create observation parent: %v", err)
+	}
+	injectedObservationWriteErr := errors.New("injected observation foreign-key failure")
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO observations") {
+			return nil, injectedObservationWriteErr
+		}
+		return originalExec(db, query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = originalExec })
 
 	badChunk := []SyncMutation{
 		{
@@ -4970,8 +4982,8 @@ func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 		},
 	}
 
-	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); err == nil {
-		t.Fatal("expected chunk apply error for invalid observation payload")
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); !errors.Is(err, injectedObservationWriteErr) {
+		t.Fatalf("chunk apply error = %v, want injected observation write error", err)
 	}
 	if _, err := s.GetSession("chunk-session"); err == nil {
 		t.Fatal("expected chunk session upsert to roll back after failed chunk apply")
@@ -8176,18 +8188,46 @@ func TestApplyPulledChunkObservationIdentityInvalidQuarantinesAndContinues(t *te
 
 func TestApplyPulledChunkObservationFailuresRemainClosed(t *testing.T) {
 	valid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "closed-valid", Op: SyncOpUpsert, Payload: `{"sync_id":"closed-valid","session_id":"closed-parent","type":"decision","title":"valid","content":"must roll back","project":"engram","scope":"project"}`}
+	injectedForeignKeyErr := errors.New("injected foreign-key failure")
 	tests := []struct {
-		name string
-		bad  SyncMutation
+		name    string
+		bad     SyncMutation
+		wantErr error
+		setup   func(t *testing.T, s *Store)
 	}{
 		{name: "decode error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "decode-invalid", Op: SyncOpUpsert, Payload: "not JSON"}},
-		{name: "unrelated foreign key error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "missing-parent", Op: SyncOpUpsert, Payload: `{"sync_id":"missing-parent","session_id":"missing-parent-session","type":"decision","title":"missing parent","content":"must not quarantine","project":"engram","scope":"project"}`}},
+		{
+			name:    "injected foreign key error",
+			bad:     SyncMutation{Entity: SyncEntityObservation, EntityKey: "injected-fk", Op: SyncOpUpsert, Payload: `{"sync_id":"injected-fk","session_id":"injected-fk-parent","type":"decision","title":"injected FK","content":"must not quarantine","project":"engram","scope":"project"}`},
+			wantErr: injectedForeignKeyErr,
+			setup: func(t *testing.T, s *Store) {
+				t.Helper()
+				if err := s.CreateSession("injected-fk-parent", "engram", "/tmp/injected-fk-parent"); err != nil {
+					t.Fatalf("create observation parent: %v", err)
+				}
+				originalExec := s.hooks.exec
+				s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+					if strings.Contains(query, "INSERT INTO observations") {
+						return nil, injectedForeignKeyErr
+					}
+					return originalExec(db, query, args...)
+				}
+				t.Cleanup(func() { s.hooks.exec = originalExec })
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
-			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid}); err == nil {
+			if tc.setup != nil {
+				tc.setup(t, s)
+			}
+			err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid})
+			if err == nil {
 				t.Fatal("ApplyPulledChunk succeeded for a fail-closed observation error")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ApplyPulledChunk error = %v, want injected error", err)
 			}
 			if _, err := s.GetObservationBySyncID(valid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
 				t.Fatalf("valid observation applied despite rollback: %v", err)
