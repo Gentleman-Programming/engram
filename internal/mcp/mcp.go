@@ -21,6 +21,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -800,6 +801,9 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
+				),
+				mcp.WithBoolean("include_history",
+					mcp.Description("When true, render every captured prior version of the observation (title/content snapshots from topic_key upserts and content-changing mem_update calls) and include version_count in the envelope. Omit for the historical default output."),
 				),
 			),
 			handleGetObservation(s, cfg, activity),
@@ -2262,10 +2266,46 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
 
+		extra := map[string]any{}
+		if boolArg(req, "include_history", false) {
+			versions, err := s.GetObservationVersions(id)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to read observation history: %v", err)), nil
+			}
+			extra["version_count"] = len(versions)
+			history := make([]map[string]any, 0, len(versions))
+			if len(versions) > 0 {
+				var b strings.Builder
+				b.WriteString("\n\nHistory (")
+				b.WriteString(strconv.Itoa(len(versions)))
+				b.WriteString(" previous version")
+				if len(versions) != 1 {
+					b.WriteString("s")
+				}
+				b.WriteString("):")
+				for _, v := range versions {
+					fmt.Fprintf(&b, "\n\n--- Version %d (%s) ---\n%s\n%s",
+						v.Version,
+						timeutil.FormatLocal(v.CreatedAt),
+						v.Title,
+						v.Content,
+					)
+					history = append(history, map[string]any{
+						"version":    v.Version,
+						"title":      v.Title,
+						"content":    v.Content,
+						"created_at": v.CreatedAt,
+					})
+				}
+				result += b.String()
+			}
+			extra["history"] = history
+		}
+
 		if detErr != nil {
 			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
-		return respondWithProject(detRes, result, nil), nil
+		return respondWithProject(detRes, result, extra), nil
 	}
 }
 

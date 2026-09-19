@@ -1016,6 +1016,14 @@ The optional project filter is enforced: an observation owned by another project
 
 Get full untruncated content of a specific observation by ID.
 
+Optional argument `include_history` (boolean, default false): when true, the
+result also renders every previously captured version of the observation (each
+snapshot is the title/content saved before a `topic_key` upsert or a
+content-changing `mem_update` overwrote it, numbered per observation starting at
+1). The response envelope gains `version_count` (always) and `history` (an array
+of `{version, title, content, created_at}` objects). Omitting the argument keeps
+the input and output identical to prior releases.
+
 ### mem_session_summary
 
 Save comprehensive end-of-session summary:

@@ -50,7 +50,8 @@
     "mem_get_observation": {
       "type": ["object"],
       "properties": {
-        "id": {"type":["number"],"additionalProperties":true}
+        "id": {"type":["number"],"additionalProperties":true},
+        "include_history": {"type":["boolean"],"additionalProperties":true}
       },
       "required": ["id"],
       "additionalProperties": true},
