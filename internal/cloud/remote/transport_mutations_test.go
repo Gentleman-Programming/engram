@@ -342,8 +342,8 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 		transport := mustNewMutationTransport(t, secureServer.URL, "token")
 		transport.httpClient.Transport = secureServer.Client().Transport
 		_, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}})
-		if err == nil || !strings.Contains(err.Error(), "bearer token redirect requires HTTPS") {
-			t.Fatalf("HTTPS downgrade redirect error = %v, want bearer HTTPS redirect error", err)
+		if err == nil || !strings.Contains(err.Error(), "redirect requires HTTPS") {
+			t.Fatalf("HTTPS downgrade redirect error = %v, want HTTPS redirect error", err)
 		}
 		if downgraded {
 			t.Fatal("HTTPS downgrade redirect reached the HTTP server")

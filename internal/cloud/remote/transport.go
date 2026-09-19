@@ -98,12 +98,13 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
 		return nil, err
 	}
+	requireHTTPSRedirect := token != "" || len(extraHeaders) > 0
 	return &RemoteTransport{
 		baseURL:         normalized,
 		token:           token,
 		project:         project,
-		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
-		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
+		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, requireHTTPSRedirect),
+		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, requireHTTPSRedirect),
 		extraHeaders:    extraHeaders,
 	}, nil
 }
@@ -120,12 +121,12 @@ func validateBearerBaseURL(baseURL, token string) (string, string, error) {
 	return normalized, token, nil
 }
 
-func newRemoteHTTPClient(timeout time.Duration, token string) *http.Client {
+func newRemoteHTTPClient(timeout time.Duration, requireHTTPSRedirect bool) *http.Client {
 	client := &http.Client{Timeout: timeout}
-	if token != "" {
+	if requireHTTPSRedirect {
 		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
 			if req.URL.Scheme != "https" {
-				return fmt.Errorf("cloud: bearer token redirect requires HTTPS")
+				return fmt.Errorf("cloud: redirect requires HTTPS")
 			}
 			return nil
 		}
@@ -369,10 +370,11 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
 		return nil, err
 	}
+	requireHTTPSRedirect := token != "" || len(extraHeaders) > 0
 	return &MutationTransport{
 		baseURL:      normalized,
 		token:        token,
-		httpClient:   newRemoteHTTPClient(ordinaryOperationTimeout, token),
+		httpClient:   newRemoteHTTPClient(ordinaryOperationTimeout, requireHTTPSRedirect),
 		extraHeaders: extraHeaders,
 	}, nil
 }

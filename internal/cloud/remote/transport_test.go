@@ -529,3 +529,28 @@ func TestNewRemoteTransportRejectsHTTPWithExtraHeaders(t *testing.T) {
 		t.Fatalf("tokenless HTTP with extra headers error=%v, want HTTPS requirement", err)
 	}
 }
+
+func TestRemoteTransportRejectsHTTPRedirectWithExtraHeaders(t *testing.T) {
+	t.Setenv(extraHeadersEnv, "CF-Access-Client-Id: abc.access")
+	insecure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("extra-header request reached HTTP redirect target")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer insecure.Close()
+
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, insecure.URL, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	rt, err := NewRemoteTransport(secure.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = secure.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("ReadManifest redirect error = %v, want HTTPS requirement", err)
+	}
+}
