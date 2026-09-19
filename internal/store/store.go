@@ -141,15 +141,18 @@ const (
 )
 
 type Observation struct {
-	ID             int64   `json:"id"`
-	SyncID         string  `json:"sync_id"`
-	SessionID      string  `json:"session_id"`
-	Type           string  `json:"type"`
-	Title          string  `json:"title"`
-	Content        string  `json:"content"`
-	ToolName       *string `json:"tool_name,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	Scope          string  `json:"scope"`
+	ID        int64   `json:"id"`
+	SyncID    string  `json:"sync_id"`
+	SessionID string  `json:"session_id"`
+	Type      string  `json:"type"`
+	Title     string  `json:"title"`
+	Content   string  `json:"content"`
+	ToolName  *string `json:"tool_name,omitempty"`
+	Project   *string `json:"project,omitempty"`
+	Scope     string  `json:"scope"`
+	// Org is an optional, free-text grouping axis orthogonal to Scope (#776).
+	// Nil for observations saved before this field existed or without an org set.
+	Org            *string `json:"org,omitempty"`
 	TopicKey       *string `json:"topic_key,omitempty"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
@@ -202,6 +205,7 @@ type SearchPreviewResult struct {
 	Project     *string `json:"project,omitempty"`
 	TopicKey    *string `json:"topic_key,omitempty"`
 	Scope       string  `json:"scope"`
+	Org         *string `json:"org,omitempty"`
 	ReviewAfter *string `json:"review_after,omitempty"`
 	Pinned      bool    `json:"-"`
 	CreatedAt   string  `json:"created_at"`
@@ -260,6 +264,7 @@ type SearchOptions struct {
 	Type      string `json:"type,omitempty"`
 	Project   string `json:"project,omitempty"`
 	Scope     string `json:"scope,omitempty"`
+	Org       string `json:"org,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
 	MatchMode string `json:"match_mode,omitempty"` // "all" (default) | "any"
 }
@@ -273,6 +278,8 @@ type AddObservationParams struct {
 	Project   string `json:"project,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	TopicKey  string `json:"topic_key,omitempty"`
+	// Org is a free-text grouping axis orthogonal to Scope (#776). Empty means unset.
+	Org string `json:"org,omitempty"`
 }
 
 type UpdateObservationParams struct {
@@ -377,7 +384,7 @@ var decayReviewAfterMonths = map[string]int{
 }
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
+	       scope, org, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -583,6 +590,7 @@ type syncObservationPayload struct {
 	ToolName       *string `json:"tool_name,omitempty"`
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
+	Org            *string `json:"org,omitempty"`
 	TopicKey       *string `json:"topic_key,omitempty"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
@@ -1406,6 +1414,16 @@ func (s *Store) migrate() error {
 		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
 			return err
 		}
+	}
+
+	// ── Phase: org-grouping-axis (#776) ─────────────────────────────────────
+	// Additive nullable "org" column: a second grouping axis orthogonal to
+	// scope. Empty/NULL by default so single-context users see no change.
+	if err := s.addColumnIfNotExists("observations", "org", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `CREATE INDEX IF NOT EXISTS idx_obs_org ON observations(org)`); err != nil {
+		return err
 	}
 
 	// ── Phase: memory-conflict-surfacing — B.2 ──────────────────────────────
@@ -3233,10 +3251,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				 WHERE topic_key = ?
 				   AND ifnull(project, '') = ifnull(?, '')
 				   AND scope = ?
+				   AND ifnull(org, '') = ifnull(?, '')
 				   AND deleted_at IS NULL
 				 ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
 				 LIMIT 1`,
-				topicKey, nullableString(p.Project), scope,
+				topicKey, nullableString(p.Project), scope, nullableString(p.Org),
 			).Scan(&existingID)
 			if err == nil {
 				if _, err := s.execHook(tx,
@@ -3246,6 +3265,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     title = ?,
 					     content = ?,
 					     tool_name = ?,
+					     org = ?,
 					     topic_key = ?,
 					     normalized_hash = ?,
 					     revision_count = revision_count + 1,
@@ -3257,6 +3277,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					title,
 					content,
 					nullableString(p.ToolName),
+					nullableString(p.Org),
 					nullableString(topicKey),
 					normHash,
 					existingID,
@@ -3282,13 +3303,14 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			 WHERE normalized_hash = ?
 			   AND ifnull(project, '') = ifnull(?, '')
 			   AND scope = ?
+			   AND ifnull(org, '') = ifnull(?, '')
 			   AND type = ?
 			   AND title = ?
 			   AND deleted_at IS NULL
 			   AND datetime(created_at) >= datetime('now', ?)
 			 ORDER BY created_at DESC
 			 LIMIT 1`,
-			normHash, nullableString(p.Project), scope, p.Type, title, window,
+			normHash, nullableString(p.Project), scope, nullableString(p.Org), p.Type, title, window,
 		).Scan(&existingID)
 		if err == nil {
 			if _, err := s.execHook(tx,
@@ -3314,10 +3336,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, org, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
-			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(p.Org), nullableString(topicKey), normHash,
 		)
 		if err != nil {
 			return err
@@ -4364,6 +4386,10 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 			tkSQL += " AND scope = ?"
 			tkArgs = append(tkArgs, normalizeScope(opts.Scope))
 		}
+		if opts.Org != "" {
+			tkSQL += " AND org = ?"
+			tkArgs = append(tkArgs, opts.Org)
+		}
 
 		tkSQL += " ORDER BY updated_at DESC LIMIT ?"
 		tkArgs = append(tkArgs, limit)
@@ -4378,7 +4404,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 				var sr SearchResult
 				if err := tkRows.Scan(
 					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
+					&sr.ToolName, &sr.Project, &sr.Scope, &sr.Org, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
 					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
 				); err != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
@@ -4437,7 +4463,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		var sr SearchResult
 		if err := rows.Scan(
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
+			&sr.ToolName, &sr.Project, &sr.Scope, &sr.Org, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
 			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
 			&sr.Rank,
 		); err != nil {
@@ -4496,7 +4522,7 @@ func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts Se
 		tkSQL := `
 			SELECT id, ifnull(sync_id, '') as sync_id, type, title,
 			       substr(content, 1, 300) as preview, length(content) > 300 as truncated,
-			       project, topic_key, scope, review_after, pinned, created_at
+			       project, topic_key, scope, org, review_after, pinned, created_at
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
@@ -4512,6 +4538,10 @@ func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts Se
 		if opts.Scope != "" {
 			tkSQL += " AND scope = ?"
 			tkArgs = append(tkArgs, normalizeScope(opts.Scope))
+		}
+		if opts.Org != "" {
+			tkSQL += " AND org = ?"
+			tkArgs = append(tkArgs, opts.Org)
 		}
 		tkSQL += " ORDER BY updated_at DESC LIMIT ?"
 		tkArgs = append(tkArgs, limit)
@@ -4616,13 +4646,13 @@ func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []
 
 func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, ftsQuery, opts, limit)
+	       o.scope, o.org, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, ftsQuery, opts, limit)
 }
 
 func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
 	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
-	       o.project, o.topic_key, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
+	       o.project, o.topic_key, o.scope, o.org, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
 }
 
 func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions, limit int) (string, []any) {
@@ -4667,6 +4697,10 @@ func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions
 		sqlQ += " AND o.scope = ?"
 		args = append(args, normalizeScope(opts.Scope))
 	}
+	if opts.Org != "" {
+		sqlQ += " AND o.org = ?"
+		args = append(args, opts.Org)
+	}
 
 	sqlQ += " ORDER BY " + compositeRank + " ASC, COALESCE(NULLIF(o.sync_id, ''), printf('%020d', o.id)) ASC, o.id ASC LIMIT ?"
 	return sqlQ, append(args, limit)
@@ -4703,13 +4737,13 @@ func escapeLIKE(term string) string {
 
 func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, query, opts, limit)
+	       o.scope, o.org, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, query, opts, limit)
 }
 
 func buildSearchPreviewLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
 	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
-	       o.project, o.topic_key, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
+	       o.project, o.topic_key, o.scope, o.org, o.review_after, o.pinned, o.created_at`, query, opts, limit)
 }
 
 func buildSearchLIKEQueryWithColumns(columns, query string, opts SearchOptions, limit int) (string, []any) {
@@ -4744,6 +4778,10 @@ func buildSearchLIKEQueryWithColumns(columns, query string, opts SearchOptions, 
 	if opts.Scope != "" {
 		sqlQ += " AND o.scope = ?"
 		args = append(args, normalizeScope(opts.Scope))
+	}
+	if opts.Org != "" {
+		sqlQ += " AND o.org = ?"
+		args = append(args, opts.Org)
 	}
 	sqlQ += " ORDER BY datetime(o.updated_at) DESC, o.id DESC LIMIT ?"
 	return sqlQ, append(args, limit)
@@ -5448,16 +5486,25 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if duplicateCount <= 0 {
 				duplicateCount = existing.DuplicateCount
 			}
-			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, pinned = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
-				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, obs.Pinned, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
+			// A snapshot from before org existed (#776) omits the field
+			// entirely, decoding to nil — preserve the existing org rather
+			// than clobbering it with NULL. A snapshot that carries org
+			// (including an explicit empty string) always wins, same as
+			// every other field here.
+			org := obs.Org
+			if org == nil {
+				org = existing.Org
+			}
+			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, org = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, pinned = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
+				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), org, nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, obs.Pinned, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
 			result.ObservationsUpdated++
 			continue
 		}
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, org, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at)
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -5467,6 +5514,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			obs.ToolName,
 			obs.Project,
 			normalizeScope(obs.Scope),
+			obs.Org,
 			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
 			hashNormalized(obs.Content),
 			maxInt(obs.RevisionCount, 1),
@@ -7623,16 +7671,24 @@ type ProjectStats struct {
 	Directories      []string `json:"directories"` // unique directories from sessions
 }
 
-// ListProjectsWithStats returns all projects with aggregated counts.
-// Ordered by observation count descending.
-func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
+// ListProjectsWithStats returns all projects with aggregated counts. Ordered
+// by observation count descending. When org is non-empty (#776), observation
+// counts are scoped to that org and the result set is limited to projects
+// that have at least one observation tagged with it — sessions and prompts
+// have no org axis of their own, so they only enrich projects already
+// selected by the org filter rather than reintroducing unfiltered ones.
+func (s *Store) ListProjectsWithStats(org string) ([]ProjectStats, error) {
 	// Observation counts per project
-	obsRows, err := s.queryItHook(s.db,
-		`SELECT project, COUNT(*) as cnt
+	obsQuery := `SELECT project, COUNT(*) as cnt
 		 FROM observations
-		 WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
-		 GROUP BY project`,
-	)
+		 WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL`
+	obsArgs := []any{}
+	if org != "" {
+		obsQuery += " AND org = ?"
+		obsArgs = append(obsArgs, org)
+	}
+	obsQuery += " GROUP BY project"
+	obsRows, err := s.queryItHook(s.db, obsQuery, obsArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("list projects obs: %w", err)
 	}
@@ -7688,6 +7744,11 @@ func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
 
 	for name, sd := range sessData {
 		if statsMap[name] == nil {
+			if org != "" {
+				// This project had no observation tagged with org: skip it
+				// rather than reintroducing it via session data alone.
+				continue
+			}
 			statsMap[name] = &ProjectStats{Name: name}
 		}
 		statsMap[name].SessionCount = sd.count
@@ -7715,6 +7776,9 @@ func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
 			return nil, err
 		}
 		if statsMap[name] == nil {
+			if org != "" {
+				continue
+			}
 			statsMap[name] = &ProjectStats{Name: name}
 		}
 		statsMap[name].PromptCount = cnt
@@ -8602,8 +8666,8 @@ func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sess
 	}
 	for _, id := range p.ObservationIDs {
 		var payload syncObservationPayload
-		err := tx.QueryRow(`SELECT sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at FROM observations WHERE id = ? AND project = ?`, id, target).
-			Scan(&payload.SyncID, &payload.SessionID, &payload.Type, &payload.Title, &payload.Content, &payload.ToolName, &payload.Project, &payload.Scope, &payload.TopicKey, &payload.RevisionCount, &payload.DuplicateCount, &payload.LastSeenAt, &payload.CreatedAt, &payload.UpdatedAt, &payload.DeletedAt)
+		err := tx.QueryRow(`SELECT sync_id, session_id, type, title, content, tool_name, project, scope, org, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at FROM observations WHERE id = ? AND project = ?`, id, target).
+			Scan(&payload.SyncID, &payload.SessionID, &payload.Type, &payload.Title, &payload.Content, &payload.ToolName, &payload.Project, &payload.Scope, &payload.Org, &payload.TopicKey, &payload.RevisionCount, &payload.DuplicateCount, &payload.LastSeenAt, &payload.CreatedAt, &payload.UpdatedAt, &payload.DeletedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -10164,6 +10228,7 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		ToolName:       obs.ToolName,
 		Project:        obs.Project,
 		Scope:          obs.Scope,
+		Org:            obs.Org,
 		TopicKey:       obs.TopicKey,
 		RevisionCount:  obs.RevisionCount,
 		DuplicateCount: obs.DuplicateCount,
@@ -10309,8 +10374,8 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, org, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -10319,6 +10384,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 			payload.ToolName,
 			payload.Project,
 			normalizeScope(payload.Scope),
+			payload.Org,
 			payload.TopicKey,
 			hashNormalized(payload.Content),
 			revisionCount,
@@ -10351,10 +10417,17 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if strings.TrimSpace(payload.UpdatedAt) == "" {
 		updatedAt = existing.UpdatedAt
 	}
+	// A payload from before org existed (#776) omits the field entirely,
+	// decoding to nil — preserve the existing org rather than clobbering it
+	// with NULL. A payload that carries org (including an explicit empty
+	// string) always wins, same as every other field here.
+	if payload.Org == nil {
+		payload.Org = existing.Org
+	}
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, org = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,
@@ -10363,6 +10436,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		payload.ToolName,
 		payload.Project,
 		normalizeScope(payload.Scope),
+		payload.Org,
 		payload.TopicKey,
 		hashNormalized(payload.Content),
 		revisionCount,
@@ -10511,7 +10585,7 @@ type observationScanner interface {
 func scanObservationRow(scanner observationScanner, o *Observation) error {
 	return scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
+		&o.ToolName, &o.Project, &o.Scope, &o.Org, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	)
 }
@@ -10519,7 +10593,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 func scanSearchPreviewRow(scanner observationScanner, r *SearchPreviewResult, withRank bool) error {
 	dest := []any{
 		&r.ID, &r.SyncID, &r.Type, &r.Title, &r.Preview, &r.Truncated,
-		&r.Project, &r.TopicKey, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
+		&r.Project, &r.TopicKey, &r.Scope, &r.Org, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
 	}
 	if withRank {
 		dest = append(dest, &r.Rank)
