@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -224,6 +225,34 @@ func TestCloudPullMutations_NoAuthMode(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Pulled 1") {
 		t.Fatalf("expected 1 pulled mutation in no-auth mode, got stdout:\n%s", stdout)
+	}
+}
+
+// TestCloudPullMutations_CloseFailureSurfaces asserts that a store close
+// failure is reported to the operator instead of silently discarded: the
+// command must fatal before reporting success (CodeRabbit data-integrity
+// follow-up).
+func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
+	srv := mutationPullTestServer(t, []map[string]any{
+		mutationTestSession(1, "sess-1", "proj-a"),
+	})
+	cfg := setupPullMutationsConfig(t, srv.URL, "test-token")
+
+	oldClose := closeCloudPullMutationsStore
+	closeCloudPullMutationsStore = func(*store.Store) error {
+		return fmt.Errorf("injected close failure")
+	}
+	t.Cleanup(func() { closeCloudPullMutationsStore = oldClose })
+
+	stdout, stderr, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatal("expected fatal on store close failure, got success")
+	}
+	if strings.Contains(stdout, "Pulled") {
+		t.Fatalf("success must not be reported when close fails, got stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "injected close failure") {
+		t.Fatalf("expected close error in stderr, got:\n%s", stderr)
 	}
 }
 
