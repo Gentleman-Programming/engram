@@ -154,8 +154,8 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 		{name: "multiple modes", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--plan", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "multiple sync mutation modes", args: []string{"engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--dry-run", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "missing project", args: []string{"engram", "doctor", "repair", "--check", "session_project_directory_mismatch", "--plan"}, want: "--project is required"},
+		{name: "orphaned observation session requires project", args: []string{"engram", "doctor", "repair", "--check", "orphaned_observation_session", "--plan"}, want: "--project is required"},
 		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "not_real", "--plan"}, want: "unsupported repair check"},
-		{name: "orphaned observation session is report only", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "orphaned_observation_session", "--apply"}, want: "orphaned_observation_session is a diagnostic-only check with no repair"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -536,7 +536,7 @@ func TestCmdDoctorTextOutput(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
+func TestCmdDoctorOrphanedObservationSessionRoutesReportAndRepair(t *testing.T) {
 	cfg := testConfig(t)
 	initDoctorStore(t, cfg)
 	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
@@ -578,25 +578,74 @@ func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
 	exited := false
 	exitFunc = func(code int) { exited = code != 0 }
 	t.Cleanup(func() { exitFunc = oldExit })
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--plan")
+	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
+	if exited || stderr != "" {
+		t.Fatalf("plan exited=%v stderr=%q", exited, stderr)
+	}
+	plan := decodeRepairPlan(t, stdout)
+	if plan["status"] != "planned" || len(plan["actions"].([]any)) != 0 {
+		t.Fatalf("plan=%v", plan)
+	}
+	rebuilds := plan["session_rebuilds"].([]any)
+	if len(rebuilds) != 1 {
+		t.Fatalf("plan session_rebuilds=%v", rebuilds)
+	}
+	action := rebuilds[0].(map[string]any)
+	if action["session_id"] != "missing-session" || action["project"] != "engram" || action["observation_count"] != float64(1) {
+		t.Fatalf("plan action=%v", action)
+	}
+
 	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
 	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
-	if !exited || !strings.Contains(stdout, "usage: engram doctor repair") || !strings.Contains(stderr, "orphaned_observation_session is a diagnostic-only check with no repair") {
-		t.Fatalf("repair exited=%v stdout=%q stderr=%q", exited, stdout, stderr)
+	if exited || stderr != "" {
+		t.Fatalf("apply exited=%v stderr=%q", exited, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.DataDir, "backups")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported repair created backup directory: %v", err)
+	applied := decodeRepairPlan(t, stdout)
+	if applied["status"] != "applied" || applied["backup_path"] == "" {
+		t.Fatalf("apply=%v", applied)
 	}
+	if _, err := os.Stat(applied["backup_path"].(string)); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	appliedCounts := applied["counts"].(map[string]any)
+	if appliedCounts["sessions_applied"] != float64(1) || appliedCounts["observations_applied"] != float64(1) {
+		t.Fatalf("apply counts=%v", appliedCounts)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
+	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
+	if exited || stderr != "" {
+		t.Fatalf("second apply exited=%v stderr=%q", exited, stderr)
+	}
+	if second := decodeRepairPlan(t, stdout); second["status"] != "noop" {
+		t.Fatalf("second apply=%v, want noop", second)
+	}
+
 	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
 	if err != nil {
 		t.Fatalf("reopen database: %v", err)
 	}
 	defer db.Close()
+	var sessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = 'missing-session'`).Scan(&sessions); err != nil {
+		t.Fatalf("count rebuilt sessions: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("rebuilt sessions=%d, want 1", sessions)
+	}
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = 'obs-orphan'`).Scan(&count); err != nil {
 		t.Fatalf("count orphaned observations: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("unsupported repair changed observations: count=%d", count)
+		t.Fatalf("repair changed observations: count=%d", count)
+	}
+
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "orphaned_observation_session")
+	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" || decodeDoctorReport(t, stdout)["status"] != "ok" {
+		t.Fatalf("post-repair report stderr=%q report=%s", stderr, stdout)
 	}
 }
 
@@ -1262,5 +1311,219 @@ func TestCmdDoctorLocalOnlyInstallIsNotBlockedByPendingMutations(t *testing.T) {
 	}
 	if strings.Contains(stdout, "non_enrolled_pending_mutations") || strings.Contains(stdout, "engram cloud enroll") {
 		t.Fatalf("local-only doctor must not suggest cloud enrollment: %s", stdout)
+	}
+}
+
+// seedDoctorOrphanObservationAt inserts an orphan observation with explicit
+// timestamps so repair tests can pin the MIN(created_at) grouping. The parent
+// session deliberately does not exist.
+func seedDoctorOrphanObservationAt(t *testing.T, cfg store.Config, syncID, sessionID, project, createdAt, deletedAt string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	}()
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at, deleted_at)
+		VALUES (?, ?, 'bugfix', 'orphan', 'content', ?, 'project', ?, 1, 1, ?, ?, ?)
+	`, syncID, sessionID, project, syncID, createdAt, createdAt, deletedAt); err != nil {
+		t.Fatalf("seed orphan observation %q: %v", syncID, err)
+	}
+}
+
+// TestCmdDoctorRepairOrphanedObservationSessionPlanDryRunApplyLifecycle covers
+// the whole repair lifecycle for mixed orphan groups: plan shape (one action per
+// group, tombstoned group skipped), apply columns (terminal placeholder rows,
+// both ownership branches, backup before write), and idempotency.
+func TestCmdDoctorRepairOrphanedObservationSessionPlanDryRunApplyLifecycle(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	seedDoctorOrphanObservationAt(t, cfg, "obs-runtime-late", "missing-runtime", "engram", "2026-01-02 10:00:00", "")
+	seedDoctorOrphanObservationAt(t, cfg, "obs-runtime-soft-deleted", "missing-runtime", "engram", "2026-01-01 09:30:00", "2026-01-03 00:00:00")
+	seedDoctorOrphanObservationAt(t, cfg, "obs-manual", "manual-save-engram", "engram", "2026-02-03 08:00:00", "")
+	seedDoctorOrphanObservationAt(t, cfg, "obs-deleted", "missing-deleted", "engram", "2026-01-05 00:00:00", "")
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open tombstone fixture: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key, project, active) VALUES (?, ?, ?, 1)`, store.SyncEntitySession, "missing-deleted", "engram"); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close tombstone fixture: %v", err)
+	}
+
+	runRepair := func(stage, mode string) map[string]any {
+		t.Helper()
+		withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", mode)
+		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatalf("%s stderr=%q", stage, stderr)
+		}
+		return decodeRepairPlan(t, stdout)
+	}
+
+	plan := runRepair("plan", "--plan")
+	if plan["status"] != "planned" || len(plan["actions"].([]any)) != 0 {
+		t.Fatalf("plan=%v", plan)
+	}
+	rebuilds := plan["session_rebuilds"].([]any)
+	if len(rebuilds) != 2 {
+		t.Fatalf("plan session_rebuilds=%v", rebuilds)
+	}
+	manual := rebuilds[0].(map[string]any)
+	runtime := rebuilds[1].(map[string]any)
+	if manual["session_id"] != "manual-save-engram" || manual["started_at"] != "2026-02-03 08:00:00" || manual["observation_count"] != float64(1) {
+		t.Fatalf("manual action=%v", manual)
+	}
+	if runtime["session_id"] != "missing-runtime" || runtime["started_at"] != "2026-01-01 09:30:00" || runtime["observation_count"] != float64(2) {
+		t.Fatalf("runtime action=%v (MIN must include the soft-deleted observation)", runtime)
+	}
+	skipped := plan["skipped"].([]any)
+	if len(skipped) != 1 || skipped[0].(map[string]any)["session_id"] != "missing-deleted" || skipped[0].(map[string]any)["reason_code"] != "session_delete_tombstoned" {
+		t.Fatalf("plan skipped=%v", skipped)
+	}
+	planCounts := plan["counts"].(map[string]any)
+	if planCounts["sessions_planned"] != float64(2) || planCounts["observations_planned"] != float64(3) {
+		t.Fatalf("plan counts=%v", planCounts)
+	}
+
+	dry := runRepair("dry-run", "--dry-run")
+	if dry["status"] != "dry_run" || dry["backup_path"] != nil {
+		t.Fatalf("dry-run=%v", dry)
+	}
+	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("reopen after dry-run: %v", err)
+	}
+	var sessionsAfterDryRun int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessionsAfterDryRun); err != nil {
+		_ = db.Close()
+		t.Fatalf("count sessions after dry-run: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close after dry-run: %v", err)
+	}
+	if sessionsAfterDryRun != 0 {
+		t.Fatalf("dry-run inserted %d sessions", sessionsAfterDryRun)
+	}
+
+	applied := runRepair("apply", "--apply")
+	if applied["status"] != "applied" || applied["backup_path"] == "" {
+		t.Fatalf("apply=%v", applied)
+	}
+	if _, err := os.Stat(applied["backup_path"].(string)); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	appliedCounts := applied["counts"].(map[string]any)
+	if appliedCounts["sessions_applied"] != float64(2) || appliedCounts["observations_applied"] != float64(3) {
+		t.Fatalf("apply counts=%v", appliedCounts)
+	}
+	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("reopen after apply: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close reopened database: %v", err)
+		}
+	}()
+	assertPlaceholder := func(sessionID, project, ownership, timestamp string) {
+		t.Helper()
+		var directory, startedAt, endedAt, gotOwnership, summary string
+		if err := db.QueryRow(`SELECT directory, started_at, ended_at, ifnull(ownership_mode, ''), ifnull(summary, '') FROM sessions WHERE id = ? AND project = ?`, sessionID, project).Scan(&directory, &startedAt, &endedAt, &gotOwnership, &summary); err != nil {
+			t.Fatalf("read rebuilt session %q: %v", sessionID, err)
+		}
+		if directory != "" || startedAt != timestamp || endedAt != timestamp || gotOwnership != ownership {
+			t.Fatalf("rebuilt session %q directory=%q started_at=%q ended_at=%q ownership=%q", sessionID, directory, startedAt, endedAt, gotOwnership)
+		}
+		if !strings.HasPrefix(summary, "placeholder rebuilt by doctor repair (orphaned_observation_session) ") {
+			t.Fatalf("rebuilt session %q summary=%q", sessionID, summary)
+		}
+	}
+	assertPlaceholder("missing-runtime", "engram", "shared", "2026-01-01 09:30:00")
+	assertPlaceholder("manual-save-engram", "engram", "project_owned", "2026-02-03 08:00:00")
+	var tombstonedSessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = 'missing-deleted'`).Scan(&tombstonedSessions); err != nil {
+		t.Fatalf("count tombstoned sessions: %v", err)
+	}
+	if tombstonedSessions != 0 {
+		t.Fatalf("tombstoned session inserted: count=%d", tombstonedSessions)
+	}
+
+	if second := runRepair("second apply", "--apply"); second["status"] != "noop" || second["backup_path"] != nil {
+		t.Fatalf("second apply=%v, want noop without backup", second)
+	}
+}
+
+// TestOrphanRepairApplyStatusDerivation pins the honest status mapping between
+// what the apply inserted and the planner's non-skipped rebuild actions. The
+// in-transaction skip only fires when an active tombstone appears between
+// planning and applying, which a single-process command test cannot stage
+// deterministically, so the derivation is pinned at the unit level.
+func TestOrphanRepairApplyStatusDerivation(t *testing.T) {
+	cases := []struct {
+		name             string
+		sessionsInserted int64
+		planned          int
+		want             string
+	}{
+		{"nothing inserted is noop", 0, 2, "noop"},
+		{"planned nothing is noop", 0, 0, "noop"},
+		{"partial insert is partial", 1, 2, "partial"},
+		{"complete insert is applied", 2, 2, "applied"},
+	}
+	for _, tc := range cases {
+		if got := orphanRepairApplyStatus(tc.sessionsInserted, tc.planned); got != tc.want {
+			t.Fatalf("%s: orphanRepairApplyStatus(%d, %d)=%q, want %q", tc.name, tc.sessionsInserted, tc.planned, got, tc.want)
+		}
+	}
+}
+
+// TestCmdDoctorRepairOrphanedObservationSessionApplyFailurePreservesBackupPath
+// forces the apply transaction to fail after the pre-repair backup (a BEFORE
+// INSERT trigger stands in for a conflicting writer) and pins that the failure
+// output still tells the user where the backup lives.
+func TestCmdDoctorRepairOrphanedObservationSessionApplyFailurePreservesBackupPath(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	seedDoctorOrphanObservationAt(t, cfg, "obs-blocked", "missing-blocked", "engram", "2026-01-07 00:00:00", "")
+
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER doctor_block_rebuild BEFORE INSERT ON sessions WHEN NEW.id = 'missing-blocked' BEGIN SELECT RAISE(ABORT, 'blocked by test trigger'); END`); err != nil {
+		_ = db.Close()
+		t.Fatalf("create blocking trigger: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
+	oldExit := exitFunc
+	exited := false
+	exitFunc = func(code int) { exited = code != 0 }
+	t.Cleanup(func() { exitFunc = oldExit })
+	_, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if !exited {
+		t.Fatalf("apply must fail (stderr=%q)", stderr)
+	}
+	if !strings.Contains(stderr, "engram doctor repair failed:") || !strings.Contains(stderr, "blocked by test trigger") {
+		t.Fatalf("stderr=%q, want the transaction failure", stderr)
+	}
+	if !strings.Contains(stderr, "pre-repair backup preserved at ") {
+		t.Fatalf("stderr=%q, want the preserved backup path", stderr)
 	}
 }

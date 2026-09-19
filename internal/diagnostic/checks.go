@@ -34,6 +34,11 @@ const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_ident
 // targets.
 const ReasonForeignSyncTarget = "foreign_sync_target"
 
+// ReasonSessionDeleteTombstoned marks an orphaned session reference that the
+// doctor repair refuses to rebuild because a delete tombstone proves the
+// session was deliberately deleted.
+const ReasonSessionDeleteTombstoned = "session_delete_tombstoned"
+
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
@@ -619,9 +624,9 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 			Severity:             SeverityWarning,
 			ReasonCode:           CheckOrphanedObservationSession,
 			Message:              fmt.Sprintf("%d observation(s) reference missing session %q.", item.ObservationCount, item.SessionID),
-			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically.",
+			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically; doctor can only rebuild a placeholder parent that restores referential integrity without recovering the original session metadata.",
 			Evidence:             mustJSON(item),
-			SafeNextStep:         "Inspect and recover the affected data deliberately. The canonical session cannot be reconstructed automatically, and no supported repair exists.",
+			SafeNextStep:         fmt.Sprintf("Review the grouped evidence, then run `engram doctor repair --check %s --project <project> --plan` and apply with --dry-run or --apply after review. Sessions whose ID carries a delete tombstone are skipped (%s) instead of being rebuilt.", CheckOrphanedObservationSession, ReasonSessionDeleteTombstoned),
 			RequiresConfirmation: true,
 		})
 	}

@@ -275,6 +275,35 @@ func cmdDoctorRepair(cfg store.Config) {
 		writeDoctorRepairJSON(plan)
 		return
 	}
+	if check == diagnostic.CheckOrphanedObservationSession {
+		plan.Counts.SessionsPlanned = int64(len(plan.SessionRebuilds))
+		for _, action := range plan.SessionRebuilds {
+			plan.Counts.ObservationsPlanned += action.ObservationCount
+		}
+		if mode == diagnostic.RepairModeApply && len(plan.SessionRebuilds) > 0 {
+			candidates := make([]store.SessionRebuildCandidate, 0, len(plan.SessionRebuilds))
+			for _, action := range plan.SessionRebuilds {
+				candidates = append(candidates, store.SessionRebuildCandidate{Project: action.Project, SessionID: action.SessionID, StartedAt: action.StartedAt})
+			}
+			result, err := s.ApplyOrphanedObservationSessionRepair(candidates)
+			if err != nil {
+				// The pre-tx backup exists even when the transaction failed, so
+				// the failure output must preserve its path for the user.
+				message := err.Error()
+				if result.BackupPath != "" {
+					message += "; pre-repair backup preserved at " + result.BackupPath
+				}
+				failDoctorRepair(message)
+				return
+			}
+			plan.Status = orphanRepairApplyStatus(result.Counts.SessionsInserted, len(plan.SessionRebuilds))
+			plan.BackupPath = result.BackupPath
+			plan.Counts.SessionsApplied = result.Counts.SessionsInserted
+			plan.Counts.ObservationsApplied = result.Counts.ObservationsLinked
+		}
+		writeDoctorRepairJSON(plan)
+		return
+	}
 	actions := make([]store.SessionProjectReclassification, 0, len(plan.Actions))
 	for _, action := range plan.Actions {
 		actions = append(actions, store.SessionProjectReclassification{SessionID: action.SessionID, FromProject: action.FromProject, ToProject: action.ToProject})
@@ -309,6 +338,21 @@ func cmdDoctorRepair(cfg store.Config) {
 		plan.Counts.PromptsPlanned = counts.Prompts
 	}
 	writeDoctorRepairJSON(plan)
+}
+
+// orphanRepairApplyStatus derives the honest plan status from what the apply
+// actually inserted versus the planner's non-skipped rebuild actions: an apply
+// that inserted nothing is a noop, one that rebuilt only part of the plan is
+// partial, and only a complete apply is applied.
+func orphanRepairApplyStatus(sessionsInserted int64, planned int) string {
+	switch {
+	case sessionsInserted <= 0:
+		return "noop"
+	case sessionsInserted < int64(planned):
+		return "partial"
+	default:
+		return "applied"
+	}
 }
 
 func failDoctorRepair(message string) {
