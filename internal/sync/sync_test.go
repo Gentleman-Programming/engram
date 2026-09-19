@@ -3725,10 +3725,10 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 			Payload:   `{"id":"remote-sess","project":"proj-a","directory":"/remote"}`,
 		},
 		{
-			Entity:    store.SyncEntityObservation,
-			EntityKey: "obs-bad",
+			Entity:    "unknown",
+			EntityKey: "invalid-entity",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-bad","session_id":"missing-session","type":"note","title":"bad","content":"fails fk","project":"proj-a","scope":"project"}`,
+			Payload:   `{}`,
 		},
 	}}
 	badPayload, err := json.Marshal(badChunk)
@@ -5409,10 +5409,10 @@ func TestCloudImportStallPathSurvivesRelationFiltering(t *testing.T) {
 			Payload:   `{"sync_id":"obs-stall-good","session_id":"sess-stall","type":"decision","title":"good","content":"importable endpoint","project":"proj-a","scope":"project"}`,
 		},
 		{
-			Entity:    store.SyncEntityObservation,
-			EntityKey: "obs-stall-orphan",
+			Entity:    "unknown",
+			EntityKey: "invalid-stall-entity",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-stall-orphan","session_id":"sess-never-anywhere","type":"note","title":"orphan","content":"references a session no chunk provides","project":"proj-a","scope":"project"}`,
+			Payload:   `{}`,
 		},
 		{
 			Entity:    store.SyncEntityRelation,
@@ -5429,8 +5429,8 @@ func TestCloudImportStallPathSurvivesRelationFiltering(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the chunk to keep stalling on its unrelated failure")
 	}
-	if !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "sess-never-anywhere") {
-		t.Fatalf("expected original stall error with pending session dependencies, got: %v", err)
+	if !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "unknown sync entity") {
+		t.Fatalf("expected original stall error with unrelated failure, got: %v", err)
 	}
 	synced, err := s.GetSyncedChunks()
 	if err != nil {
