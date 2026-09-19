@@ -626,6 +626,27 @@ test("instance-id resolution failure wording distinguishes an old binary from a 
     instanceIDFailureMessage({ status: null, stdout: "", error: Object.assign(new Error("spawn engram ENOENT"), { code: "ENOENT" }) }),
     `The Engram binary "engram" could not be found. Install Engram, or point ENGRAM_BIN at the current binary.`,
   );
+
+  const etimedout = { status: null, stdout: "", stderr: "", signal: "SIGTERM", error: Object.assign(new Error("spawn engram ETIMEDOUT"), { code: "ETIMEDOUT" }) };
+  assert.match(
+    instanceIDFailureMessage(etimedout),
+    /did not answer "instance-id" within the startup timeout/,
+  );
+  assert.doesNotMatch(instanceIDFailureMessage(etimedout), /predates v2\.0\.0-rc\.11/);
+
+  const eacces = { status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn engram EACCES"), { code: "EACCES" }) };
+  assert.match(
+    instanceIDFailureMessage(eacces),
+    /could not be started \(spawn error EACCES\)/,
+  );
+  assert.doesNotMatch(instanceIDFailureMessage(eacces), /predates v2\.0\.0-rc\.11/);
+
+  const locked = { status: 2, stdout: "", stderr: "Error: database is locked\n" };
+  assert.match(
+    instanceIDFailureMessage(locked),
+    /failed to resolve its instance id \(exit 2\)/,
+  );
+  assert.doesNotMatch(instanceIDFailureMessage(locked), /predates v2\.0\.0-rc\.11/);
 });
 
 test("the legacy guidance message interpolates both versions with the approved wording", () => {

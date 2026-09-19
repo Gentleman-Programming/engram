@@ -407,15 +407,24 @@ function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
   return id;
 }
 
-// Approved wording (engram#1255): a binary that answers "instance-id" with an error predates
-// v2.0.0-rc.11, while a binary that cannot be spawned at all must not be misreported as an
-// outdated version.
+// Only a binary that actually runs "instance-id" and answers with an explicit unknown-command
+// error predates v2.0.0-rc.11; every other failure shape gets its own diagnosis so a broken
+// install is never misreported as an outdated version.
 function instanceIDFailureMessage(result: SpawnSyncReturns<string>): string {
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
   if (code === "ENOENT") {
     return `The Engram binary "${ENGRAM_BIN}" could not be found. Install Engram, or point ENGRAM_BIN at the current binary.`;
   }
-  return `The Engram binary "${ENGRAM_BIN}" does not support "instance-id" and predates v2.0.0-rc.11. Upgrade the binary, or point ENGRAM_BIN at the current one.`;
+  if (code === "ETIMEDOUT") {
+    return `The Engram binary "${ENGRAM_BIN}" did not answer "instance-id" within the startup timeout. Check for a hung or very slow binary, then retry.`;
+  }
+  if (code !== undefined) {
+    return `The Engram binary "${ENGRAM_BIN}" could not be started (spawn error ${code}). Check the binary's path and permissions, then retry.`;
+  }
+  if (result.status !== 0 && /unknown command/i.test(result.stderr) && /instance-id/i.test(result.stderr)) {
+    return `The Engram binary "${ENGRAM_BIN}" does not support "instance-id" and predates v2.0.0-rc.11. Upgrade the binary, or point ENGRAM_BIN at the current one.`;
+  }
+  return `The Engram binary "${ENGRAM_BIN}" failed to resolve its instance id (exit ${result.status}). Run "${ENGRAM_BIN} instance-id" directly to see the underlying error.`;
 }
 
 // The CLI version is context for the legacy-server guidance message, never a gate: a binary
