@@ -181,6 +181,19 @@ func observationState(reviewAfterValue *string) string {
 	return ObservationStateActive
 }
 
+// ObservationVersion is an immutable snapshot of an observation's title and
+// content captured before a topic_key upsert or a content-changing mem_update
+// overwrote it. Versions are numbered per observation starting at 1: the older
+// the state, the lower the number.
+type ObservationVersion struct {
+	ID            int64  `json:"id"`
+	ObservationID int64  `json:"observation_id"`
+	Title         string `json:"title"`
+	Content       string `json:"content"`
+	Version       int    `json:"version"`
+	CreatedAt     string `json:"created_at"`
+}
+
 type SearchResult struct {
 	Observation
 	Rank float64 `json:"rank"`
@@ -1174,6 +1187,16 @@ func (s *Store) migrate() error {
 			tokenize='trigram',
 			content='observations',
 			content_rowid='id'
+		);
+
+		CREATE TABLE IF NOT EXISTS observation_versions (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+			title          TEXT,
+			content        TEXT NOT NULL,
+			version        INTEGER NOT NULL,
+			created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(observation_id, version)
 		);
 
 			CREATE TABLE IF NOT EXISTS user_prompts (
@@ -3191,6 +3214,15 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				topicKey, nullableString(p.Project), scope,
 			).Scan(&existingID)
 			if err == nil {
+				// Capture the pre-overwrite state before the topic_key upsert
+				// rewrites it in place (#184).
+				prev, err := s.getObservationTx(tx, existingID)
+				if err != nil {
+					return err
+				}
+				if err := s.captureObservationVersionTx(tx, prev); err != nil {
+					return err
+				}
 				if _, err := s.execHook(tx,
 					`UPDATE observations
 					 SET session_id = ?,
@@ -4027,6 +4059,15 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		}
 		if p.TopicKey != nil {
 			topicKey = normalizeTopicKey(*p.TopicKey)
+		}
+
+		// Capture the pre-update state when the user-visible content (title or
+		// body) actually changes (#184). Metadata-only updates (type, scope,
+		// topic_key) do not create a version entry.
+		if title != obs.Title || content != obs.Content {
+			if err := s.captureObservationVersionTx(tx, obs); err != nil {
+				return err
+			}
 		}
 
 		if _, err := s.execHook(tx,
@@ -10025,6 +10066,50 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+// captureObservationVersionTx snapshots an observation's pre-overwrite
+// title/content into observation_versions with the next per-observation
+// version number. Call it before the write that replaces the state.
+func (s *Store) captureObservationVersionTx(tx *sql.Tx, obs *Observation) error {
+	_, err := s.execHook(tx,
+		`INSERT INTO observation_versions (observation_id, title, content, version, created_at)
+		 SELECT ?, ?, ?, COALESCE(MAX(version), 0) + 1, datetime('now')
+		 FROM observation_versions WHERE observation_id = ?`,
+		obs.ID, obs.Title, obs.Content, obs.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("capture observation version: %w", err)
+	}
+	return nil
+}
+
+// GetObservationVersions returns every captured version for an observation,
+// oldest first, numbering starting at 1. Versions survive soft deletes: they
+// are immutable history, read directly from the version table. A missing or
+// untouched observation yields an empty slice, never an error.
+func (s *Store) GetObservationVersions(id int64) ([]ObservationVersion, error) {
+	rows, err := s.queryItHook(s.db,
+		`SELECT id, observation_id, ifnull(title, ''), content, version, ifnull(created_at, '')
+		 FROM observation_versions WHERE observation_id = ? ORDER BY version ASC`, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var versions []ObservationVersion
+	for rows.Next() {
+		var v ObservationVersion
+		if err := rows.Scan(&v.ID, &v.ObservationID, &v.Title, &v.Content, &v.Version, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return versions, nil
 }
 
 // getObservationIncludingDeletedTx is reserved for explicit destructive paths.
