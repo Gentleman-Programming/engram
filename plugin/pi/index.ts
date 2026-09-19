@@ -6,7 +6,7 @@
  * are configured separately through pi-mcp-adapter and `engram mcp`.
  */
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -30,6 +30,8 @@ const ENGRAM_STARTUP_TIMEOUT_MS = 10000;
 const ENGRAM_STARTUP_POLL_MS = 100;
 const ENGRAM_STARTUP_RETRY_BASE_MS = 1000;
 const ENGRAM_STARTUP_RETRY_MAX_MS = 60000;
+const ENGRAM_VERSION_PROBE_TIMEOUT_MS = 2000;
+const ENGRAM_DETERMINISTIC_RETRY_MS = 5000;
 
 const ENGRAM_TOOLS = [
   "mem_search",
@@ -386,16 +388,51 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
   }
 }
 
+// A deterministic startup failure has a cause that does not heal on its own — a foreign or
+// legacy server already bound to the port, or a binary that cannot resolve an identity — so
+// retrying it on the exponential curve only delays the recheck. Its retry cadence is a fixed
+// short window instead; transient failures keep the exponential backoff.
+class DeterministicStartupError extends Error {}
+
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
 // told us nothing either way. Only "ready" is proof that a server is answering, so nothing
-// but "ready" may be read as "a server is already there".
-type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign";
+// but "ready" may be read as "a server is already there". "foreign" is a live server owned
+// by a different identity; "legacy" is a live server too old to report one.
+type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "legacy";
 
 function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
   const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
   const id = result.status === 0 ? result.stdout.trim() : "";
-  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Engram could not resolve its local server identity");
+  if (!/^[a-f0-9]{32}$/.test(id)) throw new DeterministicStartupError(instanceIDFailureMessage(result));
   return id;
+}
+
+// Only a binary that actually runs "instance-id" and answers with an explicit unknown-command
+// error predates v2.0.0-rc.11; every other failure shape gets its own diagnosis so a broken
+// install is never misreported as an outdated version.
+function instanceIDFailureMessage(result: SpawnSyncReturns<string>): string {
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "ENOENT") {
+    return `The Engram binary "${ENGRAM_BIN}" could not be found. Install Engram, or point ENGRAM_BIN at the current binary.`;
+  }
+  if (code === "ETIMEDOUT") {
+    return `The Engram binary "${ENGRAM_BIN}" did not answer "instance-id" within the startup timeout. Check for a hung or very slow binary, then retry.`;
+  }
+  if (code !== undefined) {
+    return `The Engram binary "${ENGRAM_BIN}" could not be started (spawn error ${code}). Check the binary's path and permissions, then retry.`;
+  }
+  if (result.status !== 0 && /unknown command/i.test(result.stderr) && /instance-id/i.test(result.stderr)) {
+    return `The Engram binary "${ENGRAM_BIN}" does not support "instance-id" and predates v2.0.0-rc.11. Upgrade the binary, or point ENGRAM_BIN at the current one.`;
+  }
+  return `The Engram binary "${ENGRAM_BIN}" failed to resolve its instance id (exit ${result.status}). Run "${ENGRAM_BIN} instance-id" directly to see the underlying error.`;
+}
+
+// The CLI version is context for the legacy-server guidance message, never a gate: a binary
+// that cannot report one degrades the message to "unknown" instead of failing startup.
+function localEngramVersion(timeoutMs = ENGRAM_VERSION_PROBE_TIMEOUT_MS): string {
+  const result = spawnSync(ENGRAM_BIN, ["version"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
+  const version = result.status === 0 ? result.stdout.trim() : "";
+  return version.length > 0 ? version : "unknown";
 }
 
 // Node reports a refused localhost connection through several shapes: a bare Error whose
@@ -423,7 +460,12 @@ async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
     });
     if (!res.ok) return "indeterminate";
     if (!expectedID) return "ready";
-    const health = await res.json() as { instance_id?: unknown };
+    const health = await res.json() as { version?: unknown; instance_id?: unknown };
+    engramServerVersion = typeof health.version === "string" && health.version.trim().length > 0 ? health.version : "unknown";
+    // A 200 without a usable instance_id is not a foreign owner: it is the signature of a
+    // pre-v2 server that predates instance identity entirely (engram#1255). Classifying it
+    // as legacy keeps the owner question answerable instead of collapsing both shapes.
+    if (typeof health.instance_id !== "string" || health.instance_id.length === 0) return "legacy";
     return health.instance_id === expectedID ? "ready" : "foreign";
   } catch (error) {
     if (isTimeoutError(error)) return "indeterminate";
@@ -439,6 +481,18 @@ async function isEngramRunning(expectedID = ""): Promise<boolean> {
 }
 
 let localEngramInstanceID = "";
+
+// The /health body is parsed by the identity-verified probe; its `version` field feeds the
+// legacy-server guidance message. It stays "unknown" until such a probe reads one, so the
+// message never reports a version the facade did not actually observe.
+let engramServerVersion = "unknown";
+
+// Approved wording (engram#1255). Versions come from the /health body the probe already
+// fetched and from a short `version` spawn; either side that cannot report one degrades to
+// "unknown".
+function legacyEngramServerMessage(): string {
+  return `Engram server at ${ENGRAM_URL} predates instance identity (server ${engramServerVersion}, CLI ${localEngramVersion()}). An older Engram left running by the upgrade is the likely cause: stop it and start the current binary. Nothing is terminated automatically and memory retries on its own. If nothing was upgraded recently, treat this port as occupied by an unrelated process.`;
+}
 
 function waitUnref(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -471,7 +525,8 @@ function scheduleEngramSelfHeal(ctx: MemoryToolContext): void {
     try {
       for (let attempt = 0; attempt < ENGRAM_SELF_HEAL_MAX_ATTEMPTS; attempt += 1) {
         await waitUnref(ENGRAM_SELF_HEAL_INTERVAL_MS);
-		if (await isEngramRunning(localEngramInstanceID)) {
+        if (await isEngramRunning(localEngramInstanceID)) {
+          clearStartupRetryWindow();
           for (const pending of engramSelfHealContexts.values()) pending.ui?.setStatus?.("engram", undefined);
           return;
         }
@@ -673,7 +728,10 @@ async function initializeEngramServer(): Promise<void> {
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
   const health = await probeEngramHealth(instanceID);
   if (health === "ready") return;
-  if (health === "foreign") throw new Error(`Engram server ownership mismatch at ${ENGRAM_URL}`);
+  // Both deterministic owner outcomes fail closed before any spawn: a server we do not own
+  // is never adopted and never terminated. Only the message and the retry cadence differ.
+  if (health === "foreign") throw new DeterministicStartupError(`Engram server ownership mismatch at ${ENGRAM_URL}`);
+  if (health === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage());
 
   // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
   // aborted probe, a DNS failure, an error shape we do not recognize — means we have no
@@ -718,6 +776,8 @@ function startupBackoffMs(failures: number): number {
 // failure is replayed immediately, so the cost of an unhealthy provider is bounded by the
 // backoff rather than by how often the agent calls tools, and so is the number of children a
 // failing session can spawn. A success clears the window and is cached for the session.
+// Deterministic failures are bounded by a fixed short window instead: their cause does not
+// heal with time, so doubling the wait would only delay the user's fix.
 function sharedInitialization(start: () => Promise<void>): Promise<void> {
   if (initialization) return initialization;
   if (startupFailure !== undefined && Date.now() < startupRetryAt) return Promise.reject(startupFailure);
@@ -732,11 +792,22 @@ function sharedInitialization(start: () => Promise<void>): Promise<void> {
       initialization = undefined;
       startupFailures += 1;
       startupFailure = error instanceof Error ? error : new Error(String(error));
-      startupRetryAt = Date.now() + startupBackoffMs(startupFailures);
+      startupRetryAt = Date.now() + (startupFailure instanceof DeterministicStartupError
+        ? ENGRAM_DETERMINISTIC_RETRY_MS
+        : startupBackoffMs(startupFailures));
       throw startupFailure;
     },
   );
   return initialization;
+}
+
+// The self-heal probe unifies with the startup retry window: once it observes the expected
+// identity again, the window is cleared so the next tool call reconnects immediately instead
+// of waiting out the rest of a fixed or exponential recheck.
+function clearStartupRetryWindow(): void {
+  startupFailures = 0;
+  startupRetryAt = 0;
+  startupFailure = undefined;
 }
 
 // Initialization remains fulfilled for the session, so a later refusal needs a separate,
