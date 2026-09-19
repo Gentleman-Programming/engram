@@ -248,7 +248,7 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair(err.Error())
 		return
 	}
-	plan, err := diagnostic.BuildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
+	plan, err := buildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
 	if err != nil {
 		failDoctorRepair(err.Error())
 		return

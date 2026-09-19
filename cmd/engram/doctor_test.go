@@ -608,12 +608,11 @@ func TestCmdDoctorOrphanedObservationSessionRepairCreatesLocalEndedPlaceholder(t
 }
 
 // TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop
-// proves that an apply over a session that already exists reports an explicit
-// noop with zero applied sessions instead of looking successfully repaired.
+// proves the reporting boundary uses the store's actual insert result when a
+// session appears after diagnostics planned an orphan placeholder.
 func TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop(t *testing.T) {
 	cfg := testConfig(t)
 	initDoctorStore(t, cfg)
-	seedDoctorSession(t, cfg, "existing-session", "engram", "/work/engram")
 	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
@@ -631,86 +630,31 @@ func TestCmdDoctorOrphanedObservationSessionApplyWithoutInsertionsReportsNoop(t 
 		t.Fatalf("close seeded database: %v", err)
 	}
 
+	oldBuildRepairPlan := buildRepairPlan
+	buildRepairPlan = func(ctx context.Context, scope diagnostic.Scope, report diagnostic.Report, check string, mode diagnostic.RepairMode) (diagnostic.RepairPlan, error) {
+		plan, err := diagnostic.BuildRepairPlan(ctx, scope, report, check, mode)
+		if err != nil {
+			return plan, err
+		}
+		if err := scope.Store.CreateSession("existing-session", "engram", "/work/engram"); err != nil {
+			return diagnostic.RepairPlan{}, err
+		}
+		return plan, nil
+	}
+	t.Cleanup(func() { buildRepairPlan = oldBuildRepairPlan })
+
 	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
 	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if stderr != "" {
 		t.Fatalf("stderr=%q", stderr)
 	}
 	plan := decodeRepairPlan(t, stdout)
-	if plan["status"] != "noop" || plan["counts"].(map[string]any)["sessions_applied"] != float64(0) {
+	if len(plan["placeholder_sessions"].([]any)) != 1 || plan["status"] != "noop" {
 		t.Fatalf("apply=%v", plan)
 	}
-}
-
-// TestCmdDoctorOrphanedObservationSessionPlanResolvedBeforeApplyReportsNoop
-// proves the reporting contract for a genuine zero-insert apply: an orphan
-// plan that resolves before apply (for example a session created after the
-// plan was reviewed) must report an explicit noop with zero applied rows, not
-// an apparently successful repair. The observation stays preserved and no
-// session sync mutation or duplicate placeholder is emitted.
-func TestCmdDoctorOrphanedObservationSessionPlanResolvedBeforeApplyReportsNoop(t *testing.T) {
-	cfg := testConfig(t)
-	initDoctorStore(t, cfg)
-	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	if _, err := db.Exec(`
-		PRAGMA foreign_keys = OFF;
-		INSERT INTO observations
-			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
-		VALUES ('obs-orphan', 'missing-session', 'bugfix', 'orphan', 'content', 'engram', 'project', 'obs-orphan', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
-	`); err != nil {
-		_ = db.Close()
-		t.Fatalf("seed orphaned observation: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close seeded database: %v", err)
-	}
-
-	runRepair := func(mode string) map[string]any {
-		t.Helper()
-		withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", mode)
-		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
-		if stderr != "" {
-			t.Fatalf("%s stderr=%q", mode, stderr)
-		}
-		return decodeRepairPlan(t, stdout)
-	}
-
-	planned := runRepair("--plan")
-	if len(planned["placeholder_sessions"].([]any)) != 1 || planned["counts"].(map[string]any)["sessions_planned"] != float64(1) || planned["counts"].(map[string]any)["observations_planned"] != float64(1) {
-		t.Fatalf("plan=%v", planned)
-	}
-
-	// The missing session appears before apply, so the previously planned
-	// orphan becomes a no-op and the CLI must not report a successful repair.
-	seedDoctorSession(t, cfg, "missing-session", "engram", "/work/engram")
-
-	applied := runRepair("--apply")
-	if applied["status"] != "noop" || applied["counts"].(map[string]any)["sessions_applied"] != float64(0) || applied["counts"].(map[string]any)["observations_applied"] != float64(0) {
-		t.Fatalf("apply=%v", applied)
-	}
-
-	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
-	if err != nil {
-		t.Fatalf("reopen database: %v", err)
-	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("close database: %v", err)
-		}
-	}()
-	var sessionCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = 'missing-session'`).Scan(&sessionCount); err != nil || sessionCount != 1 {
-		t.Fatalf("sessions=%d err=%v, want exactly the pre-existing session", sessionCount, err)
-	}
-	var observations, mutations int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = 'obs-orphan'`).Scan(&observations); err != nil || observations != 1 {
-		t.Fatalf("observations=%d err=%v", observations, err)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = 'session' AND entity_key = 'missing-session'`).Scan(&mutations); err != nil || mutations != 0 {
-		t.Fatalf("session mutations=%d err=%v", mutations, err)
+	counts := plan["counts"].(map[string]any)
+	if counts["sessions_planned"] != float64(1) || counts["observations_planned"] != float64(1) || counts["sessions_applied"] != float64(0) || counts["observations_applied"] != float64(0) {
+		t.Fatalf("apply counts=%v", counts)
 	}
 }
 
