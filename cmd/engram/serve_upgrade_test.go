@@ -22,13 +22,15 @@ const selfCheckTempFailCode = 75
 // a deterministic double: no real engram binary runs, no real supervisor is
 // detected, and exitFunc records codes instead of ending the test process.
 type selfCheckStub struct {
-	mu          sync.Mutex
-	report      engramsrv.StaleBinaryReport
-	reportFor   func(call int) engramsrv.StaleBinaryReport
-	supervision engramsrv.SupervisionContext
-	calls       int
-	requested   []string
-	exitCodes   []int
+	mu               sync.Mutex
+	report           engramsrv.StaleBinaryReport
+	reportFor        func(call int) engramsrv.StaleBinaryReport
+	supervision      engramsrv.SupervisionContext
+	supervisionFor   func(call int) engramsrv.SupervisionContext
+	calls            int
+	supervisionCalls int
+	requested        []string
+	exitCodes        []int
 }
 
 func (s *selfCheckStub) install(t *testing.T) {
@@ -44,7 +46,15 @@ func (s *selfCheckStub) install(t *testing.T) {
 		}
 		return s.report
 	}
-	supervisionProbe = func() engramsrv.SupervisionContext { return s.supervision }
+	supervisionProbe = func() engramsrv.SupervisionContext {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.supervisionCalls++
+		if s.supervisionFor != nil {
+			return s.supervisionFor(s.supervisionCalls)
+		}
+		return s.supervision
+	}
 	exitFunc = func(code int) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -65,6 +75,12 @@ func (s *selfCheckStub) probeCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls
+}
+
+func (s *selfCheckStub) supervisionProbeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.supervisionCalls
 }
 
 func (s *selfCheckStub) lastRequested() string {
@@ -92,6 +108,11 @@ func staleActionableReport() engramsrv.StaleBinaryReport {
 // launchdSupervision is a job reparented to pid 1: the supervised case.
 func launchdSupervision() engramsrv.SupervisionContext {
 	return engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 1}
+}
+
+// supervisedLaunchdDecision is the startup decision launchdSupervision resolves to.
+func supervisedLaunchdDecision() engramsrv.SupervisorDecision {
+	return engramsrv.SupervisorDecision{Supervised: true, Source: engramsrv.SupervisorLaunchd}
 }
 
 func captureServeLogs(t *testing.T) *bytes.Buffer {
@@ -125,7 +146,7 @@ func TestRunServeSelfCheckExitsUnderSupervisor(t *testing.T) {
 	srv := engramsrv.New(nil, 0)
 	srv.SetVersion("2.0.0")
 
-	if !runServeSelfCheck(context.Background(), srv, "2.0.0", true) {
+	if !runServeSelfCheck(context.Background(), srv, "2.0.0", supervisedLaunchdDecision(), true) {
 		t.Fatal("an actionable finding under a supervisor must ask for a restart")
 	}
 
@@ -148,44 +169,44 @@ func TestRunServeSelfCheckReportsWithoutExiting(t *testing.T) {
 	tests := []struct {
 		name        string
 		report      engramsrv.StaleBinaryReport
-		supervision engramsrv.SupervisionContext
+		supervision engramsrv.SupervisorDecision
 		wantHealth  bool
 	}{
 		{
 			name:        "a different install is a report",
 			report:      engramsrv.StaleBinaryReport{Known: true, Stale: true, Running: "2.0.0", OnDisk: "2.1.0"},
-			supervision: launchdSupervision(),
+			supervision: supervisedLaunchdDecision(),
 			wantHealth:  true,
 		},
 		{
-			name:        "launchd variables inherited by a child are not supervision",
+			name:        "a process started without a supervisor keeps serving",
 			report:      staleActionableReport(),
-			supervision: engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 4242},
+			supervision: engramsrv.SupervisorDecision{},
 			wantHealth:  true,
 		},
 		{
-			name:        "an explicit opt-out disables the self exit",
+			name:        "a startup opt-out disables the self exit",
 			report:      staleActionableReport(),
-			supervision: engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 1, Override: "0"},
+			supervision: engramsrv.SupervisorDecision{Disabled: true},
 			wantHealth:  true,
 		},
 		{
 			name:        "an unknown on-disk version is reported without a restart",
 			report:      engramsrv.StaleBinaryReport{},
-			supervision: launchdSupervision(),
+			supervision: supervisedLaunchdDecision(),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stub := &selfCheckStub{report: tt.report, supervision: tt.supervision}
+			stub := &selfCheckStub{report: tt.report}
 			stub.install(t)
 			logs := captureServeLogs(t)
 
 			srv := engramsrv.New(nil, 0)
 			srv.SetVersion("2.0.0")
 
-			if runServeSelfCheck(context.Background(), srv, "2.0.0", true) {
+			if runServeSelfCheck(context.Background(), srv, "2.0.0", tt.supervision, true) {
 				t.Fatal("only an actionable finding under a supervisor may ask for a restart")
 			}
 			if got := stub.exits(); len(got) != 0 {
@@ -216,7 +237,7 @@ func TestRunServeSelfCheckStopsLoggingUnknownFindings(t *testing.T) {
 	stub.install(t)
 	logs := captureServeLogs(t)
 
-	if runServeSelfCheck(context.Background(), engramsrv.New(nil, 0), "2.0.0", false) {
+	if runServeSelfCheck(context.Background(), engramsrv.New(nil, 0), "2.0.0", supervisedLaunchdDecision(), false) {
 		t.Fatal("an unknown comparison must never ask for a restart")
 	}
 	if got := logs.String(); got != "" {
@@ -303,6 +324,124 @@ func TestStartServeSelfCheckNeverLoopsAfterAnExit(t *testing.T) {
 	if got := stub.probeCount(); got != 1 {
 		t.Fatalf("probe ran %d times, want no re-check once the process is exiting", got)
 	}
+}
+
+func TestStartServeSelfCheckFreezesSupervisionAtStartup(t *testing.T) {
+	tests := []struct {
+		name     string
+		startup  engramsrv.SupervisionContext
+		later    engramsrv.SupervisionContext
+		wantExit bool
+	}{
+		{
+			// The falsified case: the Pi plugin spawns the server detached and
+			// unref'd, so the orphan is reparented to PID 1 when Pi exits while
+			// still holding the inherited launchd variable. Nothing would relaunch
+			// it, so the frozen startup decision must keep it serving.
+			name:    "a plugin-spawned child orphaned to pid 1 stays unsupervised",
+			startup: engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 4242},
+			later:   engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 1},
+		},
+		{
+			name:     "a launchd job stays supervised when the environment changes later",
+			startup:  launchdSupervision(),
+			later:    engramsrv.SupervisionContext{PPID: 4242},
+			wantExit: true,
+		},
+		{
+			name:     "a systemd job keeps its startup parent-comm evidence",
+			startup:  engramsrv.SupervisionContext{InvocationID: "9f1a", PPID: 900, ParentComm: "systemd\n"},
+			later:    engramsrv.SupervisionContext{InvocationID: "9f1a", PPID: 900},
+			wantExit: true,
+		},
+		{
+			name:     "an override of 1 at startup forces the restart path",
+			startup:  engramsrv.SupervisionContext{Override: "1", PPID: 4242},
+			later:    engramsrv.SupervisionContext{PPID: 4242},
+			wantExit: true,
+		},
+		{
+			name:    "an override of 0 at startup keeps the process serving",
+			startup: engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 1, Override: "0"},
+			later:   engramsrv.SupervisionContext{XPCServiceName: "com.gentleman.engram", PPID: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(engramsrv.SelfCheckIntervalEnvVar, "5ms")
+			stub := &selfCheckStub{
+				reportFor: func(call int) engramsrv.StaleBinaryReport {
+					if call < 2 {
+						return engramsrv.StaleBinaryReport{Known: true, Running: "2.0.0", OnDisk: "2.0.0"}
+					}
+					return staleActionableReport()
+				},
+				supervisionFor: func(call int) engramsrv.SupervisionContext {
+					if call == 1 {
+						return tt.startup
+					}
+					return tt.later
+				},
+			}
+			stub.install(t)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			srv := engramsrv.New(nil, 0)
+			srv.SetVersion("2.0.0")
+
+			if startServeSelfCheck(ctx, srv, "2.0.0") {
+				t.Fatal("a current binary at startup must not ask for a restart")
+			}
+
+			if tt.wantExit {
+				if exits := waitForExit(t, stub); len(exits) != 1 || exits[0] != selfCheckTempFailCode {
+					t.Fatalf("exit codes = %v, want [%d] from the startup decision", exits, selfCheckTempFailCode)
+				}
+			} else {
+				waitForRechecks(t, stub, 3)
+			}
+
+			if got := stub.supervisionProbeCount(); got != 1 {
+				t.Fatalf("supervision was resolved %d times, want exactly once at startup", got)
+			}
+		})
+	}
+}
+
+// waitForExit blocks until the self-check asked for a restart and returns the
+// recorded exit codes.
+func waitForExit(t *testing.T, stub *selfCheckStub) []int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if exits := stub.exits(); len(exits) != 0 {
+			return exits
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("no restart was requested after %d probes, want the startup decision to be honoured", stub.probeCount())
+	return nil
+}
+
+// waitForRechecks blocks until the periodic check ran count times. It fails as
+// soon as the process asks for a restart, because every caller models a process
+// that nothing would relaunch.
+func waitForRechecks(t *testing.T, stub *selfCheckStub, count int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if exits := stub.exits(); len(exits) != 0 {
+			t.Fatalf("exit codes = %v, want none: this process has no supervisor to relaunch it", exits)
+		}
+		if stub.probeCount() >= count {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("probe ran %d times, want at least %d", stub.probeCount(), count)
 }
 
 func TestCmdServeStaleBinaryExitLeavesThePortFree(t *testing.T) {

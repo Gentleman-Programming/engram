@@ -179,7 +179,9 @@ var (
 
 	// supervisionProbe observes the process context that decides whether a
 	// supervisor will relaunch this process. Injectable so tests never depend on
-	// the environment that runs the suite.
+	// the environment that runs the suite. startServeSelfCheck reads it exactly
+	// once per serve start and freezes the decision; the periodic re-check reuses
+	// that frozen value instead of re-deriving it.
 	supervisionProbe = func() server.SupervisionContext {
 		return server.ReadSupervisionContext(server.DefaultSupervisionDeps())
 	}
@@ -935,8 +937,9 @@ func cmdServe(cfg store.Config) {
 // configured with Restart=on-failure.
 const selfCheckExitCode = 75
 
-// runServeSelfCheck performs one stale-binary check. It publishes the finding to
-// GET /health, reports a stale binary once, and returns true when this process
+// runServeSelfCheck performs one stale-binary check with the supervision
+// decision frozen at startup (see startServeSelfCheck). It publishes the finding
+// to GET /health, reports a stale binary once, and returns true when this process
 // should stop serving so a supervisor can relaunch the new binary.
 //
 // It never exits for a different install, for an unsupervised process, for an
@@ -944,7 +947,7 @@ const selfCheckExitCode = 75
 // findings only get reported, which is what keeps a restart loop impossible.
 // logUnknown additionally reports the "cannot compare" outcome, which is worth
 // saying once at startup and pure noise on every later re-check.
-func runServeSelfCheck(ctx context.Context, srv *server.Server, current string, logUnknown bool) bool {
+func runServeSelfCheck(ctx context.Context, srv *server.Server, current string, supervision server.SupervisorDecision, logUnknown bool) bool {
 	report := staleBinaryProbe(ctx, current)
 	if !report.Known {
 		if logUnknown {
@@ -958,23 +961,22 @@ func runServeSelfCheck(ctx context.Context, srv *server.Server, current string, 
 		return false
 	}
 
-	decision := supervisionProbe().Decide()
-	if report.Actionable && decision.Supervised {
+	if report.Actionable && supervision.Supervised {
 		log.Printf("[engram] stale binary: running engram %s but %s is installed on disk; exiting with code %d so %s relaunches the new binary",
-			report.Running, report.OnDisk, selfCheckExitCode, decision.Source)
+			report.Running, report.OnDisk, selfCheckExitCode, supervision.Source)
 		exitFunc(selfCheckExitCode)
 		return true
 	}
 
 	log.Printf("[engram] stale binary: running engram %s but %s is installed on disk; continuing to serve (%s)",
-		report.Running, report.OnDisk, selfCheckHoldReason(report, decision))
+		report.Running, report.OnDisk, selfCheckHoldReason(report, supervision))
 	return false
 }
 
 // selfCheckHoldReason explains, for operators, why a stale binary was not acted
-// on. Callers only reach it when the override disabled the self-exit, the finding
-// was not actionable, or the process is not supervised, so every branch reports
-// instead of exiting.
+// on. Callers only reach it when the startup override disabled the self-exit, the
+// finding was not actionable, or the process was not started by a supervisor, so
+// every branch reports instead of exiting.
 func selfCheckHoldReason(report server.StaleBinaryReport, decision server.SupervisorDecision) string {
 	switch {
 	case decision.Disabled:
@@ -991,8 +993,19 @@ func selfCheckHoldReason(report server.StaleBinaryReport, decision server.Superv
 // until ctx is cancelled so a long-lived daemon converges without a reboot. It
 // returns true when this process must stop serving so a supervisor can relaunch
 // the new binary; no periodic re-check is started in that case.
+//
+// Supervision is resolved exactly once, here, from the environment and the parent
+// process as they are when serving starts, and every later check reuses that same
+// decision. Supervision is a property of how this process was started, not of the
+// current moment: the plugin spawns `engram serve` detached and unref'd, so the
+// child is reparented to PID 1 when its parent exits while still holding the
+// inherited XPC_SERVICE_NAME or INVOCATION_ID. Re-deriving the decision later
+// would call such an orphan supervised and exit 75 into silence, with nothing
+// left to relaunch it.
 func startServeSelfCheck(ctx context.Context, srv *server.Server, current string) bool {
-	if runServeSelfCheck(ctx, srv, current, true) {
+	supervision := supervisionProbe().Decide()
+
+	if runServeSelfCheck(ctx, srv, current, supervision, true) {
 		return true
 	}
 
@@ -1009,7 +1022,7 @@ func startServeSelfCheck(ctx context.Context, srv *server.Server, current string
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if runServeSelfCheck(ctx, srv, current, false) {
+				if runServeSelfCheck(ctx, srv, current, supervision, false) {
 					return
 				}
 			}
