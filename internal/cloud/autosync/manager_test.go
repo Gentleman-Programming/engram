@@ -2019,6 +2019,43 @@ func TestManagerSurfacesPolicyForbiddenOn403(t *testing.T) {
 		mgr.Status().Phase, mgr.Status().ReasonCode)
 }
 
+func TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 2},
+	}
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{
+		Mutations: []PulledMutation{
+			{Seq: 1, Project: "enrolled-proj", Entity: "observation", EntityKey: "obs-1", Op: "upsert", Payload: []byte(`{"title":"test"}`)},
+		},
+	}
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected pull to execute despite non-enrolled pending mutations, got %d", got)
+	}
+	if len(ls.appliedMuts) != 1 {
+		t.Fatalf("expected 1 pulled mutation applied, got %d", len(ls.appliedMuts))
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed {
+		t.Fatalf("expected push_failed status, got %q", st.Phase)
+	}
+	if st.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected non-enrolled reason code, got %q", st.ReasonCode)
+	}
+	if st.LastSyncAt == nil {
+		t.Fatal("expected LastSyncAt to be recorded after successful pull")
+	}
+}
+
 func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 	ls := newFakeLocalStore()
 	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
@@ -2034,8 +2071,8 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
 		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
 	}
-	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
-		t.Fatalf("expected blocked cycle to skip pull, got %d", got)
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected blocked cycle to still run pull, got %d", got)
 	}
 	if len(ls.ackedSeqs) != 0 {
 		t.Fatalf("expected no acked mutations, got %v", ls.ackedSeqs)
@@ -2054,6 +2091,289 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 	}
 	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
 		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	}
+}
+
+func TestManagerPullFailureOverridesNonEnrolledBlocked(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 2},
+	}
+	tr := newFakeTransport()
+	tr.pullErr = &fakeAuthErr{code: 401}
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected pull to be attempted, got %d", got)
+	}
+	if len(ls.ackedSeqs) != 0 {
+		t.Fatalf("expected no acked mutations on pull failure, got %v", ls.ackedSeqs)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePullFailed {
+		t.Fatalf("expected pull_failed status, got %q", st.Phase)
+	}
+	if st.ReasonCode != "auth_required" {
+		t.Fatalf("expected auth_required reason code, got %q", st.ReasonCode)
+	}
+	if st.BackoffUntil == nil {
+		t.Fatal("expected BackoffUntil to be set on pull failure")
+	}
+	if st.LastSyncAt != nil {
+		t.Fatalf("expected LastSyncAt to remain nil on pull failure, got %v", st.LastSyncAt)
+	}
+	if ls.failureReason != "auth_required" {
+		t.Fatalf("expected store failure reason auth_required, got %q", ls.failureReason)
+	}
+}
+
+type paginatedTransport struct {
+	*fakeCloudTransport
+	batches []*PullMutationsResponse
+	index   int
+}
+
+func (p *paginatedTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, error) {
+	atomic.AddInt32(&p.pullCalls, 1)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.index < len(p.batches) {
+		res := p.batches[p.index]
+		p.index++
+		return res, nil
+	}
+	return &PullMutationsResponse{}, nil
+}
+
+func TestManagerPaginatedPullAndCursorProgressUnderNonEnrolledPending(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 3},
+	}
+	tr := &paginatedTransport{
+		fakeCloudTransport: newFakeTransport(),
+		batches: []*PullMutationsResponse{
+			{
+				HasMore: true,
+				Mutations: []PulledMutation{
+					{Seq: 10, Project: "enrolled", Entity: "observation", EntityKey: "obs-1", Op: "upsert", Payload: []byte(`{"title":"1"}`)},
+				},
+			},
+			{
+				HasMore: false,
+				Mutations: []PulledMutation{
+					{Seq: 20, Project: "enrolled", Entity: "observation", EntityKey: "obs-2", Op: "upsert", Payload: []byte(`{"title":"2"}`)},
+				},
+			},
+		},
+	}
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push calls, got %d", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 2 {
+		t.Fatalf("expected 2 paginated pull calls, got %d", got)
+	}
+	if len(ls.appliedMuts) != 2 {
+		t.Fatalf("expected 2 applied mutations, got %d", len(ls.appliedMuts))
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed {
+		t.Fatalf("expected push_failed phase, got %q", st.Phase)
+	}
+	if st.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected non_enrolled_pending_mutations reason code, got %q", st.ReasonCode)
+	}
+	if st.LastSyncAt == nil {
+		t.Fatal("expected LastSyncAt to be recorded after successful pull")
+	}
+}
+
+func TestManagerNonEnrolledBlockedThenEnrolledPushesBacklogExactlyOnceAcrossRestart(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("store default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	// 1. Create session and mutation for "throwaway", then unenroll to simulate non-enrolled backlog.
+	if err := local.EnrollProject("throwaway"); err != nil {
+		t.Fatalf("enroll throwaway: %v", err)
+	}
+	if err := local.CreateSession("sess-throwaway", "throwaway", "/tmp/throwaway"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := local.UnenrollProject("throwaway"); err != nil {
+		t.Fatalf("unenroll throwaway: %v", err)
+	}
+
+	// Verify backlog exists.
+	nonEnrolled, err := local.CountPendingNonEnrolledSyncMutations(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count non-enrolled: %v", err)
+	}
+	if len(nonEnrolled) != 1 || nonEnrolled[0].Project != "throwaway" || nonEnrolled[0].Count != 1 {
+		t.Fatalf("expected 1 pending non-enrolled mutation for throwaway, got %+v", nonEnrolled)
+	}
+
+	// Enroll another project "enrolled-proj".
+	if err := local.EnrollProject("enrolled-proj"); err != nil {
+		t.Fatalf("enroll enrolled-proj: %v", err)
+	}
+
+	// Transport provides a remote mutation to pull for enrolled-proj.
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{
+		Mutations: []PulledMutation{
+			{Seq: 100, Project: "enrolled-proj", Entity: "session", EntityKey: "remote-sess", Op: "upsert", Payload: []byte(`{"id":"remote-sess","project":"enrolled-proj","directory":"/tmp/remote"}`)},
+		},
+	}
+
+	mgrConfig := DefaultConfig()
+	mgr := New(local, tr, mgrConfig)
+	mgr.cycle(context.Background())
+
+	// Proof 1: Blocked push performs no push/acknowledgement but performs one pull.
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected 0 push calls, got %d", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected 1 pull call, got %d", got)
+	}
+
+	// Proof 2: Pulled mutations applied and cursor progress persisted.
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed || st.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected push_failed with non_enrolled_pending_mutations, got %+v", st)
+	}
+	if st.LastSyncAt == nil {
+		t.Fatal("expected LastSyncAt to be set")
+	}
+
+	// Close store and reopen to verify durability across restart.
+	if err := local.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	local, err = store.New(cfg)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer local.Close() //nolint:errcheck
+
+	// Proof 3: Durable state across restart: cursor persisted, degraded reason preserved, backlog intact.
+	state, err := local.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("get sync state after restart: %v", err)
+	}
+	if state.LastPulledSeq != 100 {
+		t.Fatalf("expected cursor last_pulled_seq=100 after restart, got %d", state.LastPulledSeq)
+	}
+	if state.Lifecycle != store.SyncLifecycleDegraded {
+		t.Fatalf("expected degraded lifecycle after restart, got %q", state.Lifecycle)
+	}
+	if state.ReasonCode == nil || *state.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected reason_code non_enrolled_pending_mutations after restart, got %v", state.ReasonCode)
+	}
+
+	nonEnrolledAfterRestart, err := local.CountPendingNonEnrolledSyncMutations(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count non-enrolled after restart: %v", err)
+	}
+	if len(nonEnrolledAfterRestart) != 1 || nonEnrolledAfterRestart[0].Project != "throwaway" {
+		t.Fatalf("expected throwaway backlog preserved after restart, got %+v", nonEnrolledAfterRestart)
+	}
+
+	// Proof 4: A later enrollment allows the original backlog to push exactly once.
+	if err := local.EnrollProject("throwaway"); err != nil {
+		t.Fatalf("enroll throwaway: %v", err)
+	}
+
+	// Materialize any repair mutation the manager would enqueue so the accepted
+	// sequence map below covers every project the next push can target.
+	if err := local.EnsureEnrolledProjectSyncMutations(context.Background()); err != nil {
+		t.Fatalf("repair enrolled project mutations: %v", err)
+	}
+
+	// Build per-project accepted sequence sets from the now-pushable backlog.
+	pendingBeforePush, err := local.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatalf("list pending before push: %v", err)
+	}
+	acceptedByProject := make(map[string]*PushMutationsResult)
+	throwawayPending := 0
+	for _, m := range pendingBeforePush {
+		if acceptedByProject[m.Project] == nil {
+			acceptedByProject[m.Project] = &PushMutationsResult{}
+		}
+		acceptedByProject[m.Project].AcceptedSeqs = append(acceptedByProject[m.Project].AcceptedSeqs, m.Seq)
+		if m.Project == "throwaway" {
+			throwawayPending++
+		}
+	}
+	if throwawayPending != 1 {
+		t.Fatalf("expected 1 pushable throwaway mutation after enrollment, got %d", throwawayPending)
+	}
+
+	tr2 := newFakeTransport()
+	tr2.pushResultByProject = acceptedByProject
+	mgr2 := New(local, tr2, mgrConfig)
+	mgr2.cycle(context.Background())
+
+	// The original throwaway backlog must reach transport exactly once.
+	throwawayPushed := 0
+	for _, batch := range tr2.pushed {
+		for _, entry := range batch {
+			if entry.Project == "throwaway" {
+				throwawayPushed++
+			}
+		}
+	}
+	if throwawayPushed != 1 {
+		t.Fatalf("expected throwaway backlog pushed exactly once, got %d", throwawayPushed)
+	}
+	if mgr2.Status().Phase != PhaseHealthy {
+		t.Fatalf("expected healthy phase after successful push, got %q", mgr2.Status().Phase)
+	}
+
+	// Verify backlog is now cleared.
+	nonEnrolledFinal, err := local.CountPendingNonEnrolledSyncMutations(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count non-enrolled final: %v", err)
+	}
+	if len(nonEnrolledFinal) != 0 {
+		t.Fatalf("expected 0 non-enrolled pending mutations, got %+v", nonEnrolledFinal)
+	}
+
+	pendingFinal, err := local.ListPendingSyncMutations(store.DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("list pending final: %v", err)
+	}
+	if len(pendingFinal) != 0 {
+		t.Fatalf("expected 0 pending mutations remaining, got %+v", pendingFinal)
+	}
+
+	// Cycle 3: subsequent cycle does not push again (pushed exactly once).
+	tr3 := newFakeTransport()
+	mgr3 := New(local, tr3, mgrConfig)
+	mgr3.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr3.pushCalls); got != 0 {
+		t.Fatalf("expected 0 push calls on subsequent cycle, got %d", got)
 	}
 }
 

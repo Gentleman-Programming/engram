@@ -490,20 +490,23 @@ func (m *Manager) cycle(ctx context.Context) {
 	m.mu.Unlock()
 
 	// Push, then pull.
+	var nonEnrolledErr *nonEnrolledPendingError
 	if err := m.push(ctx); err != nil {
-		var blocked *nonEnrolledPendingError
-		if errors.As(err, &blocked) {
-			m.recordBlocked(err.Error(), constants.ReasonNonEnrolledPendingMutations)
+		if !errors.As(err, &nonEnrolledErr) {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
 			return
 		}
-		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
-		return
 	}
 
 	if err := m.pull(ctx); err != nil {
 		reasonCode := classifyTransportError(err)
 		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
+		return
+	}
+
+	if nonEnrolledErr != nil {
+		m.recordBlocked(nonEnrolledErr.Error(), constants.ReasonNonEnrolledPendingMutations)
 		return
 	}
 
@@ -807,12 +810,15 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 }
 
 func (m *Manager) recordBlocked(msg, reasonCode string) {
+	now := time.Now()
 	m.mu.Lock()
 	m.status.Phase = PhasePushFailed
+	m.status.ConsecutiveFailures = 0
 	m.status.LastError = msg
 	m.status.ReasonCode = reasonCode
 	m.status.ReasonMessage = msg
 	m.status.BackoffUntil = nil
+	m.status.LastSyncAt = &now
 	m.mu.Unlock()
 
 	_ = m.store.MarkSyncBlocked(m.cfg.TargetKey, reasonCode, msg)
