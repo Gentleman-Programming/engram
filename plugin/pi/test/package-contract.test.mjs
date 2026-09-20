@@ -136,6 +136,42 @@ test("pi-engram init adds the current package and help names its install command
 	}
 });
 
+test("pi-engram init launcher treats blank ENGRAM_BIN as unset without changing its MCP shape", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
+	try {
+		runCli(agentDir, "init");
+		const server = JSON.parse(readFileSync(join(agentDir, "mcp.json"), "utf8")).mcpServers.engram;
+		assert.deepEqual(
+			{ command: server.command, lifecycle: server.lifecycle, directTools: server.directTools },
+			{ command: "node", lifecycle: "lazy", directTools: false },
+		);
+		assert.equal(server.args.length, 2);
+		assert.equal(server.args[0], "-e");
+		assert.match(server.args[1], /spawn\(bin, \['mcp', '--tools=agent'\], \{ stdio: 'inherit' \}\)/);
+
+		const launcherPrefix = server.args[1].slice(0, server.args[1].indexOf("const child = spawn"));
+		assert.notEqual(launcherPrefix, server.args[1], "launcher must select a binary before spawning it");
+		const selectBin = (engramBin) => Function("require", "process", `${launcherPrefix}; return bin;`)(
+			(moduleName) => {
+				assert.equal(moduleName, "node:child_process");
+				return { spawn() {} };
+			},
+			{ env: engramBin === undefined ? {} : { ENGRAM_BIN: engramBin } },
+		);
+
+		assert.equal(selectBin(undefined), "engram", "an absent ENGRAM_BIN falls back to engram");
+		assert.equal(selectBin(""), "engram", "an empty ENGRAM_BIN falls back to engram");
+		assert.equal(selectBin(" \t "), "engram", "a whitespace-only ENGRAM_BIN falls back to engram");
+		assert.equal(
+			selectBin("  /custom/engram  "),
+			"  /custom/engram  ",
+			"a nonblank ENGRAM_BIN is preserved exactly rather than trimmed",
+		);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
 test("pi-engram init replaces legacy package entries without disturbing other packages", () => {
 	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
 	try {
