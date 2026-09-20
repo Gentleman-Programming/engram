@@ -7,7 +7,7 @@ Thanks for contributing. Engram enforces a strict **issue-first workflow** — e
 ## Contribution Workflow
 
 ```
-Open Issue → Get status:approved → Open PR → Add type:* label → Review & Merge
+Search canonical issue → Investigate → Approve design → Implement → Review & Merge
 ```
 
 ### Step 1: Open an Issue
@@ -21,24 +21,22 @@ Use the correct template:
 > ⚠️ Blank issues are disabled. You must use a template.
 > General questions and support belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions).
 
-Fill in all required fields. Your issue will automatically receive the `status:needs-review` label.
+Fill in all required fields. Your issue will automatically receive the `status:needs-review` label. Report the observed consequence and release context; do not diagnose the root cause or design the fix.
 
-If useful for alignment, search existing issues before opening a new one.
+### Step 2: Triage and Investigation
 
-### Step 2: Wait for Approval
+Maintainers: Search for a canonical root-cause tracker, triage the report, and assign an investigator. The investigator reproduces bugs against exact current remote `main` and records its SHA, identifies the first repository-owned invariant that explains the occurrence, and clusters only reports with that same root/contract. The investigator records each same-root occurrence on the canonical tracker before duplicate closure; similar symptoms with different roots remain separate.
 
-A maintainer will review the issue and replace `status:needs-review` with `status:approved` if it's accepted for implementation.
+The investigator records each same-root occurrence on the canonical tracker before duplicate closure; useful evidence moves with it. Use `status:possible-duplicate` while evaluating; then close confirmed duplicates as not planned with `status:wontfix` and `resolution:duplicate`. Do not automate fuzzy duplicate detection.
 
-**Do not open a PR until the issue is approved.** Automated checks will block PRs that reference unapproved issues.
+### Step 3: Approval and Pull Request
 
-### Step 3: Open a Pull Request
-
-Once the issue is approved:
+The investigator proposes a proportional design, non-goals, and root-level tests. `status:approved` means investigation and design are accepted; bugs additionally require exact-main reproduction and root-cause evidence. An approved issue needs an owner before its PR.
 
 1. Fork the repo and create a branch from `main`
-2. Implement your change
-3. Open a PR using the PR template — **link the approved issue** with `Closes #N`
-4. Add exactly **one `type:*` label** to the PR (see label system below)
+2. Implement the accepted design
+3. Open a PR using the PR template — link one canonical approved issue with `Closes #N`
+4. Add exactly one `type:*` label to the PR (see label system below)
 
 ### Step 4: Automated PR Checks
 
@@ -144,7 +142,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 | Label | Meaning |
 |-------|---------|
 | `status:needs-review` | Awaiting maintainer review (auto-applied to new issues) |
-| `status:approved` | Approved for implementation — PRs can now be opened |
+| `status:approved` | Investigation and design accepted; bugs require current-main reproduction and root-cause evidence |
 | `status:in-progress` | Actively being worked on — auto-exempt from stale bot |
 | `status:blocked` | Blocked by another issue or external dependency |
 | `status:stale` | No activity for 30 days — auto-applied by stale bot |

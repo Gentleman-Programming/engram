@@ -51,7 +51,7 @@
 
 - name: "status:approved"
   color: "0E8A16"
-  description: "Approved for implementation"
+  description: "Investigation and design accepted; bugs require current-main reproduction and root-cause evidence"
 
 - name: "status:in-progress"
   color: "1d76db"

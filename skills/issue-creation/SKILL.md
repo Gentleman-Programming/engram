@@ -22,7 +22,7 @@ Use this skill when:
 
 1. **Blank issues are disabled** — MUST use the matching bug, feature, docs, or tracked-question template
 2. **Every issue gets `status:needs-review` automatically** on creation
-3. **A maintainer MUST replace `status:needs-review` with `status:approved`** before any PR can be opened
+3. **`status:approved` means accepted investigation and design**; bugs also require current-main reproduction and root-cause evidence before a PR
 4. **General questions go to [Discussions](https://github.com/Gentleman-Programming/engram/discussions)**; questions requiring tracked work use `type:question`
 
 ---
@@ -30,12 +30,12 @@ Use this skill when:
 ## Workflow
 
 ```
-1. Consider searching existing issues for duplicates
-2. Choose the correct template (Bug Report, Feature Request, Documentation Improvement, or Tracked Question)
-3. Fill in ALL required fields
-4. Submit → issue gets status:needs-review automatically
-5. Wait for a maintainer to replace status:needs-review with status:approved
-6. Only then open a PR linking this issue
+1. Search for a canonical root-cause tracker; add a new occurrence there when applicable
+2. Choose the correct template and report consequence plus release context, not root cause or implementation
+3. Submit → issue gets status:needs-review automatically
+4. A maintainer triages and assigns an investigator, who records each same-root occurrence on the canonical tracker before duplicate closure
+5. The investigator records current-remote-main SHA for bugs, first violated repository invariant, proportional design, non-goals, and root-level tests
+6. A maintainer applies status:approved only after accepting that investigation and design; then the owner may open a linked PR
 ```
 
 ---
@@ -51,12 +51,13 @@ Auto-labels: `type:bug`, `status:needs-review`
 
 | Field | Description |
 |-------|-------------|
-| **Bug Description** | Clear description of the bug |
+| **Existing Issue Search** | Required acknowledgement; add evidence to a canonical tracker when applicable |
+| **Observed Consequence** | Clear user-visible consequence, without root-cause diagnosis |
 | **Steps to Reproduce** | Numbered steps to reproduce |
 | **Expected Behavior** | What should have happened |
 | **Actual Behavior** | What happened instead (include errors/logs) |
 | **Operating System** | Dropdown: macOS, Linux variants, Windows, WSL |
-| **Engram Version** | Output of `engram version` |
+| **Release Version** | Report context from `engram version`; an investigator verifies current remote main |
 | **Agent / Client** | Dropdown: Claude Code, OpenCode, Gemini CLI, Cursor, Windsurf, Other |
 
 #### Optional Fields
@@ -72,7 +73,7 @@ Auto-labels: `type:bug`, `status:needs-review`
 gh issue create --template "bug_report.yml" \
   --title "fix(store): duplicate observations on concurrent saves" \
   --body "
-### Bug Description
+### Observed Consequence
 When two agents save observations concurrently, duplicates are created.
 
 ### Steps to Reproduce
@@ -89,7 +90,7 @@ Two identical observations exist with different IDs.
 ### Operating System
 macOS
 
-### Engram Version
+### Release Version
 0.3.1
 
 ### Agent / Client
@@ -113,15 +114,17 @@ Auto-labels: `type:feature`, `status:needs-review`
 
 | Field | Description |
 |-------|-------------|
-| **Problem Description** | The pain point this feature solves |
-| **Proposed Solution** | How it should work from the user's perspective |
+| **Existing Issue Search** | Required acknowledgement; add evidence to a canonical tracker when applicable |
+| **Observed Consequence** | User problem and impact, not an implementation proposal |
+| **Desired Outcome** | User outcome, not an implementation proposal |
 | **Affected Area** | Dropdown: CLI, MCP Server, TUI, Store, Sync, Skills, Documentation, Other |
+| **Release Context** | Required report context; use `not release-specific` when applicable |
 
 #### Optional Fields
 
 | Field | Description |
 |-------|-------------|
-| **Alternatives Considered** | Other approaches or workarounds |
+| **Workarounds and Constraints** | User-observed workarounds or constraints, not implementation alternatives |
 | **Additional Context** | Mockups, examples, references |
 
 #### Example — Feature Request via CLI
@@ -130,27 +133,20 @@ Auto-labels: `type:feature`, `status:needs-review`
 gh issue create --template "feature_request.yml" \
   --title "feat(cli): add --json flag to mem search" \
   --body "
-### Problem Description
-When scripting with engram, parsing the human-readable output of mem search is fragile. There's no machine-readable output format.
+### Observed Consequence
+When scripting with engram, parsing human-readable search results is fragile.
 
-### Proposed Solution
-Add a \`--json\` flag to \`engram mem search\` that outputs results as JSON.
+### Desired Outcome
+Scripts can consume search results without parsing human-readable output.
 
-Example:
-\`\`\`bash
-engram mem search \"auth middleware\" --json
-\`\`\`
-
-Expected output:
-\`\`\`json
-[{\"id\": 42, \"title\": \"JWT auth middleware\", \"type\": \"decision\", ...}]
-\`\`\`
+### Release Context
+not release-specific
 
 ### Affected Area
 CLI (commands, flags)
 
-### Alternatives Considered
-Using \`jq\` to parse the current output, but it's unreliable since the format isn't structured.
+### Workarounds and Constraints
+Using \`jq\` to parse the current output is unreliable because the format is unstructured.
 "
 ```
 
@@ -163,7 +159,7 @@ Auto-labels: `type:question`, `status:needs-review`
 
 Use this form only when the answer requires maintainer investigation, a repository change, or a durable decision. Send general questions and support to Discussions.
 
-Required fields: the question, why issue tracking is needed, and the affected area. Additional context is optional.
+Required fields: existing-issue search acknowledgement, question, tracking reason, affected area, and release context. Additional context is optional.
 
 ---
 
@@ -182,7 +178,7 @@ Required fields: the question, why issue tracking is needed, and the affected ar
 
 | Label | When to apply |
 |-------|--------------|
-| `status:approved` | Issue accepted for implementation — PRs can now be opened |
+| `status:approved` | Investigation and design accepted; bugs include current-main reproduction and root-cause evidence |
 | `priority:critical` | Critical bug or urgent feature |
 | `priority:high` | High priority |
 | `priority:medium` | Important but not blocking |
@@ -196,11 +192,12 @@ Required fields: the question, why issue tracking is needed, and the affected ar
 ## Maintainer Approval Workflow
 
 ```
-1. New issue arrives with status:needs-review
-2. Review the issue — is it valid, clear, and in scope?
-3. If YES → replace status:needs-review with status:approved
-4. If NO → comment with reason, close if needed
-5. Contributor can now open a PR linking this issue
+1. Search for a canonical tracker, triage the consequence, and assign an investigator
+2. For bugs, reproduce against exact current remote main and record SHA; identify the first violated repository-owned invariant
+3. Cluster only same-root/contract occurrences; keep distinct roots separate
+4. Accept proportional design, non-goals, and root-level tests
+5. If accepted → replace status:needs-review with status:approved; otherwise explain and close if needed
+6. The assigned owner can open one linked PR
 ```
 
 ---
