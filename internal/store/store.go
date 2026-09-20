@@ -5227,20 +5227,15 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 	return mutations, nil
 }
 
-// ExportLocalDeleteTombstonesAfter projects locally retained hard-delete intent
-// into canonical mutations. The inclusive timestamp boundary is deliberate:
-// callers must reconcile equal-time rows against manifest history by identity.
-func (s *Store) ExportLocalDeleteTombstonesAfter(project, after string) ([]SyncMutation, error) {
+// ExportLocalDeleteTombstones projects locally retained hard-delete intent
+// into canonical mutations. Manifest history reconciles them by identity.
+func (s *Store) ExportLocalDeleteTombstones(project string) ([]SyncMutation, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	where, args := "active = 1", []any{}
 	if project != "" {
 		where += " AND project = ?"
 		args = append(args, project)
-	}
-	if strings.TrimSpace(after) != "" {
-		where += " AND julianday(deleted_at) >= julianday(?)"
-		args = append(args, after)
 	}
 	mutations := make([]SyncMutation, 0)
 	rows, err := s.queryItHook(s.db, `SELECT entity, entity_key, ifnull(session_id, ''), project, deleted_at, hard_delete FROM sync_delete_tombstones WHERE entity IN (?, ?) AND `+where, append([]any{SyncEntityObservation, SyncEntitySession}, args...)...)
@@ -5276,10 +5271,6 @@ func (s *Store) ExportLocalDeleteTombstonesAfter(project, after string) ([]SyncM
 	if project != "" {
 		promptWhere += " AND ifnull(project, '') = ?"
 		promptArgs = append(promptArgs, project)
-	}
-	if strings.TrimSpace(after) != "" {
-		promptWhere += " AND julianday(deleted_at) >= julianday(?)"
-		promptArgs = append(promptArgs, after)
 	}
 	promptRows, err := s.queryItHook(s.db, `SELECT sync_id, ifnull(session_id, ''), ifnull(project, ''), deleted_at FROM prompt_tombstones WHERE `+promptWhere, promptArgs...)
 	if err != nil {

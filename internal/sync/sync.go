@@ -52,8 +52,8 @@ var (
 	storeExportRelations      = func(s *store.Store, project string) ([]store.SyncMutation, error) {
 		return s.ExportRelationMutations(project)
 	}
-	storeExportLocalDeleteTombstones = func(s *store.Store, project, after string) ([]store.SyncMutation, error) {
-		return s.ExportLocalDeleteTombstonesAfter(project, after)
+	storeExportLocalDeleteTombstones = func(s *store.Store, project string) ([]store.SyncMutation, error) {
+		return s.ExportLocalDeleteTombstones(project)
 	}
 	storeListMutationsAfterSeq = func(s *store.Store, targetKey string, afterSeq int64, limit int) ([]store.SyncMutation, error) {
 		return s.ListPendingSyncMutationsAfterSeq(targetKey, afterSeq, limit)
@@ -499,7 +499,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("scan exported relations: %w", err)
 	}
-	localDeletes, err := storeExportLocalDeleteTombstones(sy.store, project, normalizeTime(lastChunkTime))
+	localDeletes, err := storeExportLocalDeleteTombstones(sy.store, project)
 	if err != nil {
 		return nil, fmt.Errorf("export local delete tombstones: %w", err)
 	}

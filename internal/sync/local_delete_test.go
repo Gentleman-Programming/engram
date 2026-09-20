@@ -11,9 +11,10 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
-func TestLocalExportDeleteTombstonesRespectProjectAndEqualTimestampBoundary(t *testing.T) {
+func TestLocalExportDeleteTombstonesIgnoreManifestTimestampAndRemainIdempotent(t *testing.T) {
 	src := newTestStore(t)
-	const createdAt = "2099-01-02T03:04:05Z"
+	const manifestTime = "2099-01-02T03:04:05Z"
+	const tombstoneTime = "2000-01-02T03:04:05Z"
 	for _, project := range []string{"proj-a", "proj-b"} {
 		if err := src.CreateSession("session-"+project, project, "/tmp/"+project); err != nil {
 			t.Fatalf("create session for %s: %v", project, err)
@@ -22,16 +23,16 @@ func TestLocalExportDeleteTombstonesRespectProjectAndEqualTimestampBoundary(t *t
 			t.Fatalf("delete session for %s: %v", project, err)
 		}
 	}
-	if _, err := src.DB().Exec(`UPDATE sync_delete_tombstones SET deleted_at = ?`, createdAt); err != nil {
+	if _, err := src.DB().Exec(`UPDATE sync_delete_tombstones SET deleted_at = ?`, tombstoneTime); err != nil {
 		t.Fatalf("set tombstone timestamp: %v", err)
 	}
 	syncDir := filepath.Join(t.TempDir(), ".engram")
 	writeLocalChunkFile(t, syncDir, "historical", ChunkData{})
-	writeManifestFile(t, syncDir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: createdAt}}})
+	writeManifestFile(t, syncDir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: manifestTime}}})
 
 	result, err := NewLocalWithProject(src, syncDir, "proj-a").Export("alice", "proj-a")
 	if err != nil || result.IsEmpty {
-		t.Fatalf("equal-timestamp project export = %+v, %v", result, err)
+		t.Fatalf("historical tombstone project export = %+v, %v", result, err)
 	}
 	payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
 	if err != nil {
@@ -42,7 +43,40 @@ func TestLocalExportDeleteTombstonesRespectProjectAndEqualTimestampBoundary(t *t
 		t.Fatalf("decode delete chunk: %v", err)
 	}
 	if len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != "session-proj-a" || chunk.Mutations[0].Project != "proj-a" {
-		t.Fatalf("project-scoped equal-timestamp deletes = %+v", chunk.Mutations)
+		t.Fatalf("project-scoped historical deletes = %+v", chunk.Mutations)
+	}
+	if replay, err := NewLocalWithProject(src, syncDir, "proj-a").Export("alice", "proj-a"); err != nil || !replay.IsEmpty {
+		t.Fatalf("replayed local export = %+v, %v; want idempotent empty result", replay, err)
+	}
+}
+
+func TestLocalExportFutureManifestDoesNotSuppressLaterHardDelete(t *testing.T) {
+	src := newTestStore(t)
+	const project, sessionID = "proj-future", "session-future"
+	if err := src.CreateSession(sessionID, project, "/tmp/proj-future"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := src.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "historical", ChunkData{})
+	writeManifestFile(t, syncDir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: "2099-01-02T03:04:05Z"}}})
+	result, err := NewLocalWithProject(src, syncDir, project).Export("alice", project)
+	if err != nil || result.IsEmpty {
+		t.Fatalf("future-manifest delete export = %+v, %v", result, err)
+	}
+	payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read delete chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		t.Fatalf("decode delete chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != sessionID {
+		t.Fatalf("future-manifest deletes = %+v", chunk.Mutations)
 	}
 }
 
