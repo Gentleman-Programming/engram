@@ -2,9 +2,11 @@ package remote
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -619,5 +621,43 @@ func TestRemoteTransportRejectsCrossPortRedirectWithExtraHeaders(t *testing.T) {
 	}
 	if crossPortHit {
 		t.Fatal("configured extra headers reached a different HTTPS origin (port)")
+	}
+}
+
+func TestRemoteTransportTokenOnlyFollowsCrossOriginHTTPSRedirectWithoutBearer(t *testing.T) {
+	// A bearer-token-only client keeps the historical redirect policy from
+	// main: HTTPS downgrades are rejected, but cross-origin HTTPS redirects
+	// are still followed, and Go withholds the Authorization header from the
+	// other host. Extra-header clients are more restrictive (see the
+	// cross-host and cross-port tests above); token-only clients must not be.
+	targetHit := false
+	var targetAuthorization string
+	targetHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		targetAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
+	})
+
+	cert, pool := newTestTLSIdentity(t, net.ParseIP("127.0.0.1"), net.ParseIP("::1"))
+	targetURL := startTestTLSServer(t, "[::1]:0", cert, targetHandler)
+	sourceURL := startTestTLSServer(t, "127.0.0.1:0", cert, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL, http.StatusFound)
+	}))
+
+	rt, err := NewRemoteTransport(sourceURL, "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest through cross-origin HTTPS redirect: %v", err)
+	}
+	if !targetHit {
+		t.Fatal("token-only client did not follow the cross-origin HTTPS redirect")
+	}
+	if targetAuthorization != "" {
+		t.Fatalf("Authorization forwarded to cross-origin HTTPS host: %q", targetAuthorization)
 	}
 }

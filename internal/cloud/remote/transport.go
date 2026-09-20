@@ -98,13 +98,12 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
 		return nil, err
 	}
-	requireHTTPSRedirect := token != "" || len(extraHeaders) > 0
 	return &RemoteTransport{
 		baseURL:         normalized,
 		token:           token,
 		project:         project,
-		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, requireHTTPSRedirect),
-		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, requireHTTPSRedirect),
+		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token, extraHeaders),
+		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token, extraHeaders),
 		extraHeaders:    extraHeaders,
 	}, nil
 }
@@ -121,23 +120,34 @@ func validateBearerBaseURL(baseURL, token string) (string, string, error) {
 	return normalized, token, nil
 }
 
-func newRemoteHTTPClient(timeout time.Duration, requireHTTPSRedirect bool) *http.Client {
+// newRemoteHTTPClient builds the HTTP client used by the cloud transports.
+//
+// The redirect policy deliberately keeps the pre-extra-header behavior of
+// main for bearer-token-only clients: they must reject HTTPS downgrades, but
+// may follow cross-origin HTTPS redirects, where Go withholds the
+// Authorization header as appropriate. Configured ENGRAM_CLOUD_EXTRA_HEADERS
+// can carry service credentials that Go would forward verbatim across a
+// cross-origin redirect, so clients with extra headers additionally require
+// every redirect to stay on the same normalized origin.
+func newRemoteHTTPClient(timeout time.Duration, token string, extraHeaders []extraHeader) *http.Client {
 	client := &http.Client{Timeout: timeout}
-	if requireHTTPSRedirect {
-		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme != "https" {
-				return fmt.Errorf("cloud: redirect requires HTTPS")
-			}
-			// Go already drops the bearer on cross-origin redirects, but
-			// configured extra headers (which can carry service credentials)
-			// would be forwarded verbatim. Never follow a redirect away from
-			// the original normalized origin (scheme, hostname, effective
-			// port); path-only and same-origin redirects remain allowed.
-			if len(via) > 0 && redirectOrigin(req.URL) != redirectOrigin(via[0].URL) {
-				return fmt.Errorf("cloud: redirect to a different origin is rejected to keep configured credentials private")
-			}
-			return nil
+	if token == "" && len(extraHeaders) == 0 {
+		return client
+	}
+	requireSameOrigin := len(extraHeaders) > 0
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("cloud: redirect requires HTTPS")
 		}
+		// Go already drops the bearer on cross-origin redirects, but
+		// configured extra headers (which can carry service credentials)
+		// would be forwarded verbatim. Never follow a redirect away from
+		// the original normalized origin (scheme, hostname, effective
+		// port); path-only and same-origin redirects remain allowed.
+		if requireSameOrigin && len(via) > 0 && redirectOrigin(req.URL) != redirectOrigin(via[0].URL) {
+			return fmt.Errorf("cloud: redirect to a different origin is rejected to keep configured credentials private")
+		}
+		return nil
 	}
 	return client
 }
@@ -394,11 +404,10 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 	if err := validateExtraHeadersScheme(normalized, extraHeaders); err != nil {
 		return nil, err
 	}
-	requireHTTPSRedirect := token != "" || len(extraHeaders) > 0
 	return &MutationTransport{
 		baseURL:      normalized,
 		token:        token,
-		httpClient:   newRemoteHTTPClient(ordinaryOperationTimeout, requireHTTPSRedirect),
+		httpClient:   newRemoteHTTPClient(ordinaryOperationTimeout, token, extraHeaders),
 		extraHeaders: extraHeaders,
 	}, nil
 }
