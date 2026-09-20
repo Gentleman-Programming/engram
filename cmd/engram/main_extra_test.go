@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -127,6 +128,108 @@ func stubExitWithPanic(t *testing.T) {
 	old := exitFunc
 	exitFunc = func(code int) { panic(exitCode(code)) }
 	t.Cleanup(func() { exitFunc = old })
+}
+
+func TestMainDataDirEnvBlankUsesDefault(t *testing.T) {
+	stubExitWithPanic(t)
+
+	oldStoreDefaultConfig := storeDefaultConfig
+	t.Cleanup(func() { storeDefaultConfig = oldStoreDefaultConfig })
+
+	oldCheckForUpdates := checkForUpdates
+	checkForUpdates = func(string) versioncheck.CheckResult { return versioncheck.CheckResult{} }
+	t.Cleanup(func() { checkForUpdates = oldCheckForUpdates })
+
+	cwd := t.TempDir()
+	withCwd(t, cwd)
+
+	explicitDataDir := " explicit-data-dir "
+	if runtime.GOOS == "windows" {
+		// Windows does not preserve trailing spaces in directory names.
+		explicitDataDir = " explicit-data-dir"
+	}
+
+	tests := []struct {
+		name          string
+		unsetEnv      bool
+		envValue      string
+		createDataDir bool
+		wantDataDir   func(defaultDir string) string
+	}{
+		{
+			name:        "absent uses default",
+			unsetEnv:    true,
+			wantDataDir: func(defaultDir string) string { return defaultDir },
+		},
+		{
+			name:        "empty uses default",
+			envValue:    "",
+			wantDataDir: func(defaultDir string) string { return defaultDir },
+		},
+		{
+			name:        "whitespace only uses default",
+			envValue:    " \t\n ",
+			wantDataDir: func(defaultDir string) string { return defaultDir },
+		},
+		{
+			name:          "explicit path is preserved",
+			envValue:      explicitDataDir,
+			createDataDir: true,
+			wantDataDir:   func(string) string { return filepath.Join(cwd, explicitDataDir) },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defaultDir := filepath.Join(t.TempDir(), "default")
+			storeDefaultConfig = func() (store.Config, error) {
+				return store.Config{DataDir: defaultDir}, nil
+			}
+
+			if tc.unsetEnv {
+				previous, wasSet := os.LookupEnv("ENGRAM_DATA_DIR")
+				if err := os.Unsetenv("ENGRAM_DATA_DIR"); err != nil {
+					t.Fatalf("unset ENGRAM_DATA_DIR: %v", err)
+				}
+				t.Cleanup(func() {
+					if wasSet {
+						_ = os.Setenv("ENGRAM_DATA_DIR", previous)
+						return
+					}
+					_ = os.Unsetenv("ENGRAM_DATA_DIR")
+				})
+			} else {
+				t.Setenv("ENGRAM_DATA_DIR", tc.envValue)
+			}
+
+			wantDataDir := tc.wantDataDir(defaultDir)
+			if tc.createDataDir {
+				if err := os.MkdirAll(wantDataDir, 0o755); err != nil {
+					t.Fatalf("create explicit data directory: %v", err)
+				}
+			}
+
+			withArgs(t, "engram", "instance-id")
+			stdout, stderr, recovered := captureOutputAndRecover(t, main)
+			if recovered != nil || stderr != "" {
+				t.Fatalf("instance-id should succeed, panic=%v stderr=%q", recovered, stderr)
+			}
+
+			id := strings.TrimSpace(stdout)
+			if len(id) != 32 {
+				t.Fatalf("instance ID length = %d, want 32: %q", len(id), id)
+			}
+			for _, char := range id {
+				if char < '0' || char > '9' && char < 'a' || char > 'f' {
+					t.Fatalf("instance ID = %q, want lowercase hex", id)
+				}
+			}
+
+			if _, err := os.Stat(filepath.Join(wantDataDir, ".instance-id")); err != nil {
+				t.Fatalf("instance ID file in expected data directory: %v", err)
+			}
+		})
+	}
 }
 
 func stubRuntimeHooks(t *testing.T) {

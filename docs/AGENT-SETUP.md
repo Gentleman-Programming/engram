@@ -36,6 +36,8 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > per-agent sections below describe each integration's authoritative owner and
 > manual equivalent.
 
+> The OpenCode adapter treats optional `ENGRAM_BIN`, `ENGRAM_PORT`, and `ENGRAM_URL` values containing only whitespace as unset and uses their normal defaults.
+
 ### Protocol verbosity
 
 `engram setup claude-code --protocol=slim` requests the slim session-start

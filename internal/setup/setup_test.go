@@ -4158,11 +4158,11 @@ func TestInstallOpenCodeWarningUsesResolvedCommand(t *testing.T) {
 // TestPatchEngramBINLine verifies that patchEngramBINLine() preserves an
 // explicit environment override and uses a baked absolute or bare fallback.
 func TestPatchEngramBINLine(t *testing.T) {
-	const original = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`
+	const original = `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"`
 
 	t.Run("bakes in an absolute fallback without Bun", func(t *testing.T) {
 		result := string(patchEngramBINLine([]byte(original), "/usr/local/bin/engram"))
-		want := `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/usr/local/bin/engram"`
+		want := `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/usr/local/bin/engram"`
 		if result != want {
 			t.Fatalf("patched line = %q, want %q", result, want)
 		}
@@ -4239,8 +4239,11 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		if strings.Contains(content, `Bun.which`) {
 			t.Fatalf("installed Node plugin must not reference Bun, got:\n%s", content)
 		}
-		if !strings.Contains(content, `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/usr/local/bin/engram"`) {
+		if !strings.Contains(content, `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/usr/local/bin/engram"`) {
 			t.Fatalf("installed plugin must contain the expected absolute fallback, got:\n%s", content)
+		}
+		if !strings.Contains(content, `return value?.trim() ? value : undefined`) {
+			t.Fatalf("installed plugin must treat blank and whitespace ENGRAM_BIN overrides as unset, got:\n%s", content)
 		}
 		// Source plugin file must remain unchanged (no patching of the template)
 		srcRaw, err := openCodeReadFile("plugins/opencode/engram.ts")
@@ -4273,8 +4276,8 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		content := string(raw)
 
 		// The line must have the form:
-		// const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/abs/path"
-		// where process.env.ENGRAM_BIN is leftmost (wins if set).
+		// const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/abs/path"
+		// where process.env.ENGRAM_BIN remains the leftmost input (wins when nonblank).
 		envIdx := strings.Index(content, `process.env.ENGRAM_BIN`)
 		absIdx := strings.Index(content, `"/usr/local/bin/engram"`)
 		if envIdx == -1 || absIdx == -1 || strings.Contains(content, `Bun.which`) {
@@ -4303,8 +4306,8 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		}
 		content := string(raw)
 
-		if !strings.Contains(content, `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`) {
-			t.Fatalf("must preserve bare fallback when os.Executable fails, got:\n%s", content)
+		if !strings.Contains(content, `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"`) {
+			t.Fatalf("must preserve the normalized bare fallback when os.Executable fails, got:\n%s", content)
 		}
 		if strings.Contains(content, `Bun.which`) {
 			t.Fatalf("installed Node plugin must not reference Bun, got:\n%s", content)

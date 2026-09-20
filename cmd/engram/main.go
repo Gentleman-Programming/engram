@@ -723,8 +723,8 @@ func main() {
 		}
 	}
 
-	// Allow overriding data dir via env
-	if dir := os.Getenv("ENGRAM_DATA_DIR"); dir != "" {
+	// Allow overriding data dir via env. Blank values retain the resolved default.
+	if dir := os.Getenv("ENGRAM_DATA_DIR"); strings.TrimSpace(dir) != "" {
 		cfg.DataDir = dir
 	}
 
@@ -3655,7 +3655,8 @@ Commands:
   help               Show this help
 
 Environment:
-  ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
+  ENGRAM_DATA_DIR    Engram CLI data directory. Empty or whitespace-only values use the
+                     platform default; nonblank values are used as provided (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Process-level default project override, applied by every entry point
                      with one precedence rule: explicit request project (engram save --project,
