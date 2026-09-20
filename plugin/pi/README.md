@@ -222,7 +222,7 @@ If the binary is missing, Pi keeps running and memory degrades instead of crashi
 
 ## Environment variables
 
-Optional `ENGRAM_*` values treat an absent, empty, or whitespace-only value as unset. Nonblank explicit values remain authoritative.
+The Pi extension treats absent, empty, and whitespace-only `ENGRAM_URL`, `ENGRAM_BIN`, and `ENGRAM_PORT` values as unset. It detects blankness without trimming nonblank explicit values.
 
 | Variable          | Default  | Effect                                                                                                                                                                                                                                                                                  |
 | ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

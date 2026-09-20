@@ -4276,8 +4276,8 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 		content := string(raw)
 
 		// The line must have the form:
-		// const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/abs/path"
-		// where process.env.ENGRAM_BIN is leftmost (wins if set).
+		// const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/abs/path"
+		// where process.env.ENGRAM_BIN remains the leftmost input (wins when nonblank).
 		envIdx := strings.Index(content, `process.env.ENGRAM_BIN`)
 		absIdx := strings.Index(content, `"/usr/local/bin/engram"`)
 		if envIdx == -1 || absIdx == -1 || strings.Contains(content, `Bun.which`) {

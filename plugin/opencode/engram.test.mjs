@@ -292,16 +292,17 @@ test("adapter treats blank optional Engram environment values as unset at its im
   }
 })
 
-test("an explicit OpenCode ENGRAM_URL keeps precedence over local defaults", async (t) => {
+test("an explicit OpenCode ENGRAM_URL keeps precedence and its exact value", async (t) => {
+  const configuredEngramURL = " http://127.0.0.1:17437"
   const runtime = await createRuntime(t, {
-    configuredEngramURL: "http://127.0.0.1:17437",
+    configuredEngramURL,
     engramBin: "custom-engram",
     engramPort: "18437",
     healthOK: false,
   })
 
   assert.equal(runtime.spawns.some(({ args }) => args[1] === "serve"), false)
-  assert.equal(runtime.healthURLs[0], "http://127.0.0.1:17437/health")
+  assert.equal(runtime.healthURLs[0], `${configuredEngramURL}/health`)
 })
 
 test("adapter returns hooks when local identity lookup fails", async (t) => {
