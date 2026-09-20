@@ -5227,6 +5227,94 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 	return mutations, nil
 }
 
+// ExportLocalDeleteTombstonesAfter projects locally retained hard-delete intent
+// into canonical mutations. The inclusive timestamp boundary is deliberate:
+// callers must reconcile equal-time rows against manifest history by identity.
+func (s *Store) ExportLocalDeleteTombstonesAfter(project, after string) ([]SyncMutation, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	where, args := "active = 1", []any{}
+	if project != "" {
+		where += " AND project = ?"
+		args = append(args, project)
+	}
+	if strings.TrimSpace(after) != "" {
+		where += " AND julianday(deleted_at) >= julianday(?)"
+		args = append(args, after)
+	}
+	mutations := make([]SyncMutation, 0)
+	rows, err := s.queryItHook(s.db, `SELECT entity, entity_key, ifnull(session_id, ''), project, deleted_at, hard_delete FROM sync_delete_tombstones WHERE entity IN (?, ?) AND `+where, append([]any{SyncEntityObservation, SyncEntitySession}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("export local delete tombstones: %w", err)
+	}
+	for rows.Next() {
+		var entity, key, sessionID, rowProject, deletedAt string
+		var hardDelete bool
+		if err := rows.Scan(&entity, &key, &sessionID, &rowProject, &deletedAt, &hardDelete); err != nil {
+			return nil, closeRowsWithError(rows, err)
+		}
+		var payload any
+		if entity == SyncEntityObservation {
+			payload = syncObservationPayload{SyncID: key, SessionID: sessionID, Project: nullableString(rowProject), Deleted: true, DeletedAt: &deletedAt, HardDelete: hardDelete}
+		} else {
+			payload = syncSessionPayload{ID: key, Project: rowProject, Deleted: true, DeletedAt: &deletedAt, HardDelete: hardDelete}
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, closeRowsWithError(rows, err)
+		}
+		mutations = append(mutations, SyncMutation{Entity: entity, EntityKey: key, Op: SyncOpDelete, Payload: string(raw), Project: rowProject, OccurredAt: deletedAt})
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	promptWhere, promptArgs := "1 = 1", []any{}
+	if project != "" {
+		promptWhere += " AND ifnull(project, '') = ?"
+		promptArgs = append(promptArgs, project)
+	}
+	if strings.TrimSpace(after) != "" {
+		promptWhere += " AND julianday(deleted_at) >= julianday(?)"
+		promptArgs = append(promptArgs, after)
+	}
+	promptRows, err := s.queryItHook(s.db, `SELECT sync_id, ifnull(session_id, ''), ifnull(project, ''), deleted_at FROM prompt_tombstones WHERE `+promptWhere, promptArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("export local prompt tombstones: %w", err)
+	}
+	for promptRows.Next() {
+		var syncID, sessionID, rowProject, deletedAt string
+		if err := promptRows.Scan(&syncID, &sessionID, &rowProject, &deletedAt); err != nil {
+			return nil, closeRowsWithError(promptRows, err)
+		}
+		raw, err := json.Marshal(syncPromptPayload{SyncID: syncID, SessionID: sessionID, Project: nullableString(rowProject), Deleted: true, DeletedAt: &deletedAt, HardDelete: true})
+		if err != nil {
+			return nil, closeRowsWithError(promptRows, err)
+		}
+		mutations = append(mutations, SyncMutation{Entity: SyncEntityPrompt, EntityKey: syncID, Op: SyncOpDelete, Payload: string(raw), Project: rowProject, OccurredAt: deletedAt})
+	}
+	if err := promptRows.Close(); err != nil {
+		return nil, err
+	}
+	if err := promptRows.Err(); err != nil {
+		return nil, err
+	}
+	rank := map[string]int{SyncEntityObservation: 0, SyncEntityPrompt: 1, SyncEntitySession: 2}
+	sort.Slice(mutations, func(i, j int) bool {
+		if rank[mutations[i].Entity] != rank[mutations[j].Entity] {
+			return rank[mutations[i].Entity] < rank[mutations[j].Entity]
+		}
+		if mutations[i].OccurredAt != mutations[j].OccurredAt {
+			return mutations[i].OccurredAt < mutations[j].OccurredAt
+		}
+		return mutations[i].EntityKey < mutations[j].EntityKey
+	})
+	return mutations, nil
+}
+
 // exportWithProjectScope reads sessions.project through ifnull(): an export is how
 // data leaves the store before a repair, so it must not be the one path that
 // refuses to read the legacy unowned rows the operator is trying to rescue.

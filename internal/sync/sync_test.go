@@ -1487,7 +1487,7 @@ func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
 			transport := newFakeCloudTransport()
 			transport.chunks["history"] = raw
 			sy := NewWithTransport(nil, transport)
-			_, available, historical, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
+			_, available, historical, _, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
 			if err != nil {
 				t.Fatalf("exportedChunkKeys: %v", err)
 			}

@@ -52,6 +52,9 @@ var (
 	storeExportRelations      = func(s *store.Store, project string) ([]store.SyncMutation, error) {
 		return s.ExportRelationMutations(project)
 	}
+	storeExportLocalDeleteTombstones = func(s *store.Store, project, after string) ([]store.SyncMutation, error) {
+		return s.ExportLocalDeleteTombstonesAfter(project, after)
+	}
 	storeListMutationsAfterSeq = func(s *store.Store, targetKey string, afterSeq int64, limit int) ([]store.SyncMutation, error) {
 		return s.ListPendingSyncMutationsAfterSeq(targetKey, afterSeq, limit)
 	}
@@ -492,14 +495,18 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 
 	// Relations are filtered by chunk presence, not timestamp; see the
 	// rationale on filterRelationMutationsForExport and issue #353.
-	exportedRelations, exportedObservations, historicalObservations, err := sy.exportedChunkKeys(manifest)
+	exportedRelations, exportedObservations, historicalObservations, exportedDeletes, err := sy.exportedChunkKeys(manifest)
 	if err != nil {
 		return nil, fmt.Errorf("scan exported relations: %w", err)
+	}
+	localDeletes, err := storeExportLocalDeleteTombstones(sy.store, project, normalizeTime(lastChunkTime))
+	if err != nil {
+		return nil, fmt.Errorf("export local delete tombstones: %w", err)
 	}
 	chunk := sy.filterNewData(data, lastChunkTime)
 	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
 	includeObservationParentSessions(chunk, data.Sessions)
-	chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
+	chunk.Mutations = append(filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime), filterUnexportedDeleteMutations(localDeletes, exportedDeletes)...)
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
 	}
@@ -2152,12 +2159,13 @@ func filterRelationMutationsForEndpointAvailability(chunk *ChunkData, data *stor
 // relation may live in any chunk, so the scan cannot stop early. For very long
 // sync histories this is O(total chunks); tracking relation keys in the
 // manifest would remove the rescan if it ever becomes a bottleneck.
-func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
+func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
 	relationKeys := make(map[string]struct{})
 	observationKeys := make(map[string]struct{})
 	historicalObservationKeys := make(map[string]struct{})
+	deleteKeys := make(map[string]struct{})
 	if m == nil {
-		return relationKeys, observationKeys, historicalObservationKeys, nil
+		return relationKeys, observationKeys, historicalObservationKeys, deleteKeys, nil
 	}
 	for _, entry := range m.Chunks {
 		// Read through the transport (not the local filesystem directly) so the
@@ -2173,17 +2181,20 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 				// but cannot be read is a real fault and fails loudly below.
 				continue
 			}
-			return nil, nil, nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+			return nil, nil, nil, nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, nil, nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+			return nil, nil, nil, nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
 		}
 		for _, observation := range chunk.Observations {
 			observationKeys[observation.SyncID] = struct{}{}
 			historicalObservationKeys[observation.SyncID] = struct{}{}
 		}
 		for _, mutation := range chunk.Mutations {
+			if mutation.Op == store.SyncOpDelete {
+				deleteKeys[mutationIdentityKey(mutation)] = struct{}{}
+			}
 			if mutation.Entity == store.SyncEntityRelation {
 				relationKeys[mutation.EntityKey] = struct{}{}
 			}
@@ -2202,7 +2213,17 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 			}
 		}
 	}
-	return relationKeys, observationKeys, historicalObservationKeys, nil
+	return relationKeys, observationKeys, historicalObservationKeys, deleteKeys, nil
+}
+
+func filterUnexportedDeleteMutations(mutations []store.SyncMutation, exported map[string]struct{}) []store.SyncMutation {
+	filtered := make([]store.SyncMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		if _, exists := exported[mutationIdentityKey(mutation)]; !exists {
+			filtered = append(filtered, mutation)
+		}
+	}
+	return filtered
 }
 
 // observationUpsertIdentity returns the payload-owned identity of a replayable

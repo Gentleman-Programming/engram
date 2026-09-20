@@ -1311,6 +1311,7 @@ Share memories through git repositories using compressed chunks with a manifest 
 - `engram sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
 - `engram sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
 - `engram sync --project NAME` — Filters export to a specific project
+- Local sync projects hard deletes as canonical observation, prompt, and session delete mutations; child deletes precede their session and remain replay-safe through manifest history.
 
 ```
 .engram/
