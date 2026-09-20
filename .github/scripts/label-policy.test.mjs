@@ -123,13 +123,16 @@ test('runs PR label policy from the trusted base with current API labels', () =>
   );
   assert.match(labelWorkflow, /^  pull-requests: read$/m);
   assert.doesNotMatch(labelWorkflow, /merge_group\.head_ref/);
-  assert.match(labelWorkflow, /github\.paginate\(/);
-  assert.match(labelWorkflow, /github\.rest\.repos\.listPullRequestsAssociatedWithCommit/);
-  assert.match(labelWorkflow, /commit_sha: context\.payload\.merge_group\.head_sha/);
-  assert.match(labelWorkflow, /new Set\(pulls\.map\(\(pull\) => pull\.number\)\)/);
-  assert.match(labelWorkflow, /could not resolve associated pull requests/);
-  assert.match(labelWorkflow, /github\.rest\.pulls\.get\(\{/);
-  assert.match(labelWorkflow, /for \(const pull of pulls\)/);
+  assert.match(
+    labelWorkflow,
+    /if \(context\.eventName === 'merge_group'\) \{\r?\n              const \{ aggregatePullRequestResults, resolveAssociatedPullRequests \} = await import\(.*merge-queue\.mjs/,
+  );
+  assert.doesNotMatch(labelWorkflow, /^            const \{ aggregatePullRequestResults, resolveAssociatedPullRequests \} = await import\(.*merge-queue\.mjs/m);
+  assert.match(labelWorkflow, /resolveAssociatedPullRequests\(github, \{/);
+  assert.match(labelWorkflow, /aggregatePullRequestResults\(pulls,/);
+  assert.match(labelWorkflow, /failures = validate\(pull\)\.map\(\(error\) => `PR #\$\{pull\.number\}: \$\{error\}`\)/);
+  assert.doesNotMatch(labelWorkflow, /github\.paginate\(/);
+  assert.doesNotMatch(labelWorkflow, /listPullRequestsAssociatedWithCommit/);
   assert.match(labelWorkflow, /validateLabels\(policy, pull\.labels\.map\(\(label\) => label\.name\), 'pull-request'\)/);
   assert.match(labelWorkflow, /github\.event\.merge_group\.base_sha.*github\.event\.pull_request\.base\.sha/);
   assert.doesNotMatch(labelWorkflow, /github\.event\.pull_request\.labels|context\.payload\.pull_request\.labels/);

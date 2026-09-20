@@ -16,34 +16,37 @@ jobs:
     name: Check Issue Reference
     runs-on: ubuntu-latest
     steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          persist-credentials: false
       - name: Verify PR links an issue
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            let pulls = [context.payload.pull_request];
-            if (context.eventName === 'merge_group') try {
-              pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.payload.merge_group.head_sha,
-              });
-              const pullNumbers = [...new Set(pulls.map((pull) => pull.number))];
-              if (pullNumbers.length === 0) throw new Error('could not resolve associated pull requests');
-              pulls = await Promise.all(pullNumbers.map(async (pull_number) => (
-                await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number })
-              ).data));
-            } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
-
             const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const failures = [];
-            for (const pull of pulls) {
+            const validate = (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) {
-                failures.push(`PR #${pull.number}: no closing issue reference found`);
-                continue;
-              }
+              if (matches.length === 0) return ['no closing issue reference found'];
               core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[1]).join(', ')}`);
+              return [];
+            };
+            let failures;
+            if (context.eventName === 'merge_group') {
+              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
+              try {
+                const pulls = await resolveAssociatedPullRequests(github, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commitSha: context.payload.merge_group.head_sha,
+                });
+                failures = await aggregatePullRequestResults(pulls, validate);
+              } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
+            } else {
+              const pull = context.payload.pull_request;
+              failures = validate(pull).map((error) => `PR #${pull.number}: ${error}`);
             }
 
             if (failures.length > 0) {
@@ -59,35 +62,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: check-issue-reference
     steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          persist-credentials: false
       - name: Verify linked issue is approved
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            let pulls = [context.payload.pull_request];
-            if (context.eventName === 'merge_group') try {
-              pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.payload.merge_group.head_sha,
-              });
-              const pullNumbers = [...new Set(pulls.map((pull) => pull.number))];
-              if (pullNumbers.length === 0) throw new Error('could not resolve associated pull requests');
-              pulls = await Promise.all(pullNumbers.map(async (pull_number) => (
-                await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number })
-              ).data));
-            } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
-
             const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const failures = [];
-            for (const pull of pulls) {
+            const validate = async (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) {
-                failures.push(`PR #${pull.number}: no closing issue reference found`);
-                continue;
-              }
+              if (matches.length === 0) return ['no closing issue reference found'];
 
+              const errors = [];
               for (const match of matches) {
                 const issueNumber = parseInt(match[1], 10);
                 core.info(`Checking PR #${pull.number} issue #${issueNumber} for status:approved label...`);
@@ -99,14 +90,30 @@ jobs:
                   })).data;
                   const labels = issue.labels.map((label) => label.name);
                   if (!labels.includes('status:approved')) {
-                    failures.push(`PR #${pull.number} issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label.`);
+                    errors.push(`issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label.`);
                   } else {
                     core.info(`✅ PR #${pull.number} issue #${issueNumber} has status:approved`);
                   }
                 } catch (err) {
-                  failures.push(`PR #${pull.number} issue #${issueNumber}: could not be fetched (${err.message})`);
+                  errors.push(`issue #${issueNumber}: could not be fetched (${err.message})`);
                 }
               }
+              return errors;
+            };
+            let failures;
+            if (context.eventName === 'merge_group') {
+              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
+              try {
+                const pulls = await resolveAssociatedPullRequests(github, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commitSha: context.payload.merge_group.head_sha,
+                });
+                failures = await aggregatePullRequestResults(pulls, validate);
+              } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
+            } else {
+              const pull = context.payload.pull_request;
+              failures = (await validate(pull)).map((error) => `PR #${pull.number}: ${error}`);
             }
 
             if (failures.length > 0) {

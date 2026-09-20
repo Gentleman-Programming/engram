@@ -30,33 +30,32 @@ jobs:
         with:
           script: |
             const { loadLabelPolicy, validateLabels } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/label-policy.mjs`);
-            let pulls;
-            try {
-              if (context.eventName === 'merge_group') {
-                pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+            const policy = loadLabelPolicy();
+            const validate = (pull) => {
+              const errors = validateLabels(policy, pull.labels.map((label) => label.name), 'pull-request').errors;
+              if (errors.length === 0) core.info(`✅ PR #${pull.number} labels pass canonical policy`);
+              return errors;
+            };
+            let failures;
+            if (context.eventName === 'merge_group') {
+              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
+              try {
+                const pulls = await resolveAssociatedPullRequests(github, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  commit_sha: context.payload.merge_group.head_sha,
+                  commitSha: context.payload.merge_group.head_sha,
                 });
-                const pullNumbers = [...new Set(pulls.map((pull) => pull.number))];
-                if (pullNumbers.length === 0) throw new Error('could not resolve associated pull requests');
-                pulls = await Promise.all(pullNumbers.map(async (pull_number) => (
-                  await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number })
-                ).data));
-              } else {
-                pulls = [(await github.rest.pulls.get({
+                failures = await aggregatePullRequestResults(pulls, validate);
+              } catch (err) { core.setFailed(`❌ Could not fetch current pull request metadata: ${err.message}`); return; }
+            } else {
+              let pull;
+              try {
+                pull = (await github.rest.pulls.get({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   pull_number: context.issue.number,
-                })).data];
-              }
-            } catch (err) { core.setFailed(`❌ Could not fetch current pull request metadata: ${err.message}`); return; }
-
-            const policy = loadLabelPolicy();
-            const failures = [];
-            for (const pull of pulls) {
-              const errors = validateLabels(policy, pull.labels.map((label) => label.name), 'pull-request').errors;
-              if (errors.length > 0) failures.push(`PR #${pull.number}: ${errors.join('; ')}`);
-              else core.info(`✅ PR #${pull.number} labels pass canonical policy`);
+                })).data;
+              } catch (err) { core.setFailed(`❌ Could not fetch current pull request metadata: ${err.message}`); return; }
+              failures = validate(pull).map((error) => `PR #${pull.number}: ${error}`);
             }
             if (failures.length > 0) core.setFailed('❌ Pull-request label policy failures:\n' + failures.join('\n'));

@@ -122,11 +122,10 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
 		"permissions:\n  contents: read\n  pull-requests: read",
 		"check-label-policy:\n    name: Check PR Has type:* Label\n    runs-on: ubuntu-latest\n    concurrency:\n      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number || github.run_id }}\n      cancel-in-progress: true",
-		"github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit",
-		"commit_sha: context.payload.merge_group.head_sha",
-		"new Set(pulls.map((pull) => pull.number))",
-		"could not resolve associated pull requests",
-		"github.rest.pulls.get({",
+		"if (context.eventName === 'merge_group') {\n              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);",
+		"resolveAssociatedPullRequests(github, {",
+		"aggregatePullRequestResults(pulls, validate)",
+		"failures = validate(pull).map((error) => `PR #${pull.number}: ${error}`)",
 		"validateLabels(policy, pull.labels.map((label) => label.name), 'pull-request')",
 		"github.event.merge_group.base_sha || github.event.pull_request.base.sha",
 		"persist-credentials: false",
@@ -136,6 +135,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"\n            const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);",
 		"github.event.pull_request.labels",
 		"context.payload.pull_request.labels",
 		"pull_request.head",
