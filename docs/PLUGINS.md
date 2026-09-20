@@ -116,7 +116,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 ```
 plugin/claude-code/
 ├── .claude-plugin/plugin.json     # Plugin manifest
-├── hooks/hooks.json               # SessionStart + SubagentStop + SessionEnd lifecycle hooks
+├── hooks/hooks.json               # PreToolUse binding + SessionStart/SubagentStop/SessionEnd lifecycle hooks
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
@@ -128,6 +128,11 @@ plugin/claude-code/
 ```
 
 ### How It Works
+
+**Before Engram write/session MCP tools** (`PreToolUse`):
+1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
+2. The transformer replaces any model-supplied tool-input `session_id` with Claude's authoritative top-level `session_id` while preserving other arguments.
+3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 
 **On session start** (`startup`):
 1. Ensures the engram HTTP server is running
