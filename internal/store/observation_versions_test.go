@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -335,5 +337,208 @@ func TestHardDeleteRemovesObservationVersions(t *testing.T) {
 	}
 	if len(after) != 0 {
 		t.Fatalf("expected no versions after hard delete, got %d", len(after))
+	}
+}
+
+// seedVersionHistory creates an observation with versions whose contents are
+// "state-00" ... "state-N", and returns the observation id.
+func seedVersionHistory(t *testing.T, s *Store, versionCount int) int64 {
+	t.Helper()
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var id int64
+	var err error
+	for i := 0; i <= versionCount; i++ {
+		id, err = s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "architecture",
+			Title:     "Auth architecture",
+			Content:   fmt.Sprintf("state-%02d", i),
+			Project:   "engram",
+			Scope:     "project",
+			TopicKey:  "architecture/auth-model",
+		})
+		if err != nil {
+			t.Fatalf("add state %d: %v", i, err)
+		}
+	}
+	return id
+}
+
+func TestGetObservationVersionPageBoundsToMostRecent(t *testing.T) {
+	s := newTestStore(t)
+	id := seedVersionHistory(t, s, 60)
+
+	page, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0)
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if page.Total != 60 {
+		t.Fatalf("total = %d, want 60", page.Total)
+	}
+	if !page.HasMore {
+		t.Fatalf("expected HasMore when older versions exist")
+	}
+	if page.NextCursor != 11 {
+		t.Fatalf("next cursor = %d, want 11", page.NextCursor)
+	}
+	if len(page.Versions) != DefaultObservationVersionPageSize {
+		t.Fatalf("page length = %d, want %d", len(page.Versions), DefaultObservationVersionPageSize)
+	}
+	for i, v := range page.Versions {
+		wantVersion := i + 11
+		if v.Version != wantVersion {
+			t.Fatalf("versions[%d].Version = %d, want %d", i, v.Version, wantVersion)
+		}
+		// Capture stores the pre-overwrite content: version N holds the state
+		// saved N saves before the current one (state-(N-1)).
+		wantContent := fmt.Sprintf("state-%02d", wantVersion-1)
+		if v.Content != wantContent {
+			t.Fatalf("versions[%d].Content = %q, want %q", i, v.Content, wantContent)
+		}
+	}
+
+	older, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, page.NextCursor)
+	if err != nil {
+		t.Fatalf("older page: %v", err)
+	}
+	if older.Total != 60 {
+		t.Fatalf("older total = %d, want 60", older.Total)
+	}
+	if older.HasMore {
+		t.Fatalf("expected no continuation after the final page")
+	}
+	if older.NextCursor != 0 {
+		t.Fatalf("final page cursor = %d, want 0", older.NextCursor)
+	}
+	if len(older.Versions) != 10 {
+		t.Fatalf("older page length = %d, want 10", len(older.Versions))
+	}
+	for i, v := range older.Versions {
+		wantVersion := i + 1
+		if v.Version != wantVersion {
+			t.Fatalf("older versions[%d].Version = %d, want %d", i, v.Version, wantVersion)
+		}
+	}
+}
+
+func TestGetObservationVersionPageFitsSinglePageHasNoCursor(t *testing.T) {
+	s := newTestStore(t)
+	id := seedVersionHistory(t, s, 2)
+
+	page, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0)
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if page.Total != 2 {
+		t.Fatalf("total = %d, want 2", page.Total)
+	}
+	if page.HasMore {
+		t.Fatalf("2 versions must fit one page without a continuation cursor")
+	}
+	if page.NextCursor != 0 {
+		t.Fatalf("cursor = %d, want 0 when nothing remains", page.NextCursor)
+	}
+	if len(page.Versions) != 2 || page.Versions[0].Version != 1 || page.Versions[1].Version != 2 {
+		t.Fatalf("unexpected page: %+v", page.Versions)
+	}
+}
+
+func TestGetObservationVersionPageEmptyForUntouchedObservation(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "architecture",
+		Title:     "Auth architecture",
+		Content:   "Use middleware for JWT validation.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	page, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0)
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if page.Total != 0 || page.HasMore || len(page.Versions) != 0 || page.NextCursor != 0 {
+		t.Fatalf("untouched observation page = %+v, want empty page without continuation", page)
+	}
+}
+
+func TestGetObservationVersionPageValidatesLimitAndCursor(t *testing.T) {
+	s := newTestStore(t)
+	id := seedVersionHistory(t, s, 3)
+
+	for _, limit := range []int{0, -1, MaxObservationVersionPageSize + 1} {
+		if _, err := s.GetObservationVersionPage(id, limit, 0); err == nil {
+			t.Fatalf("limit %d: expected validation error", limit)
+		}
+	}
+	if _, err := s.GetObservationVersionPage(id, 10, -1); err == nil {
+		t.Fatal("negative cursor: expected validation error")
+	}
+}
+
+func TestGetObservationVersionPagePropagatesQueryFailure(t *testing.T) {
+	s := newTestStore(t)
+	id := seedVersionHistory(t, s, 1)
+
+	wantErr := errors.New("history query failed")
+	oldQueryIt := s.hooks.queryIt
+	s.hooks.queryIt = func(queryer, string, ...any) (rowScanner, error) {
+		return nil, wantErr
+	}
+	t.Cleanup(func() { s.hooks.queryIt = oldQueryIt })
+
+	if _, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0); !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestTitleOnlyUpdateCapturesPriorTitleAndContent(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "bugfix",
+		Title:     "Old title",
+		Content:   "Old body.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	newTitle := "New title"
+	if _, err := s.UpdateObservation(id, UpdateObservationParams{Title: &newTitle}); err != nil {
+		t.Fatalf("title-only update: %v", err)
+	}
+
+	page, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0)
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if page.Total != 1 || len(page.Versions) != 1 {
+		t.Fatalf("expected exactly 1 version after title-only update, got %d total / %d rows", page.Total, len(page.Versions))
+	}
+	v := page.Versions[0]
+	if v.Title != "Old title" {
+		t.Fatalf("captured version title = %q, want prior title %q", v.Title, "Old title")
+	}
+	if v.Content != "Old body." {
+		t.Fatalf("captured version content = %q, want prior content %q", v.Content, "Old body.")
 	}
 }

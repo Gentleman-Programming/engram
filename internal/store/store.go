@@ -10186,6 +10186,9 @@ func (s *Store) captureObservationVersionTx(tx *sql.Tx, obs *Observation) error 
 // oldest first, numbering starting at 1. Versions survive soft deletes: they
 // are immutable history, read directly from the version table. A missing or
 // untouched observation yields an empty slice, never an error.
+//
+// Callers serving one bounded response should prefer GetObservationVersionPage,
+// which never materializes the full unbounded history.
 func (s *Store) GetObservationVersions(id int64) ([]ObservationVersion, error) {
 	rows, err := s.queryItHook(s.db,
 		`SELECT id, observation_id, ifnull(title, ''), content, version, ifnull(created_at, '')
@@ -10194,7 +10197,7 @@ func (s *Store) GetObservationVersions(id int64) ([]ObservationVersion, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var versions []ObservationVersion
 	for rows.Next() {
@@ -10208,6 +10211,122 @@ func (s *Store) GetObservationVersions(id int64) ([]ObservationVersion, error) {
 		return nil, err
 	}
 	return versions, nil
+}
+
+// DefaultObservationVersionPageSize is the bound applied to a single history
+// page when the caller does not choose a limit; MCP include_history renders
+// exactly this many most recent versions per call.
+const DefaultObservationVersionPageSize = 50
+
+// MaxObservationVersionPageSize caps a caller-supplied history page so one
+// bounded read stays resource-safe no matter how many snapshots are stored.
+const MaxObservationVersionPageSize = 100
+
+// ObservationVersionPage is one bounded page of an observation's captured
+// version history, oldest first (ascending version numbers), plus the truthful
+// total count of stored versions and a continuation cursor when older versions
+// remain beyond the page.
+type ObservationVersionPage struct {
+	Versions []ObservationVersion
+	Total    int
+	HasMore  bool
+	// NextCursor is the oldest version in Versions when HasMore is true: pass
+	// it as the cursor argument to fetch the next (older) page.
+	NextCursor int64
+}
+
+// GetObservationVersionPage returns one bounded page of an observation's
+// version history, oldest first (ascending version number) so rendering stays
+// chronological. Cursor 0 starts from the most recent versions; a cursor from a
+// previous page's NextCursor (set only when HasMore is true) fetches the older
+// page continuing before it. Total is the full stored count and is truthful
+// even when the page is truncated. Versions survive soft deletes and a missing
+// or untouched observation yields an empty page with Total 0, never an error.
+//
+// limit must be between 1 and MaxObservationVersionPageSize; cursor must be
+// non-negative.
+func (s *Store) GetObservationVersionPage(id int64, limit int, cursor int64) (ObservationVersionPage, error) {
+	if limit < 1 || limit > MaxObservationVersionPageSize {
+		return ObservationVersionPage{}, fmt.Errorf("GetObservationVersionPage: limit must be between 1 and %d", MaxObservationVersionPageSize)
+	}
+	if cursor < 0 {
+		return ObservationVersionPage{}, fmt.Errorf("GetObservationVersionPage: cursor must be non-negative")
+	}
+
+	// Truthful total: the page count is the full stored count and never shrinks
+	// when a page only carries the most recent versions.
+	page := ObservationVersionPage{}
+	totalRows, err := s.queryItHook(s.db,
+		`SELECT COUNT(*) FROM observation_versions WHERE observation_id = ?`, id,
+	)
+	if err != nil {
+		return page, err
+	}
+	// The store pool allows a single open connection: the count rows must be
+	// closed once its value is read and before the page query starts, or the
+	// two reads self-deadlock on the one-connection pool.
+	if totalRows.Next() {
+		if err := totalRows.Scan(&page.Total); err != nil {
+			return page, closeRowsWithError(totalRows, err)
+		}
+	}
+	if err := closeRowsWithError(totalRows, totalRows.Err()); err != nil {
+		return page, err
+	}
+
+	// Fetch limit+1 rows newest first: the extra row is discarded only to prove
+	// whether an older page still exists, so HasMore is exact and never guessed.
+	query := `SELECT id, observation_id, ifnull(title, ''), content, version, ifnull(created_at, '')
+		 FROM observation_versions WHERE observation_id = ?`
+	args := []any{id}
+	if cursor > 0 {
+		query += ` AND version < ?`
+		args = append(args, cursor)
+	}
+	query += ` ORDER BY version DESC LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return page, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	fetched := make([]ObservationVersion, 0, limit+1)
+	for rows.Next() {
+		var v ObservationVersion
+		if err := rows.Scan(&v.ID, &v.ObservationID, &v.Title, &v.Content, &v.Version, &v.CreatedAt); err != nil {
+			return page, err
+		}
+		fetched = append(fetched, v)
+	}
+	if err := rows.Err(); err != nil {
+		return page, err
+	}
+
+	if len(fetched) > limit {
+		page.HasMore = true
+		fetched = fetched[:limit]
+	}
+	page.Versions = reverseObservationVersions(fetched)
+	if page.HasMore {
+		// Versions is ascending (oldest first): the continuation cursor is the
+		// oldest version shown on this page, so the next page reads strictly
+		// older versions (version < cursor) without re-shipping this page.
+		oldest := page.Versions[0]
+		page.NextCursor = int64(oldest.Version)
+	}
+	return page, nil
+}
+
+// reverseObservationVersions returns versions in ascending version order. The
+// page query fetches newest first so the bounded page reads chronologically.
+func reverseObservationVersions(versions []ObservationVersion) []ObservationVersion {
+	reversed := make([]ObservationVersion, len(versions))
+	for i, v := range versions {
+		reversed[len(versions)-1-i] = v
+	}
+	return reversed
 }
 
 // getObservationIncludingDeletedTx is reserved for explicit destructive paths.

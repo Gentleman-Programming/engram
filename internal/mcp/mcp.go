@@ -803,7 +803,7 @@ Examples:
 					mcp.Description("The observation ID to retrieve"),
 				),
 				mcp.WithBoolean("include_history",
-					mcp.Description("When true, render every captured prior version of the observation (title/content snapshots from topic_key upserts and content-changing mem_update calls) and include version_count in the envelope. Omit for the historical default output."),
+					mcp.Description("When true, render the observation's bounded version history: the 50 most recent prior title/content snapshots, oldest first, with version_count set to the total stored count in the envelope. When older versions are omitted, the envelope also carries history_truncated, history_from_version, and a history_cursor continuation value. Omit for the historical default output."),
 				),
 			),
 			handleGetObservation(s, cfg, activity),
@@ -2268,21 +2268,33 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 
 		extra := map[string]any{}
 		if boolArg(req, "include_history", false) {
-			versions, err := s.GetObservationVersions(id)
+			// Bounded paginated history (#1286): a single page of the most recent
+			// versions, a truthful total, and a continuation cursor only when an
+			// older page still exists.
+			page, err := s.GetObservationVersionPage(id, store.DefaultObservationVersionPageSize, 0)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to read observation history: %v", err)), nil
 			}
-			extra["version_count"] = len(versions)
+			versions := page.Versions
+			extra["version_count"] = page.Total
 			history := make([]map[string]any, 0, len(versions))
 			if len(versions) > 0 {
 				var b strings.Builder
-				b.WriteString("\n\nHistory (")
-				b.WriteString(strconv.Itoa(len(versions)))
-				b.WriteString(" previous version")
-				if len(versions) != 1 {
-					b.WriteString("s")
+				if page.HasMore {
+					b.WriteString("\n\nHistory (")
+					b.WriteString(strconv.Itoa(len(versions)))
+					b.WriteString(" of ")
+					b.WriteString(strconv.Itoa(page.Total))
+					b.WriteString(" previous versions — older versions omitted):")
+				} else {
+					b.WriteString("\n\nHistory (")
+					b.WriteString(strconv.Itoa(len(versions)))
+					b.WriteString(" previous version")
+					if len(versions) != 1 {
+						b.WriteString("s")
+					}
+					b.WriteString("):")
 				}
-				b.WriteString("):")
 				for _, v := range versions {
 					fmt.Fprintf(&b, "\n\n--- Version %d (%s) ---\n%s\n%s",
 						v.Version,
@@ -2300,6 +2312,15 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 				result += b.String()
 			}
 			extra["history"] = history
+			if page.HasMore {
+				// versions is ascending (oldest first): the oldest shown version
+				// is the first entry, and the next page continues strictly before
+				// it via the same value the store exposes as NextCursor.
+				oldest := versions[0].Version
+				extra["history_truncated"] = true
+				extra["history_from_version"] = oldest
+				extra["history_cursor"] = page.NextCursor
+			}
 		}
 
 		if detErr != nil {
