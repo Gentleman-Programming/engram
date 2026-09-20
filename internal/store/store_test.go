@@ -5896,6 +5896,181 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 	})
 }
 
+func TestExportImportRoundTripPreservesOrphanedRelationsWithoutEndpoints(t *testing.T) {
+	source := newTestStore(t)
+	if err := source.CreateSession("orphaned-backup-session", "backup-project", "/tmp/backup"); err != nil {
+		t.Fatalf("create source session: %v", err)
+	}
+	sourceID, err := source.AddObservation(AddObservationParams{SessionID: "orphaned-backup-session", Type: "decision", Title: "source", Content: "source content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add source observation: %v", err)
+	}
+	targetID, err := source.AddObservation(AddObservationParams{SessionID: "orphaned-backup-session", Type: "decision", Title: "target", Content: "target content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add target observation: %v", err)
+	}
+	sourceObservation, err := source.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get source observation: %v", err)
+	}
+	targetObservation, err := source.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get target observation: %v", err)
+	}
+	reason := "endpoint was hard deleted"
+	evidence := `{"audit":"preserve"}`
+	confidence := 0.73
+	actor := "agent:audit"
+	kind := "agent"
+	model := "audit-model"
+	sessionID := "orphaned-backup-session"
+	relations := []BackupRelation{
+		{SyncID: "rel-orphaned-missing-source", SourceID: "obs-missing-source", TargetID: targetObservation.SyncID, Relation: RelationConflictsWith, Reason: &reason, Evidence: &evidence, Confidence: &confidence, JudgmentStatus: JudgmentStatusOrphaned, MarkedByActor: &actor, MarkedByKind: &kind, MarkedByModel: &model, SessionID: &sessionID, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-02T00:00:00Z"},
+		{SyncID: "rel-orphaned-missing-target", SourceID: sourceObservation.SyncID, TargetID: "obs-missing-target", Relation: RelationSupersedes, Reason: &reason, Evidence: &evidence, Confidence: &confidence, JudgmentStatus: " ORPHANED ", MarkedByActor: &actor, MarkedByKind: &kind, MarkedByModel: &model, SessionID: &sessionID, CreatedAt: "2026-01-03T00:00:00Z", UpdatedAt: "2026-01-04T00:00:00Z"},
+		{SyncID: "rel-orphaned-missing-both", SourceID: "obs-missing-both-source", TargetID: "obs-missing-both-target", Relation: RelationRelated, Reason: &reason, Evidence: &evidence, Confidence: &confidence, JudgmentStatus: JudgmentStatusOrphaned, MarkedByActor: &actor, MarkedByKind: &kind, MarkedByModel: &model, SessionID: &sessionID, CreatedAt: "2026-01-05T00:00:00Z", UpdatedAt: "2026-01-06T00:00:00Z"},
+	}
+	for _, relation := range relations {
+		if _, err := source.DB().Exec(`INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status,
+			 marked_by_actor, marked_by_kind, marked_by_model, session_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation, relation.Reason, relation.Evidence, relation.Confidence,
+			relation.JudgmentStatus, relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
+			relation.CreatedAt, relation.UpdatedAt); err != nil {
+			t.Fatalf("seed orphaned relation %q: %v", relation.SyncID, err)
+		}
+	}
+
+	exported, err := source.Export()
+	if err != nil {
+		t.Fatalf("export source: %v", err)
+	}
+	bytes, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	var imported ExportData
+	if err := json.Unmarshal(bytes, &imported); err != nil {
+		t.Fatalf("decode backup: %v", err)
+	}
+	destination := newTestStore(t)
+	if _, err := destination.Import(&imported); err != nil {
+		t.Fatalf("import backup: %v", err)
+	}
+	restored, err := destination.Export()
+	if err != nil {
+		t.Fatalf("export restored backup: %v", err)
+	}
+	if !reflect.DeepEqual(restored.Relations, exported.Relations) {
+		t.Fatalf("restored orphaned relations = %#v, want %#v", restored.Relations, exported.Relations)
+	}
+}
+
+func TestImportRejectsNonOrphanedDanglingAndMissingSupersedingRelations(t *testing.T) {
+	for _, status := range []string{JudgmentStatusPending, JudgmentStatusJudged, "rejected", "orphaned-rejected"} {
+		t.Run(status, func(t *testing.T) {
+			destination := newTestStore(t)
+			project := "backup-project"
+			data := &ExportData{
+				Version: "0.2.0",
+				Sessions: []Session{{ID: "invalid-relation-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
+				Observations: []Observation{{SyncID: "obs-valid-endpoint", SessionID: "invalid-relation-session", Type: "note", Title: "valid", Content: "valid", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+				Relations: []BackupRelation{{SyncID: "rel-invalid-endpoint", SourceID: "obs-valid-endpoint", TargetID: "obs-missing-endpoint", Relation: RelationRelated, JudgmentStatus: status, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+			}
+			if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "relation endpoint") {
+				t.Fatalf("import dangling %s relation error = %v, want missing endpoint error", status, err)
+			}
+			assertImportRelationRollback(t, destination)
+		})
+	}
+
+	destination := newTestStore(t)
+	project := "backup-project"
+	missingSuperseding := "rel-not-in-backup"
+	data := &ExportData{
+		Version: "0.2.0",
+		Sessions: []Session{{ID: "missing-superseding-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
+		Observations: []Observation{
+			{SyncID: "obs-superseding-source", SessionID: "missing-superseding-session", Type: "note", Title: "source", Content: "source", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
+			{SyncID: "obs-superseding-target", SessionID: "missing-superseding-session", Type: "note", Title: "target", Content: "target", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
+		},
+		Relations: []BackupRelation{{SyncID: "rel-missing-superseding", SourceID: "obs-superseding-source", TargetID: "obs-superseding-target", Relation: RelationSupersedes, JudgmentStatus: JudgmentStatusOrphaned, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+	}
+	if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "superseding relation") {
+		t.Fatalf("import missing superseding relation error = %v, want missing superseding relation error", err)
+	}
+	assertImportRelationRollback(t, destination)
+}
+
+func TestImportValidatesMissingSupersedingRelationForExistingRelation(t *testing.T) {
+	destination := newTestStore(t)
+	const sessionID = "existing-relation-session"
+	if err := destination.CreateSession(sessionID, "backup-project", "/tmp/backup"); err != nil {
+		t.Fatalf("create existing session: %v", err)
+	}
+	sourceID, err := destination.AddObservation(AddObservationParams{SessionID: sessionID, Type: "note", Title: "source", Content: "source", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add existing source observation: %v", err)
+	}
+	targetID, err := destination.AddObservation(AddObservationParams{SessionID: sessionID, Type: "note", Title: "target", Content: "target", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add existing target observation: %v", err)
+	}
+	source, err := destination.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get existing source observation: %v", err)
+	}
+	target, err := destination.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get existing target observation: %v", err)
+	}
+	if _, err := destination.SaveRelation(SaveRelationParams{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID}); err != nil {
+		t.Fatalf("seed existing relation: %v", err)
+	}
+
+	project := "backup-project"
+	missingSuperseding := "rel-missing-superseder"
+	data := &ExportData{
+		Version: "0.2.0",
+		Sessions: []Session{{ID: "rolled-back-session", Project: project, Directory: "/tmp/rollback", StartedAt: "2026-01-01T00:00:00Z"}},
+		Observations: []Observation{{SyncID: "obs-rolled-back", SessionID: "rolled-back-session", Type: "note", Title: "rollback", Content: "rollback", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+		Relations: []BackupRelation{{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID, Relation: RelationRelated, JudgmentStatus: JudgmentStatusPending, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+	}
+	if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "superseding relation") {
+		t.Fatalf("import existing relation with missing superseder error = %v, want missing superseding relation error", err)
+	}
+
+	for table, want := range map[string]int{"sessions": 1, "observations": 2, "memory_relations": 1} {
+		var count int
+		if err := destination.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != want {
+			t.Fatalf("%s count = %d, want %d after rollback", table, count, want)
+		}
+	}
+	var supersedingID sql.NullInt64
+	if err := destination.DB().QueryRow(`SELECT superseded_by_relation_id FROM memory_relations WHERE sync_id = ?`, "rel-existing-no-superseder").Scan(&supersedingID); err != nil {
+		t.Fatalf("read existing relation superseder: %v", err)
+	}
+	if supersedingID.Valid {
+		t.Fatalf("existing relation superseder = %d, want no mutation", supersedingID.Int64)
+	}
+}
+
+func assertImportRelationRollback(t *testing.T, s *Store) {
+	t.Helper()
+	for _, table := range []string{"sessions", "observations", "memory_relations"} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("invalid relation import persisted %d %s rows", count, table)
+		}
+	}
+}
+
 func TestImportRejectsUnsupportedExportVersion(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("existing-session", "backup-project", "/tmp/existing"); err != nil {

@@ -218,7 +218,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - Optional `?project=<name>` selects a known project; `?all_projects=true` exports every project
   - Current format `0.2.0` preserves observations (including local pin state), prompts, and complete memory-relation judgment and supersession metadata.
   - `400` for blank, malformed, or conflicting selectors
-- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Every imported relation must reference observations present in the same resulting store.
+- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Relations normally require both endpoint observations in the resulting store. Audit rows whose normalized `judgment_status` is exactly `orphaned` may retain missing source and/or target observations; their IDs and metadata are preserved. All other dangling relations and missing superseding relations reject and roll back the full import.
 
 ### Stats / Diagnostics
 
@@ -1299,7 +1299,7 @@ Separate table captures what the USER asked (not just tool calls). Gives future 
 Share memories across machines, backup, or migrate:
 
 - `engram export` — Versioned JSON backup of sessions, observations, prompts, local pin state, and memory-relation metadata
-- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation
+- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation. Orphaned relation audit rows may retain missing endpoint observations; other dangling relations or missing superseding relations fail the complete transaction.
 
 ### Git Sync (Chunked)
 

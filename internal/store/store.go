@@ -5534,7 +5534,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observations WHERE sync_id = ?)`, endpoint.syncID).Scan(&exists); err != nil {
 				return nil, fmt.Errorf("import relation %s: check %s endpoint: %w", relation.SyncID, endpoint.role, err)
 			}
-			if !exists {
+			if !exists && !isOrphanedBackupRelation(relation.JudgmentStatus) {
 				return nil, fmt.Errorf("import relation %s: relation endpoint %s not found", relation.SyncID, endpoint.role)
 			}
 		}
@@ -5557,7 +5557,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		importedRelations[relation.SyncID] = inserted == 1
 	}
 	for _, relation := range data.Relations {
-		if !importedRelations[relation.SyncID] || relation.SupersededByRelationSyncID == nil {
+		if relation.SupersededByRelationSyncID == nil {
 			continue
 		}
 		var supersedingID int64
@@ -5566,6 +5566,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 				return nil, fmt.Errorf("import relation %s: superseding relation %s not found", relation.SyncID, *relation.SupersededByRelationSyncID)
 			}
 			return nil, fmt.Errorf("import relation %s: lookup superseding relation: %w", relation.SyncID, err)
+		}
+		if !importedRelations[relation.SyncID] {
+			continue
 		}
 		if _, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id = ? WHERE sync_id = ?`, supersedingID, relation.SyncID); err != nil {
 			return nil, fmt.Errorf("import relation %s: set superseding relation: %w", relation.SyncID, err)
@@ -5577,6 +5580,13 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	return result, nil
+}
+
+// isOrphanedBackupRelation permits missing observation endpoints only for audit
+// rows that normalize to the exact orphaned status. Import still writes the
+// original status unchanged so direct backups remain lossless.
+func isOrphanedBackupRelation(status string) bool {
+	return strings.ToLower(strings.TrimSpace(status)) == JudgmentStatusOrphaned
 }
 
 type ImportResult struct {
