@@ -1,6 +1,11 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
+
+const require = createRequire(import.meta.url)
+const childProcess = require("node:child_process")
+const fs = require("node:fs")
 
 const source = readFileSync(new URL("./engram.ts", import.meta.url), "utf8")
 
@@ -107,7 +112,12 @@ async function createRuntime(t, {
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
 	manifestExists = false,
+  identityLookupFails = false,
+  emitSpawnError = false,
+  installBun = true,
   configuredEngramURL,
+  engramBin,
+  engramPort,
   healthOK = true,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
     registrationResponse,
@@ -120,28 +130,74 @@ async function createRuntime(t, {
 	const originalFetch = globalThis.fetch
 	const originalBun = globalThis.Bun
 	const originalEngramURL = process.env.ENGRAM_URL
+  const originalEngramBin = process.env.ENGRAM_BIN
+  const originalEngramPort = process.env.ENGRAM_PORT
+  const originalSpawnSync = childProcess.spawnSync
+  const originalSpawn = childProcess.spawn
+  const originalExistsSync = fs.existsSync
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
+  const healthURLs = []
 	const spawns = []
 	const startupEvents = []
 	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
 	else process.env.ENGRAM_URL = configuredEngramURL
-  globalThis.Bun = {
-    spawnSync(args) {
-      if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
-			if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
-      return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
-    },
-		spawn(args, options) {
-			spawns.push({ args, options })
-			if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
-		},
-		file() { return { async exists() { return manifestExists } } },
+  if (engramBin === undefined) delete process.env.ENGRAM_BIN
+  else process.env.ENGRAM_BIN = engramBin
+  if (engramPort === undefined) delete process.env.ENGRAM_PORT
+  else process.env.ENGRAM_PORT = engramPort
+  if (installBun) {
+    globalThis.Bun = {
+      spawnSync(args) {
+        if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
+        if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
+        return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
+      },
+      spawn(args, options) {
+        spawns.push({ args, options })
+        if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
+      },
+      file() { return { async exists() { return manifestExists } } },
+    }
+  } else {
+    delete globalThis.Bun
   }
+  childProcess.spawnSync = (_command, args) => ({
+    status: args[0] === "instance-id" && !identityLookupFails ? 0 : 1,
+    stdout: args[0] === "instance-id" && !identityLookupFails ? "00000000000000000000000000000000\n" : "",
+  })
+  childProcess.spawn = (command, args, options) => {
+    let errorListener
+    const child = {
+      events: [],
+      on(event, listener) {
+        if (event === "error" && typeof listener === "function") {
+          this.events.push(event)
+          errorListener = listener
+        }
+        return this
+      },
+      unref() {
+        this.events.push("unref")
+        if (emitSpawnError) queueMicrotask(() => {
+          this.events.push("error:emitted")
+          errorListener?.(new Error("simulated spawn failure"))
+        })
+      },
+    }
+    spawns.push({ args: [command, ...args], options, child })
+    if (args[0] === "sync" && args[1] === "--import") startupEvents.push("import:spawn")
+    return child
+  }
+  fs.existsSync = () => manifestExists
+  syncBuiltinESMExports()
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
-		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+		if (path === "/health") {
+      healthURLs.push(String(url))
+      return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+    }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
 		if (path === "/project/current") {
@@ -170,6 +226,14 @@ async function createRuntime(t, {
 		globalThis.Bun = originalBun
 		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
 		else process.env.ENGRAM_URL = originalEngramURL
+    if (originalEngramBin === undefined) delete process.env.ENGRAM_BIN
+    else process.env.ENGRAM_BIN = originalEngramBin
+    if (originalEngramPort === undefined) delete process.env.ENGRAM_PORT
+    else process.env.ENGRAM_PORT = originalEngramPort
+    childProcess.spawnSync = originalSpawnSync
+    childProcess.spawn = originalSpawn
+    fs.existsSync = originalExistsSync
+    syncBuiltinESMExports()
 	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
@@ -198,10 +262,71 @@ async function createRuntime(t, {
     registeredIDs,
     sessionGetIDs,
     requests,
+    healthURLs,
 		spawns,
 		startupEvents,
   }
 }
+
+test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t) => {
+  const runtime = await createRuntime(t, { installBun: false })
+
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+test("adapter treats blank optional Engram environment values as unset at its import boundary", async (t) => {
+  for (const scenario of [
+    { name: "absent", engramBin: undefined, engramPort: undefined, configuredEngramURL: undefined },
+    { name: "empty", engramBin: "", engramPort: "", configuredEngramURL: "" },
+    { name: "whitespace-only", engramBin: " \t", engramPort: " \n", configuredEngramURL: " \t" },
+    { name: "explicit", engramBin: " /custom/engram ", engramPort: "17437", configuredEngramURL: undefined },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, { ...scenario, healthOK: false })
+      const server = runtime.spawns.find(({ args }) => args[1] === "serve")
+
+      assert.equal(server?.args[0], scenario.engramBin?.trim() ? scenario.engramBin : "engram")
+      assert.equal(new URL(runtime.healthURLs[0]).port, scenario.engramPort?.trim() ? scenario.engramPort : "7437")
+    })
+  }
+})
+
+test("an explicit OpenCode ENGRAM_URL keeps precedence and its exact value", async (t) => {
+  const configuredEngramURL = " http://127.0.0.1:17437"
+  const runtime = await createRuntime(t, {
+    configuredEngramURL,
+    engramBin: "custom-engram",
+    engramPort: "18437",
+    healthOK: false,
+  })
+
+  assert.equal(runtime.spawns.some(({ args }) => args[1] === "serve"), false)
+  assert.equal(runtime.healthURLs[0], `${configuredEngramURL}/health`)
+})
+
+test("adapter returns hooks when local identity lookup fails", async (t) => {
+  const runtime = await createRuntime(t, { installBun: false, identityLookupFails: true })
+
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+test("manifest import ignores an asynchronous child launch error", async (t) => {
+  const runtime = await createRuntime(t, { manifestExists: true, emitSpawnError: true })
+  const imported = runtime.spawns.find(({ args }) => args[1] === "sync" && args[2] === "--import")
+
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.deepEqual(imported?.child.events, ["error", "unref", "error:emitted"])
+})
+
+test("server startup ignores an asynchronous child launch error", async (t) => {
+  const runtime = await createRuntime(t, { healthOK: false, emitSpawnError: true })
+  const server = runtime.spawns.find(({ args }) => args[1] === "serve")
+
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.deepEqual(server?.child.events, ["error", "unref", "error:emitted"])
+})
 
 test("save nudge fails closed for malformed and non-array observation responses", async (t) => {
   for (const scenario of [
@@ -412,11 +537,44 @@ test("registration enters the cache only after a successful acknowledgement", as
   await runtime.event("session.created", session("runtime"))
   assert.deepEqual(runtime.registeredIDs, ["runtime"])
 
-  for (const expectedRegistrations of [2, 2]) {
+  for (const expectedRegistrations of [2, 3]) {
     const output = toolOutput(undefined)
     await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
     assert.equal(output.args.session_id, "runtime")
     assert.equal(runtime.registeredIDs.length, expectedRegistrations)
+  }
+})
+
+test("OpenCode activity renews a cached root session once per activity wave", async (t) => {
+  const renewal = deferredResponse()
+  const runtime = await createRuntime(t, {
+    registrationResponse: (attempt) => attempt === 2 ? renewal.handler() : httpResponse(),
+  })
+  await runtime.event("session.created", session("runtime"))
+  assert.deepEqual(runtime.registeredIDs, ["runtime"], "session.created remains initial registration")
+
+  const message = { message: {}, parts: [{ type: "text", text: "A sufficiently long root prompt" }] }
+  const first = runtime.chat({ sessionID: "runtime" }, message)
+  const started = await Promise.race([
+    renewal.started.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 25)),
+  ])
+  try {
+    assert.equal(started, true, "cached runtime activity must start a renewal request")
+    const second = runtime.chat({ sessionID: "runtime" }, message)
+    await Promise.resolve()
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime"], "concurrent activity shares the renewal flight")
+
+    renewal.resolve(httpResponse())
+    await Promise.all([first, second])
+    await runtime.after({ tool: "Task", sessionID: "runtime" }, "A".repeat(60))
+
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime", "runtime"], "later non-Engram tool activity renews before use")
+    assert.equal(runtime.requests.filter(({ path }) => path === "/prompts").length, 2)
+    assert.equal(runtime.requests.filter(({ path }) => path === "/observations/passive").length, 1)
+  } finally {
+    renewal.resolve(httpResponse())
+    await first
   }
 })
 
@@ -443,7 +601,7 @@ test("qualified Engram write IDs inject the authoritative root session", async (
   }
 
   assert.deepEqual(runtime.sessionGetIDs, ["root", "leaf"])
-  assert.deepEqual(runtime.registeredIDs, ["root"], "a child must reuse its authoritative root")
+  assert.deepEqual(runtime.registeredIDs, ["root", "root", "root", "root"], "a child must renew the authoritative root, never register itself")
 })
 
 test("subagent sessions resolve to the authoritative parent and never register themselves", () => {
@@ -582,13 +740,13 @@ test("session.updated reparents a known leaf while deletion tombstones dominate 
   const afterUpdate = toolOutput(undefined)
   await runtime.before({ tool: "mem_save", sessionID: "leaf" }, afterUpdate)
   assert.equal(afterUpdate.args.session_id, "new-root")
-  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root"])
+  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root", "old-root", "new-root"])
 
   await runtime.event("session.deleted", { id: "new-root" })
   const deleted = toolOutput()
   await assertNoForward(runtime.before({ tool: "mem_save", sessionID: "leaf" }, deleted), deleted)
   assert.deepEqual(runtime.sessionGetIDs, [])
-  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root"], "deleted descendants must never revive")
+  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root", "old-root", "new-root"], "deleted descendants must never revive")
 })
 
 test("deleting a leaf during its SDK lookup aborts without mutation or registration", async (t) => {
@@ -904,7 +1062,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   const subagent = toolOutput("sub")
   await runtime.before({ tool: "mem_session_summary", sessionID: "sub" }, subagent)
   assert.equal(subagent.args.session_id, "runtime")
-  assert.equal(runtime.registeredIDs.length, 2, "child must reuse the confirmed parent, not register itself")
+  assert.equal(runtime.registeredIDs.length, 3, "child must renew the confirmed parent, not register itself")
 
   const unresolved = toolOutput()
   let resolutionErrorMessage = ""
@@ -915,7 +1073,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   })
   assert.notEqual(resolutionErrorMessage, registrationErrorMessage)
   assert.equal(unresolved.args.session_id, MODEL_SESSION_ID, "failed resolution must not forward MCP arguments")
-  assert.equal(runtime.registeredIDs.length, 2)
+  assert.equal(runtime.registeredIDs.length, 3)
 
   await runtime.event("session.created", { id: "orphan", parentID: "" })
   const orphan = toolOutput(undefined)
@@ -923,7 +1081,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   await runtime.event("session.updated", session("orphan", "runtime"))
   await runtime.before({ tool: "mem_capture_passive", sessionID: "orphan" }, orphan)
   assert.equal(orphan.args.session_id, "runtime", "a later authoritative mapping must remain retryable")
-  assert.equal(runtime.registeredIDs.length, 2)
+  assert.equal(runtime.registeredIDs.length, 4)
 })
 
 test("a title-only session.created event registers an authoritative root", async (t) => {
@@ -933,7 +1091,7 @@ test("a title-only session.created event registers an authoritative root", async
   const output = toolOutput(undefined)
   await runtime.before({ tool: "mem_capture_passive", sessionID: "legitimate-root" }, output)
   assert.equal(output.args.session_id, "legitimate-root")
-  assert.deepEqual(runtime.registeredIDs, ["legitimate-root"])
+  assert.deepEqual(runtime.registeredIDs, ["legitimate-root", "legitimate-root"])
   assert.deepEqual(runtime.sessionGetIDs, [], "event-cached roots must not query the SDK")
 })
 
@@ -1003,7 +1161,7 @@ test("deleting a parent invalidates descendants and prevents later writes or re-
     await assert.rejects(runtime.before({ tool: "mem_session_summary", sessionID }, toolOutput(undefined)), RESOLUTION_ERROR)
   }
 
-  assert.deepEqual(runtime.registeredIDs, ["parent"], "invalid descendants must never re-register as top-level sessions")
+  assert.deepEqual(runtime.registeredIDs, ["parent", "parent"], "invalid descendants must never re-register as top-level sessions")
 })
 
 test("plugin disposal closes registered roots, not children, and waits for session ends", async (t) => {

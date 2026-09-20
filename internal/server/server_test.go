@@ -1268,12 +1268,45 @@ func TestObservationPinRoutesRemainOpenWithConfiguredToken(t *testing.T) {
 		SessionID: "s-pin-http",
 		Type:      "decision",
 		Title:     "Keep HTTP pinning local",
-		Content:   "Pin state must not enter sync or export payloads.",
+		Content:   "Pin state must not enter sync payloads.",
 		Project:   "engram",
 		Scope:     "project",
 	})
 	if err != nil {
 		t.Fatalf("add observation: %v", err)
+	}
+	observation, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation identity: %v", err)
+	}
+	assertBackupPinned := func(stage string, wantPinned bool) {
+		t.Helper()
+		exported, err := st.ExportProject("engram")
+		if err != nil {
+			t.Fatalf("export %s: %v", stage, err)
+		}
+		encoded, err := json.Marshal(exported)
+		if err != nil {
+			t.Fatalf("marshal export %s: %v", stage, err)
+		}
+		var backup struct {
+			Observations []struct {
+				SyncID string `json:"sync_id"`
+				Pinned bool   `json:"pinned"`
+			} `json:"observations"`
+		}
+		if err := json.Unmarshal(encoded, &backup); err != nil {
+			t.Fatalf("decode export %s: %v", stage, err)
+		}
+		for _, exportedObservation := range backup.Observations {
+			if exportedObservation.SyncID == observation.SyncID {
+				if exportedObservation.Pinned != wantPinned {
+					t.Fatalf("backup pinned state %s for %q = %t, want %t", stage, observation.SyncID, exportedObservation.Pinned, wantPinned)
+				}
+				return
+			}
+		}
+		t.Fatalf("backup %s did not include observation %q", stage, observation.SyncID)
 	}
 
 	var updatedAtBefore string
@@ -1284,15 +1317,7 @@ func TestObservationPinRoutesRemainOpenWithConfiguredToken(t *testing.T) {
 	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
 		t.Fatalf("count sync mutations before pin: %v", err)
 	}
-	exportedBefore, err := st.ExportProject("engram")
-	if err != nil {
-		t.Fatalf("export before pin: %v", err)
-	}
-	exportedBefore.ExportedAt = ""
-	exportedBeforeJSON, err := json.Marshal(exportedBefore)
-	if err != nil {
-		t.Fatalf("marshal export before pin: %v", err)
-	}
+	assertBackupPinned("before pin", false)
 
 	var writes atomic.Int32
 	srv := New(st, 0)
@@ -1335,18 +1360,7 @@ func TestObservationPinRoutesRemainOpenWithConfiguredToken(t *testing.T) {
 	if updatedAtAfterPin != updatedAtBefore {
 		t.Fatalf("pin changed updated_at: before=%q after=%q", updatedAtBefore, updatedAtAfterPin)
 	}
-	exportedAfterPin, err := st.ExportProject("engram")
-	if err != nil {
-		t.Fatalf("export after pin: %v", err)
-	}
-	exportedAfterPin.ExportedAt = ""
-	exportedAfterPinJSON, err := json.Marshal(exportedAfterPin)
-	if err != nil {
-		t.Fatalf("marshal export after pin: %v", err)
-	}
-	if !bytes.Equal(exportedAfterPinJSON, exportedBeforeJSON) {
-		t.Fatalf("pin changed export payload:\nbefore: %s\nafter:  %s", exportedBeforeJSON, exportedAfterPinJSON)
-	}
+	assertBackupPinned("after pin", true)
 
 	setPin(http.MethodDelete, false)
 	setPin(http.MethodDelete, false)
@@ -1357,6 +1371,7 @@ func TestObservationPinRoutesRemainOpenWithConfiguredToken(t *testing.T) {
 	if updatedAtAfterUnpin != updatedAtBefore {
 		t.Fatalf("unpin changed updated_at: before=%q after=%q", updatedAtBefore, updatedAtAfterUnpin)
 	}
+	assertBackupPinned("after unpin", false)
 	if writes.Load() != 0 {
 		t.Fatalf("local-only pin changes triggered %d sync notifications", writes.Load())
 	}
@@ -4025,5 +4040,124 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing observation, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListProjectsEndpoint(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("s-1", "alpha", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{SessionID: "s-1", Type: "note", Title: "alpha note", Content: "content", Project: "alpha"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/projects", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /projects = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Projects []store.ProjectStats `json:"projects"`
+		Count    int                  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /projects response: %v", err)
+	}
+	if body.Count != 1 || len(body.Projects) != 1 {
+		t.Fatalf("expected 1 project, got count=%d projects=%d", body.Count, len(body.Projects))
+	}
+	if body.Projects[0].Name != "alpha" {
+		t.Fatalf("expected project alpha, got %q", body.Projects[0].Name)
+	}
+	if body.Projects[0].ObservationCount != 1 {
+		t.Fatalf("expected 1 observation for alpha, got %d", body.Projects[0].ObservationCount)
+	}
+}
+
+func TestListProjectsEndpointEmptyStore(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/projects", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /projects on empty store = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Projects []store.ProjectStats `json:"projects"`
+		Count    int                  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /projects response: %v", err)
+	}
+	if body.Count != 0 || body.Projects == nil || len(body.Projects) != 0 {
+		t.Fatalf("expected empty successful listing, got count=%d projects=%v", body.Count, body.Projects)
+	}
+}
+
+func TestHandleCreateSessionRenewsRuntimeLeaseAndRejectsEndedSession(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	body := `{"id":"runtime-http","project":"runtime-project","directory":"/runtime","ownership_mode":"project_owned"}`
+
+	post := func() *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		return rec
+	}
+
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("initial POST /sessions = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	before, err := st.GetSession("runtime-http")
+	if err != nil {
+		t.Fatalf("get initial runtime session: %v", err)
+	}
+	if _, err := st.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "2001-02-03 04:05:06", "runtime-http"); err != nil {
+		t.Fatalf("seed expired runtime lease: %v", err)
+	}
+
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("renewing POST /sessions = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.GetSession("runtime-http")
+	if err != nil {
+		t.Fatalf("get renewed runtime session: %v", err)
+	}
+	if after.StartedAt != before.StartedAt || after.Project != "runtime-project" || after.OwnershipMode != store.SessionOwnershipProjectOwned || after.EndedAt != nil {
+		t.Fatalf("renewed HTTP runtime session = %#v, want unchanged session identity", after)
+	}
+	var future int
+	if err := st.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-http").Scan(&future); err != nil {
+		t.Fatalf("check renewed runtime lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatal("renewing POST /sessions did not persist a future runtime lease")
+	}
+
+	if err := st.EndSession("runtime-http", "complete"); err != nil {
+		t.Fatalf("end runtime session: %v", err)
+	}
+	rec := post()
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST /sessions for ended runtime session = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Code      string `json:"code"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode ended-session response: %v", err)
+	}
+	if response.Code != "session_already_ended" || response.SessionID != "runtime-http" {
+		t.Fatalf("ended-session response = %#v", response)
 	}
 }

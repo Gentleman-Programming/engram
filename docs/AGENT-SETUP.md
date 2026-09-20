@@ -36,6 +36,8 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > per-agent sections below describe each integration's authoritative owner and
 > manual equivalent.
 
+> The OpenCode adapter treats optional `ENGRAM_BIN`, `ENGRAM_PORT`, and `ENGRAM_URL` values containing only whitespace as unset and uses their normal defaults.
+
 ### Protocol verbosity
 
 `engram setup claude-code --protocol=slim` requests the slim session-start
@@ -56,14 +58,14 @@ Install Engram's Pi package, the MCP adapter, and Pi MCP config:
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.12` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
+`engram setup pi` runs `pi install npm:gentle-engram@0.1.13` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
 
 When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
 
 Manual equivalent:
 
 ```bash
-pi install npm:gentle-engram@0.1.12
+pi install npm:gentle-engram@0.1.13
 pi install npm:pi-mcp-adapter
 pi-engram init
 ```
@@ -120,7 +122,7 @@ For monorepos, prefer subproject configs such as `backend/.engram/config.json` a
 
 **Recommended first call:** `mem_current_project` — confirms which project Engram detected before you start writing. Returns `project_source` (how it was detected) and `available_projects` (if cwd is ambiguous).
 
-**Cross-project recall:** when the detected project is empty or the wrong one, call `mem_list_projects` to enumerate every known project with counts, then scope `mem_search`/`mem_context` to the project you need. `mem_list_projects` is included in the `agent` profile, and `engram mcp` registers all tools by default — `--tools=agent` is not required.
+**Cross-project recall:** when the detected project is empty or the wrong one, call `mem_list_projects` to enumerate every known project with counts, then scope `mem_search`/`mem_context` to the project you need. `mem_list_projects` is included in the `agent` profile, and `engram mcp` registers all tools by default — `--tools=agent` is not required. The Pi-native `gentle-engram` plugin exposes the same listing over HTTP (`GET /projects`) and also offers `mem_pin`/`mem_unpin` for local observation pin state.
 
 If a write tool returns `ambiguous_project`, the agent must not guess. This happens when the MCP server is started from a parent directory that contains multiple repositories, for example:
 

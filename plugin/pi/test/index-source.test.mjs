@@ -20,6 +20,15 @@ function extractFunctionBody(name, marker) {
   throw new Error(`${name} body not found`);
 }
 
+function buildOptionalEnvironmentValueForTest() {
+  const body = extractFunctionBody("optionalEnvironmentValue", "{\n  return");
+  return new Function(`
+    return function optionalEnvironmentValue(value) {
+      ${body}
+    };
+  `)();
+}
+
 function flush(times = 2) {
   return times <= 0
     ? Promise.resolve()
@@ -136,12 +145,13 @@ function buildEngramFetchForTest({
   );
 }
 
-function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAttempts = 6 }) {
+function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAttempts = 6, clearStartupRetryWindow = () => {} }) {
   const body = extractFunctionBody("scheduleEngramSelfHeal", "{\n  // Track every session");
   const forgetBody = extractFunctionBody("forgetSelfHealContext", "{\n  engramSelfHealContexts.delete");
   const factory = new Function(
     "waitUnref",
     "isEngramRunning",
+    "clearStartupRetryWindow",
     "ENGRAM_SELF_HEAL_INTERVAL_MS",
     "ENGRAM_SELF_HEAL_MAX_ATTEMPTS",
     `
@@ -163,7 +173,7 @@ function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAtt
     };
   `,
   );
-  return factory(waitUnref, isEngramRunning, 1, maxAttempts);
+  return factory(waitUnref, isEngramRunning, clearStartupRetryWindow, 1, maxAttempts);
 }
 
 function buildInitializeEngramServerForTest({
@@ -173,8 +183,11 @@ function buildInitializeEngramServerForTest({
   waitForEngramReadiness,
   timeoutMs = 10000,
   instanceID = "00000000000000000000000000000000",
+  engramUrl = "http://127.0.0.1:7437",
+  legacyMessage = "legacy server message",
 }) {
   const body = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
+  class DeterministicStartupError extends Error {}
   const factory = new Function(
     "CONFIGURED_ENGRAM_URL",
     "probeEngramHealth",
@@ -182,12 +195,16 @@ function buildInitializeEngramServerForTest({
     "waitForEngramReadiness",
     "ENGRAM_STARTUP_TIMEOUT_MS",
     "instanceID",
+    "ENGRAM_URL",
+    "legacyEngramServerMessage",
+    "DeterministicStartupError",
     `
     let localEngramInstanceID = "";
     const localInstanceID = () => instanceID;
     async function initializeEngramServer() {
       ${body}
     }
+    initializeEngramServer.deterministicStartupError = DeterministicStartupError;
     return initializeEngramServer;
     `,
   );
@@ -198,11 +215,56 @@ function buildInitializeEngramServerForTest({
     waitForEngramReadiness,
     timeoutMs,
     instanceID,
+    engramUrl,
+    () => legacyMessage,
+    DeterministicStartupError,
   );
 }
 
+function buildLocalInstanceIDForTest({ spawnSync, DeterministicStartupError = class extends Error {}, instanceIDFailureMessage = buildInstanceIDFailureMessageForTest() }) {
+  const body = extractFunctionBody("localInstanceID", "{\n  const result");
+  const factory = new Function("spawnSync", "ENGRAM_BIN", "ENGRAM_STARTUP_TIMEOUT_MS", "instanceIDFailureMessage", "DeterministicStartupError", `
+    return function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS) {
+      ${body}
+    };
+  `);
+  return factory(spawnSync, "engram", 10000, instanceIDFailureMessage, DeterministicStartupError);
+}
+
+function buildInstanceIDFailureMessageForTest() {
+  const body = extractFunctionBody("instanceIDFailureMessage", "{\n  const code")
+    .replace("(result.error as NodeJS.ErrnoException | undefined)?.code", "result.error?.code");
+  const factory = new Function("ENGRAM_BIN", `
+    return function instanceIDFailureMessage(result) {
+      ${body}
+    };
+  `);
+  return factory("engram");
+}
+
+function buildLegacyEngramServerMessageForTest({ engramUrl = "http://127.0.0.1:7437", serverVersion = "unknown", localEngramVersion = () => "unknown" }) {
+  const body = extractFunctionBody("legacyEngramServerMessage", "{\n  return");
+  const factory = new Function("ENGRAM_URL", "engramServerVersion", "localEngramVersion", `
+    return function legacyEngramServerMessage() {
+      ${body}
+    };
+  `);
+  return factory(engramUrl, serverVersion, localEngramVersion);
+}
+
+function buildLocalEngramVersionForTest({ spawnSync }) {
+  const body = extractFunctionBody("localEngramVersion", "{\n  const result");
+  const factory = new Function("spawnSync", "ENGRAM_BIN", "ENGRAM_VERSION_PROBE_TIMEOUT_MS", `
+    return function localEngramVersion(timeoutMs = ENGRAM_VERSION_PROBE_TIMEOUT_MS) {
+      ${body}
+    };
+  `);
+  return factory(spawnSync, "engram", 2000);
+}
+
 function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
-  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { instance_id?: unknown };", "const health = await res.json();");
+  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { version?: unknown; instance_id?: unknown };", "const health = await res.json();");
+  const preIdentityVersionBody = extractFunctionBody("isPreIdentityEngramVersion", "{\n  const match");
   const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
     .replace("value as Record<string, unknown>", "value");
   const refusalBody = extractFunctionBody("isConnectionRefusedError", "{\n  return");
@@ -212,15 +274,20 @@ function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
     "ENGRAM_URL",
     "AbortSignal",
     `
+    let engramServerVersion = "unknown";
     function hasConnectionRefusedCode(value, depth = 0) {
       ${refusedBody}
     }
     function isConnectionRefusedError(error) {
       ${refusalBody}
     }
-    async function probeEngramHealth() {
+    function isPreIdentityEngramVersion(version) {
+      ${preIdentityVersionBody}
+    }
+    async function probeEngramHealth(expectedID = "") {
       ${body}
     }
+    probeEngramHealth.serverVersion = () => engramServerVersion;
     return probeEngramHealth;
     `,
   );
@@ -229,7 +296,7 @@ function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
 
 // The retry backoff is clock-driven, so the test owns the clock: nothing here sleeps, and a
 // backoff window is crossed by moving `clock.now` instead of by waiting for wall time.
-function buildSharedInitializationForTest({ retryBaseMs = 1000, retryMaxMs = 60000 } = {}) {
+function buildSharedInitializationForTest({ retryBaseMs = 1000, retryMaxMs = 60000, deterministicRetryMs = 5000 } = {}) {
   const clock = { now: 1_000_000 };
   const body = extractFunctionBody("sharedInitialization", "{\n  if (initialization)")
     .replace("(error: unknown) =>", "(error) =>");
@@ -238,7 +305,9 @@ function buildSharedInitializationForTest({ retryBaseMs = 1000, retryMaxMs = 600
     "Date",
     "ENGRAM_STARTUP_RETRY_BASE_MS",
     "ENGRAM_STARTUP_RETRY_MAX_MS",
+    "ENGRAM_DETERMINISTIC_RETRY_MS",
     `
+    class DeterministicStartupError extends Error {}
     let initialization;
     let startupFailures = 0;
     let startupRetryAt = 0;
@@ -250,11 +319,11 @@ function buildSharedInitializationForTest({ retryBaseMs = 1000, retryMaxMs = 600
     function sharedInitialization(start) {
       ${body}
     }
-    return sharedInitialization;
+    return { sharedInitialization, DeterministicStartupError };
     `,
   );
-  const sharedInitialization = factory({ now: () => clock.now }, retryBaseMs, retryMaxMs);
-  return { sharedInitialization, clock };
+  const { sharedInitialization, DeterministicStartupError } = factory({ now: () => clock.now }, retryBaseMs, retryMaxMs, deterministicRetryMs);
+  return { sharedInitialization, clock, DeterministicStartupError };
 }
 
 function buildRecoveryForTest({ configuredUrl = false, initializeEngramServer }) {
@@ -354,7 +423,7 @@ function buildEnsureSessionForTest(engramFetch) {
     .replace("const body: SessionBody", "const body")
     .replace("let acknowledgement: unknown;", "let acknowledgement;");
   const factory = new Function("knownSessions", "registeredSessionProjects", "sessionRegistrationsInFlight", "sessionRegistrationProjects", "sessionProjectConflict", "sessionProjectConflictFromResponse", "engramFetch", "project", "directory", `
-    return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch) {
+    return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch, renew = false) {
       ${body}
     };
   `);
@@ -411,9 +480,29 @@ function sessionCtx(id, sink) {
   };
 }
 
+test("optional Engram environment values treat blank strings as unset without rewriting explicit values", () => {
+  const optionalEnvironmentValue = buildOptionalEnvironmentValueForTest();
+
+  for (const value of [undefined, "", " \t\n "]) {
+    assert.equal(optionalEnvironmentValue(value), undefined);
+    assert.equal(optionalEnvironmentValue(value) ?? "engram", "engram", "blank ENGRAM_BIN uses the default executable");
+    assert.equal(Number.parseInt(optionalEnvironmentValue(value) ?? "7437", 10), 7437, "blank ENGRAM_PORT uses the default port");
+    assert.equal(optionalEnvironmentValue(value), undefined, "blank ENGRAM_URL keeps its existing unset behavior");
+  }
+
+  assert.equal(optionalEnvironmentValue(" /custom/engram "), " /custom/engram ", "an explicit ENGRAM_BIN is preserved exactly");
+  assert.equal(optionalEnvironmentValue("17437"), "17437", "an explicit ENGRAM_PORT remains authoritative");
+  assert.equal(Number.parseInt(optionalEnvironmentValue("17437") ?? "7437", 10), 17437);
+  assert.equal(optionalEnvironmentValue(" http://127.0.0.1:17437"), " http://127.0.0.1:17437", "an explicit ENGRAM_URL is preserved exactly");
+
+  assert.match(source, /const ENGRAM_PORT = Number\.parseInt\(optionalEnvironmentValue\(process\.env\.ENGRAM_PORT\) \?\? "7437", 10\)/);
+  assert.match(source, /const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue\(process\.env\.ENGRAM_URL\);/);
+  assert.match(source, /const ENGRAM_BIN = optionalEnvironmentValue\(process\.env\.ENGRAM_BIN\) \?\? "engram"/);
+});
+
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch, true\)[\s\S]*project: activeProject/);
 });
 
 test("mem_save_prompt returns a prompt-scoped identity", () => {
@@ -529,20 +618,145 @@ test("an already-ready health endpoint neither spawns nor waits", async () => {
 });
 
 test("instance-id command is bounded by the startup deadline", () => {
-  const body = extractFunctionBody("localInstanceID", "{\n  const result");
   let options;
-  const bounded = new Function("spawnSync", "ENGRAM_BIN", "ENGRAM_STARTUP_TIMEOUT_MS", `
-    return function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS) {
-      ${body}
-    };
-  `)((_command, _args, received) => {
-    options = received;
-    return { status: 0, stdout: "00000000000000000000000000000000\n" };
-  }, "engram", 10000);
+  const bounded = buildLocalInstanceIDForTest({
+    spawnSync: (_command, _args, received) => {
+      options = received;
+      return { status: 0, stdout: "00000000000000000000000000000000\n" };
+    },
+  });
 
   assert.equal(bounded(123), "00000000000000000000000000000000");
   assert.equal(options.timeout, 123);
   assert.match(source, /localInstanceID\(Math\.max\(1, deadline - Date\.now\(\)\)\)/);
+});
+
+test("instance-id resolution failures are deterministic startup failures", () => {
+  class DeterministicStartupError extends Error {}
+  const localInstanceID = buildLocalInstanceIDForTest({
+    spawnSync: () => ({ status: 1, stdout: "", stderr: "Error: unknown command \"instance-id\" for \"engram\"" }),
+    DeterministicStartupError,
+  });
+
+  let failure;
+  try {
+    localInstanceID();
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure instanceof DeterministicStartupError, "identity-resolution failures must be deterministic startup failures");
+  assert.match(failure.message, /predates v2\.0\.0-rc\.11/);
+});
+
+test("instance-id resolution failure wording distinguishes an old binary from a missing one", () => {
+  const instanceIDFailureMessage = buildInstanceIDFailureMessageForTest();
+
+  assert.equal(
+    instanceIDFailureMessage({ status: 1, stdout: "", stderr: "Error: unknown command \"instance-id\" for \"engram\"" }),
+    `The Engram binary "engram" does not support "instance-id" and predates v2.0.0-rc.11. Upgrade the binary, or point ENGRAM_BIN at the current one.`,
+  );
+  assert.equal(
+    instanceIDFailureMessage({ status: null, stdout: "", error: Object.assign(new Error("spawn engram ENOENT"), { code: "ENOENT" }) }),
+    `The Engram binary "engram" could not be found. Install Engram, or point ENGRAM_BIN at the current binary.`,
+  );
+
+  const etimedout = { status: null, stdout: "", stderr: "", signal: "SIGTERM", error: Object.assign(new Error("spawn engram ETIMEDOUT"), { code: "ETIMEDOUT" }) };
+  assert.match(
+    instanceIDFailureMessage(etimedout),
+    /did not answer "instance-id" within the startup timeout/,
+  );
+  assert.doesNotMatch(instanceIDFailureMessage(etimedout), /predates v2\.0\.0-rc\.11/);
+
+  const eacces = { status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn engram EACCES"), { code: "EACCES" }) };
+  assert.match(
+    instanceIDFailureMessage(eacces),
+    /could not be started \(spawn error EACCES\)/,
+  );
+  assert.doesNotMatch(instanceIDFailureMessage(eacces), /predates v2\.0\.0-rc\.11/);
+
+  const locked = { status: 2, stdout: "", stderr: "Error: database is locked\n" };
+  assert.match(
+    instanceIDFailureMessage(locked),
+    /failed to resolve its instance id \(exit 2\)/,
+  );
+  assert.doesNotMatch(instanceIDFailureMessage(locked), /predates v2\.0\.0-rc\.11/);
+});
+
+test("the legacy guidance message interpolates both versions with the approved wording", () => {
+  const legacyEngramServerMessage = buildLegacyEngramServerMessageForTest({
+    engramUrl: "http://127.0.0.1:7437",
+    serverVersion: "1.20.0",
+    localEngramVersion: () => "1.20.0",
+  });
+
+  assert.equal(
+    legacyEngramServerMessage(),
+    "Engram server at http://127.0.0.1:7437 predates instance identity (server 1.20.0, CLI 1.20.0). An older Engram left running by the upgrade is the likely cause: stop it and start the current binary. Nothing is terminated automatically and memory retries on its own. If nothing was upgraded recently, treat this port as occupied by an unrelated process.",
+  );
+});
+
+test("the legacy guidance message degrades unreportable versions to unknown", () => {
+  const legacyEngramServerMessage = buildLegacyEngramServerMessageForTest({
+    engramUrl: "http://127.0.0.1:7437",
+    serverVersion: "unknown",
+    localEngramVersion: () => "unknown",
+  });
+
+  assert.equal(
+    legacyEngramServerMessage(),
+    "Engram server at http://127.0.0.1:7437 predates instance identity (server unknown, CLI unknown). An older Engram left running by the upgrade is the likely cause: stop it and start the current binary. Nothing is terminated automatically and memory retries on its own. If nothing was upgraded recently, treat this port as occupied by an unrelated process.",
+  );
+});
+
+test("the CLI version probe is bounded and degrades to unknown instead of failing", () => {
+  const results = [
+    { status: 0, stdout: "2.0.0-rc.11\n" },
+    { status: 1, stdout: "" },
+    { status: 0, stdout: "   \n" },
+  ];
+  const optionsSeen = [];
+  const localEngramVersion = buildLocalEngramVersionForTest({
+    spawnSync: (_command, _args, options) => {
+      optionsSeen.push(options.timeout);
+      return results[optionsSeen.length - 1];
+    },
+  });
+
+  assert.equal(localEngramVersion(), "2.0.0-rc.11");
+  assert.equal(localEngramVersion(), "unknown", "a non-zero version probe degrades to unknown");
+  assert.equal(localEngramVersion(), "unknown", "a blank version output degrades to unknown");
+  assert.deepEqual(optionsSeen, [2000, 2000, 2000], "the version probe stays on a short fixed timeout");
+});
+
+test("a legacy server fails closed without spawning or waiting", async () => {
+  let spawns = 0;
+  let readinessWaits = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "legacy",
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+    legacyMessage: "legacy guidance message",
+  });
+
+  await assert.rejects(initializeEngramServer(), /legacy guidance message/);
+  assert.equal(spawns, 0, "a legacy server is never replaced by a spawn");
+  assert.equal(readinessWaits, 0, "a legacy server is never waited on");
+});
+
+test("a foreign server keeps the exact ownership mismatch message and fails closed", async () => {
+  let spawns = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "foreign",
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+  });
+
+  const failure = await initializeEngramServer().then(
+    () => null,
+    (error) => error,
+  );
+  assert.ok(failure instanceof initializeEngramServer.deterministicStartupError, "ownership mismatch is a deterministic failure");
+  assert.equal(failure?.message, "Engram server ownership mismatch at http://127.0.0.1:7437");
+  assert.equal(spawns, 0, "a foreign server is never replaced by a spawn");
 });
 
 test("an inconclusive probe falls back to an already-starting server when our child loses the port", async () => {
@@ -648,6 +862,49 @@ test("timeout-shaped health errors remain indeterminate", async () => {
     });
     assert.equal(await probeEngramHealth(), "indeterminate");
   }
+});
+
+test("the identity probe classifies matching, foreign, legacy, and identity-missing servers", async () => {
+  const id = "00000000000000000000000000000000";
+  const cases = [
+    { body: { status: "ok", version: "2.0.0", instance_id: id }, expectedID: id, expected: "ready" },
+    { body: { status: "ok", version: "2.0.0", instance_id: "ffffffffffffffffffffffffffffffff" }, expectedID: id, expected: "foreign" },
+    { body: { status: "ok", service: "engram", version: "1.20.0" }, expectedID: id, expected: "legacy" },
+    { body: { status: "ok", service: "engram", version: "2.0.0-rc.10" }, expectedID: id, expected: "legacy" },
+    { body: { status: "ok", version: "2.0.0-rc.11" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", version: "2.0.0" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", version: "later" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", instance_id: "" }, expectedID: id, expected: "identity_missing" },
+    { body: { status: "ok", instance_id: id }, expectedID: "", expected: "ready" },
+    { body: { status: "ok" }, expectedID: "", expected: "ready" },
+  ];
+  for (const { body, expectedID, expected } of cases) {
+    const probeEngramHealth = buildProbeEngramHealthForTest({
+      fetch: async () => ({ ok: true, async json() { return body; } }),
+      isTimeoutError: () => false,
+    });
+    assert.equal(await probeEngramHealth(expectedID), expected, `instance_id=${JSON.stringify(body.instance_id)} expectedID="${expectedID}"`);
+  }
+});
+
+test("the identity probe records the server version for the legacy guidance message", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: async () => ({ ok: true, async json() { return { status: "ok", version: "1.20.0" }; } }),
+    isTimeoutError: () => false,
+  });
+
+  await probeEngramHealth("00000000000000000000000000000000");
+  assert.equal(probeEngramHealth.serverVersion(), "1.20.0");
+});
+
+test("a /health body without a usable version degrades the recorded server version to unknown", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: async () => ({ ok: true, async json() { return { status: "ok" }; } }),
+    isTimeoutError: () => false,
+  });
+
+  await probeEngramHealth("00000000000000000000000000000000");
+  assert.equal(probeEngramHealth.serverVersion(), "unknown");
 });
 
 test("a definitive refusal spawns once and awaits spawned-server readiness", async () => {
@@ -975,6 +1232,60 @@ test("the startup backoff grows with consecutive failures and stays capped", asy
   assert.equal(await attemptAt(1), true);
   assert.equal(await attemptAt(3999), false, "the window is capped at 4000ms, it does not keep doubling");
   assert.equal(await attemptAt(1), true);
+});
+
+test("a deterministic startup failure rechecks on a fixed 5s cadence that never grows", async () => {
+  const { sharedInitialization, clock, DeterministicStartupError } = buildSharedInitializationForTest();
+  let starts = 0;
+  const start = async () => {
+    starts += 1;
+    throw new DeterministicStartupError("Engram server ownership mismatch at http://127.0.0.1:7437");
+  };
+
+  await assert.rejects(sharedInitialization(start));
+  assert.equal(starts, 1);
+
+  clock.now += 4999;
+  await assert.rejects(sharedInitialization(start), /ownership mismatch/);
+  assert.equal(starts, 1, "inside the fixed window the failure is replayed, not re-run");
+
+  clock.now += 1;
+  await assert.rejects(sharedInitialization(start));
+  assert.equal(starts, 2, "the fixed window opens at exactly 5000ms");
+
+  clock.now += 5000;
+  await assert.rejects(sharedInitialization(start));
+  assert.equal(starts, 3, "consecutive deterministic failures never grow the window");
+});
+
+test("self-heal observing the expected identity clears the startup retry window", async () => {
+  let clears = 0;
+  let statusCleared = false;
+  const { scheduleEngramSelfHeal } = buildScheduleEngramSelfHealForTest({
+    waitUnref: () => Promise.resolve(),
+    isEngramRunning: async () => true,
+    clearStartupRetryWindow: () => { clears += 1; },
+  });
+  scheduleEngramSelfHeal({ ui: { setStatus: () => { statusCleared = true; } } });
+  await flush();
+
+  assert.equal(clears, 1, "a confirmed recovery reconnects the next tool call immediately");
+  assert.equal(statusCleared, true, "the stale status label is still cleared");
+});
+
+test("self-heal that never observes the server does not clear the startup retry window", async () => {
+  let clears = 0;
+  const { scheduleEngramSelfHeal, isInFlight } = buildScheduleEngramSelfHealForTest({
+    waitUnref: () => Promise.resolve(),
+    isEngramRunning: async () => false,
+    maxAttempts: 2,
+    clearStartupRetryWindow: () => { clears += 1; },
+  });
+  scheduleEngramSelfHeal({ ui: { setStatus: () => {} } });
+  await flush();
+
+  assert.equal(isInFlight(), false);
+  assert.equal(clears, 0, "only an observed recovery may shorten the recheck");
 });
 
 test("native tool fetches retry transient HTTP startup failures", async () => {
@@ -1335,6 +1646,30 @@ test("session registration requires acknowledgement and failed acknowledgement r
   assert.equal(calls, 2);
 });
 
+test("renewal bypasses the acknowledged session short-circuit while coalescing in-flight work", async () => {
+  let releaseRenewal;
+  const renewal = new Promise((resolve) => { releaseRenewal = resolve; });
+  let calls = 0;
+  const { ensureSession, knownSessions } = buildEnsureSessionForTest(async () => {
+    calls += 1;
+    if (calls === 2) await renewal;
+    return { status: "created" };
+  });
+
+  await ensureSession("runtime");
+  assert.equal(knownSessions.has("engram:runtime"), true, "initial registration stays cached for identity ownership");
+
+  const firstRenewal = ensureSession("runtime", "engram", undefined, true);
+  await Promise.resolve();
+  const secondRenewal = ensureSession("runtime", "engram", undefined, true);
+  assert.equal(calls, 2, "parallel renewal requests share one POST /sessions");
+
+  releaseRenewal();
+  await Promise.all([firstRenewal, secondRenewal]);
+  await ensureSession("runtime", "engram", undefined, true);
+  assert.equal(calls, 3, "a later activity renews the cached runtime session");
+});
+
 test("session compaction strictly registers before forwarding its summary", () => {
   const compactStart = source.indexOf('pi.on("session_compact"');
   const compactEnd = source.indexOf('\n  pi.on("before_agent_start"', compactStart);
@@ -1342,7 +1677,7 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(compactEnd, -1, "session_compact handler end not found");
   const compactHandler = source.slice(compactStart, compactEnd);
 
-  const registration = compactHandler.indexOf("await ensureSession(sessionId);");
+  const registration = compactHandler.indexOf("await ensureSession(sessionId, project, engramFetch, true);");
   const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(sessionId, summary);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");

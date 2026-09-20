@@ -226,6 +226,7 @@ func resultFromFindings(checkID string, okEvidence any, findings []Finding) Chec
 		RequiresConfirmation: false,
 		Findings:             findings,
 	}
+	hasActionableFinding := false
 	for _, f := range findings {
 		switch f.Severity {
 		case SeverityBlocking:
@@ -233,11 +234,20 @@ func resultFromFindings(checkID string, okEvidence any, findings []Finding) Chec
 			result.Severity = SeverityBlocking
 			return result
 		case SeverityError:
+			hasActionableFinding = true
 			if result.Result != StatusBlocked {
 				result.Result = StatusError
 				result.Severity = SeverityError
 			}
+		case SeverityWarning:
+			hasActionableFinding = true
 		}
+	}
+	if !hasActionableFinding {
+		result.Result = StatusOK
+		result.Severity = SeverityInfo
+		result.Message = "No actionable issues detected."
+		result.SafeNextStep = "No action required."
 	}
 	return result
 }

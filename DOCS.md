@@ -64,7 +64,7 @@ Code and tests beat docs: `internal/mcp` owns agent-facing tool schemas, `intern
 
 The live schema is created and incrementally migrated by `Store.migrate` in [`internal/store/store.go`](internal/store/store.go); treat that migration as the source of authority when this summary and the database differ.
 
-- **sessions** — `id` (TEXT PK), `project`, `ownership_mode`, `directory`, `started_at`, `ended_at`, `summary`
+- **sessions** — `id` (TEXT PK), `project`, `ownership_mode`, `directory`, `started_at`, `ended_at`, `summary`, `runtime_lease_expires_at` (local-only runtime liveness; never synced or exported)
 - **observations** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `scope`, `topic_key`, `normalized_hash`, `revision_count`, `duplicate_count`, `last_seen_at`, `pinned`, `review_after`, `expires_at`, `embedding`, `embedding_model`, `embedding_created_at`, `created_at`, `updated_at`, `deleted_at`
 - **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`, `topic_key`)
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `content`, `project`, `created_at`; **prompt_tombstones** records deleted prompt `sync_id`, `session_id`, `project`, and `deleted_at`
@@ -154,9 +154,11 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Sessions
 
-- `POST /sessions` — Create session. Body: `{id, project, directory, ownership_mode?}`
+- `POST /sessions` — Create or renew a runtime session. Body: `{id, project, directory, ownership_mode?}`
   - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
+  - A successful create or renewal writes a local 30-minute `runtime_lease_expires_at` without changing the persisted session identity. Leases are local liveness evidence only: they are neither synced nor exported.
   - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
+  - An ended session is terminal: renewal returns `409` and never reopens it. `POST /sessions/{id}/end` remains the only endpoint that sets `ended_at`.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
@@ -181,7 +183,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
 - `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
   - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
-  - Pin state is local-only: these routes do not change `updated_at`, enqueue sync work, or alter export payloads
+  - Pin state is local-only for sync: these routes do not change `updated_at` or enqueue sync work. Direct backups preserve pin state, but shared sync payloads continue to omit it.
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
@@ -233,10 +235,11 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Export / Import
 
-- `GET /export` — Export current-project data as JSON
+- `GET /export` — Export current-project data as a versioned JSON backup
   - Optional `?project=<name>` selects a known project; `?all_projects=true` exports every project
+  - Current format `0.2.0` preserves observations (including local pin state), prompts, and complete memory-relation judgment and supersession metadata.
   - `400` for blank, malformed, or conflicting selectors
-- `POST /import` — Import data from JSON. Body: ExportData JSON
+- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Every imported relation must reference observations present in the same resulting store.
 
 ### Stats / Diagnostics
 
@@ -536,7 +539,7 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
+| `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
 | `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
@@ -591,6 +594,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 
 - `--dry-run` (default): for non-semantic lexical scans, reports candidates found with 0 pending rows inserted.
 - `--apply`: inserts up to `--max-insert` (default 100) new rows; prints WARNING when cap is reached.
+- `--dry-run` and `--apply` are mutually exclusive; combining them in either order exits with an error before opening the store.
 - `--since RFC3339`: scan only observations created at or after the timestamp.
 - `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
 - `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
@@ -884,7 +888,7 @@ Guardrails:
 - An unbacked explicit `project` fails loudly and does not create a new bucket.
 - If a non-empty `session_id` is supplied and no session exists, `mem_save` fails with a structured error and does not write.
 - If both explicit `project` and `session_id` are supplied, they must resolve to the same normalized project or `mem_save` fails with a structured error and does not write.
-- An explicit `session_id` is authoritative. When a write omits it, Engram uses the current process directory only to narrow active non-manual runtime sessions for the resolved project. It attaches to a session only when exactly one candidate remains, uses the project manual-save session when none remain, and fails closed when multiple candidates remain rather than selecting by recency. Directory is not session identity; callers with concurrent sessions must supply `session_id`, end other active matching sessions, or save independently with `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`. The CLI fallback writes to an independent project manual-save session and does not bind it to the current MCP session. Claude Code currently may require ending other active matching sessions because its MCP transport does not expose runtime identity to each tool call.
+- An explicit `session_id` is authoritative. When a write omits it, Engram uses the current process directory only to narrow active non-manual runtime sessions for the resolved project. A valid, unexpired local lease takes precedence over legacy unleased rows in the same directory; every live leased owner remains a candidate, so multiple live leases fail closed. Expired, malformed, and nonblank invalid leases are excluded. Only when a directory has no live lease do unleased rows use the legacy seven-day effective-activity fallback (latest observation, then `started_at`). This precedence is applied independently for every requested directory. Engram attaches to a session only when exactly one candidate remains, uses the project manual-save session when none remain, and fails closed when multiple candidates remain rather than selecting by recency. Selection is read-only and never changes `ended_at`. Directory is not session identity; callers with concurrent sessions must supply `session_id`, end other active matching sessions, or save independently with `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`. The CLI fallback writes to an independent project manual-save session and does not bind it to the current MCP session. Claude Code currently may require ending other active matching sessions because its MCP transport does not expose runtime identity to each tool call.
 - `project_choice_reason=user_selected_after_ambiguous_project` is only honored when cwd resolution is actually ambiguous. On a non-ambiguous cwd, stale recovery flags do not override explicit-project precedence or session mismatch validation.
 - If ambiguous-project recovery is active, `project` must exactly match one of the previously returned `available_projects`; invented or normalized guesses are rejected.
 - Exact ambiguous-project choices can still fail with `project_name_collision` when multiple available names collapse to the same stored project bucket after normalization. Rename or disambiguate the colliding projects before retrying.
@@ -1315,8 +1319,8 @@ Separate table captures what the USER asked (not just tool calls). Gives future 
 
 Share memories across machines, backup, or migrate:
 
-- `engram export` — JSON dump of all sessions, observations, prompts
-- `engram import <file>` — Load from JSON, sessions use INSERT OR IGNORE (skip duplicates), atomic transaction
+- `engram export` — Versioned JSON backup of sessions, observations, prompts, local pin state, and memory-relation metadata
+- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation
 
 ### Git Sync (Chunked)
 
