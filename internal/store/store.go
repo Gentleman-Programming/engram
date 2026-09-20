@@ -6846,8 +6846,9 @@ func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation)
 }
 
 // ApplyPulledChunk atomically applies all mutations contained in a pulled chunk
-// and records the chunk as synced in the same transaction. This guarantees
-// retry safety: a failed chunk import leaves no partial semantic mutations.
+// under the local import domain and records the chunk as synced in the same
+// transaction. This guarantees retry safety: a failed chunk import leaves no
+// partial semantic mutations.
 //
 // It shares ApplyPulledMutation's skip-plus-evidence rule for invalid session
 // and observation identities, plus deferred handling for observation and prompt
@@ -6857,6 +6858,20 @@ func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation)
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
 func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMutation) error {
+	return s.ApplyPulledChunkForDomain(targetKey, chunkID, mutations, false)
+}
+
+// ApplyPulledChunkForDomain is ApplyPulledChunk with an explicit import domain.
+// The domain must be carried explicitly by the caller; it is never inferred
+// from the target key, because a cloud chunk's tracking key and its admission
+// rule answer different questions. cloud=true runs the strict cloud-inbound
+// directory admission (validatePulledSessionDirectory), so a session upsert
+// with a blank or missing directory fails the whole chunk atomically — no
+// session persisted, chunk not recorded — mirroring how ApplyPulledMutation
+// fails the same payload. cloud=false keeps the local partial-session domain:
+// blank directories are accepted and the skip-plus-evidence quarantine ladder
+// behaves exactly as before.
+func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations []SyncMutation, cloud bool) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	chunkTargetKey := normalizeChunkTargetKey(targetKey)
 	chunkID = strings.TrimSpace(chunkID)
@@ -6888,7 +6903,7 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 			mutation.Seq = seq
 			mutation.TargetKey = targetKey
 			mutation.Source = SyncSourceRemote
-			if applyErr := s.applyPulledMutationTx(tx, mutation); applyErr != nil {
+			if applyErr := s.applyPulledMutationForDomainTx(tx, mutation, cloud, targetKey); applyErr != nil {
 				if handled, err := s.recordRelationApplyFailureTx(tx, targetKey, mutation, applyErr); err != nil {
 					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
 				} else if !handled {

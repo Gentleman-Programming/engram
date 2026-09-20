@@ -58,8 +58,8 @@ var (
 	storeAckMutationSeq = func(s *store.Store, targetKey string, seqs []int64) error {
 		return s.AckSyncMutationSeqs(targetKey, seqs)
 	}
-	storeApplyPulledChunk = func(s *store.Store, targetKey, chunkID string, mutations []store.SyncMutation) error {
-		return s.ApplyPulledChunk(targetKey, chunkID, mutations)
+	storeApplyPulledChunk = func(s *store.Store, targetKey, chunkID string, mutations []store.SyncMutation, cloud bool) error {
+		return s.ApplyPulledChunkForDomain(targetKey, chunkID, mutations, cloud)
 	}
 	storeRecordSynced = func(s *store.Store, targetKey, chunkID string) error {
 		return s.RecordSyncedChunkForTarget(targetKey, chunkID)
@@ -1065,14 +1065,14 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 				}
 			}
 
-			if err := sy.importMutationChunk(entry.ID, applyChunk); err != nil {
+			if err := sy.importMutationChunk(entry.ID, applyChunk, mode == importModeCloud); err != nil {
 				if mode == importModeLocal {
 					recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)
 					if recoveryErr != nil {
 						return nil, recoveryErr
 					}
 					if recovered {
-						if retryErr := sy.importMutationChunk(entry.ID, recoveredChunk); retryErr == nil {
+						if retryErr := sy.importMutationChunk(entry.ID, recoveredChunk, mode == importModeCloud); retryErr == nil {
 							chunk = recoveredChunk
 							goto imported
 						} else {
@@ -1145,10 +1145,15 @@ func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode impor
 	return chunks, nil
 }
 
-func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
+// importMutationChunk applies one decoded chunk through the store's pulled
+// apply path. The import domain rides along explicitly (cloud=true for the
+// cloud mode selected in ImportWithProgress) instead of being inferred from the
+// chunk-tracking target key: cloud chunks must meet the strict cloud directory
+// admission, while local chunks keep the #1287 blank-directory acceptance.
+func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData, cloud bool) error {
 	mutations := buildImportMutations(chunk)
 	mutations = orderMutationsForApply(mutations)
-	return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations)
+	return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations, cloud)
 }
 
 // ─── Issue #1135: permanently unsatisfiable relation upserts ─────────────────

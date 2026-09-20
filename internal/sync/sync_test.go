@@ -2823,7 +2823,7 @@ func TestImportBranches(t *testing.T) {
 			t.Fatalf("write gzip chunk: %v", err)
 		}
 
-		storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+		storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation, _ bool) error {
 			return errors.New("forced apply pulled chunk fail")
 		}
 
@@ -3120,7 +3120,7 @@ func TestLocalImportSkipsAlreadyImportedChunksIdempotently(t *testing.T) {
 		t.Fatalf("first import: %v", err)
 	}
 	applyCalls := 0
-	storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+	storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation, _ bool) error {
 		applyCalls++
 		return errors.New("already imported chunks should not be applied")
 	}
@@ -3751,6 +3751,118 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 	}
 	if synced[chunkID] {
 		t.Fatalf("failed chunk %q must not be marked synced", chunkID)
+	}
+}
+
+// A cloud chunk carrying a session upsert with a blank directory must fail the
+// whole chunk import: cloud inbound keeps the strict directory admission rule
+// (engram#1287 reviewer contract B1), so the session is not persisted and the
+// chunk is not recorded as imported. A corrected chunk with the same id stays
+// redeliverable afterwards.
+func TestCloudImportChunkRejectsBlankDirectorySessionAtomically(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-cloud-blank-dir"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: time.Now().UTC().Format(time.RFC3339)}}}
+	transport.chunks[chunkID] = []byte(`{"sessions":[{"id":"cloud-blank-sess","project":"proj-a","directory":"","started_at":"2026-01-01 00:00:00"}]}`)
+
+	importer := NewCloudWithTransport(dst, transport, "proj-a")
+	if _, err := importer.Import(); err == nil {
+		t.Fatal("expected cloud import failure for blank-directory session chunk")
+	}
+
+	if _, err := dst.GetSession("cloud-blank-sess"); err == nil {
+		t.Fatal("blank-directory session persisted via cloud chunk import")
+	}
+	synced, err := dst.GetSyncedChunksForTarget("cloud:proj-a")
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("rejected chunk %q must not be marked synced", chunkID)
+	}
+
+	// Fixing the payload and redelivering the same chunk id must converge.
+	transport.chunks[chunkID] = []byte(`{"sessions":[{"id":"cloud-blank-sess","project":"proj-a","directory":"/remote/dir","started_at":"2026-01-01 00:00:00"}]}`)
+	if _, err := importer.Import(); err != nil {
+		t.Fatalf("cloud import after corrected redelivery: %v", err)
+	}
+	sess, err := dst.GetSession("cloud-blank-sess")
+	if err != nil {
+		t.Fatalf("get session after corrected redelivery: %v", err)
+	}
+	if sess.Directory != "/remote/dir" {
+		t.Fatalf("stored directory = %q, want /remote/dir", sess.Directory)
+	}
+}
+
+// A cloud chunk carrying a session upsert whose payload omits the directory
+// key entirely must fail the same way: strict cloud admission rejects a missing
+// directory, nothing is persisted, and the chunk stays unrecorded.
+func TestCloudImportChunkRejectsMissingDirectoryKeySessionAtomically(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-cloud-missing-dir"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: time.Now().UTC().Format(time.RFC3339)}}}
+	transport.chunks[chunkID] = []byte(`{"mutations":[{"entity":"session","entity_key":"cloud-missing-dir-sess","op":"upsert","payload":"{\"id\":\"cloud-missing-dir-sess\",\"project\":\"proj-a\"}"}]}`)
+
+	importer := NewCloudWithTransport(dst, transport, "proj-a")
+	if _, err := importer.Import(); err == nil {
+		t.Fatal("expected cloud import failure for missing-directory-key session chunk")
+	}
+
+	if _, err := dst.GetSession("cloud-missing-dir-sess"); err == nil {
+		t.Fatal("missing-directory-key session persisted via cloud chunk import")
+	}
+	synced, err := dst.GetSyncedChunksForTarget("cloud:proj-a")
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("rejected chunk %q must not be marked synced", chunkID)
+	}
+}
+
+// Boundary guard: the local import domain keeps accepting a blank-directory
+// session exactly as before, so the cloud strictness above cannot be blamed on
+// the shared chunk-apply machinery.
+func TestLocalImportStillAcceptsBlankDirectorySession(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "local-blank", ChunkData{
+		Sessions: []store.Session{{
+			ID:        "local-blank-sess",
+			Project:   "proj-a",
+			Directory: "",
+			StartedAt: "2026-01-01 00:00:00",
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "local-blank", CreatedAt: "2026-01-01T00:00:00Z"}}})
+
+	if _, err := New(s, syncDir).Import(); err != nil {
+		t.Fatalf("local import with blank directory: %v", err)
+	}
+	sess, err := s.GetSession("local-blank-sess")
+	if err != nil {
+		t.Fatalf("get locally imported blank session: %v", err)
+	}
+	if sess.Directory != "" {
+		t.Fatalf("stored directory = %q, want exactly \"\"", sess.Directory)
+	}
+	synced, err := s.GetSyncedChunksForTarget(store.LocalChunkTargetKey)
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if !synced["local-blank"] {
+		t.Fatal("local chunk with blank directory must be recorded as imported")
 	}
 }
 
