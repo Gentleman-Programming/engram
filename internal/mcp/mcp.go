@@ -805,6 +805,9 @@ Examples:
 				mcp.WithBoolean("include_history",
 					mcp.Description("When true, render the observation's bounded version history: the 50 most recent prior title/content snapshots, oldest first, with version_count set to the total stored count in the envelope. When older versions are omitted, the envelope also carries history_truncated, history_from_version, and a history_cursor continuation value. Omit for the historical default output."),
 				),
+				mcp.WithNumber("history_cursor",
+					mcp.Description("Optional non-negative integer cursor returned as history_cursor by a previous truncated include_history response; submit it in a follow-up call to fetch the older page. Omit for the most recent page."),
+				),
 			),
 			handleGetObservation(s, cfg, activity),
 		)
@@ -2269,9 +2272,14 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		extra := map[string]any{}
 		if boolArg(req, "include_history", false) {
 			// Bounded paginated history (#1286): a single page of the most recent
-			// versions, a truthful total, and a continuation cursor only when an
-			// older page still exists.
-			page, err := s.GetObservationVersionPage(id, store.DefaultObservationVersionPageSize, 0)
+			// versions (or the page continuing before an emitted history_cursor),
+			// a truthful total, and a continuation cursor only when an older page
+			// still exists.
+			cursor, err := historyCursorArg(req)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			page, err := s.GetObservationVersionPage(id, store.DefaultObservationVersionPageSize, cursor)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to read observation history: %v", err)), nil
 			}
@@ -3563,6 +3571,22 @@ func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return int(v)
+}
+
+// historyCursorArg reads the optional history_cursor argument as a
+// non-negative integer, defaulting to 0 (the most recent page) when omitted.
+// Invalid values return an error that the handler surfaces as a tool error, so
+// a malformed cursor can never be silently misread.
+func historyCursorArg(req mcp.CallToolRequest) (int64, error) {
+	raw, ok := req.GetArguments()["history_cursor"]
+	if !ok {
+		return 0, nil
+	}
+	f, ok := raw.(float64)
+	if !ok || f < 0 || math.Trunc(f) != f || f > float64(math.MaxInt64) {
+		return 0, fmt.Errorf("history_cursor must be a non-negative integer")
+	}
+	return int64(f), nil
 }
 
 func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {

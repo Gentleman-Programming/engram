@@ -1028,8 +1028,11 @@ count, always) and `history` (an array of `{version, title, content, created_at}
 objects). When more than 50 versions are stored, the response renders the most
 recent 50 (oldest first) and adds `history_truncated` (true),
 `history_from_version` (the oldest version still rendered), and `history_cursor`
-(a continuation value to fetch the older page). Omitting the argument keeps the
-input and output identical to prior releases.
+(a non-negative continuation value). To fetch the older page, pass that value as
+the optional `history_cursor` argument of a follow-up
+`mem_get_observation(id, include_history: true)` call; the older page is emitted
+without truncation fields once version 1 is reached. Omitting the argument keeps
+the input and output identical to prior releases.
 
 ### mem_session_summary
 

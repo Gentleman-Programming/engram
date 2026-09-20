@@ -10253,18 +10253,26 @@ func (s *Store) GetObservationVersionPage(id int64, limit int, cursor int64) (Ob
 		return ObservationVersionPage{}, fmt.Errorf("GetObservationVersionPage: cursor must be non-negative")
 	}
 
+	// Run the count and the page query inside one read transaction: a
+	// concurrent version capture or hard delete can otherwise commit between
+	// the two reads and leave Total, Versions, or HasMore mutually
+	// inconsistent. The tx connection is shared, so the count rows are closed
+	// once their value is read and before the page query starts.
+	tx, err := s.beginTxHook()
+	if err != nil {
+		return ObservationVersionPage{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Truthful total: the page count is the full stored count and never shrinks
 	// when a page only carries the most recent versions.
 	page := ObservationVersionPage{}
-	totalRows, err := s.queryItHook(s.db,
+	totalRows, err := s.queryItHook(tx,
 		`SELECT COUNT(*) FROM observation_versions WHERE observation_id = ?`, id,
 	)
 	if err != nil {
 		return page, err
 	}
-	// The store pool allows a single open connection: the count rows must be
-	// closed once its value is read and before the page query starts, or the
-	// two reads self-deadlock on the one-connection pool.
 	if totalRows.Next() {
 		if err := totalRows.Scan(&page.Total); err != nil {
 			return page, closeRowsWithError(totalRows, err)
@@ -10286,7 +10294,7 @@ func (s *Store) GetObservationVersionPage(id int64, limit int, cursor int64) (Ob
 	query += ` ORDER BY version DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.queryItHook(s.db, query, args...)
+	rows, err := s.queryItHook(tx, query, args...)
 	if err != nil {
 		return page, err
 	}
@@ -10315,6 +10323,9 @@ func (s *Store) GetObservationVersionPage(id int64, limit int, cursor int64) (Ob
 		// older versions (version < cursor) without re-shipping this page.
 		oldest := page.Versions[0]
 		page.NextCursor = int64(oldest.Version)
+	}
+	if err := s.commitHook(tx); err != nil {
+		return page, err
 	}
 	return page, nil
 }

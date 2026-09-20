@@ -487,11 +487,44 @@ func TestGetObservationVersionPageValidatesLimitAndCursor(t *testing.T) {
 	}
 }
 
-func TestGetObservationVersionPagePropagatesQueryFailure(t *testing.T) {
+// countOnlyRows is a rowScanner that yields exactly one row and writes its
+// total into the first Scan destination (the COUNT(*) read), recording Close.
+// It lets tests fake the count query while intercepting later queries.
+type countOnlyRows struct {
+	total    int
+	closed   bool
+	consumed bool
+}
+
+func (r *countOnlyRows) Next() bool {
+	if r.consumed {
+		return false
+	}
+	r.consumed = true
+	return true
+}
+
+func (r *countOnlyRows) Scan(dest ...any) error {
+	if len(dest) > 0 {
+		if p, ok := dest[0].(*int); ok {
+			*p = r.total
+		}
+	}
+	return nil
+}
+
+func (r *countOnlyRows) Err() error { return nil }
+
+func (r *countOnlyRows) Close() error {
+	r.closed = true
+	return nil
+}
+
+func TestGetObservationVersionPagePropagatesCountQueryFailure(t *testing.T) {
 	s := newTestStore(t)
 	id := seedVersionHistory(t, s, 1)
 
-	wantErr := errors.New("history query failed")
+	wantErr := errors.New("count query failed")
 	oldQueryIt := s.hooks.queryIt
 	s.hooks.queryIt = func(queryer, string, ...any) (rowScanner, error) {
 		return nil, wantErr
@@ -500,6 +533,37 @@ func TestGetObservationVersionPagePropagatesQueryFailure(t *testing.T) {
 
 	if _, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0); !errors.Is(err, wantErr) {
 		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestGetObservationVersionPagePropagatesPageQueryFailure(t *testing.T) {
+	s := newTestStore(t)
+	id := seedVersionHistory(t, s, 1)
+
+	wantErr := errors.New("page query failed")
+	calls := 0
+	var countRows *countOnlyRows
+	oldQueryIt := s.hooks.queryIt
+	s.hooks.queryIt = func(queryer, string, ...any) (rowScanner, error) {
+		calls++
+		if calls == 1 {
+			countRows = &countOnlyRows{total: 1}
+			return countRows, nil
+		}
+		// The count rows must be closed before the page query starts: with the
+		// shared tx connection, leaving them open would deadlock the read.
+		if !countRows.closed {
+			t.Fatalf("count rows must be closed before the page query starts")
+		}
+		return nil, wantErr
+	}
+	t.Cleanup(func() { s.hooks.queryIt = oldQueryIt })
+
+	if _, err := s.GetObservationVersionPage(id, DefaultObservationVersionPageSize, 0); !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+	if calls != 2 {
+		t.Fatalf("expected exactly 2 query invocations (count, page), got %d", calls)
 	}
 }
 
