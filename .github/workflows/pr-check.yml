@@ -94,6 +94,9 @@ jobs:
                   } else {
                     core.info(`✅ PR #${pull.number} issue #${issueNumber} has status:approved`);
                   }
+                  if (issue.assignees.length === 0) {
+                    errors.push(`issue #${issueNumber} ("${issue.title}") has no assignee. Assign an owner before implementation.`);
+                  }
                 } catch (err) {
                   errors.push(`issue #${issueNumber}: could not be fetched (${err.message})`);
                 }

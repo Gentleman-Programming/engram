@@ -101,6 +101,9 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		"name: Check Issue Reference",
 		"check-issue-approved:",
 		"name: Check Issue Has status:approved",
+		"permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
+		"issue.assignees.length === 0",
+		"has no assignee. Assign an owner before implementation.",
 	} {
 		if !strings.Contains(prCheck, required) {
 			t.Errorf("%s does not contain %q", prCheckPath, required)
