@@ -10229,6 +10229,13 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 	}
 }
 
+// applySessionPayloadTx upserts a pulled session with the same directory
+// completion CASE as createSessionTx/startSessionTx: an existing concrete
+// directory is preserved (a later blank payload cannot erase it) and an
+// existing blank adopts an incoming concrete value. Cloud callers always pass
+// the strict directory validation before reaching this upsert, so their
+// payloads carry concrete directories and keep whichever concrete value
+// arrived first.
 func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) error {
 	if err := validateSessionID(payload.ID); err != nil {
 		return err
@@ -10247,11 +10254,11 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 		   ownership_mode = CASE
 		     WHEN sessions.ownership_mode = 'project_owned' OR excluded.ownership_mode IS NULL THEN sessions.ownership_mode
 		     ELSE excluded.ownership_mode END,
-		   directory = excluded.directory,
+		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END,
 		   started_at = COALESCE(NULLIF(excluded.started_at, ''), sessions.started_at),
 		   ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
 		   summary = COALESCE(excluded.summary, sessions.summary)`,
-		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), payload.EndedAt, payload.Summary,
+		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), payload.EndedAt, payload.Summary, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err

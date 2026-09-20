@@ -455,3 +455,87 @@ func TestValidatePulledSessionDirectoryLocalRejectsNullAndNonString(t *testing.T
 		})
 	}
 }
+
+// Matrix item 2c (completion semantics on the conflict path): the pulled-chunk
+// session upsert follows the SAME directory completion CASE as
+// createSessionTx/startSessionTx — an existing concrete directory is preserved,
+// an existing blank adopts an incoming concrete value — and repeated or
+// replayed chunk application is idempotent for the directory.
+// RED before the fix: the conflict clause overwrote unconditionally with
+// excluded.directory, so a later blank local payload erased a concrete value.
+func TestPulledChunkDirectoryCompletionPreservesConcreteValue(t *testing.T) {
+	t.Run("later blank chunk keeps concrete directory", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("preserve-dir", "engram", "/concrete/dir"); err != nil {
+			t.Fatalf("seed concrete session: %v", err)
+		}
+		mutations := []SyncMutation{{
+			Entity:    SyncEntitySession,
+			EntityKey: "preserve-dir",
+			Op:        SyncOpUpsert,
+			Payload:   sessionUpsertPayloadJSON("preserve-dir", ""),
+		}}
+		if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-blank-update", mutations); err != nil {
+			t.Fatalf("ApplyPulledChunk blank update over concrete: %v", err)
+		}
+		sess, err := s.GetSession("preserve-dir")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if sess.Directory != "/concrete/dir" {
+			t.Fatalf("stored directory = %q, want /concrete/dir (later blank payload must not erase)", sess.Directory)
+		}
+	})
+
+	t.Run("blank session adopts concrete directory from chunk", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("complete-dir", "engram", " \t "); err != nil {
+			t.Fatalf("seed blank session: %v", err)
+		}
+		mutations := []SyncMutation{{
+			Entity:    SyncEntitySession,
+			EntityKey: "complete-dir",
+			Op:        SyncOpUpsert,
+			Payload:   sessionUpsertPayloadJSON("complete-dir", "/completed/dir"),
+		}}
+		if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-concrete-update", mutations); err != nil {
+			t.Fatalf("ApplyPulledChunk concrete update over blank: %v", err)
+		}
+		sess, err := s.GetSession("complete-dir")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if sess.Directory != "/completed/dir" {
+			t.Fatalf("stored directory = %q, want /completed/dir (blank must adopt later concrete)", sess.Directory)
+		}
+	})
+
+	t.Run("replayed chunk is idempotent for directory", func(t *testing.T) {
+		s := newTestStore(t)
+		mutations := []SyncMutation{{
+			Entity:    SyncEntitySession,
+			EntityKey: "idempotent-dir",
+			Op:        SyncOpUpsert,
+			Payload:   sessionUpsertPayloadJSON("idempotent-dir", "/stable/dir"),
+		}}
+		if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-dir-first", mutations); err != nil {
+			t.Fatalf("first apply: %v", err)
+		}
+		// Same chunk id: recorded, so the replay must be a no-op.
+		if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-dir-first", mutations); err != nil {
+			t.Fatalf("same-chunk replay: %v", err)
+		}
+		// Same payload under a new chunk id: the conflict clause runs again, so
+		// the concrete directory must survive unchanged.
+		if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-dir-second", mutations); err != nil {
+			t.Fatalf("replayed payload under new chunk id: %v", err)
+		}
+		sess, err := s.GetSession("idempotent-dir")
+		if err != nil {
+			t.Fatalf("GetSession after replays: %v", err)
+		}
+		if sess.Directory != "/stable/dir" {
+			t.Fatalf("stored directory = %q, want /stable/dir (replay must be idempotent)", sess.Directory)
+		}
+	})
+}
