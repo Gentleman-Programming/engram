@@ -6,6 +6,7 @@ package store
 // test's doc comment names the RED/GREEN matrix item it covers from the issue.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,7 +106,7 @@ func TestPulledChunkBlankDirectoryAppliesLocally(t *testing.T) {
 		Op:        SyncOpUpsert,
 		Payload:   sessionUpsertPayloadJSON(sessionID, ""),
 	}}
-	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-blank-dir-1", mutations); err != nil {
+	if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-blank-dir-1", mutations); err != nil {
 		t.Fatalf("ApplyPulledChunk with blank directory: %v", err)
 	}
 	sess, err := s.GetSession(sessionID)
@@ -122,7 +123,7 @@ func TestPulledChunkBlankDirectoryAppliesLocally(t *testing.T) {
 	if len(deferred) != 0 {
 		t.Fatalf("deferred rows = %d, want 0 (blank directory must not dead-letter)", len(deferred))
 	}
-	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	state, err := s.GetSyncState(LocalChunkTargetKey)
 	if err != nil {
 		t.Fatalf("GetSyncState: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestBlankDirectorySessionKeepsDependentRecordsAttached(t *testing.T) {
 			{Entity: SyncEntityObservation, EntityKey: "obs-chunk-blank-parent", Op: SyncOpUpsert, Payload: string(obsPayload)},
 			{Entity: SyncEntityPrompt, EntityKey: "prompt-chunk-blank-parent", Op: SyncOpUpsert, Payload: string(promptPayload)},
 		}
-		if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-blank-parent-1", mutations); err != nil {
+		if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-blank-parent-1", mutations); err != nil {
 			t.Fatalf("ApplyPulledChunk blank session with dependents: %v", err)
 		}
 		deferred, err := s.ListDeferred(ListDeferredOptions{})
@@ -196,7 +197,7 @@ func TestBlankDirectorySessionKeepsDependentRecordsAttached(t *testing.T) {
 		if observations != 1 || prompts != 1 {
 			t.Fatalf("dependents attached = %d observations, %d prompts, want 1 and 1", observations, prompts)
 		}
-		state, err := s.GetSyncState(DefaultSyncTargetKey)
+		state, err := s.GetSyncState(LocalChunkTargetKey)
 		if err != nil || state.LastPulledSeq != 3 {
 			t.Fatalf("LastPulledSeq = %d, %v; want 3 (all mutations applied)", state.LastPulledSeq, err)
 		}
@@ -351,4 +352,106 @@ func TestImportValidationRetainsIdentityAndOwnershipChecks(t *testing.T) {
 			t.Fatalf("Import invalid ownership mode error = %v, want ErrInvalidSessionOwnershipMode", err)
 		}
 	})
+}
+
+// Matrix item 2b (JSON null directory): a pulled session upsert whose directory
+// value is JSON null must be rejected on the local domain. The rejection goes
+// through the real pulled-chunk apply path so the atomicity contract is proven
+// end to end: the session is not persisted and the chunk is not recorded as
+// imported, leaving the chunk free to be redelivered after a fix.
+// RED before the fix: json.Unmarshal folds JSON null into a Go string no-op, so
+// the null slipped through as if it were a blank directory.
+func TestPulledChunkNullDirectoryRejectedLocallyWithoutSideEffects(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "chunk-null-dir-session"
+	mutations := []SyncMutation{{
+		Entity:    SyncEntitySession,
+		EntityKey: sessionID,
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"chunk-null-dir-session","project":"engram","directory":null}`,
+	}}
+	err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-null-dir-1", mutations)
+	if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+		t.Fatalf("ApplyPulledChunk with null directory: err = %v, want ErrPulledSessionDirectoryInvalid", err)
+	}
+	if _, getErr := s.GetSession(sessionID); !errors.Is(getErr, sql.ErrNoRows) {
+		t.Fatalf("session persisted despite null-directory rejection: %v", getErr)
+	}
+	synced, err := s.GetSyncedChunksForTarget(LocalChunkTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncedChunksForTarget: %v", err)
+	}
+	if synced["chunk-null-dir-1"] {
+		t.Fatal("chunk recorded as imported despite null-directory rejection")
+	}
+	deferred, err := s.ListDeferred(ListDeferredOptions{})
+	if err != nil {
+		t.Fatalf("ListDeferred: %v", err)
+	}
+	if len(deferred) != 0 {
+		t.Fatalf("deferred rows = %d, want 0 (null directory must fail closed, not quarantine)", len(deferred))
+	}
+}
+
+// The missing directory key stays admitted on the local domain (distinct from
+// JSON null): the local partial-session state has no directory yet, and the
+// payload bytes are applied exactly as carried.
+func TestPulledChunkMissingDirectoryKeyAppliesLocally(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "chunk-missing-dir-key-session"
+	mutations := []SyncMutation{{
+		Entity:    SyncEntitySession,
+		EntityKey: sessionID,
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"chunk-missing-dir-key-session","project":"engram"}`,
+	}}
+	if err := s.ApplyPulledChunk(LocalChunkTargetKey, "chunk-missing-dir-key-1", mutations); err != nil {
+		t.Fatalf("ApplyPulledChunk with missing directory key: %v", err)
+	}
+	sess, err := s.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("GetSession %s: %v", sessionID, err)
+	}
+	if sess.Directory != "" {
+		t.Fatalf("stored directory = %q, want exactly \"\" (missing key decodes to blank)", sess.Directory)
+	}
+	synced, err := s.GetSyncedChunksForTarget(LocalChunkTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncedChunksForTarget: %v", err)
+	}
+	if !synced["chunk-missing-dir-key-1"] {
+		t.Fatal("chunk with missing directory key must be recorded as imported")
+	}
+}
+
+// Deterministic validator table for the local pull-path admission rule: ONLY a
+// missing directory key or a JSON string value (blank included) is admitted.
+// JSON null and every non-string value are rejected with
+// ErrPulledSessionDirectoryInvalid.
+func TestValidatePulledSessionDirectoryLocalRejectsNullAndNonString(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{name: "null rejected", payload: `{"id":"s","project":"engram","directory":null}`, wantErr: true},
+		{name: "number rejected", payload: `{"id":"s","project":"engram","directory":42}`, wantErr: true},
+		{name: "array rejected", payload: `{"id":"s","project":"engram","directory":["/a"]}`, wantErr: true},
+		{name: "object rejected", payload: `{"id":"s","project":"engram","directory":{"path":"/a"}}`, wantErr: true},
+		{name: "missing key admitted", payload: `{"id":"s","project":"engram"}`},
+		{name: "blank string admitted", payload: `{"id":"s","project":"engram","directory":""}`},
+		{name: "whitespace string admitted", payload: `{"id":"s","project":"engram","directory":" \t "}`},
+		{name: "concrete string admitted", payload: `{"id":"s","project":"engram","directory":"/real/dir"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePulledSessionDirectoryLocal([]byte(tt.payload))
+			if tt.wantErr && !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("error = %v, want ErrPulledSessionDirectoryInvalid", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("error = %v, want nil", err)
+			}
+		})
+	}
 }

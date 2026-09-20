@@ -9792,12 +9792,14 @@ func validatePulledSessionDirectory(raw []byte) error {
 }
 
 // validatePulledSessionDirectoryLocal is the local pull-path admission check.
-// It accepts a missing directory key (decoding to blank) and a present-but-blank
-// value, so a local partial session round-trips through pulled chunks without
-// being rejected, spliced, or normalized: the payload bytes are applied as
-// carried and the stored session keeps the blank directory (engram#1287).
-// Transport-level faults (undecodable raw) and non-string directory values stay
-// rejected exactly as before.
+// It accepts ONLY a missing directory key (decoding to blank) or a JSON string
+// value (blank included), so a local partial session round-trips through pulled
+// chunks without being rejected, spliced, or normalized: the payload bytes are
+// applied as carried and the stored session keeps the blank directory
+// (engram#1287). Transport-level faults (undecodable raw), JSON null, and
+// non-string directory values stay rejected. The pointer decode is what keeps
+// JSON null out: unmarshalling null into a plain string is a silent no-op that
+// would otherwise masquerade as a blank value.
 func validatePulledSessionDirectoryLocal(raw []byte) error {
 	var fields map[string]json.RawMessage
 	if err := decodeSyncPayload(raw, &fields); err != nil {
@@ -9807,9 +9809,9 @@ func validatePulledSessionDirectoryLocal(raw []byte) error {
 	if !ok {
 		return nil
 	}
-	var value string
-	if err := json.Unmarshal(directory, &value); err != nil {
-		return fmt.Errorf("%w: directory must be non-blank", ErrPulledSessionDirectoryInvalid)
+	var value *string
+	if err := json.Unmarshal(directory, &value); err != nil || value == nil {
+		return fmt.Errorf("%w: directory must be a string", ErrPulledSessionDirectoryInvalid)
 	}
 	return nil
 }
