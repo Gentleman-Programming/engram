@@ -3,7 +3,6 @@ package autosync
 import (
 	"context"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 
@@ -40,6 +39,19 @@ type PullReport struct {
 // apply semantics. Per-entity error policy (design §9): relation FK misses are
 // handled inside ApplyPulledMutation by writing to sync_apply_deferred and
 // returning nil (cursor advances normally); other errors halt the pull.
+//
+// Fail-closed contract:
+//   - Deferred-replay infrastructure failures (enumerating or replaying
+//     sync_apply_deferred rows) are returned as errors instead of being logged
+//     and suppressed, so the caller never reports a healthy pull when deferred
+//     relation work could not be inspected or executed.
+//   - A continued page (has_more=true) must advance the local cursor; an empty
+//     or duplicate-only page is a transport protocol error.
+//   - report.Applied counts only newly applied mutations, never idempotently
+//     skipped duplicate redeliveries.
+//
+// The HTTP requests issued by the transport are bound to ctx so cancellation
+// aborts an in-flight pull instead of waiting between batches.
 func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTransport, targetKey string, batchSize int) (PullReport, error) {
 	var report PullReport
 
@@ -61,12 +73,19 @@ func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTr
 			return report, ctx.Err()
 		}
 
-		resp, err := transport.PullMutations(sinceSeq, batchSize)
+		resp, err := transport.PullMutations(ctx, sinceSeq, batchSize)
 		if err != nil {
 			return report, fmt.Errorf("transport pull: %w", err)
 		}
 
+		pageAdvanced := false
 		for _, rm := range resp.Mutations {
+			// Idempotent duplicate redelivery (seq already consumed): skip it
+			// exactly like ApplyPulledMutation would, and never count it.
+			if rm.Seq <= sinceSeq {
+				continue
+			}
+			pageAdvanced = true
 			localMut := store.SyncMutation{
 				Seq:        rm.Seq,
 				TargetKey:  targetKey,
@@ -94,6 +113,12 @@ func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTr
 			}
 		}
 
+		if resp.HasMore && !pageAdvanced {
+			return report, fmt.Errorf(
+				"transport pull: protocol error: server returned has_more=true without advancing the cursor beyond seq=%d (empty or duplicate-only page)",
+				sinceSeq)
+		}
+
 		if !resp.HasMore {
 			break
 		}
@@ -102,19 +127,18 @@ func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTr
 
 	pendingProjects, err := localStore.ListDeferredProjectsForTarget(targetKey)
 	if err != nil {
-		log.Printf("[autosync] list deferred projects target=%q error: %v", targetKey, err)
-	} else {
-		for _, project := range pendingProjects {
-			project = strings.TrimSpace(project)
-			if project == "" {
-				continue
-			}
-			if _, seen := touchedProjects[project]; seen {
-				continue
-			}
-			touchedProjects[project] = struct{}{}
-			projectOrder = append(projectOrder, project)
+		return report, fmt.Errorf("list deferred projects for target %q: %w", targetKey, err)
+	}
+	for _, project := range pendingProjects {
+		project = strings.TrimSpace(project)
+		if project == "" {
+			continue
 		}
+		if _, seen := touchedProjects[project]; seen {
+			continue
+		}
+		touchedProjects[project] = struct{}{}
+		projectOrder = append(projectOrder, project)
 	}
 	sort.Strings(projectOrder)
 	report.ProjectsTouched = projectOrder
@@ -122,8 +146,7 @@ func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTr
 	for _, project := range projectOrder {
 		res, err := localStore.ReplayDeferredForScope(targetKey, project)
 		if err != nil {
-			log.Printf("[autosync] replayDeferred project=%q error: %v", project, err)
-			continue
+			return report, fmt.Errorf("replay deferred project %q: %w", project, err)
 		}
 		report.Replays = append(report.Replays, ProjectReplay{
 			Project:   project,

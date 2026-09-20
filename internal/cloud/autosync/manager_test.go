@@ -286,7 +286,7 @@ func (t *fakeCloudTransport) PushMutations(mutations []MutationEntry) (*PushMuta
 	return t.pushResult, nil
 }
 
-func (t *fakeCloudTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, error) {
+func (t *fakeCloudTransport) PullMutations(_ context.Context, _ int64, _ int) (*PullMutationsResponse, error) {
 	atomic.AddInt32(&t.pullCalls, 1)
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -2106,7 +2106,7 @@ func (t *errTransport) PushMutations(_ []MutationEntry) (*PushMutationsResult, e
 	return &PushMutationsResult{AcceptedSeqs: []int64{}}, nil
 }
 
-func (t *errTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, error) {
+func (t *errTransport) PullMutations(_ context.Context, _ int64, _ int) (*PullMutationsResponse, error) {
 	if t.pullErr != nil {
 		return nil, t.pullErr
 	}
@@ -2501,14 +2501,18 @@ func TestPullMergesTouchedAndPendingDeferredScopes(t *testing.T) {
 	}
 }
 
-func TestPullDeferredScopeEnumerationFailureDoesNotInventScopes(t *testing.T) {
+func TestPullDeferredScopeEnumerationFailureFailsClosed(t *testing.T) {
 	ls := newFakeLocalStore()
 	ls.listDeferredErr = errors.New("list deferred projects")
 	tr := newFakeTransport()
 	tr.pullResult = &PullMutationsResponse{}
 
-	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
-		t.Fatalf("pull: %v", err)
+	err := New(ls, tr, DefaultConfig()).pull(context.Background())
+	if err == nil {
+		t.Fatal("expected pull failure on deferred enumeration error, got nil")
+	}
+	if !strings.Contains(err.Error(), "list deferred projects") {
+		t.Fatalf("expected enumeration failure to surface, got: %v", err)
 	}
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
@@ -2517,7 +2521,7 @@ func TestPullDeferredScopeEnumerationFailureDoesNotInventScopes(t *testing.T) {
 	}
 }
 
-func TestPullDeferredScopeReplayErrorIsNonFatal(t *testing.T) {
+func TestPullDeferredScopeReplayErrorFailsClosed(t *testing.T) {
 	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
 	ls.deferredRows = []DeferredRow{{
 		SyncID: "rel-project-b", TargetKey: "cloud", Project: "project-b", ApplyStatus: "deferred",
@@ -2526,16 +2530,12 @@ func TestPullDeferredScopeReplayErrorIsNonFatal(t *testing.T) {
 	tr := newFakeTransport()
 	tr.pullResult = &PullMutationsResponse{}
 
-	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
-		t.Fatalf("pull: %v", err)
+	err := New(ls, tr, DefaultConfig()).pull(context.Background())
+	if err == nil {
+		t.Fatal("expected pull failure on deferred replay error, got nil")
 	}
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
-	if got := ls.replayProjects; len(got) != 1 || got[0] != "project-b" {
-		t.Fatalf("replay projects = %v, want [project-b]", got)
-	}
-	if row := ls.deferredRows[0]; row.ApplyStatus != "deferred" {
-		t.Fatalf("replay error changed deferred row: %+v", row)
+	if !strings.Contains(err.Error(), `replay deferred project "project-b"`) {
+		t.Fatalf("expected replay failure to surface, got: %v", err)
 	}
 }
 
@@ -2552,12 +2552,12 @@ func (p *panicOnceTransport) PushMutations(mutations []MutationEntry) (*PushMuta
 	return p.delegate.PushMutations(mutations)
 }
 
-func (p *panicOnceTransport) PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error) {
+func (p *panicOnceTransport) PullMutations(ctx context.Context, sinceSeq int64, limit int) (*PullMutationsResponse, error) {
 	if atomic.CompareAndSwapInt32(p.panicOnce, 1, 0) {
 		p.signal(p.panicObserved)
 		panic(fmt.Sprintf("test panic in cycle"))
 	}
-	result, err := p.delegate.PullMutations(sinceSeq, limit)
+	result, err := p.delegate.PullMutations(ctx, sinceSeq, limit)
 	p.signal(p.subsequentPull)
 	return result, err
 }

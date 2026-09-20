@@ -114,7 +114,9 @@ func (e *nonEnrolledPendingError) Error() string {
 // CloudTransport is the subset of remote.MutationTransport methods the manager needs.
 type CloudTransport interface {
 	PushMutations(mutations []MutationEntry) (*PushMutationsResult, error)
-	PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error)
+	// PullMutations is bound to ctx so an in-flight pull request aborts when
+	// the caller cancels (e.g. CLI Ctrl+C or manager shutdown).
+	PullMutations(ctx context.Context, sinceSeq int64, limit int) (*PullMutationsResponse, error)
 }
 
 // transportStatusError is an optional interface that transport errors may implement.
