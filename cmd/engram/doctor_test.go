@@ -268,8 +268,7 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 
 func TestCmdDoctorRepairManualSessionNamePlanDryRunApplyJSON(t *testing.T) {
 	cfg := testConfig(t)
-	thirdProjectRepo := newDoctorGitRepo(t, "third-project")
-	seedDoctorRepairRows(t, cfg, "manual-save-engram", "sias-app", thirdProjectRepo)
+	seedDoctorRepairRows(t, cfg, "manual-save-engram", "sias-app", "/work/not-a-repository")
 	seedDoctorSession(t, cfg, "known-engram", "engram", "/work/engram")
 
 	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "manual_session_name_project_mismatch", "--plan")
@@ -513,12 +512,24 @@ func TestCmdDoctorJSONSingleCheckAndProjectScope(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
 		t.Fatalf("doctor json invalid: %v\n%s", err, stdout)
 	}
-	if report["status"] != "ok" || report["project"] != "engram" {
+	if report["status"] != "warning" || report["project"] != "engram" {
 		t.Fatalf("report=%v", report)
 	}
 	checks := report["checks"].([]any)
-	if len(checks) != 1 || checks[0].(map[string]any)["check_id"] != "session_project_directory_mismatch" {
+	if len(checks) != 1 {
 		t.Fatalf("checks=%v", checks)
+	}
+	check := checks[0].(map[string]any)
+	if check["check_id"] != "session_project_directory_mismatch" || check["reason_code"] != "session_project_directory_mismatch" {
+		t.Fatalf("check=%v", check)
+	}
+	findings := check["findings"].([]any)
+	if len(findings) != 1 {
+		t.Fatalf("findings=%v", findings)
+	}
+	finding := findings[0].(map[string]any)
+	if finding["reason_code"] != "session_project_directory_mismatch" || finding["evidence"].(map[string]any)["directory_project"] != "other" {
+		t.Fatalf("finding=%v", finding)
 	}
 }
 
