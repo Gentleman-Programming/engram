@@ -15837,6 +15837,174 @@ func TestUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 	}
 }
 
+func TestUpdateObservationFindReplace(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
+	if err := s.CreateSession("s-update-find-replace", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-update-find-replace",
+		Type:      "note",
+		Title:     "Original title",
+		Content:   "a.b a.b",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	load := func() *Observation {
+		t.Helper()
+		obs, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatalf("get observation: %v", err)
+		}
+		return obs
+	}
+	mutationCount := func(syncID string) int {
+		t.Helper()
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&count); err != nil {
+			t.Fatalf("count mutations: %v", err)
+		}
+		return count
+	}
+	normalizedHash := func() string {
+		t.Helper()
+		var hash string
+		if err := s.db.QueryRow(`SELECT normalized_hash FROM observations WHERE id = ?`, id).Scan(&hash); err != nil {
+			t.Fatalf("load normalized hash: %v", err)
+		}
+		return hash
+	}
+	assertUnchanged := func(t *testing.T, before *Observation, mutations int) {
+		t.Helper()
+		after := load()
+		if after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+			t.Fatalf("rejected update changed observation: before=%#v after=%#v", before, after)
+		}
+		if got := mutationCount(before.SyncID); got != mutations {
+			t.Fatalf("rejected update enqueued a mutation: got %d, want %d", got, mutations)
+		}
+	}
+
+	t.Run("requires paired parameters and forbids direct content", func(t *testing.T) {
+		for _, update := range []UpdateObservationParams{
+			{Find: ptr("a")},
+			{Replace: ptr("b")},
+			{Content: ptr("direct"), Find: ptr("a"), Replace: ptr("b")},
+		} {
+			before := load()
+			mutations := mutationCount(before.SyncID)
+			if _, err := s.UpdateObservation(id, update); !errors.Is(err, ErrObservationFindReplaceInvalid) {
+				t.Fatalf("expected ErrObservationFindReplaceInvalid, got %v", err)
+			}
+			assertUnchanged(t, before, mutations)
+		}
+	})
+
+	t.Run("replaces literal matches globally and redacts private replacement", func(t *testing.T) {
+		updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: ptr("a.b"), Replace: ptr("<private>secret</private>")})
+		if err != nil {
+			t.Fatalf("replace observation: %v", err)
+		}
+		if updated.Content != "[REDACTED] [REDACTED]" {
+			t.Fatalf("content = %q, want literal global replacement with redaction", updated.Content)
+		}
+		if got := normalizedHash(); got != hashNormalized(updated.Content) {
+			t.Fatalf("normalized hash = %q, want hash of replacement content", got)
+		}
+	})
+
+	t.Run("empty and non-matching find preserve bytes but still revise and sync", func(t *testing.T) {
+		for _, find := range []string{"", "missing"} {
+			before := load()
+			beforeHash := normalizedHash()
+			mutations := mutationCount(before.SyncID)
+			updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: ptr("replacement")})
+			if err != nil {
+				t.Fatalf("replace with find %q: %v", find, err)
+			}
+			if updated.Content != before.Content || normalizedHash() != beforeHash {
+				t.Fatalf("no-match content or hash changed: before=%q after=%q", before.Content, updated.Content)
+			}
+			if updated.RevisionCount != before.RevisionCount+1 {
+				t.Fatalf("revision = %d, want %d", updated.RevisionCount, before.RevisionCount+1)
+			}
+			if got := mutationCount(before.SyncID); got != mutations+1 {
+				t.Fatalf("mutations = %d, want %d", got, mutations+1)
+			}
+		}
+	})
+
+	t.Run("rejects replacement that becomes empty without side effects", func(t *testing.T) {
+		find, replace := "[REDACTED] [REDACTED]", ""
+		before := load()
+		mutations := mutationCount(before.SyncID)
+		if _, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace}); !errors.Is(err, ErrObservationContentRequired) {
+			t.Fatalf("expected ErrObservationContentRequired, got %v", err)
+		}
+		assertUnchanged(t, before, mutations)
+	})
+
+	t.Run("truncates expanded output at UTF-8 boundaries", func(t *testing.T) {
+		s.cfg.MaxObservationLength = 10
+		find, replace := "[REDACTED]", "界界"
+		updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace})
+		if err != nil {
+			t.Fatalf("replace observation: %v", err)
+		}
+		if !utf8.ValidString(updated.Content) || updated.Content != "界界 界... [truncated]" {
+			t.Fatalf("content = %q, want UTF-8-safe truncated replacement", updated.Content)
+		}
+	})
+
+	t.Run("bounds oversized replacement input before mutation", func(t *testing.T) {
+		find, replace := "界", strings.Repeat("x", s.cfg.MaxObservationLength+1)
+		before := load()
+		mutations := mutationCount(before.SyncID)
+		if _, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace}); !errors.Is(err, ErrObservationFindReplaceTooLarge) {
+			t.Fatalf("expected ErrObservationFindReplaceTooLarge, got %v", err)
+		}
+		assertUnchanged(t, before, mutations)
+	})
+}
+
+func TestUpdateObservationFindReplaceRedactsBeforeTruncatingPrivateTag(t *testing.T) {
+	s := newTestStore(t)
+	s.cfg.MaxObservationLength = 25
+	enrollTestProject(t, s, "engram")
+	if err := s.CreateSession("s-update-find-replace-private-truncation", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-update-find-replace-private-truncation",
+		Type:      "note",
+		Title:     "Original title",
+		Content:   "12345replace me",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{
+		Find:    ptr("replace me"),
+		Replace: ptr("<private>secret</private>"),
+	})
+	if err != nil {
+		t.Fatalf("replace observation: %v", err)
+	}
+	if updated.Content != "12345[REDACTED]" {
+		t.Fatalf("content = %q, want redacted replacement before truncation", updated.Content)
+	}
+}
+
+func ptr(s string) *string { return &s }
+
 func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
 	s := newTestStore(t)
 	enrollTestProject(t, s, "engram")

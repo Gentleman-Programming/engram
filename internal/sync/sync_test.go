@@ -3641,7 +3641,7 @@ func TestCloudImportAppliesMutationReconciliationForUpdatesAndDeletes(t *testing
 		SessionID: "sess-a",
 		Type:      "decision",
 		Title:     "v1",
-		Content:   "original",
+		Content:   "original old",
 		Project:   "proj-a",
 		Scope:     "project",
 	})
@@ -3661,9 +3661,9 @@ func TestCloudImportAppliesMutationReconciliationForUpdatesAndDeletes(t *testing
 		t.Fatal("expected first cloud export to write initial snapshot")
 	}
 
-	updatedTitle := "v2"
-	if _, err := src.UpdateObservation(obsID, store.UpdateObservationParams{Title: &updatedTitle}); err != nil {
-		t.Fatalf("update observation: %v", err)
+	updatedTitle, find, replace := "v2", "old", "new"
+	if _, err := src.UpdateObservation(obsID, store.UpdateObservationParams{Title: &updatedTitle, Find: &find, Replace: &replace}); err != nil {
+		t.Fatalf("find-and-replace update observation: %v", err)
 	}
 	if err := src.DeletePrompt(promptID); err != nil {
 		t.Fatalf("delete prompt: %v", err)
@@ -3692,8 +3692,8 @@ func TestCloudImportAppliesMutationReconciliationForUpdatesAndDeletes(t *testing
 	if err != nil {
 		t.Fatalf("search updated observation: %v", err)
 	}
-	if len(found) == 0 || found[0].Title != "v2" {
-		t.Fatalf("expected updated observation title after pull reconciliation, got %+v", found)
+	if len(found) == 0 || found[0].Title != "v2" || found[0].Content != "original new" {
+		t.Fatalf("expected find-and-replace update after pull reconciliation, got %+v", found)
 	}
 
 	prompts, err := dst.RecentPrompts("proj-a", 10)

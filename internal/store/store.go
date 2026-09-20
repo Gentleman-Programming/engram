@@ -69,11 +69,13 @@ var (
 	// ErrProjectOwnershipAmbiguous is returned when an unowned session cannot
 	// adopt a write's project because it already parents records owned by a
 	// different one. Guessing there would split a record from its session.
-	ErrProjectOwnershipAmbiguous   = errors.New("session project ownership is ambiguous")
-	ErrObservationProjectImmutable = errors.New("observation project cannot be reassigned")
-	ErrObservationTitleRequired    = errors.New("observation title is required")
-	ErrObservationContentRequired  = errors.New("observation content is required")
-	ErrPromptContentRequired       = errors.New("prompt content is required")
+	ErrProjectOwnershipAmbiguous      = errors.New("session project ownership is ambiguous")
+	ErrObservationProjectImmutable    = errors.New("observation project cannot be reassigned")
+	ErrObservationTitleRequired       = errors.New("observation title is required")
+	ErrObservationContentRequired     = errors.New("observation content is required")
+	ErrObservationFindReplaceInvalid  = errors.New("find and replace must be provided together and cannot be combined with content")
+	ErrObservationFindReplaceTooLarge = errors.New("find or replace exceeds the observation content limit")
+	ErrPromptContentRequired          = errors.New("prompt content is required")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -279,6 +281,8 @@ type UpdateObservationParams struct {
 	Type     *string `json:"type,omitempty"`
 	Title    *string `json:"title,omitempty"`
 	Content  *string `json:"content,omitempty"`
+	Find     *string `json:"find,omitempty"`
+	Replace  *string `json:"replace,omitempty"`
 	Project  *string `json:"project,omitempty"`
 	Scope    *string `json:"scope,omitempty"`
 	TopicKey *string `json:"topic_key,omitempty"`
@@ -3721,6 +3725,46 @@ func truncateContent(content string, max int) string {
 	return content[:end] + "... [truncated]"
 }
 
+// boundedLiteralReplace applies literal global replacement without allocating an
+// unbounded expanded result. It retains one byte beyond the storage limit so
+// truncateContent can preserve its existing UTF-8 boundary behavior.
+func boundedLiteralReplace(content, find, replace string, max int) string {
+	if find == "" {
+		return content
+	}
+
+	limit := max + 1
+	var result strings.Builder
+	if len(content) < limit {
+		result.Grow(len(content))
+	} else {
+		result.Grow(limit)
+	}
+	write := func(part string) bool {
+		remaining := limit - result.Len()
+		if len(part) <= remaining {
+			result.WriteString(part)
+			return false
+		}
+		result.WriteString(part[:remaining])
+		return true
+	}
+
+	for {
+		index := strings.Index(content, find)
+		if index < 0 {
+			if write(content) {
+				return truncateContent(result.String(), max)
+			}
+			return result.String()
+		}
+		if write(content[:index]) || write(replace) {
+			return truncateContent(result.String(), max)
+		}
+		content = content[index+len(find):]
+	}
+}
+
 func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
@@ -4029,6 +4073,12 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 	// Admission runs before the transaction so a rejected update opens no
 	// transaction, touches no row and enqueues no sync mutation. The title is
 	// checked post-strip so redaction cannot smuggle an empty one through.
+	if (p.Find == nil) != (p.Replace == nil) || (p.Content != nil && p.Find != nil) {
+		return nil, ErrObservationFindReplaceInvalid
+	}
+	if p.Find != nil && (len(*p.Find) > s.cfg.MaxObservationLength || len(*p.Replace) > s.cfg.MaxObservationLength) {
+		return nil, ErrObservationFindReplaceTooLarge
+	}
 	if p.Title != nil {
 		if err := ValidateObservationTitle(stripPrivateTags(*p.Title)); err != nil {
 			return nil, err
@@ -4063,6 +4113,17 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		}
 		if p.Content != nil {
 			content, _ = s.prepareStoredContent(*p.Content)
+		}
+		if p.Find != nil {
+			// Redact a complete private tag in the bounded replacement input before
+			// expansion. Otherwise a bounded result could cut its closing tag and
+			// prevent prepareStoredContent from recognizing the private content.
+			replace := privateTagRegex.ReplaceAllString(*p.Replace, "[REDACTED]")
+			replaced := boundedLiteralReplace(content, *p.Find, replace, s.cfg.MaxObservationLength)
+			content, _ = s.prepareStoredContent(replaced)
+			if content == "" {
+				return ErrObservationContentRequired
+			}
 		}
 		if p.Project != nil {
 			requestedProject, _ := NormalizeProject(*p.Project)
