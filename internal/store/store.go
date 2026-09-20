@@ -5386,12 +5386,13 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	if data.Version != "" && data.Version != legacyExportVersion && data.Version != currentExportVersion {
 		return nil, fmt.Errorf("import: unsupported export version %q", data.Version)
 	}
+	// A blank or whitespace directory is a legitimate local partial session, so
+	// it is accepted and preserved exactly as carried (engram#1287). Completion
+	// happens through createSessionTx/startSessionTx's upsert CASE when a later
+	// non-blank directory arrives under the same id.
 	for _, sess := range data.Sessions {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
-		}
-		if strings.TrimSpace(sess.Directory) == "" {
-			return nil, fmt.Errorf("import session %s: %w: directory is required", sess.ID, ErrPulledSessionDirectoryInvalid)
 		}
 		if strings.TrimSpace(sess.OwnershipMode) != "" && !validSessionOwnershipMode(sess.OwnershipMode) {
 			return nil, fmt.Errorf("import session %s: %w %q", sess.ID, ErrInvalidSessionOwnershipMode, sess.OwnershipMode)
@@ -9711,7 +9712,7 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 				return err
 			}
 		}
-		if err := validatePulledSessionDirectory([]byte(mutation.Payload)); err != nil {
+		if err := validatePulledSessionDirectoryForDomain(cloud, []byte(mutation.Payload)); err != nil {
 			return err
 		}
 		return s.applySessionPayloadTx(tx, payload)
@@ -9759,6 +9760,21 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 	}
 }
 
+// validatePulledSessionDirectoryForDomain selects the directory admission rule
+// for a pulled session upsert. Cloud inbound stays strict byte-for-byte; the
+// local pull domain (ApplyPulledChunk and the deferred replay it feeds) accepts
+// a blank directory as the intentional local partial-session state.
+func validatePulledSessionDirectoryForDomain(cloud bool, raw []byte) error {
+	if cloud {
+		return validatePulledSessionDirectory(raw)
+	}
+	return validatePulledSessionDirectoryLocal(raw)
+}
+
+// validatePulledSessionDirectory is the strict cloud-inbound admission check
+// (ApplyPulledMutation / autosync). A missing directory key and a blank value
+// are both rejected with the historical wording; cloud payloads must name a
+// concrete directory because the cloud has no local state to complete against.
 func validatePulledSessionDirectory(raw []byte) error {
 	var fields map[string]json.RawMessage
 	if err := decodeSyncPayload(raw, &fields); err != nil {
@@ -9770,6 +9786,29 @@ func validatePulledSessionDirectory(raw []byte) error {
 	}
 	var value string
 	if err := json.Unmarshal(directory, &value); err != nil || strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%w: directory must be non-blank", ErrPulledSessionDirectoryInvalid)
+	}
+	return nil
+}
+
+// validatePulledSessionDirectoryLocal is the local pull-path admission check.
+// It accepts a missing directory key (decoding to blank) and a present-but-blank
+// value, so a local partial session round-trips through pulled chunks without
+// being rejected, spliced, or normalized: the payload bytes are applied as
+// carried and the stored session keeps the blank directory (engram#1287).
+// Transport-level faults (undecodable raw) and non-string directory values stay
+// rejected exactly as before.
+func validatePulledSessionDirectoryLocal(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := decodeSyncPayload(raw, &fields); err != nil {
+		return err
+	}
+	directory, ok := fields["directory"]
+	if !ok {
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(directory, &value); err != nil {
 		return fmt.Errorf("%w: directory must be non-blank", ErrPulledSessionDirectoryInvalid)
 	}
 	return nil

@@ -8021,17 +8021,6 @@ func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("direct import with blank directory", func(t *testing.T) {
-		s := newTestStore(t)
-		_, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "engram", Directory: " "}}})
-		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-			t.Fatalf("Import error = %v, want ErrPulledSessionDirectoryInvalid", err)
-		}
-		if _, err := s.GetSession("blank-import"); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("blank imported session persisted: %v", err)
-		}
-	})
 }
 
 func TestApplyPulledSessionMutationSkipsInvalidIdentityWithEvidence(t *testing.T) {
