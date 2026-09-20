@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 // npm from reintroducing the downgrade.
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const mcpTemplate = JSON.parse(readFileSync(new URL("../mcp-template.json", import.meta.url), "utf8"));
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 
 const PI_TUI = "@earendil-works/pi-tui";
@@ -141,6 +142,7 @@ test("pi-engram init launcher treats blank ENGRAM_BIN as unset without changing 
 	try {
 		runCli(agentDir, "init");
 		const server = JSON.parse(readFileSync(join(agentDir, "mcp.json"), "utf8")).mcpServers.engram;
+		assert.deepEqual(server, mcpTemplate.mcpServers.engram, "the published template must match the generated launcher");
 		assert.deepEqual(
 			{ command: server.command, lifecycle: server.lifecycle, directTools: server.directTools },
 			{ command: "node", lifecycle: "lazy", directTools: false },
