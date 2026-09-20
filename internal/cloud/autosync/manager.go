@@ -784,12 +784,15 @@ func (m *Manager) setPhase(phase string) {
 // recordFailureWithReason records a failure with an explicit reason code.
 // BW5: Allows specific reason codes (auth_required, policy_forbidden) to surface
 // in Manager.Status() so callers can distinguish auth errors from transport errors.
+// It clears ReasonMessage so a message left by an earlier blocked cycle cannot
+// outlive the reason code it belonged to.
 func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	m.mu.Lock()
 	failures := m.status.ConsecutiveFailures + 1
 	m.status.ConsecutiveFailures = failures
 	m.status.LastError = msg
 	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = ""
 
 	backoff := m.computeBackoff(failures)
 	bu := time.Now().Add(backoff)
@@ -809,6 +812,11 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	_ = m.store.MarkSyncFailure(m.cfg.TargetKey, msg, bu)
 }
 
+// recordBlocked records a durable degraded state for a cycle whose outbound
+// progress is blocked by non-enrolled pending mutations. It keeps the blocked
+// reason observable, clears consecutive failures and backoff (the cycle is
+// retryable, not failing), and advances LastSyncAt because inbound progress did
+// happen. It is only reached after a successful pull.
 func (m *Manager) recordBlocked(msg, reasonCode string) {
 	now := time.Now()
 	m.mu.Lock()

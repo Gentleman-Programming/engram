@@ -2032,6 +2032,8 @@ func TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist(t *
 	}
 	cfg := DefaultConfig()
 	mgr := New(ls, tr, cfg)
+	// Seed a failure streak so the blocked cycle's reset is observable.
+	mgr.status.ConsecutiveFailures = 3
 
 	mgr.cycle(context.Background())
 
@@ -2050,6 +2052,9 @@ func TestManagerPullsAndAppliesMutationsWhenNonEnrolledPendingMutationsExist(t *
 	}
 	if st.ReasonCode != "non_enrolled_pending_mutations" {
 		t.Fatalf("expected non-enrolled reason code, got %q", st.ReasonCode)
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Fatalf("expected blocked cycle to reset consecutive failures, got %d", st.ConsecutiveFailures)
 	}
 	if st.LastSyncAt == nil {
 		t.Fatal("expected LastSyncAt to be recorded after successful pull")
@@ -2133,16 +2138,54 @@ func TestManagerPullFailureOverridesNonEnrolledBlocked(t *testing.T) {
 	}
 }
 
-type paginatedTransport struct {
-	*fakeCloudTransport
-	batches []*PullMutationsResponse
-	index   int
+// TestManagerPullFailureClearsStaleBlockedReasonMessage pins that a blocked
+// cycle's reason message does not outlive the reason code it belonged to. A
+// non-enrolled block records a long enrollment guidance message; when the next
+// cycle's pull fails, the reported reason becomes the transport failure and the
+// stale enrollment message must not survive it.
+func TestManagerPullFailureClearsStaleBlockedReasonMessage(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 2},
+	}
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	// Cycle 1: blocked push with a successful pull records the blocked message.
+	mgr.cycle(context.Background())
+	if st := mgr.Status(); st.ReasonCode != "non_enrolled_pending_mutations" || st.ReasonMessage == "" {
+		t.Fatalf("expected blocked reason message after blocking cycle, got %+v", st)
+	}
+
+	// Cycle 2: same blocked push, but the pull now fails.
+	tr.pullErr = &fakeAuthErr{code: 401}
+	mgr.cycle(context.Background())
+
+	st := mgr.Status()
+	if st.ReasonCode != "auth_required" {
+		t.Fatalf("expected auth_required after pull failure, got %q", st.ReasonCode)
+	}
+	if st.ReasonMessage != "" {
+		t.Fatalf("expected stale blocked reason message to be cleared, got %q", st.ReasonMessage)
+	}
+	if st.Phase != PhasePullFailed {
+		t.Fatalf("expected pull_failed phase after pull failure, got %q", st.Phase)
+	}
 }
 
-func (p *paginatedTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, error) {
+type paginatedTransport struct {
+	*fakeCloudTransport
+	batches  []*PullMutationsResponse
+	index    int
+	sinceSeq []int64
+}
+
+func (p *paginatedTransport) PullMutations(sinceSeq int64, _ int) (*PullMutationsResponse, error) {
 	atomic.AddInt32(&p.pullCalls, 1)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.sinceSeq = append(p.sinceSeq, sinceSeq)
 	if p.index < len(p.batches) {
 		res := p.batches[p.index]
 		p.index++
@@ -2183,6 +2226,9 @@ func TestManagerPaginatedPullAndCursorProgressUnderNonEnrolledPending(t *testing
 	}
 	if got := atomic.LoadInt32(&tr.pullCalls); got != 2 {
 		t.Fatalf("expected 2 paginated pull calls, got %d", got)
+	}
+	if len(tr.sinceSeq) != 2 || tr.sinceSeq[0] != 0 || tr.sinceSeq[1] != 10 {
+		t.Fatalf("expected pagination cursors [0 10], got %v", tr.sinceSeq)
 	}
 	if len(ls.appliedMuts) != 2 {
 		t.Fatalf("expected 2 applied mutations, got %d", len(ls.appliedMuts))
