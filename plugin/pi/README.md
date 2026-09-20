@@ -222,6 +222,8 @@ If the binary is missing, Pi keeps running and memory degrades instead of crashi
 
 ## Environment variables
 
+Optional `ENGRAM_*` values treat an absent, empty, or whitespace-only value as unset. Nonblank explicit values remain authoritative.
+
 | Variable          | Default  | Effect                                                                                                                                                                                                                                                                                  |
 | ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ENGRAM_URL`      | unset    | Adopt an already running Engram HTTP server (for example `http://127.0.0.1:7437`). When set, the extension skips spawning `engram serve` and skips local instance-identity ownership checks; the server is treated as externally managed.                                                |

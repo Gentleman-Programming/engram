@@ -20,6 +20,15 @@ function extractFunctionBody(name, marker) {
   throw new Error(`${name} body not found`);
 }
 
+function buildOptionalEnvironmentValueForTest() {
+  const body = extractFunctionBody("optionalEnvironmentValue", "{\n  return");
+  return new Function(`
+    return function optionalEnvironmentValue(value) {
+      ${body}
+    };
+  `)();
+}
+
 function flush(times = 2) {
   return times <= 0
     ? Promise.resolve()
@@ -470,6 +479,26 @@ function sessionCtx(id, sink) {
     ui: { setStatus: (key, text) => sink.push([key, text]) },
   };
 }
+
+test("optional Engram environment values treat blank strings as unset", () => {
+  const optionalEnvironmentValue = buildOptionalEnvironmentValueForTest();
+
+  for (const value of [undefined, "", " \t\n "]) {
+    assert.equal(optionalEnvironmentValue(value), undefined);
+    assert.equal(optionalEnvironmentValue(value) ?? "engram", "engram", "blank ENGRAM_BIN uses the default executable");
+    assert.equal(Number.parseInt(optionalEnvironmentValue(value) ?? "7437", 10), 7437, "blank ENGRAM_PORT uses the default port");
+    assert.equal(optionalEnvironmentValue(value)?.trim() || undefined, undefined, "blank ENGRAM_URL keeps its existing unset behavior");
+  }
+
+  assert.equal(optionalEnvironmentValue("/custom/engram"), "/custom/engram", "an explicit ENGRAM_BIN remains authoritative");
+  assert.equal(optionalEnvironmentValue("17437"), "17437", "an explicit ENGRAM_PORT remains authoritative");
+  assert.equal(Number.parseInt(optionalEnvironmentValue("17437") ?? "7437", 10), 17437);
+  assert.equal(optionalEnvironmentValue("http://127.0.0.1:17437"), "http://127.0.0.1:17437");
+
+  assert.match(source, /const ENGRAM_PORT = Number\.parseInt\(optionalEnvironmentValue\(process\.env\.ENGRAM_PORT\) \?\? "7437", 10\)/);
+  assert.match(source, /const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue\(process\.env\.ENGRAM_URL\)\?\.trim\(\) \|\| undefined/);
+  assert.match(source, /const ENGRAM_BIN = optionalEnvironmentValue\(process\.env\.ENGRAM_BIN\) \?\? "engram"/);
+});
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);

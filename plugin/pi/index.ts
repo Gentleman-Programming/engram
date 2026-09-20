@@ -16,10 +16,14 @@ import { ArchiveOutcome, buildRecoveryNotice, extractCompactedSummary } from "./
 import { compactResultStatus, humanToolName, renderCallText, renderResultText } from "./memory-tool-chrome.js";
 import { redactPrivateTags, redactUrlPath, redactValue } from "./private-redaction.js";
 
-const ENGRAM_PORT = Number.parseInt(process.env.ENGRAM_PORT ?? "7437", 10);
-const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined;
+function optionalEnvironmentValue(value: string | undefined): string | undefined {
+  return value?.trim() ? value : undefined;
+}
+
+const ENGRAM_PORT = Number.parseInt(optionalEnvironmentValue(process.env.ENGRAM_PORT) ?? "7437", 10);
+const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL)?.trim() || undefined;
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
-const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram";
+const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 
 const ENGRAM_FETCH_TIMEOUT_MS = 3000;
 const ENGRAM_FETCH_MAX_ATTEMPTS = 3;
