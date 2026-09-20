@@ -550,20 +550,20 @@ func rawArrayContainsString(values []json.RawMessage, target string) bool {
 //
 // Original line in source:
 //
-//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
+//	const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
 //
 // Patched line in installed copy:
 //
-//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/abs/path/engram"
+//	const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/abs/path/engram"
 //
 // Priority (left to right, first defined wins):
-//  1. ENGRAM_BIN env var — explicit user override, always respected.
+//  1. Nonblank ENGRAM_BIN env var — explicit user override, always respected.
 //  2. Absolute baked-in path — works in headless/systemd where PATH is stripped.
 //
 // If absBin is already bare "engram" (os.Executable fallback), retain the
 // source fallback so the installed Node plugin has no Bun runtime dependency.
 func patchEngramBINLine(src []byte, absBin string) []byte {
-	const marker = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`
+	const marker = `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"`
 
 	var replacement string
 	if absBin == "engram" {
@@ -571,7 +571,7 @@ func patchEngramBINLine(src []byte, absBin string) []byte {
 		replacement = marker
 	} else {
 		// Normal case: bake in the absolute path as the final fallback.
-		replacement = fmt.Sprintf(`const ENGRAM_BIN = process.env.ENGRAM_BIN ?? %q`, absBin)
+		replacement = fmt.Sprintf(`const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? %q`, absBin)
 	}
 
 	return []byte(strings.Replace(string(src), marker, replacement, 1))
