@@ -6436,6 +6436,16 @@ func isSyncInboxTarget(targetKey string) bool {
 }
 
 func (s *Store) MarkSyncBlocked(targetKey, reasonCode, message string) error {
+	return s.markSyncBlocked(targetKey, reasonCode, message, false)
+}
+
+// MarkSyncBlockedAfterSuccess atomically records a successful inbound poll while
+// retaining the final degraded state that blocks outbound replication.
+func (s *Store) MarkSyncBlockedAfterSuccess(targetKey, reasonCode, message string) error {
+	return s.markSyncBlocked(targetKey, reasonCode, message, true)
+}
+
+func (s *Store) markSyncBlocked(targetKey, reasonCode, message string, recordSuccess bool) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	if isSyncInboxTarget(targetKey) {
 		return nil
@@ -6446,9 +6456,10 @@ func (s *Store) MarkSyncBlocked(targetKey, reasonCode, message string) error {
 		}
 		_, err := s.execHook(tx,
 			`UPDATE sync_state
-			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = ?, reason_message = ?, last_error = ?, updated_at = datetime('now')
+			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = ?, reason_message = ?, last_error = ?,
+			     last_success_at = CASE WHEN ? THEN datetime('now') ELSE last_success_at END, updated_at = datetime('now')
 			 WHERE target_key = ?`,
-			SyncLifecycleDegraded, reasonCode, message, message, targetKey,
+			SyncLifecycleDegraded, reasonCode, message, message, recordSuccess, targetKey,
 		)
 		return err
 	})
@@ -6543,6 +6554,17 @@ func (s *Store) MarkSyncPending(targetKey string) error {
 //
 // Every other apply failure keeps its existing fail-closed behavior.
 func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) error {
+	return s.applyPulledMutation(targetKey, mutation, false)
+}
+
+// ApplyPulledMutationPreservingSyncState advances the pull cursor without
+// changing the current lifecycle, reason, or failure state. It is used when
+// inbound replication succeeds while outbound sync remains policy-blocked.
+func (s *Store) ApplyPulledMutationPreservingSyncState(targetKey string, mutation SyncMutation) error {
+	return s.applyPulledMutation(targetKey, mutation, true)
+}
+
+func (s *Store) applyPulledMutation(targetKey string, mutation SyncMutation, preserveSyncState bool) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	return s.withTx(func(tx *sql.Tx) error {
 		state, err := s.getSyncStateTx(tx, targetKey)
@@ -6570,6 +6592,14 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 					}
 				}
 			}
+		}
+
+		if preserveSyncState {
+			_, err = s.execHook(tx,
+				`UPDATE sync_state SET last_pulled_seq = ?, updated_at = datetime('now') WHERE target_key = ?`,
+				mutation.Seq, targetKey,
+			)
+			return err
 		}
 
 		_, err = s.execHook(tx,

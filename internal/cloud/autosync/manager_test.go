@@ -2,6 +2,7 @@ package autosync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
@@ -32,8 +34,9 @@ type fakeLocalStore struct {
 	acquireGranted    bool
 	ackedSeqs         []int64
 	ackErr            error
-	healthyCalls      int
-	nonEnrolledCounts []store.PendingSyncMutationProjectCount
+	healthyCalls              int
+	blockedAfterSuccessCalls int
+	nonEnrolledCounts        []store.PendingSyncMutationProjectCount
 	deferredProjects  []string
 	listDeferredErr   error
 	listedTargets     []string
@@ -122,6 +125,10 @@ func (s *fakeLocalStore) ApplyPulledMutation(_ string, mutation store.SyncMutati
 	return nil
 }
 
+func (s *fakeLocalStore) ApplyPulledMutationPreservingSyncState(targetKey string, mutation store.SyncMutation) error {
+	return s.ApplyPulledMutation(targetKey, mutation)
+}
+
 func (s *fakeLocalStore) MarkSyncFailure(_, message string, _ time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,6 +193,15 @@ func TestManagerPolicyFailureGuidanceUsesDeniedProjectFromAggregate(t *testing.T
 func (s *fakeLocalStore) MarkSyncBlocked(_, reasonCode, message string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.blockedReason = reasonCode
+	s.blockedMessage = message
+	return nil
+}
+
+func (s *fakeLocalStore) MarkSyncBlockedAfterSuccess(_, reasonCode, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockedAfterSuccessCalls++
 	s.blockedReason = reasonCode
 	s.blockedMessage = message
 	return nil
@@ -2019,26 +2035,40 @@ func TestManagerSurfacesPolicyForbiddenOn403(t *testing.T) {
 		mgr.Status().Phase, mgr.Status().ReasonCode)
 }
 
-func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
+// TestManagerCyclePullsWhileNonEnrolledPendingMutationsRemain exercises the
+// manager cycle as the runtime boundary while the store persists both cursors
+// and lifecycle state.
+func TestManagerCyclePullsWhileNonEnrolledPendingMutationsRemain(t *testing.T) {
 	ls := newFakeLocalStore()
 	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
 		{Project: "alpha", Count: 2},
 		{Project: "beta", Count: 1},
 	}
 	tr := newFakeTransport()
-	cfg := DefaultConfig()
-	mgr := New(ls, tr, cfg)
+	tr.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{
+		Seq:        1,
+		Project:    "remote-project",
+		Entity:     "observation",
+		EntityKey:  "remote-observation",
+		Op:         "upsert",
+		Payload:    json.RawMessage(`{"sync_id":"remote-observation"}`),
+		OccurredAt: "2025-01-01T00:00:00Z",
+	}}}
+	mgr := New(ls, tr, DefaultConfig())
 
 	mgr.cycle(context.Background())
 
 	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
 		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
 	}
-	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
-		t.Fatalf("expected blocked cycle to skip pull, got %d", got)
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected blocked cycle to pull once, got %d", got)
 	}
 	if len(ls.ackedSeqs) != 0 {
 		t.Fatalf("expected no acked mutations, got %v", ls.ackedSeqs)
+	}
+	if len(ls.appliedMuts) != 1 || ls.appliedMuts[0].Seq != 1 {
+		t.Fatalf("expected inbound mutation to be applied, got %+v", ls.appliedMuts)
 	}
 	st := mgr.Status()
 	if st.Phase != PhasePushFailed {
@@ -2053,7 +2083,121 @@ func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
 		}
 	}
 	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
-		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+		t.Fatalf("expected blocked state persisted after pull, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	}
+	if st.LastSyncAt == nil {
+		t.Fatal("expected successful inbound pull to record LastSyncAt")
+	}
+	if ls.healthyCalls != 0 {
+		t.Fatalf("expected blocked pull never to persist a healthy lifecycle, got %d calls", ls.healthyCalls)
+	}
+	if ls.blockedAfterSuccessCalls != 1 {
+		t.Fatalf("expected blocked pull to persist success timing and blocked state once, got %d calls", ls.blockedAfterSuccessCalls)
+	}
+}
+
+func TestManagerCycleRecordsPullFailureAfterNonEnrolledBlock(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{{Project: "alpha", Count: 1}}
+	tr := newFakeTransport()
+	tr.pullErr = errors.New("remote unavailable")
+	mgr := New(ls, tr, DefaultConfig())
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("blocked cycle push calls = %d, want 0", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("blocked cycle pull calls = %d, want 1", got)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePullFailed || st.ReasonCode != "transport_failed" || !strings.Contains(st.LastError, "remote unavailable") || !strings.Contains(st.ReasonMessage, "remote unavailable") || st.ReasonMessage != st.LastError {
+		t.Fatalf("pull failure must replace every blocked status field truthfully, got %+v", st)
+	}
+	if ls.failureReason != "transport_failed" || !strings.Contains(ls.failureMessage, "remote unavailable") {
+		t.Fatalf("pull failure was not persisted, reason=%q message=%q", ls.failureReason, ls.failureMessage)
+	}
+	if st.LastSyncAt != nil || ls.healthyCalls != 0 {
+		t.Fatalf("pull failure must not record success timing, status=%+v healthy calls=%d", st, ls.healthyCalls)
+	}
+}
+
+func TestManagerCyclePersistsInboundProgressWhileOutboundEnrollmentIsBlocked(t *testing.T) {
+	storeCfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("store default config: %v", err)
+	}
+	storeCfg.DataDir = t.TempDir()
+	local, err := store.New(storeCfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer local.Close() //nolint:errcheck
+
+	if _, err := local.DB().Exec(`
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, store.DefaultSyncTargetKey, store.SyncEntitySession, "blocked-session", store.SyncOpUpsert,
+		`{"id":"blocked-session","project":"blocked-project","directory":"/tmp/blocked"}`,
+		store.SyncSourceLocal, "blocked-project"); err != nil {
+		t.Fatalf("seed blocked outbound mutation: %v", err)
+	}
+	var blockedSeq int64
+	if err := local.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = ?`, "blocked-session").Scan(&blockedSeq); err != nil {
+		t.Fatalf("read blocked mutation sequence: %v", err)
+	}
+
+	transport := newFakeTransport()
+	transport.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{
+		Seq:       1,
+		Project:   "remote-project",
+		Entity:    store.SyncEntitySession,
+		EntityKey: "remote-session",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"id":"remote-session","project":"remote-project","directory":"/tmp/remote"}`),
+	}}}
+	manager := New(local, transport, DefaultConfig())
+
+	manager.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&transport.pushCalls); got != 0 {
+		t.Fatalf("blocked cycle push calls = %d, want 0", got)
+	}
+	if got := atomic.LoadInt32(&transport.pullCalls); got != 1 {
+		t.Fatalf("blocked cycle pull calls = %d, want 1", got)
+	}
+	state, err := local.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("read sync state after blocked cycle: %v", err)
+	}
+	if state.LastPulledSeq != 1 {
+		t.Fatalf("last pulled sequence = %d, want 1", state.LastPulledSeq)
+	}
+	if state.Lifecycle != store.SyncLifecycleDegraded || state.ReasonCode == nil || *state.ReasonCode != constants.ReasonNonEnrolledPendingMutations {
+		t.Fatalf("blocked lifecycle was not restored after pull: %+v", state)
+	}
+	if state.LastSuccessAt == nil {
+		t.Fatal("successful inbound pull did not persist last success timing")
+	}
+	if status := manager.Status(); status.LastSyncAt == nil {
+		t.Fatal("successful inbound pull did not update manager LastSyncAt")
+	}
+	if pending, err := local.CountPendingNonEnrolledSyncMutations(store.DefaultSyncTargetKey); err != nil || len(pending) != 1 || pending[0].Project != "blocked-project" || pending[0].Count != 1 {
+		t.Fatalf("blocked outbound backlog = %+v, %v; want one blocked-project mutation", pending, err)
+	}
+
+	if err := local.EnrollProject("blocked-project"); err != nil {
+		t.Fatalf("enroll blocked project: %v", err)
+	}
+	transport.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{blockedSeq}}
+	manager.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&transport.pushCalls); got != 1 {
+		t.Fatalf("enrolled backlog push calls = %d, want 1", got)
+	}
+	if pending, err := local.ListPendingSyncMutations(store.DefaultSyncTargetKey, 10); err != nil || len(pending) != 0 {
+		t.Fatalf("pending mutations after enrollment = %+v, %v; want none", pending, err)
 	}
 }
 
