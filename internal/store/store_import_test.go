@@ -539,3 +539,96 @@ func TestPulledChunkDirectoryCompletionPreservesConcreteValue(t *testing.T) {
 		}
 	})
 }
+
+// CodeRabbit PR #1298 actionable finding #2: the snapshot JSON decode must
+// distinguish an absent directory key (missing → blank, accepted) from JSON
+// null and non-string tokens (rejected with an error naming the session).
+// Session's plain `json:"directory"` string tag silently folds null into "",
+// so ExportData.UnmarshalJSON inspects the raw directory value through an
+// import-only auxiliary type before admitting the session.
+func TestExportDataUnmarshalJSONDirectoryAdmission(t *testing.T) {
+	sessionJSON := func(id, directoryToken string) string {
+		directory := ""
+		if directoryToken != "" {
+			directory = fmt.Sprintf(`,"directory":%s`, directoryToken)
+		}
+		return fmt.Sprintf(`{"version":%q,"sessions":[{"id":%q,"project":"engram"%s,"started_at":"2026-01-01 00:00:00"}]}`, currentExportVersion, id, directory)
+	}
+	tests := []struct {
+		name          string
+		sessionID     string
+		directory     string // raw JSON token; "" means the key is absent
+		wantErr       bool
+		wantDirectory string
+	}{
+		{name: "null rejected", sessionID: "null-dir-session", directory: "null", wantErr: true},
+		{name: "number rejected", sessionID: "number-dir-session", directory: "42", wantErr: true},
+		{name: "array rejected", sessionID: "array-dir-session", directory: `["/a"]`, wantErr: true},
+		{name: "object rejected", sessionID: "object-dir-session", directory: `{"path":"/a"}`, wantErr: true},
+		{name: "absent key admitted as blank", sessionID: "absent-dir-session", directory: "", wantDirectory: ""},
+		{name: "blank string preserved", sessionID: "blank-dir-session", directory: `""`, wantDirectory: ""},
+		{name: "whitespace string preserved", sessionID: "whitespace-dir-session", directory: `" \t "`, wantDirectory: " \t "},
+		{name: "concrete string preserved", sessionID: "concrete-dir-session", directory: `"/real/dir"`, wantDirectory: "/real/dir"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var data ExportData
+			err := json.Unmarshal([]byte(sessionJSON(tt.sessionID, tt.directory)), &data)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("UnmarshalJSON accepted directory %s for session %s", tt.directory, tt.sessionID)
+				}
+				if !strings.Contains(err.Error(), tt.sessionID) {
+					t.Fatalf("error %q does not name the offending session %q", err, tt.sessionID)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalJSON: %v", err)
+			}
+			if len(data.Sessions) != 1 {
+				t.Fatalf("decoded sessions = %d, want 1", len(data.Sessions))
+			}
+			if got := data.Sessions[0].Directory; got != tt.wantDirectory {
+				t.Fatalf("decoded directory = %q, want exactly %q", got, tt.wantDirectory)
+			}
+		})
+	}
+}
+
+// The same admission rule proven through the snapshot import flow: a null
+// directory can never reach Store.Import because the decode rejects it, while
+// a blank string decodes and imports exactly as carried (engram#1287 local
+// partial sessions stay valid).
+func TestImportJSONSnapshotDirectoryAdmission(t *testing.T) {
+	t.Run("null directory rejected before Import", func(t *testing.T) {
+		payload := fmt.Sprintf(`{"version":%q,"sessions":[{"id":"json-null-dir","project":"engram","directory":null,"started_at":"2026-01-01 00:00:00"}]}`, currentExportVersion)
+		var data ExportData
+		if err := json.Unmarshal([]byte(payload), &data); err == nil {
+			t.Fatal("snapshot decode accepted a null directory; Import would receive a blank")
+		}
+	})
+
+	t.Run("blank directory accepted through Import", func(t *testing.T) {
+		s := newTestStore(t)
+		payload := fmt.Sprintf(`{"version":%q,"sessions":[{"id":"json-blank-dir","project":"engram","directory":"","started_at":"2026-01-01 00:00:00"}]}`, currentExportVersion)
+		var data ExportData
+		if err := json.Unmarshal([]byte(payload), &data); err != nil {
+			t.Fatalf("snapshot decode: %v", err)
+		}
+		result, err := s.Import(&data)
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if result.SessionsImported != 1 {
+			t.Fatalf("SessionsImported = %d, want 1", result.SessionsImported)
+		}
+		sess, err := s.GetSession("json-blank-dir")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if sess.Directory != "" {
+			t.Fatalf("stored directory = %q, want exactly \"\"", sess.Directory)
+		}
+	})
+}

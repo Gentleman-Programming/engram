@@ -695,13 +695,32 @@ func (d ExportData) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// exportedSessionDirectory is an import-only auxiliary projection used by
+// ExportData.UnmarshalJSON to decode each session's directory through a raw
+// JSON value. Session's plain `json:"directory"` string tag silently folds a
+// JSON null into "", so the snapshot decode inspects the raw token first: an
+// absent directory key stays missing (blank directory, accepted), a present
+// JSON string is preserved exactly (blank and whitespace included), and JSON
+// null or any non-string token is rejected with an error naming the offending
+// session. This admission rule is separate from the pulled-chunk validator
+// (validatePulledSessionDirectoryLocal), which governs a different payload.
+type exportedSessionDirectory struct {
+	ID        string          `json:"id"`
+	Directory json.RawMessage `json:"directory"`
+}
+
 // UnmarshalJSON accepts both the current backup projection and legacy 0.1.0
 // exports, where pinned and relations are absent and therefore retain defaults.
+//
+// Directory admission is part of the decode: an absent directory key is treated
+// as missing (blank directory, accepted), a present JSON string is preserved
+// exactly (blank and whitespace included), and JSON null or any non-string
+// token fails the whole unmarshal with an error naming the offending session.
 func (d *ExportData) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		Version      string              `json:"version"`
 		ExportedAt   string              `json:"exported_at"`
-		Sessions     []Session           `json:"sessions"`
+		Sessions     []json.RawMessage   `json:"sessions"`
 		Observations []backupObservation `json:"observations"`
 		Prompts      []Prompt            `json:"prompts"`
 		Relations    []BackupRelation    `json:"relations"`
@@ -709,13 +728,32 @@ func (d *ExportData) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
+	var sessions []Session
+	if decoded.Sessions != nil {
+		sessions = make([]Session, len(decoded.Sessions))
+	}
+	for i, rawSession := range decoded.Sessions {
+		var directory exportedSessionDirectory
+		if err := json.Unmarshal(rawSession, &directory); err != nil {
+			return err
+		}
+		if raw := directory.Directory; raw != nil {
+			var value *string
+			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+				return fmt.Errorf("import session %q: directory must be a JSON string", directory.ID)
+			}
+		}
+		if err := json.Unmarshal(rawSession, &sessions[i]); err != nil {
+			return err
+		}
+	}
 	observations := make([]Observation, len(decoded.Observations))
 	for i, observation := range decoded.Observations {
 		observation.Observation.Pinned = observation.Pinned
 		observations[i] = observation.Observation
 	}
 	*d = ExportData{
-		Version: decoded.Version, ExportedAt: decoded.ExportedAt, Sessions: decoded.Sessions,
+		Version: decoded.Version, ExportedAt: decoded.ExportedAt, Sessions: sessions,
 		Observations: observations, Prompts: decoded.Prompts, Relations: decoded.Relations,
 	}
 	return nil
