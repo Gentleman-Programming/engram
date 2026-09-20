@@ -116,6 +116,8 @@ async function createRuntime(t, {
   emitSpawnError = false,
   installBun = true,
   configuredEngramURL,
+  engramBin,
+  engramPort,
   healthOK = true,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
     registrationResponse,
@@ -128,16 +130,23 @@ async function createRuntime(t, {
 	const originalFetch = globalThis.fetch
 	const originalBun = globalThis.Bun
 	const originalEngramURL = process.env.ENGRAM_URL
+  const originalEngramBin = process.env.ENGRAM_BIN
+  const originalEngramPort = process.env.ENGRAM_PORT
   const originalSpawnSync = childProcess.spawnSync
   const originalSpawn = childProcess.spawn
   const originalExistsSync = fs.existsSync
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
+  const healthURLs = []
 	const spawns = []
 	const startupEvents = []
 	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
 	else process.env.ENGRAM_URL = configuredEngramURL
+  if (engramBin === undefined) delete process.env.ENGRAM_BIN
+  else process.env.ENGRAM_BIN = engramBin
+  if (engramPort === undefined) delete process.env.ENGRAM_PORT
+  else process.env.ENGRAM_PORT = engramPort
   if (installBun) {
     globalThis.Bun = {
       spawnSync(args) {
@@ -185,7 +194,10 @@ async function createRuntime(t, {
   syncBuiltinESMExports()
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
-		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+		if (path === "/health") {
+      healthURLs.push(String(url))
+      return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+    }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
 		if (path === "/project/current") {
@@ -214,6 +226,10 @@ async function createRuntime(t, {
 		globalThis.Bun = originalBun
 		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
 		else process.env.ENGRAM_URL = originalEngramURL
+    if (originalEngramBin === undefined) delete process.env.ENGRAM_BIN
+    else process.env.ENGRAM_BIN = originalEngramBin
+    if (originalEngramPort === undefined) delete process.env.ENGRAM_PORT
+    else process.env.ENGRAM_PORT = originalEngramPort
     childProcess.spawnSync = originalSpawnSync
     childProcess.spawn = originalSpawn
     fs.existsSync = originalExistsSync
@@ -246,6 +262,7 @@ async function createRuntime(t, {
     registeredIDs,
     sessionGetIDs,
     requests,
+    healthURLs,
 		spawns,
 		startupEvents,
   }
@@ -256,6 +273,35 @@ test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t
 
   assert.equal(typeof runtime.plugin.event, "function")
   assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+test("adapter treats blank optional Engram environment values as unset at its import boundary", async (t) => {
+  for (const scenario of [
+    { name: "absent", engramBin: undefined, engramPort: undefined, configuredEngramURL: undefined },
+    { name: "empty", engramBin: "", engramPort: "", configuredEngramURL: "" },
+    { name: "whitespace-only", engramBin: " \t", engramPort: " \n", configuredEngramURL: " \t" },
+    { name: "explicit", engramBin: " /custom/engram ", engramPort: "17437", configuredEngramURL: undefined },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, { ...scenario, healthOK: false })
+      const server = runtime.spawns.find(({ args }) => args[1] === "serve")
+
+      assert.equal(server?.args[0], scenario.engramBin?.trim() ? scenario.engramBin : "engram")
+      assert.equal(new URL(runtime.healthURLs[0]).port, scenario.engramPort?.trim() ? scenario.engramPort : "7437")
+    })
+  }
+})
+
+test("an explicit OpenCode ENGRAM_URL keeps precedence over local defaults", async (t) => {
+  const runtime = await createRuntime(t, {
+    configuredEngramURL: "http://127.0.0.1:17437",
+    engramBin: "custom-engram",
+    engramPort: "18437",
+    healthOK: false,
+  })
+
+  assert.equal(runtime.spawns.some(({ args }) => args[1] === "serve"), false)
+  assert.equal(runtime.healthURLs[0], "http://127.0.0.1:17437/health")
 })
 
 test("adapter returns hooks when local identity lookup fails", async (t) => {
