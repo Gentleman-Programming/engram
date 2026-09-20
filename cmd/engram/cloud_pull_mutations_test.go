@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
@@ -54,6 +55,27 @@ func mutationPullTestServer(t *testing.T, mutations []map[string]any) *httptest.
 	return srv
 }
 
+// mutationPullStatusServer serves a fixed HTTP status for the mutation pull
+// endpoint, so tests can exercise command-level error mapping (401/403/404).
+func mutationPullStatusServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync/mutations/pull" {
+			w.WriteHeader(status)
+			if body != "" {
+				_, _ = w.Write([]byte(body))
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	oldDefaultTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = oldDefaultTransport })
+	return srv
+}
+
 // mutationTestSession builds a valid session upsert mutation for the fake
 // cloud server.
 func mutationTestSession(seq int64, id, project string) map[string]any {
@@ -73,11 +95,15 @@ func mutationTestSession(seq int64, id, project string) map[string]any {
 	}
 }
 
+// setupPullMutationsConfig builds a test config with the fake server URL and
+// clears ambient cloud environment variables so each test controls auth
+// explicitly.
 func setupPullMutationsConfig(t *testing.T, srvURL, token string) store.Config {
 	t.Helper()
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 	if err := saveCloudConfig(cfg, &cloudConfig{
 		ServerURL: srvURL,
 		Token:     token,
@@ -87,6 +113,8 @@ func setupPullMutationsConfig(t *testing.T, srvURL, token string) store.Config {
 	return cfg
 }
 
+// runCloudPullMutations executes the pull command against the given config and
+// returns captured stdout, stderr, and the recovered exit value.
 func runCloudPullMutations(t *testing.T, cfg store.Config) (stdout string, stderr string, recovered any) {
 	t.Helper()
 	stubExitWithPanic(t)
@@ -212,13 +240,16 @@ func TestCloudPullMutations_AuthFailure(t *testing.T) {
 }
 
 // TestCloudPullMutations_NoAuthMode asserts that the command works when the
-// cloud config has no token: ENGRAM_CLOUD_INSECURE_NO_AUTH servers accept
-// unauthenticated mutation pull (issue #327, code review follow-up).
+// cloud config has no token and the server runs in insecure local-dev mode:
+// ENGRAM_CLOUD_INSECURE_NO_AUTH=1 servers accept unauthenticated mutation pull
+// (issue #327, code review follow-up). The env var is set explicitly so the
+// test exercises the documented no-auth configuration.
 func TestCloudPullMutations_NoAuthMode(t *testing.T) {
 	srv := mutationPullTestServer(t, []map[string]any{
 		mutationTestSession(7, "sess-7", "proj-a"),
 	})
 	cfg := setupPullMutationsConfig(t, srv.URL, "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
 
 	stdout, _, recovered := runCloudPullMutations(t, cfg)
 	if _, ok := recovered.(exitCode); ok {
@@ -232,7 +263,8 @@ func TestCloudPullMutations_NoAuthMode(t *testing.T) {
 // TestCloudPullMutations_CloseFailureSurfaces asserts that a store close
 // failure is reported to the operator instead of silently discarded: the
 // command must fatal before reporting success (CodeRabbit data-integrity
-// follow-up).
+// follow-up). The injected seam closes the real store first so the SQLite file
+// is never leaked on platforms that cannot remove an open database (Windows).
 func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
 	srv := mutationPullTestServer(t, []map[string]any{
 		mutationTestSession(1, "sess-1", "proj-a"),
@@ -240,7 +272,8 @@ func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
 	cfg := setupPullMutationsConfig(t, srv.URL, "test-token")
 
 	oldClose := closeCloudPullMutationsStore
-	closeCloudPullMutationsStore = func(*store.Store) error {
+	closeCloudPullMutationsStore = func(s cloudPullMutationsStore) error {
+		_ = s.Close()
 		return fmt.Errorf("injected close failure")
 	}
 	t.Cleanup(func() { closeCloudPullMutationsStore = oldClose })
@@ -254,6 +287,106 @@ func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "injected close failure") {
 		t.Fatalf("expected close error in stderr, got:\n%s", stderr)
+	}
+}
+
+// TestCloudPullMutations_PolicyForbidden asserts a 403 surfaced by the server
+// becomes a fatal error instead of a healthy pull.
+func TestCloudPullMutations_PolicyForbidden(t *testing.T) {
+	srv := mutationPullStatusServer(t, http.StatusForbidden,
+		`{"error_class":"policy","error_code":"policy_forbidden","error":"project not allowed"}`)
+	cfg := setupPullMutationsConfig(t, srv.URL, "test-token")
+
+	_, stderr, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatal("expected fatal on 403, got success")
+	}
+	if !strings.Contains(stderr, "403") {
+		t.Fatalf("expected policy-forbidden status in stderr, got:\n%s", stderr)
+	}
+}
+
+// TestCloudPullMutations_ServerUnsupported asserts a 404 from the mutation
+// endpoint fails the command with the server_unsupported reason (the deployed
+// server predates the mutation API).
+func TestCloudPullMutations_ServerUnsupported(t *testing.T) {
+	srv := mutationPullStatusServer(t, http.StatusNotFound, `{"error":"not found"}`)
+	cfg := setupPullMutationsConfig(t, srv.URL, "test-token")
+
+	_, stderr, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatal("expected fatal on 404, got success")
+	}
+	if !strings.Contains(stderr, "404") && !strings.Contains(stderr, "server_unsupported") {
+		t.Fatalf("expected server_unsupported guidance in stderr, got:\n%s", stderr)
+	}
+}
+
+// deferredListFailStore wraps a real store whose deferred-project enumeration
+// fails, proving the pull command exits non-zero without marking the target
+// healthy when deferred relation work could not be inspected.
+type deferredListFailStore struct {
+	*store.Store
+}
+
+// ListDeferredProjectsForTarget injects a deterministic enumeration failure.
+func (s *deferredListFailStore) ListDeferredProjectsForTarget(string) ([]string, error) {
+	return nil, fmt.Errorf("injected deferred list failure")
+}
+
+// TestCloudPullMutations_DeferredFailureNotMarkedHealthy asserts the fail-closed
+// health contract: when deferred replay inspection fails, the command exits
+// non-zero and the target stays degraded instead of being marked healthy.
+func TestCloudPullMutations_DeferredFailureNotMarkedHealthy(t *testing.T) {
+	srv := mutationPullTestServer(t, nil)
+	cfg := setupPullMutationsConfig(t, srv.URL, "test-token")
+
+	// Mark the target degraded before running; a regressed healthy mark would
+	// reset it, so the state read after the command is deterministic.
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.MarkSyncFailure(store.DefaultSyncTargetKey, "previous failure", time.Now().UTC().Add(30*time.Second)); err != nil {
+		_ = s.Close()
+		t.Fatalf("mark degraded: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	oldNew := newCloudPullMutationsStore
+	newCloudPullMutationsStore = func(c store.Config) (cloudPullMutationsStore, error) {
+		real, err := storeNew(c)
+		if err != nil {
+			return nil, err
+		}
+		return &deferredListFailStore{Store: real}, nil
+	}
+	t.Cleanup(func() { newCloudPullMutationsStore = oldNew })
+
+	_, stderr, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatal("expected fatal when deferred replay inspection fails, got success")
+	}
+	if !strings.Contains(stderr, "injected deferred list failure") {
+		t.Fatalf("expected deferred failure in stderr, got:\n%s", stderr)
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	state, err := s2.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState: %v", err)
+	}
+	if state.Lifecycle != store.SyncLifecycleDegraded {
+		t.Fatalf("target must not be marked healthy after deferred replay failure, lifecycle=%q", state.Lifecycle)
+	}
+	if state.ConsecutiveFailures < 1 {
+		t.Fatalf("expected the degraded marker to persist, consecutive_failures=%d", state.ConsecutiveFailures)
 	}
 }
 
@@ -297,6 +430,7 @@ func TestCloudPullMutations_MissingServerConfig(t *testing.T) {
 	}
 }
 
+// mustSessionPayload builds the JSON payload used by session upsert mutations.
 func mustSessionPayload(id, project string) string {
 	payload, err := json.Marshal(map[string]any{
 		"id":        id,

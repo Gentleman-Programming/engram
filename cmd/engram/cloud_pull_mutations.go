@@ -12,10 +12,27 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
+// cloudPullMutationsStore is the store surface the pull command needs: the
+// shared autosync pull path plus degraded-state marking and shutdown.
+type cloudPullMutationsStore interface {
+	autosync.LocalStore
+	MarkSyncAuthRequired(targetKey, message string) error
+	MarkSyncBlocked(targetKey, reasonCode, message string) error
+	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
+	Close() error
+}
+
 // closeCloudPullMutationsStore is a deterministic seam for the store close at
 // the end of the command, so tests can inject a close failure and assert the
 // command reports it instead of discarding it.
-var closeCloudPullMutationsStore = func(s *store.Store) error { return s.Close() }
+var closeCloudPullMutationsStore = func(s cloudPullMutationsStore) error { return s.Close() }
+
+// newCloudPullMutationsStore opens the local store for the pull command. It is
+// a deterministic seam so tests can inject a store whose deferred-replay
+// infrastructure fails; runtime behavior never changes.
+var newCloudPullMutationsStore = func(cfg store.Config) (cloudPullMutationsStore, error) {
+	return storeNew(cfg)
+}
 
 // cmdCloudPullMutations implements `engram cloud pull-mutations`: an explicit
 // operator action that pulls remote cloud mutations since the local cursor and
@@ -24,24 +41,21 @@ var closeCloudPullMutationsStore = func(s *store.Store) error { return s.Close()
 // apply semantics never diverge between the background manager and the manual
 // command. It never changes the automatic sync policy.
 func cmdCloudPullMutations(cfg store.Config) {
-	s, err := storeNew(cfg)
+	s, err := newCloudPullMutationsStore(cfg)
 	if err != nil {
 		fatal(err)
 		return
 	}
 
 	report, runErr := executeCloudPullMutations(s, cfg)
-	if runErr != nil {
-		// Best-effort close: the real failure is already about to be reported.
-		_ = closeCloudPullMutationsStore(s)
-		fatal(runErr)
-		return
+	// Preserve the primary failure together with any shutdown damage: a close
+	// error must stay inspectable even when the pull/apply already failed.
+	closeErr := closeCloudPullMutationsStore(s)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("cloud pull-mutations store close: %w", closeErr)
 	}
-
-	// Close before reporting success so a failed close cannot be buried under
-	// a success message.
-	if err := closeCloudPullMutationsStore(s); err != nil {
-		fatal(fmt.Errorf("cloud pull-mutations store close: %w", err))
+	if err := errors.Join(runErr, closeErr); err != nil {
+		fatal(err)
 		return
 	}
 
@@ -51,7 +65,7 @@ func cmdCloudPullMutations(cfg store.Config) {
 // executeCloudPullMutations performs the pull and applies remote mutations to the
 // local store. It returns the pull report so the caller can close the store and
 // report success before any output is emitted.
-func executeCloudPullMutations(s *store.Store, cfg store.Config) (autosync.PullReport, error) {
+func executeCloudPullMutations(s cloudPullMutationsStore, cfg store.Config) (autosync.PullReport, error) {
 	cc, err := resolveCloudRuntimeConfig(cfg)
 	if err != nil {
 		return autosync.PullReport{}, fmt.Errorf("cloud pull-mutations config error: %w", err)
