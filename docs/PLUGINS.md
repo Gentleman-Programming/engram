@@ -24,6 +24,10 @@
 
 Pi and OpenCode activity renews the local runtime lease through their existing session registration paths. This is local SQLite liveness only: it has no timer, cloud synchronization, or cross-machine coordination.
 
+### Codex on Windows
+
+Codex `UserPromptSubmit` invokes the installed `engram hook codex-user-prompt-submit` command directly on Windows. It does not require Git Bash, jq, or curl; the Unix hook script remains unchanged.
+
 ---
 
 ## OpenCode Plugin

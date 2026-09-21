@@ -35,8 +35,12 @@ var claudeEngramToolPrefixes = []string{
 }
 
 func cmdHook(args []string) {
+	if len(args) == 1 && args[0] == "codex-user-prompt-submit" {
+		cmdCodexUserPromptSubmit()
+		return
+	}
 	if len(args) != 1 || args[0] != "claude-pre-tool-use" {
-		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use")
+		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|codex-user-prompt-submit")
 		exitFunc(1)
 		return
 	}
