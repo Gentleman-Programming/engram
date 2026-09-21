@@ -840,6 +840,7 @@ test("an opaque runtime session ID stays byte-identical through registration, co
   const sessionEndBodies = [];
   const sessionEndMethods = [];
   let failSessionEndRequest = false;
+  let failSessionRegistrationOnce = false;
   const sessionBodies = [];
   const observationBodies = [];
   globalThis.fetch = async (url, init) => {
@@ -850,6 +851,10 @@ test("an opaque runtime session ID stays byte-identical through registration, co
     }
     if (path === "/sessions") {
       sessionBodies.push(JSON.parse(init.body));
+      if (failSessionRegistrationOnce) {
+        failSessionRegistrationOnce = false;
+        return { ok: false, status: 409, async json() { return { error: "session_already_ended" }; } };
+      }
       return { ok: true, status: 201, async json() { return { status: "created" }; } };
     }
     if (path === "/observations") {
@@ -929,6 +934,23 @@ test("an opaque runtime session ID stays byte-identical through registration, co
       const afterTimedOutShutdown = await memSave.execute("exact-5", { title: "fifth", content: "five" }, undefined, undefined, ctx);
       assert.equal(afterTimedOutShutdown.isError, undefined, "a timed-out shutdown must still clear the registration cache");
       assert.equal(sessionBodies.length, 6, "writes after a timed-out shutdown must re-register");
+
+      // A server can hold a runtime id ended while the host keeps using it (a shutdown at a
+      // compaction boundary). A later write must heal to a derived id instead of failing forever.
+      // A separate runtime id keeps the module-level heal map from affecting the cases above.
+      const endedRuntimeId = `${runtimeSessionId}-ended`;
+      const endedCtx = runtimeContext(endedRuntimeId);
+      failSessionRegistrationOnce = true;
+      const healed = await memSave.execute("exact-heal", { title: "healed", content: "six" }, undefined, undefined, endedCtx);
+      assert.equal(healed.isError, undefined, "a write after the server ended the runtime id must succeed");
+      assert.equal(sessionBodies[sessionBodies.length - 2].id, endedRuntimeId, "the ended id is offered once");
+      assert.equal(sessionBodies[sessionBodies.length - 1].id, `${endedRuntimeId}-r1`, "the refused registration must retry with a derived id");
+      assert.equal(observationBodies[observationBodies.length - 1].session_id, `${endedRuntimeId}-r1`, "the write must be attributed to the derived id");
+
+      const healedAgain = await memSave.execute("exact-heal-2", { title: "healed again", content: "seven" }, undefined, undefined, endedCtx);
+      assert.equal(healedAgain.isError, undefined, "later writes must keep working after a heal");
+      assert.equal(observationBodies[observationBodies.length - 1].session_id, `${endedRuntimeId}-r1`, "later writes must reuse the derived id");
+      assert.ok(sessionBodies.slice(-1).every((body) => body.id === `${endedRuntimeId}-r1`), "the ended id must never be registered again");
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -1390,3 +1412,4 @@ test("registered Pi-native mem_pin and mem_unpin target the observation pin rout
     else process.env.ENGRAM_URL = originalUrl;
   }
 });
+

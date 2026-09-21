@@ -422,7 +422,7 @@ function buildEnsureSessionForTest(engramFetch) {
   const body = extractFunctionBody("ensureSession", "{\n  const key")
     .replace("const body: SessionBody", "const body")
     .replace("let acknowledgement: unknown;", "let acknowledgement;");
-  const factory = new Function("knownSessions", "registeredSessionProjects", "sessionRegistrationsInFlight", "sessionRegistrationProjects", "sessionProjectConflict", "sessionProjectConflictFromResponse", "engramFetch", "project", "directory", `
+  const factory = new Function("knownSessions", "registeredSessionProjects", "sessionRegistrationsInFlight", "sessionRegistrationProjects", "sessionProjectConflict", "sessionProjectConflictFromResponse", "engramFetch", "project", "directory", "effectiveSessionID", "sessionAlreadyEndedError", "endedSessionRewrites", "endedSessionRewriteCounts", `
     return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch, renew = false) {
       ${body}
     };
@@ -435,8 +435,14 @@ function buildEnsureSessionForTest(engramFetch) {
     const ownerProject = registeredSessionProjects.get(sessionId) || sessionRegistrationProjects.get(sessionId);
     return ownerProject && ownerProject !== sessionProject ? new Error("session project conflict") : undefined;
   };
+  const endedSessionRewrites = new Map();
+  const endedSessionRewriteCounts = new Map();
+  const effectiveSessionID = (sessionId) => endedSessionRewrites.get(sessionId) ?? sessionId;
+  const sessionAlreadyEndedError = (error) => Boolean(error) && (
+    error.data?.error === "session_already_ended" || /already ended/i.test(error.message ?? "")
+  );
   return {
-    ensureSession: factory(knownSessions, registeredSessionProjects, sessionRegistrationsInFlight, sessionRegistrationProjects, sessionProjectConflict, () => undefined, engramFetch, "engram", "/work/engram"),
+    ensureSession: factory(knownSessions, registeredSessionProjects, sessionRegistrationsInFlight, sessionRegistrationProjects, sessionProjectConflict, () => undefined, engramFetch, "engram", "/work/engram", effectiveSessionID, sessionAlreadyEndedError, endedSessionRewrites, endedSessionRewriteCounts),
     knownSessions,
   };
 }

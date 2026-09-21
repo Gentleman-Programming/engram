@@ -206,6 +206,26 @@ class EngramHttpError extends Error {
   }
 }
 
+// The server never reopens a session row that was ended ("session_already_ended"). A host can
+// end a runtime session at a shutdown or compaction boundary and then keep using the same
+// runtime id, so every later write would fail forever. Register one derived id per runtime
+// session and reuse it for later writes and for the observation bodies that carry the id.
+const endedSessionRewrites = new Map<string, string>();
+const endedSessionRewriteCounts = new Map<string, number>();
+
+function sessionAlreadyEndedError(error: unknown): boolean {
+  if (!(error instanceof EngramHttpError)) return false;
+  const data = error.data;
+  const code = data && typeof data === "object" && "error" in data
+    ? String((data as { error?: unknown }).error ?? "")
+    : "";
+  return code === "session_already_ended" || /already ended/i.test(error.message);
+}
+
+function effectiveSessionID(sessionId: string): string {
+  return endedSessionRewrites.get(sessionId) ?? sessionId;
+}
+
 class SessionProjectConflictError extends Error {
   readonly sessionId: string;
   readonly ownerProject: string;
@@ -905,6 +925,7 @@ function warnSessionProjectConflictOnce(error: unknown): void {
 
 async function ensureSession(sessionId: string, sessionProject = project, fetch: EngramFetcher = engramFetch, renew = false): Promise<void> {
   const key = `${sessionProject}:${sessionId}`;
+  const targetSessionId = effectiveSessionID(sessionId);
   if (!sessionId) return;
   if (knownSessions.has(`\u0000closing:${sessionId}`)) throw new Error(`Pi runtime session ${sessionId} is closing`);
   const conflict = sessionProjectConflict(sessionId, sessionProject);
@@ -915,12 +936,22 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
   if (existingRegistration) return existingRegistration;
 
   const registration = (async () => {
-    const body: SessionBody = { id: sessionId, project: sessionProject, directory, ownership_mode: "project_owned" };
+    const body: SessionBody = { id: targetSessionId, project: sessionProject, directory, ownership_mode: "project_owned" };
     let acknowledgement: unknown;
     try {
       acknowledgement = await fetch("/sessions", { method: "POST", body });
     } catch (error) {
-      throw sessionProjectConflictFromResponse(error, sessionId, sessionProject) || error;
+      const conflict = sessionProjectConflictFromResponse(error, targetSessionId, sessionProject);
+      if (conflict) throw conflict;
+      if (!sessionAlreadyEndedError(error)) throw error;
+      const attempt = (endedSessionRewriteCounts.get(sessionId) ?? 0) + 1;
+      endedSessionRewriteCounts.set(sessionId, attempt);
+      const derived = `${targetSessionId}-r${attempt}`;
+      await ensureSession(derived, sessionProject, fetch, true);
+      endedSessionRewrites.set(sessionId, derived);
+      registeredSessionProjects.set(sessionId, sessionProject);
+      knownSessions.add(key);
+      return;
     }
     if (acknowledgement === null) {
       throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${sessionId}`);
@@ -1263,7 +1294,7 @@ async function archiveCompactionSummary(sessionId: string, summary: string): Pro
     const result = await engramFetchResult("/observations", {
       method: "POST",
       body: {
-        session_id: sessionId,
+        session_id: effectiveSessionID(sessionId),
         type: "session_summary",
         title: "Compaction recovery summary",
         content: summary,
@@ -1345,7 +1376,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch("/observations", {
         method: "POST",
         body: {
-          session_id: activeSessionId,
+          session_id: effectiveSessionID(activeSessionId),
           title: params.title,
           content: params.content,
           type: params.type || "manual",
@@ -1376,7 +1407,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       await ensureSession(promptSessionId, activeProject, fetch, true);
       const response = await fetch<{ id: number }>("/prompts", {
         method: "POST",
-        body: { session_id: promptSessionId, content: params.content, project: activeProject },
+        body: { session_id: effectiveSessionID(promptSessionId), content: params.content, project: activeProject },
       });
       return response ? { prompt_id: response.id, status: "saved" } : response;
     }
@@ -1387,7 +1418,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch("/observations", {
         method: "POST",
         body: {
-          session_id: summarySessionId,
+          session_id: effectiveSessionID(summarySessionId),
           type: "session_summary",
           title: "Session summary",
           content: params.content,
@@ -1435,7 +1466,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch("/observations/passive", {
         method: "POST",
         body: {
-          session_id: passiveSessionId,
+          session_id: effectiveSessionID(passiveSessionId),
           content: params.content,
           project,
           source: params.source || "pi-tool",
