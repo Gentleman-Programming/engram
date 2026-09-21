@@ -563,11 +563,8 @@ func TestPrintPostInstall(t *testing.T) {
 			result:  &setup.Result{Agent: "kilocode"},
 			expects: []string{"Restart Kilo Code", "~/.config/kilo/opencode.json"},
 		},
-		{
-			name:    "kimi",
-			result:  &setup.Result{Agent: "kimi"},
-			expects: []string{"Restart Kimi Code", "~/.kimi-code/mcp.json", "~/.kimi-code/AGENTS.md"},
-		},
+		// kimi lives in TestPrintPostInstallKimiUsesEffectivePaths: its steps
+		// depend on KIMI_CODE_HOME, so the expectations need explicit env control.
 		{
 			name:   "unknown",
 			result: &setup.Result{Agent: "unknown"},
@@ -595,6 +592,53 @@ func TestPrintPostInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrintPostInstallKimiUsesEffectivePaths verifies the Kimi Code next steps
+// name the files setup actually wrote: the default data root when
+// KIMI_CODE_HOME is unset, and the override when it holds an absolute path.
+func TestPrintPostInstallKimiUsesEffectivePaths(t *testing.T) {
+	kimiSteps := func(t *testing.T) string {
+		t.Helper()
+		stdout, stderr := captureOutput(t, func() { printPostInstall(&setup.Result{Agent: "kimi"}) })
+		if stderr != "" {
+			t.Fatalf("expected no stderr, got: %q", stderr)
+		}
+		return stdout
+	}
+
+	t.Run("default data root", func(t *testing.T) {
+		t.Setenv("KIMI_CODE_HOME", "")
+
+		stdout := kimiSteps(t)
+		for _, expected := range []string{
+			"Restart Kimi Code",
+			filepath.Join(".kimi-code", "mcp.json"),
+			filepath.Join(".kimi-code", "AGENTS.md"),
+		} {
+			if !strings.Contains(stdout, expected) {
+				t.Fatalf("output missing %q: %q", expected, stdout)
+			}
+		}
+	})
+
+	t.Run("absolute KIMI_CODE_HOME", func(t *testing.T) {
+		custom := t.TempDir()
+		t.Setenv("KIMI_CODE_HOME", custom)
+
+		stdout := kimiSteps(t)
+		for _, expected := range []string{
+			filepath.Join(custom, "mcp.json"),
+			filepath.Join(custom, "AGENTS.md"),
+		} {
+			if !strings.Contains(stdout, expected) {
+				t.Fatalf("output missing %q: %q", expected, stdout)
+			}
+		}
+		if strings.Contains(stdout, filepath.Join(".kimi-code", "mcp.json")) {
+			t.Fatalf("output still points at the default root: %q", stdout)
+		}
+	})
 }
 
 func TestPrintPostInstallClaudeCodeAllowlist(t *testing.T) {

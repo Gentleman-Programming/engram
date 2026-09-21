@@ -735,6 +735,8 @@ engram setup kimi
 
 Registers `mcpServers.engram` in `~/.kimi-code/mcp.json` and writes the Memory Protocol as a marker block in `~/.kimi-code/AGENTS.md`. Both files live under the Kimi Code data root, so when `KIMI_CODE_HOME` is set the setup honors it and writes there instead.
 
+**`KIMI_CODE_HOME` is only honored when it is an absolute path.** A relative value (for example `KIMI_CODE_HOME=.kimi-code`) is ignored and setup falls back to the default `~/.kimi-code` root, so config never lands in whatever directory you happened to run `engram` from. The `Next steps` printed after setup name the files that were actually written, so they follow the override.
+
 ---
 
 ## Any other MCP agent

@@ -462,10 +462,11 @@ func TestConfigDirsIgnoreRelativeConfigHome(t *testing.T) {
 }
 
 // TestKimiCodeHomeHonorsAbsoluteEnv verifies an absolute KIMI_CODE_HOME
-// relocates both the MCP config and the AGENTS.md instruction surface.
+// relocates both the MCP config and the AGENTS.md instruction surface, that a
+// real Install writes both files under the override (and nothing under the
+// default root), and that the post-install steps name those same files.
 func TestKimiCodeHomeHonorsAbsoluteEnv(t *testing.T) {
-	resetSetupSeams(t)
-	useTestHome(t)
+	home := stubRegistryEnv(t)
 
 	custom := filepath.Join(t.TempDir(), "kimi-home")
 	t.Setenv("KIMI_CODE_HOME", custom)
@@ -473,10 +474,48 @@ func TestKimiCodeHomeHonorsAbsoluteEnv(t *testing.T) {
 	if got := kimiCodeHome(); got != custom {
 		t.Errorf("kimiCodeHome = %q, want %q", got, custom)
 	}
-	if got, want := kimiMCPPath(), filepath.Join(custom, "mcp.json"); got != want {
-		t.Errorf("kimiMCPPath = %q, want %q", got, want)
+	mcpPath := filepath.Join(custom, "mcp.json")
+	agentsPath := filepath.Join(custom, "AGENTS.md")
+	if got := kimiMCPPath(); got != mcpPath {
+		t.Errorf("kimiMCPPath = %q, want %q", got, mcpPath)
 	}
-	if got, want := kimiAgentsPath(), filepath.Join(custom, "AGENTS.md"); got != want {
-		t.Errorf("kimiAgentsPath = %q, want %q", got, want)
+	if got := kimiAgentsPath(); got != agentsPath {
+		t.Errorf("kimiAgentsPath = %q, want %q", got, agentsPath)
+	}
+
+	result, err := Install("kimi")
+	if err != nil {
+		t.Fatalf("Install(kimi): %v", err)
+	}
+	if result.Files != 2 {
+		t.Fatalf("expected 2 files, got %d", result.Files)
+	}
+
+	entry := readEngramEntry(t, mcpPath, "mcpServers")
+	if entry["command"] != testEngramBin {
+		t.Errorf("expected command %q under the override, got %#v", testEngramBin, entry["command"])
+	}
+
+	instr, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", agentsPath, err)
+	}
+	if !strings.Contains(string(instr), engramMarkerBegin) {
+		t.Errorf("AGENTS.md under the override is missing the Memory Protocol marker block")
+	}
+
+	// The default root stays untouched: an honored override must not also seed
+	// ~/.kimi-code with a half-written config the user would never read.
+	if _, err := os.Stat(filepath.Join(home, ".kimi-code")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("default root ~/.kimi-code should not exist when KIMI_CODE_HOME is honored (stat error = %v)", err)
+	}
+
+	// Post-install guidance points at the files that were actually written.
+	steps := strings.Join(PostInstallSteps("kimi"), "\n")
+	if !strings.Contains(steps, mcpPath) {
+		t.Errorf("post-install steps missing %q: %q", mcpPath, steps)
+	}
+	if !strings.Contains(steps, agentsPath) {
+		t.Errorf("post-install steps missing %q: %q", agentsPath, steps)
 	}
 }
