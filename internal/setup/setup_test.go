@@ -263,6 +263,56 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 	}
 }
 
+func TestInstallCodexFailsClosedForWindowsRuntimeWhenExecutableCannotResolve(t *testing.T) {
+	tests := []struct {
+		name string
+		exe  string
+		err  error
+	}{
+		{name: "executable lookup error", err: errors.New("unavailable")},
+		{name: "bare command fallback", exe: "engram"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			useIsolatedProfile(t)
+			runtimeGOOS = "windows"
+
+			configPath := codexConfigPath()
+			if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+				t.Fatalf("create Codex config directory: %v", err)
+			}
+			original := "[profile]\nname = \"preserve\"\n"
+			if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+				t.Fatalf("write existing Codex config: %v", err)
+			}
+			osExecutable = func() (string, error) { return tt.exe, tt.err }
+			lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+
+			result, err := Install("codex")
+			if err == nil || result != nil {
+				t.Fatalf("Install(codex) = %#v, %v; want fail-closed executable resolution error", result, err)
+			}
+			if !strings.Contains(err.Error(), "resolve") || !strings.Contains(err.Error(), "Codex") {
+				t.Fatalf("expected actionable Codex executable resolution error, got %v", err)
+			}
+			got, readErr := os.ReadFile(configPath)
+			if readErr != nil {
+				t.Fatalf("read existing Codex config: %v", readErr)
+			}
+			if string(got) != original {
+				t.Fatalf("Codex config changed after failed setup:\n%s", got)
+			}
+			for _, path := range []string{codexInstructionsPath(), codexCompactPromptPath()} {
+				if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("setup created %s before executable validation: %v", path, statErr)
+				}
+			}
+		})
+	}
+}
+
 func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
@@ -2025,7 +2075,11 @@ func TestCodexBlockUsesAbsolutePath(t *testing.T) {
 			runtimeGOOS = tc.goos
 			osExecutable = func() (string, error) { return tc.exe, nil }
 
-			block := codexEngramBlockStr()
+			command, err := codexEngramCommand()
+			if err != nil {
+				t.Fatalf("resolve Codex command: %v", err)
+			}
+			block := codexEngramBlockStr(command)
 			if !strings.Contains(block, "[mcp_servers.engram]") {
 				t.Fatalf("expected mcp_servers.engram header, got:\n%s", block)
 			}
@@ -2043,7 +2097,11 @@ func TestCodexBlockUsesAbsolutePath(t *testing.T) {
 		runtimeGOOS = "linux"
 		osExecutable = func() (string, error) { return "", errors.New("no executable") }
 
-		block := codexEngramBlockStr()
+		command, err := codexEngramCommand()
+		if err != nil {
+			t.Fatalf("resolve non-Windows Codex fallback: %v", err)
+		}
+		block := codexEngramBlockStr(command)
 		if !strings.Contains(block, `command = "engram"`) {
 			t.Fatalf("expected bare engram fallback in codex block, got:\n%s", block)
 		}
@@ -2188,7 +2246,7 @@ func TestInstallCodexErrorPropagation(t *testing.T) {
 	t.Run("inject mcp fails", func(t *testing.T) {
 		resetSetupSeams(t)
 		writeCodexMemoryInstructionFilesFn = func() (string, error) { return "/tmp/instructions", nil }
-		injectCodexMCPFn = func(string) error { return errors.New("mcp failed") }
+		injectCodexMCPFn = func(string, string) error { return errors.New("mcp failed") }
 
 		_, err := installCodex()
 		if err == nil || !strings.Contains(err.Error(), "mcp failed") {
@@ -2199,7 +2257,7 @@ func TestInstallCodexErrorPropagation(t *testing.T) {
 	t.Run("inject memory config fails", func(t *testing.T) {
 		resetSetupSeams(t)
 		writeCodexMemoryInstructionFilesFn = func() (string, error) { return "/tmp/instructions", nil }
-		injectCodexMCPFn = func(string) error { return nil }
+		injectCodexMCPFn = func(string, string) error { return nil }
 		injectCodexMemoryConfigFn = func(string, string, string) error { return errors.New("memory config failed") }
 
 		_, err := installCodex()
@@ -2414,7 +2472,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			t.Fatalf("make config path directory: %v", err)
 		}
 
-		err := injectCodexMCP(configPath)
+		err := injectCodexMCP(configPath, "/usr/local/bin/engram")
 		if err == nil || !strings.Contains(err.Error(), "read config") {
 			t.Fatalf("expected read config error, got %v", err)
 		}
@@ -2476,7 +2534,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			"command = \"other\"",
 		}, "\n")
 
-		output := upsertCodexEngramBlock(input)
+		output := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
 		if strings.Count(output, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected one engram block, got:\n%s", output)
 		}
@@ -2487,10 +2545,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 
 	t.Run("upsertCodexEngramBlock from empty content", func(t *testing.T) {
 		resetSetupSeams(t)
-		// Force fallback path so output matches the constant.
-		osExecutable = func() (string, error) { return "", errors.New("no executable") }
-
-		output := upsertCodexEngramBlock("\n\n")
+		output := upsertCodexEngramBlock("\n\n", "engram")
 		if output != codexEngramBlock+"\n" {
 			t.Fatalf("unexpected output for empty content:\n%s", output)
 		}
@@ -2567,7 +2622,7 @@ func TestAdditionalHelperBranches(t *testing.T) {
 			t.Fatalf("write blocker: %v", err)
 		}
 
-		err := injectCodexMCP(filepath.Join(blocked, "config.toml"))
+		err := injectCodexMCP(filepath.Join(blocked, "config.toml"), "/usr/local/bin/engram")
 		if err == nil || !strings.Contains(err.Error(), "create config dir") {
 			t.Fatalf("expected create config dir error, got %v", err)
 		}
@@ -2580,7 +2635,7 @@ func TestAdditionalHelperBranches(t *testing.T) {
 			return errors.New("write codex boom")
 		}
 
-		err := injectCodexMCP(configPath)
+		err := injectCodexMCP(configPath, "/usr/local/bin/engram")
 		if err == nil || !strings.Contains(err.Error(), "write config") {
 			t.Fatalf("expected write config error, got %v", err)
 		}

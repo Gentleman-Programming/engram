@@ -132,19 +132,14 @@ func claudeCodePermissionTools(agentTools map[string]bool) []string {
 	return permissions
 }
 
-// codexEngramBlock is the canonical Codex TOML MCP block.
-// Command is always the bare "engram" name in this constant because
-// upsertCodexEngramBlock generates the actual content via codexEngramBlockStr()
-// which uses resolveEngramCommand() at runtime. This constant is kept for tests
-// that verify idempotency against the already-written string when os.Executable
-// returns "engram" (fallback path).
+// codexEngramBlock is retained for non-Windows fallback compatibility tests.
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
 
-// codexEngramBlockStr returns the Codex TOML block for the engram MCP server,
-// using the resolved absolute binary path from os.Executable().
-func codexEngramBlockStr() string {
-	cmd := resolveEngramCommand()
-	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", cmd) + "\nargs = [\"mcp\", \"--tools=agent\"]"
+// codexEngramBlockStr returns the Codex TOML block for the supplied canonical
+// Engram command. installCodex resolves the command before it writes any setup
+// state so Windows cannot persist a PATH-dependent fallback.
+func codexEngramBlockStr(command string) string {
+	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", command) + "\nargs = [\"mcp\", \"--tools=agent\"]"
 }
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
@@ -1485,6 +1480,40 @@ func stableHomebrewEngramCommand(exe string) (string, bool) {
 	return "engram", true
 }
 
+// codexEngramCommand is the caller-specific executable policy for the sole
+// Codex MCP authority. Windows requires a rooted .exe path derived from the
+// os.Executable/canonical symlink authority; it never falls back to PATH.
+func codexEngramCommand() (string, error) {
+	exe, err := osExecutable()
+	if err != nil {
+		if runtimeGOOS == "windows" {
+			return "", fmt.Errorf("resolve rooted absolute .exe Codex command: %w", err)
+		}
+		return "engram", nil
+	}
+
+	canonical := canonicalEngramCommand(exe)
+	if !isAbsoluteCodexCommand(canonical) && isAbsoluteCodexCommand(exe) {
+		canonical = exe
+	}
+	if runtimeGOOS == "windows" {
+		if !isAbsoluteCodexCommand(canonical) || !strings.EqualFold(filepath.Ext(canonical), ".exe") {
+			return "", fmt.Errorf("resolve rooted absolute .exe Codex command from executable path %q", exe)
+		}
+	}
+	return canonical, nil
+}
+
+func isAbsoluteCodexCommand(path string) bool {
+	if filepath.IsAbs(path) {
+		return true
+	}
+	if runtimeGOOS != "windows" {
+		return false
+	}
+	return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' && (path[2] == '\\' || path[2] == '/') || strings.HasPrefix(path, `\\`)
+}
+
 func writeGeminiSystemPrompt() error {
 	systemPath := geminiSystemPromptPath()
 	if err := os.MkdirAll(filepath.Dir(systemPath), 0755); err != nil {
@@ -1532,14 +1561,18 @@ func removeGeminiEnvOverride() {
 // ─── Codex ───────────────────────────────────────────────────────────────────
 
 func installCodex() (*Result, error) {
-	path := codexConfigPath()
+	command, err := codexEngramCommand()
+	if err != nil {
+		return nil, err
+	}
 
+	path := codexConfigPath()
 	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := injectCodexMCPFn(path); err != nil {
+	if err := injectCodexMCPFn(path, command); err != nil {
 		return nil, err
 	}
 
@@ -1587,7 +1620,7 @@ func installCodex() (*Result, error) {
 	}, nil
 }
 
-func injectCodexMCP(configPath string) error {
+func injectCodexMCP(configPath, command string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
@@ -1597,7 +1630,7 @@ func injectCodexMCP(configPath string) error {
 		return fmt.Errorf("read config: %w", err)
 	}
 
-	updated := upsertCodexEngramBlock(string(data))
+	updated := upsertCodexEngramBlock(string(data), command)
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
@@ -1644,7 +1677,7 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 	return nil
 }
 
-func upsertCodexEngramBlock(content string) string {
+func upsertCodexEngramBlock(content, command string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 
@@ -1668,7 +1701,7 @@ func upsertCodexEngramBlock(content string) string {
 	}
 
 	base := strings.TrimSpace(strings.Join(kept, "\n"))
-	block := codexEngramBlockStr()
+	block := codexEngramBlockStr(command)
 	if base == "" {
 		return block + "\n"
 	}

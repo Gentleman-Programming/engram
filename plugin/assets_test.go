@@ -111,6 +111,29 @@ func TestClaudeCodePluginDoesNotShipMCPManifest(t *testing.T) {
 	}
 }
 
+func TestCodexPluginDoesNotShipMCPManifestOrReference(t *testing.T) {
+	root := repoRoot(t)
+	manifestPath := filepath.Join(root, "plugin", "codex", ".mcp.json")
+	if _, err := os.Lstat(manifestPath); err == nil {
+		t.Errorf("Codex plugin must not ship a duplicate MCP manifest: %s", manifestPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", manifestPath, err)
+	}
+
+	pluginPath := filepath.Join(root, "plugin", "codex", ".codex-plugin", "plugin.json")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read Codex plugin manifest: %v", err)
+	}
+	var plugin map[string]json.RawMessage
+	if err := json.Unmarshal(data, &plugin); err != nil {
+		t.Fatalf("parse Codex plugin manifest: %v", err)
+	}
+	if _, exists := plugin["mcpServers"]; exists {
+		t.Fatalf("Codex plugin manifest must not reference an MCP manifest: %s", pluginPath)
+	}
+}
+
 // marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
 // needed to extract the version declared for the engram plugin entry.
 type marketplaceJSON struct {
