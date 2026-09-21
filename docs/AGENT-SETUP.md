@@ -432,16 +432,18 @@ engram setup codex
 
 `engram setup codex` now does four things:
 
-- Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`)
+- Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`) and pins the current absolute executable path
 - Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
 - Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
 - Best-effort installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`
 
 > `engram setup codex` automatically writes the full Memory Protocol to `~/.codex/engram-instructions.md` and a compaction recovery prompt to `~/.codex/engram-compact-prompt.md`. No additional configuration needed.
 
+On Windows, setup also writes the trusted hook executable marker at the first line of `config.toml`. If `engram.exe` moves, rerun `engram setup codex` before restarting Codex; the hook fails open while that pin is missing or stale.
+
 The Codex plugin passes the exact runtime `session_id` into model context only after the server confirms registration. Startup, resume, clear, and post-compaction hooks instruct the model to reuse that binding for memory writes and retain it across compaction. Missing or failed registration never supplies an authoritative ID; the model must omit `session_id` rather than invent one. Post-compaction uses the same explicit `ENGRAM_URL` (or local `ENGRAM_PORT`) as startup.
 
-Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`):
+Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`). On Windows, this does not create the trusted plugin-hook pin; run `engram setup codex` to enable that hook safely:
 
 ```toml
 model_instructions_file = "~/.codex/engram-instructions.md"
@@ -470,11 +472,11 @@ Transport closed
 
 **Prevention**
 
-- After replacing `engram.exe` / the `engram` binary, always start a new Codex chat before using memory tools.
+- After replacing `engram.exe` / the `engram` binary, rerun `engram setup codex` on Windows, then start a new Codex chat before using memory tools.
 - After editing `~/.codex/config.toml`, `engram-instructions.md`, or `engram-compact-prompt.md`, restart Codex to pick up the new config.
 - Avoid force-killing `engram` while a Codex session is active; prefer closing the chat first so Codex can shut down the MCP process cleanly.
 
-> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, confirm that the new `engram.exe` is in `PATH` and that no older copy is shadowing it.
+> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, rerun `engram setup codex` so both MCP and hook pins point to the current executable.
 
 ---
 
