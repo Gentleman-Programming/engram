@@ -81,15 +81,17 @@ This digest identifies the published multi-architecture OCI manifest list (the `
 
 ### Upgrade or roll back the container
 
-1. Record the current exact `ENGRAM_IMAGE` value and the client version:
+1. Record the running container's effective image reference and the client version:
 
    ```bash
-   grep '^ENGRAM_IMAGE=' .env
+   docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q cloud)"
    engram version
    ```
 
+   Save the first command's output as the rollback image. Inspecting the running container captures a Compose default or shell override that `.env` alone might not show.
+
 2. Read the selected release and migration notes. Confirm the recorded client version is compatible with the selected Cloud image; its exact image reference is the server release evidence. Then back up relevant state. Migrations can constrain rollback; follow the [Release Policy](../RELEASE-POLICY.md).
-3. Change `ENGRAM_IMAGE` in `.env` to the selected exact image reference.
+3. Set `ENGRAM_IMAGE` to the selected exact image reference in the environment source used by Compose. For the `.env` layout below, edit `.env` and update or unset any shell-level `ENGRAM_IMAGE`, because shell variables override `.env`.
 4. Pull and redeploy only the cloud service:
 
    ```bash
@@ -105,7 +107,7 @@ This digest identifies the published multi-architecture OCI manifest list (the `
    engram sync --cloud --status --project <project>
    ```
 
-To roll back the container, restore the previously recorded exact `ENGRAM_IMAGE` value, run `docker compose pull cloud` and `docker compose up -d cloud`, then repeat the verification checks. `engram cloud upgrade rollback` concerns local SQLite/bootstrap state and is not a container rollback.
+To roll back the container, set the effective `ENGRAM_IMAGE` to the previously recorded image reference, run `docker compose pull cloud` and `docker compose up -d cloud`, then repeat the verification checks. `engram cloud upgrade rollback` concerns local SQLite/bootstrap state and is not a container rollback.
 
 Do not build from source for production deploys. Use the published image with Dokploy, Coolify, Portainer, or a VPS.
 
