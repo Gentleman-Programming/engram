@@ -446,6 +446,48 @@ func TestNewServerScopeDescriptions(t *testing.T) {
 	}
 }
 
+func TestNewServerSessionIDDescriptions(t *testing.T) {
+	srv := NewServer(newMCPTestStore(t))
+
+	const wantSessionID = "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed."
+	if got := len(wantSessionID); got > 180 {
+		t.Fatalf("shared session_id description length = %d bytes; want <= 180", got)
+	}
+
+	for _, toolName := range []string{"mem_save", "mem_save_prompt", "mem_session_summary", "mem_capture_passive"} {
+		t.Run(toolName, func(t *testing.T) {
+			tool := srv.GetTool(toolName)
+			if tool == nil {
+				t.Fatalf("tool %q not registered", toolName)
+			}
+			sessionID, ok := tool.Tool.InputSchema.Properties["session_id"].(map[string]any)
+			if !ok {
+				t.Fatalf("tool %q session_id schema = %T; want object", toolName, tool.Tool.InputSchema.Properties["session_id"])
+			}
+			if got, _ := sessionID["description"].(string); got != wantSessionID {
+				t.Errorf("tool %q session_id description = %q; want %q", toolName, got, wantSessionID)
+			}
+		})
+	}
+
+	start := srv.GetTool("mem_session_start")
+	if start == nil {
+		t.Fatal("mem_session_start not registered")
+	}
+	const wantStartDescription = "Register a caller-provided session ID. Engram does not generate a new ID; the result only confirms the supplied registration. Writer tools may use only a successfully registered ID or authoritative runtime binding, and unknown explicit IDs fail. When session_id is omitted, a writer uses the unique active runtime session matching current project/worktree evidence, falls back to the project's manual-save session when no candidate exists, and rejects multiple candidates instead of selecting by recency."
+	if got := start.Tool.Description; got != wantStartDescription {
+		t.Errorf("mem_session_start description = %q; want %q", got, wantStartDescription)
+	}
+	id, ok := start.Tool.InputSchema.Properties["id"].(map[string]any)
+	if !ok {
+		t.Fatalf("mem_session_start id schema = %T; want object", start.Tool.InputSchema.Properties["id"])
+	}
+	const wantIDDescription = "Caller-provided unique session ID; Engram does not generate one."
+	if got, _ := id["description"].(string); got != wantIDDescription {
+		t.Errorf("mem_session_start id description = %q; want %q", got, wantIDDescription)
+	}
+}
+
 func TestHandleMergeProjectsRejectsNonEquivalentSourceWithoutMutation(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("merge-source", "engram-memory", "/tmp/engram-memory"); err != nil {
