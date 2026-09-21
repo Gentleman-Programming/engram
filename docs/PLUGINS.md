@@ -22,6 +22,8 @@
 | Codex | Codex plugin assets under `plugin/codex/`; `engram setup codex` best-effort installs the marketplace plugin and writes MCP/instruction config. |
 | Pi | Pi package under `plugin/pi/` exposes Pi-native HTTP memory tools and configures MCP through `pi-mcp-adapter`. |
 
+Pi and OpenCode activity renews the local runtime lease through their existing session registration paths. This is local SQLite liveness only: it has no timer, cloud synchronization, or cross-machine coordination.
+
 ---
 
 ## OpenCode Plugin
@@ -92,7 +94,9 @@ engram setup claude-code
 claude --plugin-dir ./plugin/claude-code
 ```
 
-Existing marketplace-only copies create their durable MCP registration at the next SessionStart and require one more Claude Code restart before MCP tools return. If `~/.claude/mcp/engram.json` is a symlink or another non-regular path, SessionStart and direct setup refuse to replace it; inspect it and manually replace it with a regular file before rerunning `engram setup claude-code`. Do not edit the plugin cache manually. When `CLAUDE_CONFIG_DIR` is set, Engram writes the MCP registration under that directory instead (`$CLAUDE_CONFIG_DIR/mcp/engram.json`, `$CLAUDE_CONFIG_DIR/settings.json`), the same directory Claude Code itself uses.
+The supported plugin-and-hook setup requires `jq` and `curl` on `PATH` before installation. On Windows, `curl.exe` satisfies curl detection, but `jq` must also be installed and available to the shell Claude Code uses. Bare MCP is the MCP-only fallback: it does not install or run hooks when those prerequisites are unavailable.
+
+Each SessionStart delegates MCP registration to `engram setup claude-code --mcp-only`; the hook does not inspect, write, or delete Claude configuration. Claude CLI owns the user-scope `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`) or `$CLAUDE_CONFIG_DIR/.claude.json` when that override is set. Setup accepts only the exact expected stdio command and arguments as configured; mismatched or unreadable entries are visible conflicts and are never overwritten. Do not edit the plugin cache manually.
 
 The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After successful Claude Code setup, Engram checks `claude plugin list --json`; an unverifiable, disabled, or older plugin produces a warning but does not fail setup or replace the selected slim mode. Use your normal Claude Code plugin update path, then restart Claude Code. Plugins loaded with session-only `claude --plugin-dir ...` cannot be detected.
 
@@ -141,7 +145,7 @@ plugin/claude-code/
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
 
-If Git Bash itself is blocked by enterprise security tooling, `scripts/user-prompt-submit.ps1` is provided as a native PowerShell fallback for manual hook testing or local override.
+If Git Bash itself is blocked by enterprise security tooling, `scripts/user-prompt-submit.ps1` is provided as a native PowerShell fallback for manual hook testing or local override. It applies only to `UserPromptSubmit`; the complete plugin setup still requires `jq` and `curl` for shared Bash hooks.
 
 PowerShell local override/testing example for locked-down Windows endpoints:
 

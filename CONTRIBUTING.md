@@ -42,28 +42,26 @@ Once the issue is approved:
 
 ### Step 4: Automated PR Checks
 
-Required checks run automatically on every PR:
-
-#### PR Validation
+The active required contexts run automatically on every PR and merge queue group:
 
 | Check | What it verifies |
 |-------|-----------------|
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
-| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](#transient-artifact-policy) |
-
-#### CI Tests
-
-| Check | What it runs |
-|-------|-------------|
-| **Lint** | golangci-lint reports no new findings in Go changes |
 | **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
+| **Plugin Tests** | The Pi plugin test suite runs from a clean checkout |
 
 All required checks must pass before a PR can be merged.
 
-> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, `PR Validation`, `Check PR Has type:* Label`, and `Check PR Has No Transient Artifacts`.
+> **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
+
+Non-required PR checks, including lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. They are not active `main` required contexts and do not run as merge-group CI jobs.
+
+### Merge Queue Activation (administrators)
+
+Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
 
 ## Transient Artifact Policy
 

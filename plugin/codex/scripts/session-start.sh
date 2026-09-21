@@ -27,7 +27,6 @@ source "${SCRIPT_DIR}/_helpers.sh"
 
 # Read hook input from stdin
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
 # Explicit ENGRAM_URL intentionally delegates ownership to an external server.
@@ -54,15 +53,8 @@ fi
 
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
-# Create session
-if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/sessions" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir}')" \
-    > /dev/null 2>&1
-fi
+# Register and retain only the server-confirmed runtime identity.
+SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD")
 
 # Auto-import git-synced chunks
 if [ -f "${CWD}/.engram/manifest.json" ]; then
@@ -156,6 +148,7 @@ if [ -n "$PROJECT" ]; then
 fi
 
 # Inject Memory Protocol + context — stdout is returned to Codex as additionalContext
+printf '%s\n' "$SESSION_HANDOFF"
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 

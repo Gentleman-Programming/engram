@@ -92,8 +92,33 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
-	fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes the quarantine to one project.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
+	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
+}
+
+func printDoctorRepairUsage() {
+	_, _ = fmt.Fprintln(os.Stdout, "usage: engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
+	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	_, _ = fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
+	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
+}
+
+func diagnosticOnlyCheckCodes() []string {
+	repairable := make(map[string]bool, len(diagnostic.RepairableCodes()))
+	for _, code := range diagnostic.RepairableCodes() {
+		repairable[code] = true
+	}
+
+	registered := diagnostic.RegisteredCodes()
+	diagnosticOnly := make([]string, 0, len(registered)-len(repairable))
+	for _, code := range registered {
+		if !repairable[code] {
+			diagnosticOnly = append(diagnosticOnly, code)
+		}
+	}
+	return diagnosticOnly
 }
 
 func cmdDoctorRepair(cfg store.Config) {
@@ -127,7 +152,7 @@ func cmdDoctorRepair(cfg store.Config) {
 			mode = diagnostic.RepairModeApply
 			modeCount++
 		case "--help", "-h", "help":
-			printDoctorUsage()
+			printDoctorRepairUsage()
 			return
 		default:
 			failDoctorRepair(fmt.Sprintf("unknown doctor repair argument %q", os.Args[i]))
@@ -152,7 +177,11 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair("exactly one of --plan, --dry-run, or --apply is required")
 		return
 	}
-	if !isSupportedDoctorRepairCheck(check) {
+	if !diagnostic.IsRepairableCode(check) {
+		if _, err := diagnostic.DefaultRegistry().Lookup(check); err == nil {
+			failDoctorRepair(check + " is a diagnostic-only check with no repair; run engram doctor --check " + check)
+			return
+		}
 		failDoctorRepair("unsupported repair check " + check)
 		return
 	}
@@ -169,19 +198,27 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
+		superseded, err := s.SupersedeUnenrolledLegacyMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
 		report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
 		if err != nil {
 			failDoctorRepair(err.Error())
 			return
 		}
-		if mode != diagnostic.RepairModeApply && len(repairs.Actions) > 0 {
-			repairSeqs := make(map[int64]struct{}, len(repairs.Actions))
+		if mode != diagnostic.RepairModeApply {
+			handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions))
 			for _, action := range repairs.Actions {
-				repairSeqs[action.Seq] = struct{}{}
+				handledSeqs[action.Seq] = struct{}{}
+			}
+			for _, action := range superseded.Actions {
+				handledSeqs[action.Seq] = struct{}{}
 			}
 			remaining := report.Actions[:0]
 			for _, action := range report.Actions {
-				if _, repaired := repairSeqs[action.Seq]; !repaired {
+				if _, handled := handledSeqs[action.Seq]; !handled {
 					remaining = append(remaining, action)
 				}
 			}
@@ -193,14 +230,15 @@ func cmdDoctorRepair(cfg store.Config) {
 			return
 		}
 		if mode == diagnostic.RepairModeApply {
-			report.Applied = len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(sourceRepairs.Actions) > 0
+			report.Applied = len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
 		}
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
 			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
+			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-		}{report, repairs.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
+		}{report, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
 		return
 	}
 
@@ -210,9 +248,55 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair(err.Error())
 		return
 	}
-	plan, err := diagnostic.BuildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
+	plan, err := buildRepairPlan(ctx, diagnostic.Scope{Store: s, Project: project}, report, check, mode)
 	if err != nil {
 		failDoctorRepair(err.Error())
+		return
+	}
+	if check == diagnostic.CheckOrphanedObservationSession {
+		plan.Counts.SessionsPlanned = int64(len(plan.PlaceholderSessions))
+		for _, action := range plan.PlaceholderSessions {
+			plan.Counts.ObservationsPlanned += action.ObservationCount
+		}
+		if mode == diagnostic.RepairModeApply && len(plan.PlaceholderSessions) > 0 {
+			applied, err := s.RestoreOrphanedObservationSessions(plan.PlaceholderSessions)
+			if err != nil {
+				failDoctorRepair(err.Error())
+				return
+			}
+			if len(applied) > 0 {
+				plan.Status = "applied"
+			} else {
+				plan.Status = "noop"
+			}
+			for _, action := range applied {
+				plan.Counts.SessionsApplied++
+				plan.Counts.ObservationsApplied += action.ObservationCount
+			}
+		}
+		writeDoctorRepairJSON(plan)
+		return
+	}
+	if check == diagnostic.CheckSyncTargetClosedSpace {
+		cleanup, err := s.CleanupForeignSyncTargets(mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
+		plan.TargetActions = make([]diagnostic.SyncTargetCleanupAction, 0, len(cleanup.Actions))
+		if mode == diagnostic.RepairModeApply && len(cleanup.Actions) > 0 {
+			plan.Status = "applied"
+		}
+		for _, action := range cleanup.Actions {
+			plan.TargetActions = append(plan.TargetActions, diagnostic.SyncTargetCleanupAction{TargetKey: action.TargetKey, RetargetedMutations: action.RetargetedMutations, RetainedMutations: action.RetainedMutations, StateRemoved: action.StateRemoved})
+			if action.RetainedMutations > 0 && mode == diagnostic.RepairModeApply {
+				plan.Status = "blocked"
+				if cleanup.Applied {
+					plan.Status = "partial"
+				}
+			}
+		}
+		writeDoctorRepairJSON(plan)
 		return
 	}
 	actions := make([]store.SessionProjectReclassification, 0, len(plan.Actions))
@@ -251,21 +335,9 @@ func cmdDoctorRepair(cfg store.Config) {
 	writeDoctorRepairJSON(plan)
 }
 
-func isSupportedDoctorRepairCheck(check string) bool {
-	switch check {
-	case diagnostic.CheckSessionProjectDirectoryMismatch,
-		diagnostic.CheckManualSessionNameProjectMismatch,
-		diagnostic.CheckInvalidSessionIdentity,
-		diagnostic.CheckSyncMutationRequiredFields:
-		return true
-	default:
-		return false
-	}
-}
-
 func failDoctorRepair(message string) {
 	fmt.Fprintln(os.Stderr, "engram doctor repair failed: "+message)
-	printDoctorUsage()
+	printDoctorRepairUsage()
 	exitFunc(1)
 }
 

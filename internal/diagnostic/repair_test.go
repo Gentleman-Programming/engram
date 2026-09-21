@@ -7,6 +7,40 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
+func TestBuildRepairPlanForeignSyncTargetUsesStoreClassification(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`
+		INSERT INTO sync_enrolled_projects (project) VALUES ('valid'); INSERT INTO sync_state (target_key, lifecycle, updated_at) VALUES ('satellite:empty', 'idle', datetime('now')), ('satellite:terminal', 'idle', datetime('now'));
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES ('satellite:terminal', 'observation', 'pending', 'upsert', '{}', 'local', 'valid', 'pending');
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, acked_at, disposition, disposition_reason, disposition_evidence, disposition_at) VALUES ('satellite:terminal', 'observation', 'terminal', 'upsert', '{}', 'local', datetime('now'), 'quarantined', 'kept', 'evidence', datetime('now'));`); err != nil {
+		t.Fatalf("seed foreign targets: %v", err)
+	}
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckSyncTargetClosedSpace)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	plan, err := BuildRepairPlan(context.Background(), Scope{Store: s}, report, CheckSyncTargetClosedSpace, RepairModeDryRun)
+	if err != nil {
+		t.Fatalf("BuildRepairPlan: %v", err)
+	}
+	if plan.Status != "dry_run" || len(plan.Actions) != 0 || len(plan.TargetActions) != 2 {
+		t.Fatalf("plan=%+v", plan)
+	}
+	if empty, terminal := plan.TargetActions[0], plan.TargetActions[1]; empty.TargetKey != "satellite:empty" || !empty.StateRemoved || empty.RetainedMutations != 0 || terminal.TargetKey != "satellite:terminal" || terminal.RetargetedMutations != 1 || terminal.StateRemoved || terminal.RetainedMutations != 1 {
+		t.Fatalf("actions=%+v", plan.TargetActions)
+	}
+	var states, mutations int
+	if err := s.DB().QueryRow(`SELECT (SELECT COUNT(*) FROM sync_state WHERE target_key LIKE 'satellite:%'), (SELECT COUNT(*) FROM sync_mutations WHERE target_key = 'satellite:terminal')`).Scan(&states, &mutations); err != nil || states != 2 || mutations != 2 {
+		t.Fatalf("plan mutated states=%d mutations=%d err=%v", states, mutations, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	if _, err := BuildRepairPlan(context.Background(), Scope{Store: s}, report, CheckSyncTargetClosedSpace, RepairModeDryRun); err == nil {
+		t.Fatal("expected cleanup classification error")
+	}
+}
+
 func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 	s := newDiagnosticTestStore(t)
 	if err := s.CreateSession("s-engram", "sias-app", "/work/engram"); err != nil {
@@ -47,6 +81,65 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 	}
 }
 
+// TestBuildRepairPlanOrphanedSessionRejectsWhitespaceEvidence proves the
+// orphaned-session planner treats whitespace-only SessionID and FirstObservedAt
+// values as invalid and skips them deterministically instead of planning a
+// placeholder the store could never apply.
+func TestBuildRepairPlanOrphanedSessionRejectsWhitespaceEvidence(t *testing.T) {
+	tests := []struct {
+		name      string
+		evidence  store.OrphanedObservationSessionEvidence
+		wantPlans int
+		wantSkip  string
+	}{
+		{
+			name:     "whitespace-only session id",
+			evidence: store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: " \t\n ", ObservationCount: 1, FirstObservedAt: "2026-01-01 00:00:00"},
+			wantSkip: "invalid_orphaned_session_evidence",
+		},
+		{
+			name:     "whitespace-only first observed timestamp",
+			evidence: store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: "missing-session", ObservationCount: 1, FirstObservedAt: "  \n "},
+			wantSkip: "invalid_orphaned_session_evidence",
+		},
+		{
+			name:      "complete evidence plans placeholder",
+			evidence:  store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: "missing-session", ObservationCount: 1, FirstObservedAt: "2026-01-01 00:00:00"},
+			wantPlans: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report := Report{Checks: []CheckResult{{
+				CheckID: CheckOrphanedObservationSession,
+				Result:  "warning",
+				Findings: []Finding{{
+					CheckID:    CheckOrphanedObservationSession,
+					ReasonCode: CheckOrphanedObservationSession,
+					Message:    "test finding",
+					Evidence:   mustJSON(tc.evidence),
+				}},
+			}}}
+			plan, err := BuildRepairPlan(context.Background(), Scope{}, report, CheckOrphanedObservationSession, RepairModePlan)
+			if err != nil {
+				t.Fatalf("BuildRepairPlan: %v", err)
+			}
+			if len(plan.PlaceholderSessions) != tc.wantPlans {
+				t.Fatalf("placeholders=%+v", plan.PlaceholderSessions)
+			}
+			if tc.wantSkip == "" {
+				if len(plan.Skipped) != 0 {
+					t.Fatalf("skipped=%+v", plan.Skipped)
+				}
+				return
+			}
+			if len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != tc.wantSkip {
+				t.Fatalf("skipped=%+v, want %q", plan.Skipped, tc.wantSkip)
+			}
+		})
+	}
+}
+
 func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -71,15 +164,15 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			wantSkip: "manual_name_unknown_project",
 		},
 		{
-			name: "trusted directory contradiction skipped",
+			name: "known manual target beats trusted third project directory",
 			sessions: []store.DiagnosticSessionEvidence{
-				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/engram"},
+				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/third-project"},
 				{ID: "known", Name: "known", Project: "engram", Directory: "/work/engram"},
 			},
 			detect: func(string) (DetectedProject, bool) {
-				return DetectedProject{Project: "other", Source: "git_root", Path: "/work/other"}, true
+				return DetectedProject{Project: "third-project", Source: "git_root", Path: "/work/third-project"}, true
 			},
-			wantSkip: "trusted_directory_contradicts_manual_name",
+			wantAction: true,
 		},
 	}
 

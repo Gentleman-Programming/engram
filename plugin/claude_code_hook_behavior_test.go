@@ -863,209 +863,56 @@ func healthyServer(t *testing.T) *httptest.Server {
 }
 
 // TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard verifies session-start.sh's MCP-migration guard honors CLAUDE_CONFIG_DIR (issue #1081).
-func TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard(t *testing.T) {
+// TestSessionStartAlwaysDelegatesClaudeMCPRegistration confirms the hook has no
+// config-file authority: setup owns inspection, conflict detection, and writes.
+func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
 	requireHookBinaries(t)
 
-	runWithEngramStub := func(t *testing.T, configDir string) []string {
+	run := func(t *testing.T, setupFails bool) ([]string, string) {
 		t.Helper()
 		srv := healthyServer(t)
-		stubDir := writeRecordingEngramStub(t)
+		stubDir := t.TempDir()
 		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
-		// bash's PATH is always colon-separated, even under Git Bash on Windows.
+		stub := filepath.Join(stubDir, "engram")
+		script := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"instance-id\" ]; then printf '00000000000000000000000000000000\\n'; fi\n"
+		if setupFails {
+			script += "if [ \"$*\" = \"setup claude-code --mcp-only\" ]; then exit 1; fi\n"
+		}
+		script += "exit 0\n"
+		if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+			t.Fatalf("write engram stub: %v", err)
+		}
+
+		configDir := t.TempDir()
+		legacyPath := filepath.Join(configDir, "mcp", "engram.json")
+		if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+			t.Fatalf("create stale MCP directory: %v", err)
+		}
+		if err := os.WriteFile(legacyPath, []byte(`{"command":"stale"}`), 0o644); err != nil {
+			t.Fatalf("write stale MCP config: %v", err)
+		}
 		env := map[string]string{
 			"ENGRAM_PORT":            serverPort(t, srv),
+			"ENGRAM_MANAGED_LOCAL":   "0",
 			"CLAUDE_CONFIG_DIR":      configDir,
 			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
 			"ENGRAM_TEST_ENGRAM_LOG": logPath,
 		}
 		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
-		runHook(t, "session-start.sh", stdin, env)
-		return readEngramInvocations(t, logPath)
+		_, stderr := runHookWithStderr(t, "session-start.sh", stdin, env)
+		return readEngramInvocations(t, logPath), stderr
 	}
 
-	t.Run("existing regular file under CLAUDE_CONFIG_DIR skips migration", func(t *testing.T) {
-		configDir := t.TempDir()
-		mcpDir := filepath.Join(configDir, "mcp")
-		if err := os.MkdirAll(mcpDir, 0o755); err != nil {
-			t.Fatalf("create mcp dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte("{}"), 0o644); err != nil {
-			t.Fatalf("write existing mcp config: %v", err)
-		}
-
-		for _, args := range runWithEngramStub(t, configDir) {
-			if args == "setup claude-code --mcp-only" {
-				t.Fatalf("migration invoked even though a regular MCP config already exists under CLAUDE_CONFIG_DIR")
-			}
-		}
-	})
-
-	t.Run("missing config under CLAUDE_CONFIG_DIR triggers migration", func(t *testing.T) {
-		configDir := t.TempDir() // mcp/engram.json intentionally absent
-
-		invocations := runWithEngramStub(t, configDir)
-		found := false
-		for _, args := range invocations {
-			if args == "setup claude-code --mcp-only" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("migration was not invoked for a missing MCP config under CLAUDE_CONFIG_DIR; invocations: %v", invocations)
-		}
-	})
-
-	t.Run("symlink under CLAUDE_CONFIG_DIR triggers migration once", func(t *testing.T) {
-		configDir := t.TempDir()
-		mcpDir := filepath.Join(configDir, "mcp")
-		if err := os.MkdirAll(mcpDir, 0o755); err != nil {
-			t.Fatalf("create mcp dir: %v", err)
-		}
-		target := filepath.Join(t.TempDir(), "existing-engram.json")
-		if err := os.WriteFile(target, []byte("{}"), 0o644); err != nil {
-			t.Fatalf("write symlink target: %v", err)
-		}
-		if err := os.Symlink(target, filepath.Join(mcpDir, "engram.json")); err != nil {
-			t.Skipf("symlink creation is unavailable: %v", err)
-		}
-
-		count := 0
-		for _, args := range runWithEngramStub(t, configDir) {
-			if args == "setup claude-code --mcp-only" {
-				count++
-			}
-		}
-		if count != 1 {
-			t.Fatalf("migration invocations for symlink MCP config = %d, want 1", count)
-		}
-	})
-
-	t.Run("migration creates the resolved config and runs once", func(t *testing.T) {
-		configDir := t.TempDir()
-		mcpConfig := filepath.Join(configDir, "mcp", "engram.json")
-		srv := healthyServer(t)
-		stubDir := writeMigratingEngramStub(t)
-		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
-		env := map[string]string{
-			"ENGRAM_PORT":            serverPort(t, srv),
-			"CLAUDE_CONFIG_DIR":      configDir,
-			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
-			"ENGRAM_TEST_ENGRAM_LOG": logPath,
-			"ENGRAM_TEST_MCP_CONFIG": mcpConfig,
-		}
-		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
-		runHook(t, "session-start.sh", stdin, env)
-		info, err := os.Stat(mcpConfig)
-		if err != nil || !info.Mode().IsRegular() {
-			t.Fatalf("first migration must create regular MCP config at %q: info=%v, err=%v", mcpConfig, info, err)
-		}
-		runHook(t, "session-start.sh", stdin, env)
-		if got := strings.Count(strings.Join(readEngramInvocations(t, logPath), "\n"), "setup claude-code --mcp-only"); got != 1 {
-			t.Fatalf("migration invocations across two SessionStart runs = %d, want 1", got)
-		}
-	})
-
-	// migrationWasInvoked reports whether "setup claude-code --mcp-only"
-	// appears among the recorded engram invocations.
-	migrationWasInvoked := func(invocations []string) bool {
-		for _, args := range invocations {
-			if args == "setup claude-code --mcp-only" {
-				return true
-			}
-		}
-		return false
+	invocations, stderr := run(t, false)
+	if stderr != "" {
+		t.Fatalf("successful setup stderr = %q", stderr)
+	}
+	if got := strings.Count(strings.Join(invocations, "\n"), "setup claude-code --mcp-only"); got != 1 {
+		t.Fatalf("setup invocations = %d, want one despite stale legacy config: %v", got, invocations)
 	}
 
-	t.Run("unset or blank CLAUDE_CONFIG_DIR falls back to $HOME/.claude", func(t *testing.T) {
-		cases := []struct {
-			name          string
-			setConfig     bool
-			configDir     string
-			createConfig  bool
-			wantMigration bool
-		}{
-			{name: "unset/config present", createConfig: true},
-			{name: "unset/config absent", wantMigration: true},
-			{name: "empty/config present", setConfig: true, createConfig: true},
-			{name: "empty/config absent", setConfig: true, wantMigration: true},
-			{name: "whitespace-only/config present", setConfig: true, configDir: "   \t  ", createConfig: true},
-			{name: "whitespace-only/config absent", setConfig: true, configDir: "   \t  ", wantMigration: true},
-		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				home := t.TempDir()
-				if tc.createConfig {
-					mcpDir := filepath.Join(home, ".claude", "mcp")
-					if err := os.MkdirAll(mcpDir, 0o755); err != nil {
-						t.Fatalf("create mcp dir: %v", err)
-					}
-					if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte("{}"), 0o644); err != nil {
-						t.Fatalf("write existing mcp config: %v", err)
-					}
-				}
-
-				srv := healthyServer(t)
-				stubDir := writeRecordingEngramStub(t)
-				logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
-				env := map[string]string{
-					"ENGRAM_PORT":            serverPort(t, srv),
-					"HOME":                   home,
-					"PATH":                   stubDir + ":" + os.Getenv("PATH"),
-					"ENGRAM_TEST_ENGRAM_LOG": logPath,
-				}
-				if tc.setConfig {
-					env["CLAUDE_CONFIG_DIR"] = tc.configDir
-				}
-				stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
-				runHook(t, "session-start.sh", stdin, env)
-
-				if got := migrationWasInvoked(readEngramInvocations(t, logPath)); got != tc.wantMigration {
-					t.Fatalf("migration invoked=%v, want %v", got, tc.wantMigration)
-				}
-			})
-		}
-	})
-
-	t.Run("relative CLAUDE_CONFIG_DIR resolved against hook's working directory", func(t *testing.T) {
-		const rel = "relative-claude-config"
-		cases := []struct {
-			name          string
-			createConfig  bool
-			wantMigration bool
-		}{
-			{name: "config present", createConfig: true, wantMigration: false},
-			{name: "config absent", createConfig: false, wantMigration: true},
-		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				workDir := t.TempDir()
-				if tc.createConfig {
-					mcpDir := filepath.Join(workDir, rel, "mcp")
-					if err := os.MkdirAll(mcpDir, 0o755); err != nil {
-						t.Fatalf("create mcp dir: %v", err)
-					}
-					if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte("{}"), 0o644); err != nil {
-						t.Fatalf("write existing mcp config: %v", err)
-					}
-				}
-
-				srv := healthyServer(t)
-				stubDir := writeRecordingEngramStub(t)
-				logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
-				env := map[string]string{
-					"ENGRAM_PORT":            serverPort(t, srv),
-					"CLAUDE_CONFIG_DIR":      rel,
-					"PATH":                   stubDir + ":" + os.Getenv("PATH"),
-					"ENGRAM_TEST_ENGRAM_LOG": logPath,
-				}
-				stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
-				runHookInDir(t, "session-start.sh", stdin, env, workDir)
-
-				if got := migrationWasInvoked(readEngramInvocations(t, logPath)); got != tc.wantMigration {
-					t.Fatalf("migration invoked=%v, want %v", got, tc.wantMigration)
-				}
-			})
-		}
-	})
+	_, stderr = run(t, true)
+	if !strings.Contains(stderr, "warning: Engram MCP registration failed") {
+		t.Fatalf("failed setup stderr = %q, want actionable warning", stderr)
+	}
 }

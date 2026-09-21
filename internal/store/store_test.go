@@ -51,6 +51,22 @@ func enrollTestProject(t *testing.T, s *Store, project string) {
 	}
 }
 
+type firstNextBlockingScanner struct {
+	rowScanner
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (s *firstNextBlockingScanner) Next() bool {
+	next := s.rowScanner.Next()
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return next
+}
+
 func TestStoreDataDir(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
@@ -62,6 +78,76 @@ func TestStoreDataDir(t *testing.T) {
 
 	if got := s.DataDir(); got != cfg.DataDir {
 		t.Fatalf("data directory = %q, want %q", got, cfg.DataDir)
+	}
+}
+
+// Characterization: the plan holds withReadTx open. modernc.org/sqlite v1.45.0
+// must let ReadOnly override the DSN's immediate mode, so this writer proceeds.
+func TestWithReadTxReadOnlyDoesNotReserveWriterLockDuringRepairPlan(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	planner, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open planner store: %v", err)
+	}
+	t.Cleanup(func() { _ = planner.Close() })
+	writer, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+
+	if _, err := writer.DB().Exec("PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatalf("disable writer busy timeout: %v", err)
+	}
+	oldBackoffs := sqliteWriteRetryBackoffs
+	sqliteWriteRetryBackoffs = nil
+	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
+
+	originalQueryIt := planner.hooks.queryIt
+	plannerEnteredQuery := make(chan struct{})
+	releasePlanner := make(chan struct{})
+	var releasePlannerOnce sync.Once
+	release := func() { releasePlannerOnce.Do(func() { close(releasePlanner) }) }
+	t.Cleanup(release)
+	planner.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		rows, err := originalQueryIt(db, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(query, "FROM sync_mutations WHERE target_key") {
+			return &firstNextBlockingScanner{rowScanner: rows, entered: plannerEnteredQuery, release: releasePlanner}, nil
+		}
+		return rows, nil
+	}
+	t.Cleanup(func() { planner.hooks.queryIt = originalQueryIt })
+
+	plannerDone := make(chan error, 1)
+	go func() {
+		_, err := planner.RepairObservationMutationTitles("project-a", false)
+		plannerDone <- err
+	}()
+
+	select {
+	case <-plannerEnteredQuery:
+	case <-time.After(time.Second):
+		t.Fatal("read-only planner did not reach its query")
+	}
+
+	if err := writer.CreateSession("writer-session", "project-a", "/work/project-a"); err != nil {
+		t.Fatalf("writer blocked by read-only planner: %v", err)
+	}
+
+	release()
+	select {
+	case err := <-plannerDone:
+		if err != nil {
+			t.Fatalf("run read-only planner: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read-only planner did not finish")
 	}
 }
 
@@ -1844,19 +1930,6 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 			t.Fatalf("set created_at for %q: %v", title, err)
 		}
 	}
-	exportedBeforePin, err := s.ExportProject("engram")
-	if err != nil {
-		t.Fatalf("export project before pin: %v", err)
-	}
-	// exported_at is wall-clock time at second resolution; zero it before
-	// comparing payloads so a second boundary crossed by the real DB work
-	// between the two exports below can't make an otherwise-identical
-	// payload look different.
-	exportedBeforePin.ExportedAt = ""
-	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
-	if err != nil {
-		t.Fatalf("marshal export before pin: %v", err)
-	}
 	var updatedAtBeforePin string
 	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtBeforePin); err != nil {
 		t.Fatalf("get updated_at before pin: %v", err)
@@ -1904,18 +1977,17 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	}
 	exportedJSON, err := json.Marshal(exported)
 	if err != nil {
-		t.Fatalf("marshal export: %v", err)
+		t.Fatalf("marshal backup export: %v", err)
 	}
-	if strings.Contains(string(exportedJSON), `"pinned"`) {
-		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
+	if !strings.Contains(string(exportedJSON), `"pinned":true`) {
+		t.Fatalf("backup export must preserve pinned state, got %s", exportedJSON)
 	}
-	exported.ExportedAt = ""
-	exportedJSONNoTimestamp, err := json.Marshal(exported)
+	syncJSON, err := json.Marshal(pinned[0])
 	if err != nil {
-		t.Fatalf("marshal export without timestamp: %v", err)
+		t.Fatalf("marshal shared observation: %v", err)
 	}
-	if string(exportedJSONNoTimestamp) != string(exportedBeforePinJSON) {
-		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSONNoTimestamp)
+	if strings.Contains(string(syncJSON), `"pinned"`) {
+		t.Fatalf("pinned state must stay out of shared sync JSON, got %s", syncJSON)
 	}
 
 	if err := s.UnpinObservation(ids[0]); err != nil {
@@ -2380,6 +2452,146 @@ func TestSuggestTopicKeyNormalizesDeterministically(t *testing.T) {
 	fallback := SuggestTopicKey("bugfix", "", "Fix nil panic in auth middleware on empty token")
 	if fallback != "bug/fix-nil-panic-in-auth-middleware-on-empty" {
 		t.Fatalf("unexpected fallback topic key: %q", fallback)
+	}
+}
+
+func TestSuggestTopicKeyPreservesDiscardedUnicodeIdentity(t *testing.T) {
+	tests := []struct {
+		name, typ, title, content, legacy, prefix string
+	}{
+		{"Japanese", "decision", "日本語の設計", "日本語の内容", "decision/general", "decision/general-u-"},
+		{"Korean", "decision", "한국어 설계", "한국어 내용", "decision/general", "decision/general-u-"},
+		{"mixed script", "architecture", "Auth 日本語", "content", "architecture/auth", "architecture/auth-u-"},
+		{"emoji", "config", "Deploy 🚀", "content", "config/deploy", "config/deploy-u-"},
+		{"combining mark", "manual", "Cafe\u0301", "content", "topic/cafe", "topic/cafe-u-"},
+	}
+
+	seen := make(map[string]struct{}, len(tests))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SuggestTopicKey(tt.typ, tt.title, tt.content)
+			if got != SuggestTopicKey(tt.typ, tt.title, tt.content) {
+				t.Fatalf("suggestion is not deterministic: %q", got)
+			}
+			if got == tt.legacy || !strings.HasPrefix(got, tt.prefix) {
+				t.Fatalf("suggestion = %q, want a distinct %q key", got, tt.prefix)
+			}
+			if len(got) > 120 {
+				t.Fatalf("suggestion length = %d, want at most 120", len(got))
+			}
+			for _, r := range got {
+				if r > unicode.MaxASCII {
+					t.Fatalf("suggestion must be ASCII-safe, got %q", got)
+				}
+			}
+			if _, duplicate := seen[got]; duplicate {
+				t.Fatalf("distinct input reused suggestion %q", got)
+			}
+			seen[got] = struct{}{}
+		})
+	}
+
+	t.Run("truncates ASCII residue before Unicode identity", func(t *testing.T) {
+		source := strings.Repeat("a", 100) + "🚀"
+		got := SuggestTopicKey("manual", source, "ignored")
+		if got != SuggestTopicKey("manual", source, "ignored") {
+			t.Fatalf("suggestion is not deterministic: %q", got)
+		}
+		if len(got) > 120 || !strings.HasPrefix(got, "topic/") {
+			t.Fatalf("suggestion = %q, want an in-limit topic key", got)
+		}
+		segment := strings.TrimPrefix(got, "topic/")
+		if len(segment) != 100 {
+			t.Fatalf("segment length = %d, want 100 after truncation", len(segment))
+		}
+		if !strings.HasPrefix(segment, strings.Repeat("a", 85)+"-u-") || strings.HasPrefix(segment, strings.Repeat("a", 86)) {
+			t.Fatalf("segment = %q, want truncated ASCII residue with Unicode identity suffix", segment)
+		}
+		for _, r := range got {
+			if r > unicode.MaxASCII {
+				t.Fatalf("suggestion must be ASCII-safe, got %q", got)
+			}
+		}
+	})
+
+	for _, tt := range []struct{ typ, title, content, want string }{
+		{"Architecture", "  Auth Model  ", "ignored", "architecture/auth-model"},
+		{"bugfix", "", "Fix nil panic in auth middleware on empty token", "bug/fix-nil-panic-in-auth-middleware-on-empty"},
+		{"manual", "!!!", "...", "topic/general"},
+	} {
+		if got := SuggestTopicKey(tt.typ, tt.title, tt.content); got != tt.want {
+			t.Fatalf("ASCII suggestion = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestSuggestedTopicKeysKeepDistinctObservationsAndSameKeyRevision(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("unicode-topic-keys", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	firstTitle, firstContent := "日本語の設計", "日本語の内容"
+	secondTitle, secondContent := "한국어 설계", "한국어 내용"
+	firstKey := SuggestTopicKey("decision", firstTitle, firstContent)
+	secondKey := SuggestTopicKey("decision", secondTitle, secondContent)
+	if firstKey == secondKey {
+		t.Fatalf("generated keys must differ, both were %q", firstKey)
+	}
+
+	add := func(title, content, key string) int64 {
+		t.Helper()
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "unicode-topic-keys",
+			Type:      "decision",
+			Title:     title,
+			Content:   content,
+			Project:   "engram",
+			Scope:     "project",
+			TopicKey:  key,
+		})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		return id
+	}
+
+	firstID := add(firstTitle, firstContent, firstKey)
+	secondID := add(secondTitle, secondContent, secondKey)
+	if firstID == secondID {
+		t.Fatalf("distinct generated keys reused observation ID %d", firstID)
+	}
+	for _, want := range []struct {
+		id             int64
+		title, content string
+	}{{firstID, firstTitle, firstContent}, {secondID, secondTitle, secondContent}} {
+		got, err := s.GetObservation(want.id)
+		if err != nil {
+			t.Fatalf("get observation %d: %v", want.id, err)
+		}
+		if got.Title != want.title || got.Content != want.content {
+			t.Fatalf("observation = %#v, want title/content %q/%q", got, want.title, want.content)
+		}
+	}
+
+	revisedID := add("日本語の更新", "updated Japanese content", firstKey)
+	if revisedID != firstID {
+		t.Fatalf("identical generated key created ID %d, want %d", revisedID, firstID)
+	}
+	first, err := s.GetObservation(firstID)
+	if err != nil {
+		t.Fatalf("get revised observation: %v", err)
+	}
+	if first.RevisionCount != 2 || first.Content != "updated Japanese content" {
+		t.Fatalf("same-key revision = %#v", first)
+	}
+
+	observations, err := s.AllObservations("engram", "project", 10)
+	if err != nil {
+		t.Fatalf("list observations: %v", err)
+	}
+	if len(observations) != 2 {
+		t.Fatalf("observation count = %d, want 2", len(observations))
 	}
 }
 
@@ -4430,6 +4642,99 @@ func TestApplyRemoteMutationIdempotent(t *testing.T) {
 	}
 }
 
+// TestStoreHasObservationBySyncIDAnyState pins the tombstone-inclusive
+// existence contract that relation imports rely on: HasObservationBySyncIDAnyState
+// must see live and soft-deleted (tombstoned) rows alike, while
+// GetObservationBySyncID keeps excluding deleted ones.
+func TestStoreHasObservationBySyncIDAnyState(t *testing.T) {
+	s := newTestStore(t)
+
+	create := SyncMutation{
+		Seq:       41,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-session",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-session","project":"engram","directory":"/remote"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, create); err != nil {
+		t.Fatalf("apply session mutation: %v", err)
+	}
+
+	obsMutation := SyncMutation{
+		Seq:       42,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-remote-1",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-remote-1","session_id":"remote-session","type":"decision","title":"Remote","content":"Pulled from cloud","project":"engram","scope":"project"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, obsMutation); err != nil {
+		t.Fatalf("apply observation mutation: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-remote-1")
+	if err != nil {
+		t.Fatalf("check live observation: %v", err)
+	}
+	if !known {
+		t.Fatalf("expected live observation to be visible in any state")
+	}
+
+	absent, err := s.HasObservationBySyncIDAnyState("obs-never-pulled")
+	if err != nil {
+		t.Fatalf("check absent observation: %v", err)
+	}
+	if absent {
+		t.Fatalf("expected absent observation to be invisible in any state")
+	}
+
+	deleteMutation := SyncMutation{
+		Seq:       43,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-remote-1",
+		Op:        SyncOpDelete,
+		Payload:   `{"sync_id":"obs-remote-1","deleted":true}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, deleteMutation); err != nil {
+		t.Fatalf("apply delete mutation: %v", err)
+	}
+	if _, err := s.GetObservationBySyncID("obs-remote-1"); err == nil {
+		t.Fatalf("expected pulled delete to hide observation from GetObservationBySyncID")
+	}
+
+	tombstoned, err := s.HasObservationBySyncIDAnyState("obs-remote-1")
+	if err != nil {
+		t.Fatalf("check tombstoned observation: %v", err)
+	}
+	if !tombstoned {
+		t.Fatalf("expected tombstoned observation to stay visible in any state")
+	}
+}
+
+// TestStoreHasObservationBySyncIDAnyStateClosedStore pins the error path: on a
+// closed store the lookup must fail with the wrapped, identifiable message so
+// callers can tell an infrastructure fault apart from a genuinely absent
+// sync_id instead of reading an error as "not found".
+func TestStoreHasObservationBySyncIDAnyStateClosedStore(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-after-close")
+	if err == nil {
+		t.Fatal("expected HasObservationBySyncIDAnyState on a closed store to fail")
+	}
+	if known {
+		t.Fatal("expected no observation to be reported when the lookup fails")
+	}
+	if !strings.Contains(err.Error(), "check observation sync_id") {
+		t.Fatalf("error = %v, want it to contain %q", err, "check observation sync_id")
+	}
+}
+
 func TestApplyPulledMutationClearsDegradedReasonFields(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.MarkSyncBlocked(DefaultSyncTargetKey, "blocked_unenrolled", "project not enrolled"); err != nil {
@@ -4649,6 +4954,18 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
+	if err := s.CreateSession("missing-session", "engram", "/tmp/missing-session"); err != nil {
+		t.Fatalf("create observation parent: %v", err)
+	}
+	injectedObservationWriteErr := errors.New("injected observation foreign-key failure")
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO observations") {
+			return nil, injectedObservationWriteErr
+		}
+		return originalExec(db, query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = originalExec })
 
 	badChunk := []SyncMutation{
 		{
@@ -4665,8 +4982,8 @@ func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 		},
 	}
 
-	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); err == nil {
-		t.Fatal("expected chunk apply error for invalid observation payload")
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); !errors.Is(err, injectedObservationWriteErr) {
+		t.Fatalf("chunk apply error = %v, want injected observation write error", err)
 	}
 	if _, err := s.GetSession("chunk-session"); err == nil {
 		t.Fatal("expected chunk session upsert to roll back after failed chunk apply")
@@ -4876,6 +5193,102 @@ func TestDeleteObservationHardDeleteEnqueuesProjectScopedMutationMetadata(t *tes
 	}
 	if payload["project"] != "engram" {
 		t.Fatalf("expected delete payload project metadata, got %#v", payload["project"])
+	}
+}
+
+func TestDeleteObservationHardDeleteAfterSoftDeleteCleansSessionReference(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
+	const sessionID = "s-soft-then-hard-delete"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     "to-delete",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	var syncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&syncID); err != nil {
+		t.Fatalf("load observation sync ID: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, false); err != nil {
+		t.Fatalf("soft delete observation: %v", err)
+	}
+	if _, err := s.GetObservation(obsID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetObservation after soft delete error = %v, want sql.ErrNoRows", err)
+	}
+	if err := s.DeleteSession(sessionID); !errors.Is(err, ErrSessionHasObservations) {
+		t.Fatalf("DeleteSession after soft delete error = %v, want ErrSessionHasObservations", err)
+	}
+
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("hard delete soft-deleted observation: %v", err)
+	}
+
+	var observations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id = ?`, obsID).Scan(&observations); err != nil {
+		t.Fatalf("count observation rows: %v", err)
+	}
+	if observations != 0 {
+		t.Fatalf("observation rows after hard delete = %d, want 0", observations)
+	}
+
+	var tombstoneEntity, tombstoneSessionID, tombstoneProject string
+	var tombstoneHardDelete, tombstoneActive int
+	if err := s.db.QueryRow(`
+		SELECT entity, session_id, project, hard_delete, active
+		FROM sync_delete_tombstones
+		WHERE entity = ? AND entity_key = ?`,
+		SyncEntityObservation, syncID,
+	).Scan(&tombstoneEntity, &tombstoneSessionID, &tombstoneProject, &tombstoneHardDelete, &tombstoneActive); err != nil {
+		t.Fatalf("load hard-delete tombstone: %v", err)
+	}
+	if tombstoneEntity != SyncEntityObservation || tombstoneSessionID != sessionID || tombstoneProject != "engram" || tombstoneHardDelete != 1 || tombstoneActive != 1 {
+		t.Fatalf("hard-delete tombstone = entity=%q session_id=%q project=%q hard_delete=%d active=%d", tombstoneEntity, tombstoneSessionID, tombstoneProject, tombstoneHardDelete, tombstoneActive)
+	}
+
+	var payloadRaw string
+	if err := s.db.QueryRow(`
+		SELECT payload FROM sync_mutations
+		WHERE entity = ? AND entity_key = ? AND op = ?
+		ORDER BY seq DESC LIMIT 1`,
+		SyncEntityObservation, syncID, SyncOpDelete,
+	).Scan(&payloadRaw); err != nil {
+		t.Fatalf("load hard-delete mutation: %v", err)
+	}
+	var payload syncObservationPayload
+	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
+		t.Fatalf("decode hard-delete mutation payload: %v", err)
+	}
+	if !payload.Deleted || !payload.HardDelete || payload.SessionID != sessionID || derefString(payload.Project) != "engram" {
+		t.Fatalf("hard-delete mutation payload = %+v", payload)
+	}
+
+	var mutationCountBefore int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&mutationCountBefore); err != nil {
+		t.Fatalf("count observation mutations before repeated hard delete: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, true); !errors.Is(err, ErrObservationNotFound) {
+		t.Fatalf("repeated hard delete error = %v, want ErrObservationNotFound", err)
+	}
+	var mutationCountAfter int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&mutationCountAfter); err != nil {
+		t.Fatalf("count observation mutations after repeated hard delete: %v", err)
+	}
+	if mutationCountAfter != mutationCountBefore {
+		t.Fatalf("observation mutations after repeated hard delete = %d, want %d", mutationCountAfter, mutationCountBefore)
+	}
+
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete unreferenced session: %v", err)
 	}
 }
 
@@ -5308,6 +5721,230 @@ func TestMigrationAndHelperEdgeBranches(t *testing.T) {
 			t.Fatalf("expected empty context when no data, got %q", ctx)
 		}
 	})
+}
+
+func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
+	source := newTestStore(t)
+	if err := source.CreateSession("backup-session", "backup-project", "/tmp/backup"); err != nil {
+		t.Fatalf("create source session: %v", err)
+	}
+	sourceID, err := source.AddObservation(AddObservationParams{SessionID: "backup-session", Type: "decision", Title: "source", Content: "source content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add source observation: %v", err)
+	}
+	targetID, err := source.AddObservation(AddObservationParams{SessionID: "backup-session", Type: "decision", Title: "target", Content: "target content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add target observation: %v", err)
+	}
+	if err := source.PinObservation(sourceID); err != nil {
+		t.Fatalf("pin source observation: %v", err)
+	}
+	sourceObservation, err := source.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get source observation: %v", err)
+	}
+	targetObservation, err := source.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get target observation: %v", err)
+	}
+	if _, err := source.SaveRelation(SaveRelationParams{SyncID: "rel-backup-first", SourceID: sourceObservation.SyncID, TargetID: targetObservation.SyncID}); err != nil {
+		t.Fatalf("save first relation: %v", err)
+	}
+	reason := "superseded reason"
+	evidence := `{"evidence":"backup"}`
+	confidence := 0.85
+	if _, err := source.JudgeRelation(JudgeRelationParams{
+		JudgmentID: "rel-backup-first", Relation: RelationSupersedes, Reason: &reason, Evidence: &evidence, Confidence: &confidence,
+		MarkedByActor: "agent:test", MarkedByKind: "agent", MarkedByModel: "test-model", SessionID: "backup-session",
+	}); err != nil {
+		t.Fatalf("judge first relation: %v", err)
+	}
+	if _, err := source.SaveRelation(SaveRelationParams{SyncID: "rel-backup-replacement", SourceID: sourceObservation.SyncID, TargetID: targetObservation.SyncID}); err != nil {
+		t.Fatalf("save replacement relation: %v", err)
+	}
+	if _, err := source.DB().Exec(`UPDATE memory_relations
+		SET superseded_at = ?, superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?)
+		WHERE sync_id = ?`, "2026-01-03T00:00:00Z", "rel-backup-replacement", "rel-backup-first"); err != nil {
+		t.Fatalf("seed supersession metadata: %v", err)
+	}
+
+	exported, err := source.Export()
+	if err != nil {
+		t.Fatalf("export source: %v", err)
+	}
+	bytes, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	var payload struct {
+		Observations []struct {
+			SyncID string `json:"sync_id"`
+			Pinned bool   `json:"pinned"`
+		} `json:"observations"`
+		Relations []struct {
+			SyncID                       string  `json:"sync_id"`
+			Reason                       *string `json:"reason"`
+			Evidence                     *string `json:"evidence"`
+			Confidence                   *float64 `json:"confidence"`
+			JudgmentStatus               string  `json:"judgment_status"`
+			MarkedByActor                *string `json:"marked_by_actor"`
+			MarkedByKind                 *string `json:"marked_by_kind"`
+			MarkedByModel                *string `json:"marked_by_model"`
+			SessionID                    *string `json:"session_id"`
+			SupersededAt                 *string `json:"superseded_at"`
+			SupersededByRelationSyncID   *string `json:"superseded_by_relation_sync_id"`
+		} `json:"relations"`
+	}
+	if err := json.Unmarshal(bytes, &payload); err != nil {
+		t.Fatalf("decode backup payload: %v", err)
+	}
+	if len(payload.Observations) != 2 {
+		t.Fatalf("backup observations = %+v, want two observations", payload.Observations)
+	}
+	pinnedBySyncID := make(map[string]bool, len(payload.Observations))
+	for _, observation := range payload.Observations {
+		pinnedBySyncID[observation.SyncID] = observation.Pinned
+	}
+	for syncID, wantPinned := range map[string]bool{
+		sourceObservation.SyncID: true,
+		targetObservation.SyncID: false,
+	} {
+		gotPinned, found := pinnedBySyncID[syncID]
+		if !found || gotPinned != wantPinned {
+			t.Fatalf("backup pinned state for %q = %t, found=%t, want %t", syncID, gotPinned, found, wantPinned)
+		}
+	}
+	if len(payload.Relations) != 2 {
+		t.Fatalf("backup relations = %+v, want two complete relation records", payload.Relations)
+	}
+	var firstRelation *struct {
+		SyncID                     string  `json:"sync_id"`
+		Reason                     *string `json:"reason"`
+		Evidence                   *string `json:"evidence"`
+		Confidence                 *float64 `json:"confidence"`
+		JudgmentStatus             string  `json:"judgment_status"`
+		MarkedByActor              *string `json:"marked_by_actor"`
+		MarkedByKind               *string `json:"marked_by_kind"`
+		MarkedByModel              *string `json:"marked_by_model"`
+		SessionID                  *string `json:"session_id"`
+		SupersededAt               *string `json:"superseded_at"`
+		SupersededByRelationSyncID *string `json:"superseded_by_relation_sync_id"`
+	}
+	for i := range payload.Relations {
+		if payload.Relations[i].SyncID == "rel-backup-first" {
+			firstRelation = &payload.Relations[i]
+			break
+		}
+	}
+	if firstRelation == nil || firstRelation.Reason == nil || *firstRelation.Reason != "superseded reason" || firstRelation.Evidence == nil || *firstRelation.Evidence != `{"evidence":"backup"}` || firstRelation.Confidence == nil || *firstRelation.Confidence != confidence || firstRelation.JudgmentStatus != JudgmentStatusJudged || firstRelation.MarkedByActor == nil || *firstRelation.MarkedByActor != "agent:test" || firstRelation.MarkedByKind == nil || *firstRelation.MarkedByKind != "agent" || firstRelation.MarkedByModel == nil || *firstRelation.MarkedByModel != "test-model" || firstRelation.SessionID == nil || *firstRelation.SessionID != "backup-session" || firstRelation.SupersededAt == nil || *firstRelation.SupersededAt != "2026-01-03T00:00:00Z" || firstRelation.SupersededByRelationSyncID == nil || *firstRelation.SupersededByRelationSyncID != "rel-backup-replacement" {
+		t.Fatalf("first backup relation = %+v, want complete judgment and supersession metadata", firstRelation)
+	}
+
+	var imported ExportData
+	if err := json.Unmarshal(bytes, &imported); err != nil {
+		t.Fatalf("decode export data: %v", err)
+	}
+	destination := newTestStore(t)
+	if _, err := destination.Import(&imported); err != nil {
+		t.Fatalf("import backup: %v", err)
+	}
+	for syncID, wantPinned := range map[string]bool{
+		sourceObservation.SyncID: true,
+		targetObservation.SyncID: false,
+	} {
+		var restoredPinned bool
+		if err := destination.DB().QueryRow(`SELECT pinned FROM observations WHERE sync_id = ?`, syncID).Scan(&restoredPinned); err != nil || restoredPinned != wantPinned {
+			t.Fatalf("restored pinned state for %q = %t, err=%v, want %t", syncID, restoredPinned, err, wantPinned)
+		}
+	}
+	var restoredReason, restoredEvidence, restoredStatus, restoredActor, restoredKind, restoredModel, restoredSession, restoredSupersededAt, restoredSupersededBy string
+	var restoredConfidence float64
+	if err := destination.DB().QueryRow(`SELECT r.reason, r.evidence, r.confidence, r.judgment_status, r.marked_by_actor, r.marked_by_kind, r.marked_by_model, r.session_id, r.superseded_at, superseding.sync_id
+		FROM memory_relations r
+		LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id
+		WHERE r.sync_id = ?`, "rel-backup-first").Scan(&restoredReason, &restoredEvidence, &restoredConfidence, &restoredStatus, &restoredActor, &restoredKind, &restoredModel, &restoredSession, &restoredSupersededAt, &restoredSupersededBy); err != nil {
+		t.Fatalf("read restored relation: %v", err)
+	}
+	if restoredReason != "superseded reason" || restoredEvidence != `{"evidence":"backup"}` || restoredConfidence != confidence || restoredStatus != JudgmentStatusJudged || restoredActor != "agent:test" || restoredKind != "agent" || restoredModel != "test-model" || restoredSession != "backup-session" || restoredSupersededAt != "2026-01-03T00:00:00Z" || restoredSupersededBy != "rel-backup-replacement" {
+		t.Fatalf("restored relation metadata = reason=%q evidence=%q confidence=%v status=%q actor=%q kind=%q model=%q session=%q superseded_at=%q superseded_by=%q", restoredReason, restoredEvidence, restoredConfidence, restoredStatus, restoredActor, restoredKind, restoredModel, restoredSession, restoredSupersededAt, restoredSupersededBy)
+	}
+
+	t.Run("missing relation endpoint rolls back", func(t *testing.T) {
+		invalid := []byte(`{
+			"version":"0.2.0",
+			"sessions":[{"id":"invalid-backup-session","project":"backup-project","directory":"/tmp/backup","started_at":"2026-01-01T00:00:00Z"}],
+			"observations":[{"sync_id":"obs-valid-endpoint","session_id":"invalid-backup-session","type":"note","title":"valid","content":"valid","project":"backup-project","scope":"project","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+			"relations":[{"sync_id":"rel-invalid-endpoint","source_id":"obs-valid-endpoint","target_id":"obs-missing-endpoint","relation":"related","judgment_status":"judged","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]
+		}`)
+		var data ExportData
+		if err := json.Unmarshal(invalid, &data); err != nil {
+			t.Fatalf("decode invalid backup: %v", err)
+		}
+		destination := newTestStore(t)
+		if _, err := destination.Import(&data); err == nil || !strings.Contains(err.Error(), "relation endpoint") {
+			t.Fatalf("import invalid relation error = %v, want missing endpoint error", err)
+		}
+		for _, table := range []string{"sessions", "observations", "memory_relations"} {
+			var count int
+			if err := destination.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			if count != 0 {
+				t.Fatalf("invalid relation import persisted %d %s rows", count, table)
+			}
+		}
+	})
+}
+
+func TestImportRejectsUnsupportedExportVersion(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("existing-session", "backup-project", "/tmp/existing"); err != nil {
+		t.Fatalf("seed existing session: %v", err)
+	}
+	data := &ExportData{Version: "9.0.0", Sessions: []Session{{ID: "future-session", Project: "backup-project", Directory: "/tmp/future", StartedAt: "2026-01-01T00:00:00Z"}}}
+	if _, err := s.Import(data); err == nil || !strings.Contains(err.Error(), "unsupported export version") {
+		t.Fatalf("future version import error = %v, want unsupported version error", err)
+	}
+	var sessions int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("future version import changed session count to %d, want 1", sessions)
+	}
+}
+
+func TestImportLegacyExportWithoutRelationsAndPinned(t *testing.T) {
+	raw := []byte(`{
+		"version":"0.1.0",
+		"sessions":[{"id":"legacy-backup-session","project":"backup-project","directory":"/tmp/legacy","started_at":"2026-01-01T00:00:00Z"}],
+		"observations":[{"sync_id":"obs-legacy-backup","session_id":"legacy-backup-session","type":"note","title":"legacy","content":"legacy content","project":"backup-project","scope":"project","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]
+	}`)
+	var data ExportData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("decode legacy export: %v", err)
+	}
+	s := newTestStore(t)
+	if _, err := s.Import(&data); err != nil {
+		t.Fatalf("import legacy export: %v", err)
+	}
+	var pinned bool
+	if err := s.DB().QueryRow(`SELECT pinned FROM observations WHERE sync_id = ?`, "obs-legacy-backup").Scan(&pinned); err != nil || pinned {
+		t.Fatalf("legacy pinned state = %t, err=%v, want false", pinned, err)
+	}
+	for _, table := range []string{"sessions", "observations", "memory_relations"} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		want := 0
+		if table != "memory_relations" {
+			want = 1
+		}
+		if count != want {
+			t.Fatalf("legacy import %s count = %d, want %d", table, count, want)
+		}
+	}
 }
 
 func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
@@ -6304,10 +6941,10 @@ func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T)
 
 	const lockFailuresBeforeRelease = 5
 	originalExec := writer.hooks.exec
+	originalBeginTx := writer.hooks.beginTx
 	lockFailures := 0
 	var releaseErr error
-	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-		result, err := originalExec(db, query, args...)
+	recordLockFailure := func(err error) {
 		if isRetryableSQLiteLockError(err) {
 			lockFailures++
 			if lockFailures == lockFailuresBeforeRelease {
@@ -6315,9 +6952,21 @@ func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T)
 				locked = false
 			}
 		}
+	}
+	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		recordLockFailure(err)
 		return result, err
 	}
-	t.Cleanup(func() { writer.hooks.exec = originalExec })
+	writer.hooks.beginTx = func(db *sql.DB) (*sql.Tx, error) {
+		tx, err := originalBeginTx(db)
+		recordLockFailure(err)
+		return tx, err
+	}
+	t.Cleanup(func() {
+		writer.hooks.exec = originalExec
+		writer.hooks.beginTx = originalBeginTx
+	})
 
 	id, err := writer.AddObservation(AddObservationParams{
 		SessionID: "retry-lock-session",
@@ -7349,22 +7998,31 @@ func TestEnqueueSessionMutationRejectsBlankKeyAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestInboundSessionDirectoryAdmissionRejectsBlankValues(t *testing.T) {
-	t.Run("pulled mutation", func(t *testing.T) {
-		s := newTestStore(t)
-		err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
-			Seq: 1, Entity: SyncEntitySession, EntityKey: "blank-directory", Op: SyncOpUpsert,
-			Payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`,
+func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		id      string
+		payload string
+	}{
+		{name: "pulled mutation with blank directory", id: "blank-directory", payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`},
+		{name: "pulled mutation with omitted directory", id: "omitted-directory", payload: `{"id":"omitted-directory","project":"engram"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+				Seq: 1, Entity: SyncEntitySession, EntityKey: tc.id, Op: SyncOpUpsert,
+				Payload: tc.payload,
+			})
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
+			}
+			if _, err := s.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid pulled session persisted: %v", err)
+			}
 		})
-		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-			t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
-		}
-		if _, err := s.GetSession("blank-directory"); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("blank pulled session persisted: %v", err)
-		}
-	})
+	}
 
-	t.Run("direct import", func(t *testing.T) {
+	t.Run("direct import with blank directory", func(t *testing.T) {
 		s := newTestStore(t)
 		_, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "engram", Directory: " "}}})
 		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
@@ -7432,6 +8090,159 @@ func TestApplyPulledSessionInvalidIdentityDoesNotBlockLaterMutations(t *testing.
 	}
 }
 
+func TestPulledObservationIdentityInvalidQuarantinesDirectPull(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "observation-quarantine-parent"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/observation-quarantine"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	invalid := SyncMutation{
+		Seq:       1,
+		Entity:    SyncEntityObservation,
+		EntityKey: "observation-mutation-id",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"observation-payload-id","session_id":"observation-quarantine-parent","type":"decision","title":"invalid identity","content":"must be retained as evidence","project":"payload-project","scope":"project"}`,
+		Project:   " Engram ",
+	}
+	valid := SyncMutation{
+		Seq:       2,
+		Entity:    SyncEntityObservation,
+		EntityKey: "observation-valid-id",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"observation-valid-id","session_id":"observation-quarantine-parent","type":"decision","title":"valid identity","content":"must apply after the invalid mutation","project":"engram","scope":"project"}`,
+	}
+	for _, mutation := range []SyncMutation{invalid, valid} {
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+			t.Fatalf("ApplyPulledMutation seq=%d: %v", mutation.Seq, err)
+		}
+	}
+
+	if _, err := s.GetObservationBySyncID(invalid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("invalid observation persisted: %v", err)
+	}
+	if _, err := s.GetObservationBySyncID(valid.EntityKey); err != nil {
+		t.Fatalf("valid observation missing after quarantine: %v", err)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM observations`); got != 1 {
+		t.Fatalf("observations=%d, want only the later valid observation", got)
+	}
+
+	var payload, targetKey, entityKey, op, reasonCode, project, scopeClass, applyStatus string
+	var remoteSeq int64
+	if err := s.db.QueryRow(`
+		SELECT payload, target_key, remote_seq, entity_key, op, reason_code, project, scope_class, apply_status
+		FROM sync_apply_deferred
+		WHERE entity = ?`, SyncEntityObservation,
+	).Scan(&payload, &targetKey, &remoteSeq, &entityKey, &op, &reasonCode, &project, &scopeClass, &applyStatus); err != nil {
+		t.Fatalf("read observation evidence: %v", err)
+	}
+	if payload != invalid.Payload || targetKey != DefaultSyncTargetKey || remoteSeq != invalid.Seq || entityKey != invalid.EntityKey || op != invalid.Op {
+		t.Fatalf("observation evidence coordinates = payload=%q target=%q seq=%d entity_key=%q op=%q", payload, targetKey, remoteSeq, entityKey, op)
+	}
+	if reasonCode != SyncObservationIdentityInvalidReasonCode || project != "engram" || scopeClass != "scoped" || applyStatus != "dead" {
+		t.Fatalf("observation evidence metadata = reason=%q project=%q scope=%q status=%q", reasonCode, project, scopeClass, applyStatus)
+	}
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil || state.LastPulledSeq != valid.Seq {
+		t.Fatalf("sync state=%+v, err=%v; cursor must advance with evidence", state, err)
+	}
+}
+
+func TestApplyPulledChunkObservationIdentityInvalidQuarantinesAndContinues(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "observation-chunk-parent"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/observation-chunk"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	invalidA := SyncMutation{Entity: SyncEntityObservation, EntityKey: "shared-mutation-id", Op: SyncOpUpsert, Payload: `{"sync_id":"payload-id-a","session_id":"observation-chunk-parent","type":"decision","title":"invalid A","content":"first discarded payload","project":"engram","scope":"project"}`}
+	invalidB := SyncMutation{Entity: SyncEntityObservation, EntityKey: "shared-mutation-id", Op: SyncOpUpsert, Payload: `{"sync_id":"payload-id-b","session_id":"observation-chunk-parent","type":"decision","title":"invalid B","content":"second discarded payload","project":"engram","scope":"project"}`}
+	firstValid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "chunk-valid-one", Op: SyncOpUpsert, Payload: `{"sync_id":"chunk-valid-one","session_id":"observation-chunk-parent","type":"decision","title":"valid one","content":"applies after malformed observations","project":"engram","scope":"project"}`}
+	secondValid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "chunk-valid-two", Op: SyncOpUpsert, Payload: `{"sync_id":"chunk-valid-two","session_id":"observation-chunk-parent","type":"decision","title":"valid two","content":"applies after redelivery","project":"engram","scope":"project"}`}
+
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "observation-identity-one", []SyncMutation{invalidA, invalidB, firstValid}); err != nil {
+		t.Fatalf("ApplyPulledChunk first delivery: %v", err)
+	}
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "observation-identity-two", []SyncMutation{invalidA, secondValid}); err != nil {
+		t.Fatalf("ApplyPulledChunk redelivery: %v", err)
+	}
+
+	for _, syncID := range []string{firstValid.EntityKey, secondValid.EntityKey} {
+		if _, err := s.GetObservationBySyncID(syncID); err != nil {
+			t.Fatalf("valid observation %q missing after chunk quarantine: %v", syncID, err)
+		}
+	}
+	var evidenceCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_apply_deferred WHERE entity = ? AND reason_code = ?`, SyncEntityObservation, SyncObservationIdentityInvalidReasonCode).Scan(&evidenceCount); err != nil {
+		t.Fatalf("count observation evidence: %v", err)
+	}
+	if evidenceCount != 2 {
+		t.Fatalf("observation evidence rows=%d, want 2; distinct mutations must not collapse and redelivery must stay idempotent", evidenceCount)
+	}
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil || state.LastPulledSeq != 5 {
+		t.Fatalf("sync state=%+v, err=%v; chunks must advance after every mutation", state, err)
+	}
+}
+
+func TestApplyPulledChunkObservationFailuresRemainClosed(t *testing.T) {
+	valid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "closed-valid", Op: SyncOpUpsert, Payload: `{"sync_id":"closed-valid","session_id":"closed-parent","type":"decision","title":"valid","content":"must roll back","project":"engram","scope":"project"}`}
+	injectedForeignKeyErr := errors.New("injected foreign-key failure")
+	tests := []struct {
+		name    string
+		bad     SyncMutation
+		wantErr error
+		setup   func(t *testing.T, s *Store)
+	}{
+		{name: "decode error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "decode-invalid", Op: SyncOpUpsert, Payload: "not JSON"}},
+		{
+			name:    "injected foreign key error",
+			bad:     SyncMutation{Entity: SyncEntityObservation, EntityKey: "injected-fk", Op: SyncOpUpsert, Payload: `{"sync_id":"injected-fk","session_id":"injected-fk-parent","type":"decision","title":"injected FK","content":"must not quarantine","project":"engram","scope":"project"}`},
+			wantErr: injectedForeignKeyErr,
+			setup: func(t *testing.T, s *Store) {
+				t.Helper()
+				if err := s.CreateSession("injected-fk-parent", "engram", "/tmp/injected-fk-parent"); err != nil {
+					t.Fatalf("create observation parent: %v", err)
+				}
+				originalExec := s.hooks.exec
+				s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+					if strings.Contains(query, "INSERT INTO observations") {
+						return nil, injectedForeignKeyErr
+					}
+					return originalExec(db, query, args...)
+				}
+				t.Cleanup(func() { s.hooks.exec = originalExec })
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if tc.setup != nil {
+				tc.setup(t, s)
+			}
+			err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid})
+			if err == nil {
+				t.Fatal("ApplyPulledChunk succeeded for a fail-closed observation error")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ApplyPulledChunk error = %v, want injected error", err)
+			}
+			if _, err := s.GetObservationBySyncID(valid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("valid observation applied despite rollback: %v", err)
+			}
+			if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_apply_deferred WHERE entity = ?`, SyncEntityObservation); got != 0 {
+				t.Fatalf("observation evidence rows=%d, want none for fail-closed errors", got)
+			}
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil || state.LastPulledSeq != 0 {
+				t.Fatalf("sync state=%+v, err=%v; fail-closed errors must not advance the cursor", state, err)
+			}
+		})
+	}
+}
+
 // TestPulledSessionDeadLetterKeepsDistinctMutationsWithEqualSequence pins the
 // dead-letter row identity to the mutation itself rather than to its position in
 // the pull.
@@ -7453,7 +8264,7 @@ func TestPulledSessionDeadLetterKeepsDistinctMutationsWithEqualSequence(t *testi
 			}
 			if err := s.withTx(func(tx *sql.Tx) error {
 				for _, mutation := range mutations {
-					if err := s.deadLetterPulledSessionIdentityTx(tx, DefaultSyncTargetKey, mutation); err != nil {
+					if err := s.deadLetterPulledIdentityTx(tx, DefaultSyncTargetKey, mutation, SyncSessionIdentityInvalidReasonCode); err != nil {
 						return err
 					}
 				}
@@ -8149,7 +8960,13 @@ func TestUnenrolledHardDeletesReplayAfterReenrollment(t *testing.T) {
 		if err := s.AckSyncMutations(DefaultSyncTargetKey, firstDeleteSeq); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: syncID, Op: SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"unenrolled-hard-observation-session","type":"decision","title":"recreated","content":"body","project":%q,"scope":"project"}`, syncID, project)}); err != nil {
+		echoedDelete := mutations[1]
+		echoedDelete.Seq = 1
+		echoedDelete.Source = SyncSourceRemote
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, echoedDelete); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 2, Entity: SyncEntityObservation, EntityKey: syncID, Op: SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"unenrolled-hard-observation-session","type":"decision","title":"recreated","content":"body","project":%q,"scope":"project"}`, syncID, project)}); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.UnenrollProject(project); err != nil {
@@ -10962,6 +11779,65 @@ func TestDeleteSession_EnrolledProjectEnqueuesSyncDeleteMutation(t *testing.T) {
 	}
 }
 
+func TestSupersedeUnenrolledLegacyMutationsPreservesTargetKey(t *testing.T) {
+	s := newTestStore(t)
+	const project, key, target = "target_project", "target-prompt", "archive"
+	for _, targetKey := range []string{DefaultSyncTargetKey, target, syncTargetKeyForProject(project)} {
+		if _, err := s.GetSyncState(targetKey); err != nil {
+			t.Fatalf("initialize %q state: %v", targetKey, err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project) VALUES (?, ?, ?)`, key, "target-session", project); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	for _, targetKey := range []string{DefaultSyncTargetKey, target} {
+		if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, targetKey, SyncEntityPrompt, key, SyncOpUpsert, `{"sync_id":"target-prompt","session_id":"target-session","content":"obsolete","project":"target_project"}`, SyncSourceLocal, project); err != nil {
+			t.Fatalf("seed %q mutation: %v", targetKey, err)
+		}
+	}
+	report, err := s.SupersedeUnenrolledLegacyMutations(target, project, true)
+	if err != nil || len(report.Actions) != 1 {
+		t.Fatalf("supersede report=%+v err=%v", report, err)
+	}
+	for targetKey, want := range map[string]string{target: SyncMutationDispositionSuperseded, DefaultSyncTargetKey: SyncMutationDispositionPending} {
+		var disposition string
+		if err := s.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE target_key = ? AND entity_key = ?`, targetKey, key).Scan(&disposition); err != nil || disposition != want {
+			t.Fatalf("target %q disposition=%q err=%v, want %q", targetKey, disposition, err, want)
+		}
+	}
+}
+
+func TestSupersedeUnenrolledLegacyMutationsContract(t *testing.T) {
+	s := newTestStore(t)
+	const project, key = "contract_project", "contract-prompt"
+	for _, targetKey := range []string{DefaultSyncTargetKey, syncTargetKeyForProject(project)} {
+		if _, err := s.GetSyncState(targetKey); err != nil {
+			t.Fatalf("initialize %q state: %v", targetKey, err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project) VALUES (?, ?, ?)`, key, "contract-session", project); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntityPrompt, key, SyncOpUpsert, `{"sync_id":"contract-prompt","session_id":"contract-session","content":"obsolete","project":"contract_project"}`, SyncSourceLocal, project); err != nil {
+		t.Fatalf("seed mutation: %v", err)
+	}
+	dryRun, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, project, false)
+	if err != nil || len(dryRun.Actions) != 1 {
+		t.Fatalf("dry-run=%+v err=%v", dryRun, err)
+	}
+	if _, err := s.DB().Exec(`DELETE FROM prompt_tombstones WHERE sync_id = ?`, key); err != nil {
+		t.Fatalf("remove delete evidence: %v", err)
+	}
+	report, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, project, true)
+	if err != nil || len(report.Actions) != 0 {
+		t.Fatalf("missing-evidence report=%+v err=%v", report, err)
+	}
+	var disposition string
+	if err := s.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = ?`, key).Scan(&disposition); err != nil || disposition != SyncMutationDispositionPending {
+		t.Fatalf("disposition=%q err=%v", disposition, err)
+	}
+}
+
 func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("repairable", "project", "/tmp/repairable"); err != nil {
@@ -11467,7 +12343,27 @@ func TestRepairObservationMutationTitles(t *testing.T) {
 		}
 	})
 
-	t.Run("reports only actions from the successful retry attempt", func(t *testing.T) {
+	t.Run("planning does not commit", func(t *testing.T) {
+		s, _, _, _ := seed(t, "Recovered title. More detail.", func(map[string]json.RawMessage) {})
+
+		originalCommit := s.hooks.commit
+		commitAttempts := 0
+		s.hooks.commit = func(tx *sql.Tx) error {
+			commitAttempts++
+			return originalCommit(tx)
+		}
+		t.Cleanup(func() { s.hooks.commit = originalCommit })
+
+		report, err := s.RepairObservationMutationTitles("project-a", false)
+		if err != nil {
+			t.Fatalf("plan repair: %v", err)
+		}
+		if commitAttempts != 0 || len(report.Actions) != 1 {
+			t.Fatalf("commit attempts=%d report=%+v", commitAttempts, report)
+		}
+	})
+
+	t.Run("reports only actions from the successful apply retry", func(t *testing.T) {
 		s, _, _, _ := seed(t, "Recovered title. More detail.", func(map[string]json.RawMessage) {})
 		oldBackoffs := sqliteWriteRetryBackoffs
 		sqliteWriteRetryBackoffs = []time.Duration{0}
@@ -11484,9 +12380,9 @@ func TestRepairObservationMutationTitles(t *testing.T) {
 		}
 		t.Cleanup(func() { s.hooks.commit = originalCommit })
 
-		report, err := s.RepairObservationMutationTitles("project-a", false)
+		report, err := s.RepairObservationMutationTitles("project-a", true)
 		if err != nil {
-			t.Fatalf("repair after retry: %v", err)
+			t.Fatalf("apply after retry: %v", err)
 		}
 		if commitAttempts != 2 || len(report.Actions) != 1 {
 			t.Fatalf("commit attempts=%d report=%+v", commitAttempts, report)
@@ -12516,6 +13412,146 @@ func TestRepairBackfillsMissingMutations(t *testing.T) {
 	}
 	if promptMutCount == 0 {
 		t.Fatalf("expected prompt mutation to be backfilled, got 0")
+	}
+
+	t.Run("superseded legacy mutation does not satisfy current source state", func(t *testing.T) {
+		const project = "stale_row"
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO sync_state (target_key, lifecycle) VALUES (?, ?)`, DefaultSyncTargetKey, SyncLifecycleIdle); err != nil {
+			t.Fatalf("seed sync state: %v", err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "stale-session", project, "/tmp/stale"); err != nil {
+			t.Fatalf("seed stale source: %v", err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'superseded')`, DefaultSyncTargetKey, SyncEntitySession, "stale-session", SyncOpUpsert, `{"id":"stale-session","project":"stale_row","directory":"/tmp/stale"}`, SyncSourceLocal, project); err != nil {
+			t.Fatalf("seed superseded legacy mutation: %v", err)
+		}
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatalf("re-enroll stale source: %v", err)
+		}
+		var pending int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE project = ? AND entity = ? AND entity_key = ? AND op = ? AND disposition = 'pending'`, project, SyncEntitySession, "stale-session", SyncOpUpsert).Scan(&pending); err != nil {
+			t.Fatalf("count reconstructed mutation: %v", err)
+		}
+		if pending != 1 {
+			t.Fatalf("pending reconstructed mutations = %d, want 1", pending)
+		}
+		var superseded int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE project = ? AND entity = ? AND entity_key = ? AND op = ? AND disposition = 'superseded'`, project, SyncEntitySession, "stale-session", SyncOpUpsert).Scan(&superseded); err != nil {
+			t.Fatalf("count retained terminal evidence: %v", err)
+		}
+		if superseded != 1 {
+			t.Fatalf("retained superseded mutations = %d, want 1", superseded)
+		}
+	})
+
+	t.Run("superseded prompt mutation does not suppress startup backfill", func(t *testing.T) {
+		const project = "stale_prompt"
+		const sessionID = "stale-prompt-session"
+		const promptSyncID = "stale-prompt"
+		if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, sessionID, project, "/tmp/stale-prompt"); err != nil {
+			t.Fatalf("seed prompt session: %v", err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, promptSyncID, sessionID, "current local prompt", project); err != nil {
+			t.Fatalf("seed prompt source: %v", err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`, DefaultSyncTargetKey, SyncEntitySession, sessionID, SyncOpUpsert, `{"id":"stale-prompt-session","project":"stale_prompt","directory":"/tmp/stale-prompt"}`, SyncSourceLocal, project); err != nil {
+			t.Fatalf("seed current session mutation: %v", err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'superseded')`, DefaultSyncTargetKey, SyncEntityPrompt, promptSyncID, SyncOpUpsert, `{"sync_id":"stale-prompt","session_id":"stale-prompt-session","content":"obsolete","project":"stale_prompt"}`, SyncSourceLocal, project); err != nil {
+			t.Fatalf("seed superseded prompt mutation: %v", err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES (?)`, project); err != nil {
+			t.Fatalf("seed prompt enrollment: %v", err)
+		}
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			t.Fatalf("startup repair prompt: %v", err)
+		}
+		var pending int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE project = ? AND entity = ? AND entity_key = ? AND op = ? AND disposition = 'pending'`, project, SyncEntityPrompt, promptSyncID, SyncOpUpsert).Scan(&pending); err != nil {
+			t.Fatalf("count startup-backfilled prompt mutation: %v", err)
+		}
+		if pending != 1 {
+			t.Fatalf("pending startup-backfilled prompt mutations = %d, want 1", pending)
+		}
+	})
+}
+
+func TestRepairBackfillKeepsAcknowledgedCoverage(t *testing.T) {
+	s := newTestStore(t)
+	const project, sessionID = "acknowledged_project", "acknowledged-session"
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(sessionID, project, "/tmp/acknowledged"); err != nil {
+		t.Fatal(err)
+	}
+	observationID, err := s.AddObservation(AddObservationParams{SessionID: sessionID, Type: "decision", Title: "acknowledged", Content: "local source", Project: project, Scope: "project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := s.GetObservation(observationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seq, before int64
+	if err := s.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID).Scan(&seq); err != nil {
+		t.Fatalf("read observation mutation: %v", err)
+	}
+	if err := s.AckSyncMutationSeqs(DefaultSyncTargetKey, []int64{seq}); err != nil {
+		t.Fatalf("ack observation mutation: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&before); err != nil {
+		t.Fatalf("count acknowledged journal: %v", err)
+	}
+	for range 2 {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			t.Fatalf("repair acknowledged coverage: %v", err)
+		}
+	}
+	var after, pending int64
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&after); err != nil {
+		t.Fatalf("count repaired journal: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT SUM(CASE WHEN acked_at IS NULL AND disposition = 'pending' THEN 1 ELSE 0 END) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID).Scan(&pending); err != nil {
+		t.Fatalf("read repaired mutation: %v", err)
+	}
+	if after != before || pending != 0 {
+		t.Fatalf("journal before=%d after=%d pending=%d, want no new mutation", before, after, pending)
+	}
+}
+
+func TestRepairBackfillDoesNotRecreateQuarantinedMutation(t *testing.T) {
+	s := newTestStoreRaw(t)
+	const project, sessionID, syncID = "quarantine_project", "quarantine-session", "quarantine-observation"
+	for _, targetKey := range []string{DefaultSyncTargetKey, syncTargetKeyForProject(project)} {
+		if _, err := s.GetSyncState(targetKey); err != nil {
+			t.Fatalf("initialize %q state: %v", targetKey, err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_enrolled_projects (project) VALUES (?)`, project); err != nil {
+		t.Fatalf("seed enrollment: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, sessionID, project, "/tmp/quarantine"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, syncID, sessionID, "decision", "", "corrupt source", project, "project", hashNormalized("corrupt source")); err != nil {
+		t.Fatalf("seed corrupt source: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`, DefaultSyncTargetKey, SyncEntitySession, sessionID, SyncOpUpsert, `{"id":"quarantine-session","project":"quarantine_project","directory":"/tmp/quarantine"}`, SyncSourceLocal, project); err != nil {
+		t.Fatalf("seed session coverage: %v", err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, 'quarantined')`, DefaultSyncTargetKey, SyncEntityObservation, syncID, SyncOpUpsert, `{"sync_id":"quarantine-observation","session_id":"quarantine-session","type":"decision","title":"","content":"corrupt source","project":"quarantine_project","scope":"project"}`, SyncSourceLocal, project); err != nil {
+		t.Fatalf("seed quarantined coverage: %v", err)
+	}
+	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	var pending int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND disposition = 'pending'`, SyncEntityObservation, syncID).Scan(&pending); err != nil {
+		t.Fatalf("count recreated mutations: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("recreated pending mutations = %d, want 0", pending)
 	}
 }
 
@@ -13901,6 +14937,69 @@ func TestActiveRuntimeSessionsStaleRowDoesNotBlockLiveSession(t *testing.T) {
 	}
 }
 
+func TestActiveRuntimeSessionsPrefersLiveLeasesPerDirectory(t *testing.T) {
+	s := newTestStore(t)
+	for _, session := range []struct {
+		id, directory string
+		leased        bool
+	}{
+		{id: "legacy-suppressed", directory: "/work/leased"},
+		{id: "live-lease", directory: "/work/leased", leased: true},
+		{id: "legacy-fallback", directory: "/work/legacy"},
+	} {
+		var err error
+		if session.leased {
+			err = s.StartSession(session.id, "engram", session.directory)
+		} else {
+			err = s.CreateSession(session.id, "engram", session.directory)
+		}
+		if err != nil {
+			t.Fatalf("create %s: %v", session.id, err)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = datetime('now', '-1 day') WHERE id = 'legacy-suppressed'`); err != nil {
+		t.Fatalf("backdate suppressed legacy session: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/leased", "/work/legacy")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"legacy-fallback", "live-lease"}) {
+		t.Fatalf("active IDs = %#v, want live lease plus other-directory legacy fallback", ids)
+	}
+	var endedAt *string
+	if err := s.DB().QueryRow(`SELECT ended_at FROM sessions WHERE id = 'legacy-suppressed'`).Scan(&endedAt); err != nil {
+		t.Fatalf("read suppressed legacy session: %v", err)
+	}
+	if endedAt != nil {
+		t.Fatalf("selection must not end suppressed legacy session, ended_at = %q", *endedAt)
+	}
+}
+
+func TestActiveRuntimeSessionsExcludesExpiredOrInvalidLeasesAndKeepsLiveLeaseAmbiguity(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"live-lease-a", "live-lease-b", "expired-lease", "invalid-lease"} {
+		if err := s.StartSession(id, "engram", "/work/engram"); err != nil {
+			t.Fatalf("start %s: %v", id, err)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "2000-01-01 00:00:00", "expired-lease"); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET runtime_lease_expires_at = ? WHERE id = ?`, "not-a-timestamp", "invalid-lease"); err != nil {
+		t.Fatalf("invalidate lease: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"live-lease-a", "live-lease-b"}) {
+		t.Fatalf("active IDs = %#v, want only genuinely live leased owners", ids)
+	}
+}
+
 func TestActiveRuntimeSessionsIgnoresManualSaveSessions(t *testing.T) {
 	s := newTestStore(t)
 
@@ -14221,6 +15320,58 @@ func TestSearchCompositeLexicalReranking(t *testing.T) {
 			t.Fatalf("preview ordering = %+v, want search ordering %+v", previews, first)
 		}
 	})
+}
+
+func TestSearchPreviewsContextIncludesTopicKey(t *testing.T) {
+	s := newTestStore(t)
+	const (
+		sessionID = "preview-topic-key-session"
+		project   = "engram"
+		topicKey  = "bugfix/preview-topic-key"
+	)
+	if err := s.CreateSession(sessionID, project, "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview tk topic key",
+		Content:   "Search previews must retain topic keys.",
+		Project:   project,
+		Scope:     "project",
+		TopicKey:  topicKey,
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	for _, query := range []string{"preview topic", "tk", topicKey} {
+		t.Run(query, func(t *testing.T) {
+			results, err := s.SearchPreviewsContext(context.Background(), query, SearchOptions{Project: project, Limit: 10})
+			if err != nil {
+				t.Fatalf("search previews: %v", err)
+			}
+			if len(results) != 1 || results[0].TopicKey == nil || *results[0].TopicKey != topicKey {
+				t.Fatalf("topic key = %#v, want %q; results=%+v", results, topicKey, results)
+			}
+		})
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "bugfix",
+		Title:     "Preview without topic key",
+		Content:   "Search previews retain nil topic keys.",
+		Project:   project,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation without topic key: %v", err)
+	}
+	results, err := s.SearchPreviewsContext(context.Background(), "without topic", SearchOptions{Project: project, Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews without topic key: %v", err)
+	}
+	if len(results) != 1 || results[0].TopicKey != nil {
+		t.Fatalf("topic key = %#v, want nil; results=%+v", results, results)
+	}
 }
 
 func TestSearch_WeightedBM25Ranking(t *testing.T) {
@@ -15103,6 +16254,106 @@ func TestFormatContextWithOptionsMaxBytes(t *testing.T) {
 	})
 }
 
+func TestUnenrolledProjectMutationsDoNotEnqueueForSessionObservationAndPrompt(t *testing.T) {
+	s := newTestStore(t)
+	const project = "unenrolled-guard"
+	if err := s.CreateSession("unenrolled-guard-session", project, "/tmp/unenrolled-guard"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "unenrolled-guard-session", Type: "decision", Title: "local only", Content: "no cloud backlog", Project: project, Scope: "project"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "unenrolled-guard-session", Content: "local only", Project: project}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE project = ?`, project); got != 0 {
+		t.Fatalf("unenrolled project queued %d mutations, want 0", got)
+	}
+}
+
+func TestUnenrolledDeleteSupersedesPendingLegacyMutations(t *testing.T) {
+	t.Run("session", func(t *testing.T) {
+		s := newTestStore(t)
+		const project = "unenrolled-session"
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateSession("unenrolled-session-id", project, "/tmp/unenrolled-session"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UnenrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteSession("unenrolled-session-id"); err != nil {
+			t.Fatal(err)
+		}
+		assertLegacyMutationSuperseded(t, s, project, SyncEntitySession, "unenrolled-session-id")
+	})
+
+	t.Run("prompt", func(t *testing.T) {
+		s := newTestStore(t)
+		const project = "unenrolled-prompt"
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateSession("unenrolled-prompt-session", project, "/tmp/unenrolled-prompt"); err != nil {
+			t.Fatal(err)
+		}
+		promptID, err := s.AddPrompt(AddPromptParams{SessionID: "unenrolled-prompt-session", Content: "retire pending upsert", Project: project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var syncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM user_prompts WHERE id = ?`, promptID).Scan(&syncID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UnenrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeletePrompt(promptID); err != nil {
+			t.Fatal(err)
+		}
+		assertLegacyMutationSuperseded(t, s, project, SyncEntityPrompt, syncID)
+	})
+
+	t.Run("observation", func(t *testing.T) {
+		s := newTestStore(t)
+		const project = "unenrolled-observation"
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateSession("unenrolled-observation-session", project, "/tmp/unenrolled-observation"); err != nil {
+			t.Fatal(err)
+		}
+		observationID, err := s.AddObservation(AddObservationParams{SessionID: "unenrolled-observation-session", Type: "decision", Title: "retire pending upsert", Content: "delete while unenrolled", Project: project, Scope: "project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var syncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, observationID).Scan(&syncID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UnenrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteObservation(observationID, false); err != nil {
+			t.Fatal(err)
+		}
+		assertLegacyMutationSuperseded(t, s, project, SyncEntityObservation, syncID)
+	})
+}
+
+func assertLegacyMutationSuperseded(t *testing.T, s *Store, project, entity, entityKey string) {
+	t.Helper()
+	var disposition, reason string
+	if err := s.db.QueryRow(`SELECT disposition, ifnull(disposition_reason, '') FROM sync_mutations WHERE project = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ?`, project, entity, entityKey, SyncOpUpsert, SyncSourceLocal).Scan(&disposition, &reason); err != nil {
+		t.Fatalf("read legacy mutation: %v", err)
+	}
+	if disposition != "superseded" || strings.TrimSpace(reason) == "" {
+		t.Fatalf("legacy mutation disposition=%q reason=%q, want auditable superseded disposition", disposition, reason)
+	}
+}
+
 func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
 	input := "prefix café" + strings.Repeat("界", 10)
 	maxBytes := len(contextTruncationMarker) + len("prefix caf") + 1
@@ -15124,5 +16375,166 @@ func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatalf("small budget output produced invalid UTF-8: %q", got)
+	}
+}
+
+func TestRuntimeSessionRegistrationPersistsLocalLease(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+
+	session, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get runtime session: %v", err)
+	}
+	if session.RuntimeLeaseExpiresAt == nil || *session.RuntimeLeaseExpiresAt == "" {
+		t.Fatalf("runtime session lease = %v, want future expiry", session.RuntimeLeaseExpiresAt)
+	}
+	var future int
+	if err := s.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-session").Scan(&future); err != nil {
+		t.Fatalf("check runtime lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatalf("runtime session lease must be in the future, got %q", *session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionRegistrationRenewsWithoutChangingSessionIdentity(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ?, runtime_lease_expires_at = ? WHERE id = ?`, "2001-02-03 04:05:06", "2001-02-03 04:05:06", "runtime-session"); err != nil {
+		t.Fatalf("seed expired lease: %v", err)
+	}
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/ignored", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("renew runtime session: %v", err)
+	}
+
+	session, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get renewed runtime session: %v", err)
+	}
+	if session.StartedAt != "2001-02-03 04:05:06" || session.Project != "runtime-project" || session.OwnershipMode != SessionOwnershipProjectOwned || session.EndedAt != nil {
+		t.Fatalf("renewed runtime session = %#v, want original identity and active terminal state", session)
+	}
+	var future int
+	if err := s.DB().QueryRow(`SELECT runtime_lease_expires_at > datetime('now') FROM sessions WHERE id = ?`, "runtime-session").Scan(&future); err != nil {
+		t.Fatalf("check renewed lease: %v", err)
+	}
+	if future != 1 {
+		t.Fatalf("renewal did not replace expired runtime lease: %#v", session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionRenewalSkipsLeaseOnlySyncMutationButJournalsIdentityRepair(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	countMutations := func() int {
+		t.Helper()
+		var count int
+		if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`, SyncEntitySession, "runtime-session", SyncOpUpsert).Scan(&count); err != nil {
+			t.Fatalf("count session mutations: %v", err)
+		}
+		return count
+	}
+	if got := countMutations(); got != 1 {
+		t.Fatalf("new runtime session mutations = %d, want 1", got)
+	}
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET acked_at = datetime('now') WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "runtime-session"); err != nil {
+		t.Fatalf("ack initial session mutation: %v", err)
+	}
+
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("renew runtime session: %v", err)
+	}
+	if got := countMutations(); got != 1 {
+		t.Fatalf("lease-only renewal mutations = %d, want 1", got)
+	}
+
+	if _, err := s.DB().Exec(`UPDATE sessions SET directory = '' WHERE id = ?`, "runtime-session"); err != nil {
+		t.Fatalf("seed blank runtime directory: %v", err)
+	}
+	if err := s.StartSessionWithOwnershipMode("runtime-session", "runtime-project", "/runtime", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("repair runtime session identity: %v", err)
+	}
+	if got := countMutations(); got != 2 {
+		t.Fatalf("identity repair mutations = %d, want 2", got)
+	}
+}
+
+func TestRuntimeSessionRegistrationRejectsEndedSessions(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+	if err := s.EndSession("runtime-session", "complete"); err != nil {
+		t.Fatalf("end runtime session: %v", err)
+	}
+	before, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get ended runtime session: %v", err)
+	}
+
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("renew ended runtime session error = %v, want ErrSessionAlreadyEnded", err)
+	}
+	after, err := s.GetSession("runtime-session")
+	if err != nil {
+		t.Fatalf("get ended runtime session after renewal: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("ended runtime session changed: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestCreateSessionDoesNotCreateRuntimeLease(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("manual-session", "manual-project", "/manual"); err != nil {
+		t.Fatalf("create manual session: %v", err)
+	}
+
+	session, err := s.GetSession("manual-session")
+	if err != nil {
+		t.Fatalf("get manual session: %v", err)
+	}
+	if session.RuntimeLeaseExpiresAt != nil {
+		t.Fatalf("manual session lease = %q, want nil", *session.RuntimeLeaseExpiresAt)
+	}
+}
+
+func TestRuntimeSessionLeaseStaysOutOfSyncAndExportPayloads(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "runtime-project")
+	if err := s.StartSession("runtime-session", "runtime-project", "/runtime"); err != nil {
+		t.Fatalf("register runtime session: %v", err)
+	}
+
+	var mutationPayload string
+	if err := s.DB().QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "runtime-session").Scan(&mutationPayload); err != nil {
+		t.Fatalf("read runtime session mutation: %v", err)
+	}
+	if strings.Contains(mutationPayload, "runtime_lease_expires_at") {
+		t.Fatalf("sync mutation leaked runtime lease: %s", mutationPayload)
+	}
+
+	exported, err := s.Export()
+	if err != nil {
+		t.Fatalf("export runtime session: %v", err)
+	}
+	exportPayload, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal runtime export: %v", err)
+	}
+	if strings.Contains(string(exportPayload), "runtime_lease_expires_at") {
+		t.Fatalf("export leaked runtime lease: %s", exportPayload)
 	}
 }

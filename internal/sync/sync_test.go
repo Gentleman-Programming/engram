@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -405,8 +406,10 @@ func TestImportWithProgressReportsOnlyCommittedChunks(t *testing.T) {
 	if result.ChunksImported != 2 {
 		t.Fatalf("imported chunks = %d, want 2", result.ChunksImported)
 	}
-	if transport.readChunkCalls != 3 {
-		t.Fatalf("chunk reads = %d, want failed dependency attempt plus two commits", transport.readChunkCalls)
+	// The failed dependency attempt retries from the cached parse, so each of
+	// the two pending chunks costs exactly one transport read.
+	if transport.readChunkCalls != 2 {
+		t.Fatalf("chunk reads = %d, want one read per pending chunk across the retry", transport.readChunkCalls)
 	}
 	want := []ImportProgress{
 		{LocalChunks: 0, RemoteChunks: 2, PendingChunks: 2, Percentage: 0},
@@ -2699,7 +2702,7 @@ func TestImportBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("import: %v", err)
 		}
-		if *res != (ImportResult{}) {
+		if res.ChunksImported != 0 || res.ChunksSkipped != 0 || res.SessionsImported != 0 || res.ObservationsImported != 0 || res.PromptsImported != 0 || res.RelationsReplayed != 0 || res.RelationsDeferred != 0 || res.RelationsDead != 0 || len(res.SkippedRelations) != 0 {
 			t.Fatalf("expected empty result, got %+v", res)
 		}
 	})
@@ -3722,10 +3725,10 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 			Payload:   `{"id":"remote-sess","project":"proj-a","directory":"/remote"}`,
 		},
 		{
-			Entity:    store.SyncEntityObservation,
-			EntityKey: "obs-bad",
+			Entity:    "unknown",
+			EntityKey: "invalid-entity",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-bad","session_id":"missing-session","type":"note","title":"bad","content":"fails fk","project":"proj-a","scope":"project"}`,
+			Payload:   `{}`,
 		},
 	}}
 	badPayload, err := json.Marshal(badChunk)
@@ -3933,74 +3936,246 @@ func TestCloudImportAppliesObservationsBeforeEarlierRelationInSameChunk(t *testi
 	}
 }
 
-func TestCloudImportDefersRelationWhenEndpointIsMissing(t *testing.T) {
-	dst := newTestStore(t)
-	if err := dst.EnrollProject("proj-a"); err != nil {
-		t.Fatalf("enroll destination project: %v", err)
+// withObservationDelete appends a hub delete for the given observation sync_id
+// to a chunk, producing the durable delete evidence the issue #1135
+// classification requires before an absent endpoint may be called permanent.
+func withObservationDelete(chunk ChunkData, syncID string) ChunkData {
+	chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
+		Entity:    store.SyncEntityObservation,
+		EntityKey: syncID,
+		Op:        store.SyncOpDelete,
+		Payload:   fmt.Sprintf(`{"sync_id":%q,"deleted":true,"hard_delete":true}`, syncID),
+	})
+	return chunk
+}
+
+// TestCloudImportRelationSkipRequiresDeleteEvidence pins the corrected issue
+// #1135 classification: a relation endpoint that is merely absent — no local
+// row in any deletion state, no pending upsert — is NOT permanent, so the edge
+// stays in the chunk and the store's existing deferral handles it. Only a
+// durable hub delete for the absent endpoint inside the current manifest
+// snapshot proves the edge permanently unsatisfiable; that edge is skipped
+// with a visible warning and durably queued for replay. An upsert for the same
+// ID anywhere in the snapshot keeps the edge recoverable when its payload and
+// entity_key satisfy the store identity contract.
+func TestCloudImportRelationSkipRequiresDeleteEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		relChunkID       string
+		relChunk         func() ChunkData
+		relID            string
+		extraChunkID     string
+		extraChunk       ChunkData
+		wantSkippedEdges []string
+		wantDeferred     int
+		wantDead         int
+		wantRelation     bool
+		assertStore      func(t *testing.T, s *store.Store)
+	}{
+		{
+			name:       "absence without delete evidence defers instead of skipping",
+			relChunkID: "chunk-skip-no-evidence",
+			relChunk: func() ChunkData {
+				return relationMissingEndpointChunk("sess-skip-none", "obs-skip-none-src", "obs-skip-none-gone", "rel-skip-none")
+			},
+			relID:            "rel-skip-none",
+			wantSkippedEdges: nil,
+			wantDeferred:     1,
+			wantRelation:     false,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				if _, err := s.GetSession("sess-skip-none"); err != nil {
+					t.Fatalf("expected session to import: %v", err)
+				}
+				if _, err := s.GetObservationBySyncID("obs-skip-none-src"); err != nil {
+					t.Fatalf("expected source observation to import: %v", err)
+				}
+			},
+		},
+		{
+			name:       "delete evidence enables warning skip and durable queue",
+			relChunkID: "chunk-skip-delete-evidence",
+			relChunk: func() ChunkData {
+				return withObservationDelete(relationMissingEndpointChunk("sess-skip-del", "obs-skip-del-src", "obs-skip-del-gone", "rel-skip-del"), "obs-skip-del-gone")
+			},
+			relID: "rel-skip-del",
+			wantSkippedEdges: []string{
+				"relation rel-skip-del obs-skip-del-src->obs-skip-del-gone: referenced observation missing permanently",
+			},
+			wantDeferred: 1,
+			wantRelation: false,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				if _, err := s.GetSession("sess-skip-del"); err != nil {
+					t.Fatalf("expected session from the filtered chunk to import: %v", err)
+				}
+				if _, err := s.GetObservationBySyncID("obs-skip-del-src"); err != nil {
+					t.Fatalf("expected source observation from the filtered chunk to import: %v", err)
+				}
+				rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+				if err != nil {
+					t.Fatalf("list deferred rows: %v", err)
+				}
+				if len(rows) != 1 || rows[0].SyncID != "rel-skip-del" || rows[0].TargetKey != cloudTargetKey("proj-a") || rows[0].Project != "proj-a" || rows[0].Op != store.SyncOpUpsert {
+					t.Fatalf("expected the skipped edge durably queued for replay, got %+v", rows)
+				}
+			},
+		},
+		{
+			name:       "delete plus upsert in the snapshot stays recoverable",
+			relChunkID: "chunk-skip-mixed",
+			relChunk: func() ChunkData {
+				return withObservationDelete(relationMissingEndpointChunk("sess-skip-mixed", "obs-skip-mixed-src", "obs-skip-mixed-x", "rel-skip-mixed"), "obs-skip-mixed-x")
+			},
+			relID:        "rel-skip-mixed",
+			extraChunkID: "chunk-skip-mixed-upsert",
+			extraChunk: ChunkData{Mutations: []store.SyncMutation{
+				{
+					Entity:    store.SyncEntitySession,
+					EntityKey: "sess-skip-mixed-endpoints",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"id":"sess-skip-mixed-endpoints","project":"proj-a","directory":"/tmp/proj-a"}`,
+				},
+				{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: "obs-skip-mixed-x",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"obs-skip-mixed-x","session_id":"sess-skip-mixed-endpoints","type":"decision","title":"x","content":"recreated endpoint","project":"proj-a","scope":"project"}`,
+				},
+			}},
+			wantSkippedEdges: nil,
+			wantDeferred:     0,
+			wantRelation:     true,
+		},
+		{
+			name:       "keyed upsert with omitted payload sync id prevents false skip",
+			relChunkID: "chunk-skip-keyed-fallback",
+			relChunk: func() ChunkData {
+				chunk := withObservationDelete(relationMissingEndpointChunk("sess-skip-keyed", "obs-skip-keyed-src", "obs-skip-keyed-x", "rel-skip-keyed"), "obs-skip-keyed-x")
+				chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: " obs-skip-keyed-x ",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"session_id":"sess-skip-keyed","type":"decision","title":"x","content":"identity from mutation key","project":"proj-a","scope":"project"}`,
+				})
+				return chunk
+			},
+			relID:            "rel-skip-keyed",
+			wantSkippedEdges: nil,
+			wantDeferred:     0,
+			wantRelation:     true,
+		},
+		{
+			name:       "mismatched upsert does not suppress delete evidence",
+			relChunkID: "chunk-skip-mismatched-evidence",
+			relChunk: func() ChunkData {
+				chunk := withObservationDelete(relationMissingEndpointChunk("sess-skip-mismatch", "obs-skip-mismatch-src", "obs-skip-mismatch-gone", "rel-skip-mismatch"), "obs-skip-mismatch-gone")
+				chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: "obs-skip-mismatch-invalid",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"obs-skip-mismatch-gone","session_id":"sess-skip-mismatch","type":"decision","title":"invalid","content":"must be quarantined","project":"proj-a","scope":"project"}`,
+				})
+				return chunk
+			},
+			relID: "rel-skip-mismatch",
+			wantSkippedEdges: []string{
+				"relation rel-skip-mismatch obs-skip-mismatch-src->obs-skip-mismatch-gone: referenced observation missing permanently",
+			},
+			wantDeferred: 1,
+			wantDead:     1,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "dead"})
+				if err != nil {
+					t.Fatalf("list quarantine evidence: %v", err)
+				}
+				for _, row := range rows {
+					if row.Entity == store.SyncEntityObservation && row.EntityKey == "obs-skip-mismatch-invalid" && row.ReasonCode == store.SyncObservationIdentityInvalidReasonCode {
+						return
+					}
+				}
+				t.Fatalf("expected invalid observation quarantine evidence, got %+v", rows)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnrollProject("proj-a"); err != nil {
+				t.Fatalf("enroll project: %v", err)
+			}
+			transport := newFakeCloudTransport()
+			entries := []ChunkEntry{{ID: tt.relChunkID, CreatedAt: "2026-08-26T00:00:00Z"}}
+			transport.chunks[tt.relChunkID] = mustJSONChunk(t, tt.relChunkID, tt.relChunk())
+			if tt.extraChunkID != "" {
+				entries = append(entries, ChunkEntry{ID: tt.extraChunkID, CreatedAt: "2026-08-26T00:01:00Z"})
+				transport.chunks[tt.extraChunkID] = mustJSONChunk(t, tt.extraChunkID, tt.extraChunk)
+			}
+			transport.manifest = &Manifest{Version: 1, Chunks: entries}
+
+			result, err := NewCloudWithTransport(s, transport, "proj-a").Import()
+			if err != nil {
+				t.Fatalf("import: %v", err)
+			}
+			if len(result.SkippedRelations) != len(tt.wantSkippedEdges) {
+				t.Fatalf("expected skipped relations %q, got %+v", tt.wantSkippedEdges, result.SkippedRelations)
+			}
+			for i, want := range tt.wantSkippedEdges {
+				if result.SkippedRelations[i] != want {
+					t.Fatalf("skipped relation %d: want %q, got %q", i, want, result.SkippedRelations[i])
+				}
+			}
+			deferred, dead, err := s.CountDeferredAndDead()
+			if err != nil {
+				t.Fatalf("count deferred and dead: %v", err)
+			}
+			if deferred != tt.wantDeferred || dead != tt.wantDead {
+				t.Fatalf("unexpected deferred state: deferred=%d dead=%d, want deferred=%d dead=%d", deferred, dead, tt.wantDeferred, tt.wantDead)
+			}
+			if tt.wantRelation {
+				if _, err := s.GetRelation(tt.relID); err != nil {
+					t.Fatalf("expected relation to apply: %v", err)
+				}
+			} else if _, err := s.GetRelation(tt.relID); err == nil {
+				t.Fatal("expected relation to stay unapplied")
+			}
+			if tt.assertStore != nil {
+				tt.assertStore(t, s)
+			}
+		})
 	}
 
-	transport := newFakeCloudTransport()
-	chunkID := "chunk-relation-missing-endpoint"
-	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-24T12:00:00Z"}}}
-	chunk := ChunkData{Mutations: []store.SyncMutation{
-		{
-			Entity:    store.SyncEntityRelation,
-			EntityKey: "rel-missing-endpoint",
-			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"rel-missing-endpoint","source_id":"obs-rollback-source","target_id":"obs-missing-target","relation":"compatible","judgment_status":"judged","marked_by_actor":"test-actor","marked_by_kind":"test","project":"proj-a","created_at":"2026-08-24T12:00:00Z","updated_at":"2026-08-24T12:00:00Z"}`,
-		},
-		{
-			Entity:    store.SyncEntityObservation,
-			EntityKey: "obs-rollback-source",
-			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-rollback-source","session_id":"sess-relation-rollback","type":"decision","title":"source","content":"source observation","project":"proj-a","scope":"project"}`,
-		},
-		{
-			Entity:    store.SyncEntitySession,
-			EntityKey: "sess-relation-rollback",
-			Op:        store.SyncOpUpsert,
-			Payload:   `{"id":"sess-relation-rollback","project":"proj-a","directory":"/tmp/proj-a"}`,
-		},
-	}}
-	chunkPayload, err := json.Marshal(chunk)
-	if err != nil {
-		t.Fatalf("marshal relation-first chunk with missing endpoint: %v", err)
-	}
-	transport.chunks[chunkID] = chunkPayload
-
-	if _, err := dst.GetObservationBySyncID("obs-missing-target"); err == nil {
-		t.Fatal("missing relation target must be absent from the destination before import")
-	}
-	result, err := NewCloudWithTransport(dst, transport, "proj-a").Import()
-	if err != nil {
-		t.Fatalf("import should defer the missing relation endpoint, got %v", err)
-	}
-	if result.ChunksImported != 1 || result.SessionsImported != 1 || result.ObservationsImported != 1 {
-		t.Fatalf("unexpected import result: %+v", result)
-	}
-	if _, err := dst.GetObservationBySyncID("obs-rollback-source"); err != nil {
-		t.Fatalf("expected source observation to import: %v", err)
-	}
-	if _, err := dst.GetSession("sess-relation-rollback"); err != nil {
-		t.Fatalf("expected session to import: %v", err)
-	}
-	if _, err := dst.GetRelation("rel-missing-endpoint"); err == nil {
-		t.Fatal("expected unresolved relation to remain unapplied")
-	}
-	deferred, dead, err := dst.CountDeferredAndDead()
-	if err != nil {
-		t.Fatalf("count deferred relation: %v", err)
-	}
-	if deferred != 1 || dead != 0 {
-		t.Fatalf("expected one deferred relation and no dead relations, got deferred=%d dead=%d", deferred, dead)
-	}
-	synced, err := dst.GetSyncedChunksForTarget(cloudTargetKey("proj-a"))
-	if err != nil {
-		t.Fatalf("get synced chunks: %v", err)
-	}
-	if !synced[chunkID] {
-		t.Fatalf("expected chunk %q with a deferred relation to be marked synced", chunkID)
-	}
+	t.Run("warning relation ID uses payload with entity key fallback", func(t *testing.T) {
+		for _, tt := range []struct {
+			name           string
+			mutation       store.SyncMutation
+			wantRelationID string
+		}{
+			{
+				name: "payload sync ID is preferred",
+				mutation: store.SyncMutation{
+					EntityKey: "relation-entity-key",
+					Payload:   `{"sync_id":"relation-payload-id","source_id":"source-id","target_id":"target-id","project":"proj-a"}`,
+				},
+				wantRelationID: "relation-payload-id",
+			},
+			{
+				name: "blank payload sync ID falls back to entity key",
+				mutation: store.SyncMutation{
+					EntityKey: " relation-entity-key ",
+					Payload:   `{"sync_id":" ","source_id":"source-id","target_id":"target-id","project":"proj-a"}`,
+				},
+				wantRelationID: "relation-entity-key",
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				relationID, sourceID, targetID, classifiable := relationUpsertEndpoints(tt.mutation)
+				if !classifiable || relationID != tt.wantRelationID || sourceID != "source-id" || targetID != "target-id" {
+					t.Fatalf("relation identity = (%q, %q, %q, %t), want (%q, %q, %q, true)", relationID, sourceID, targetID, classifiable, tt.wantRelationID, "source-id", "target-id")
+				}
+			})
+		}
+	})
 }
 
 func TestCloudImportEmptyProjectDoesNotReplayAnotherProjectDeferredRelation(t *testing.T) {
@@ -4792,5 +4967,834 @@ func TestCloudSyncPreservesPiPromptIdentityUnderProjectScope(t *testing.T) {
 		if p.SyncID == saved.SyncID {
 			t.Fatalf("prompt %q strayed into project %q after the round trip", saved.SyncID, otherProject)
 		}
+	}
+}
+
+// ─── Issue #1135: chunk referencing a deleted observation ────────────────────
+
+// relationMissingEndpointChunk builds the issue #1135 scenario payload: a chunk
+// carrying a session upsert, one observation upsert, and a relation upsert whose
+// target observation was deleted hub-side and is absent from every chunk and
+// from the local store.
+func relationMissingEndpointChunk(sessionID, obsA, obsB, relationID string) ChunkData {
+	return ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: sessionID,
+			Op:        store.SyncOpUpsert,
+			Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","directory":"/tmp/proj-a"}`, sessionID),
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: obsA,
+			Op:        store.SyncOpUpsert,
+			Payload:   fmt.Sprintf(`{"sync_id":%q,"session_id":%q,"type":"decision","title":"endpoint a","content":"source endpoint","project":"proj-a","scope":"project"}`, obsA, sessionID),
+		},
+		{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: relationID,
+			Op:        store.SyncOpUpsert,
+			Payload:   fmt.Sprintf(`{"sync_id":%q,"source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","marked_by_actor":"test-actor","marked_by_kind":"test","project":"proj-a"}`, relationID, obsA, obsB),
+		},
+	}}
+}
+
+// TestCloudImportHandlesRelationWithPermanentlyMissingEndpoint reproduces issue
+// #1135: a cloud chunk whose relation upsert references an observation that can
+// never arrive (deleted hub-side, absent from every chunk and from the local
+// store) must not stall the dependency-safe import loop. The provably
+// unsatisfiable edge is skipped with a visible warning while the rest of the
+// chunk imports.
+func TestCloudImportHandlesRelationWithPermanentlyMissingEndpoint(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		mode             importMode
+		relChunkID       string
+		relChunk         ChunkData
+		extraChunkID     string
+		extraChunk       ChunkData
+		wantErr          bool
+		wantChunks       int
+		wantSkippedEdges []string
+		wantDeferred     int
+		wantDead         int
+		assertStore      func(t *testing.T, s *store.Store)
+	}{
+		{
+			name:       "permanently missing endpoint skips relation and imports chunk",
+			mode:       importModeCloud,
+			relChunkID: "chunk-1135-permanent",
+			relChunk:   withObservationDelete(relationMissingEndpointChunk("sess-1135", "obs-1135-a", "obs-1135-deleted", "rel-1135"), "obs-1135-deleted"),
+			wantChunks: 1,
+			wantSkippedEdges: []string{
+				"relation rel-1135 obs-1135-a->obs-1135-deleted: referenced observation missing permanently",
+			},
+			wantDeferred: 1,
+			wantDead:     0,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				if _, err := s.GetSession("sess-1135"); err != nil {
+					t.Fatalf("expected session from the stalled chunk to import: %v", err)
+				}
+				if _, err := s.GetObservationBySyncID("obs-1135-a"); err != nil {
+					t.Fatalf("expected observation from the stalled chunk to import: %v", err)
+				}
+				if _, err := s.GetRelation("rel-1135"); err == nil {
+					t.Fatal("expected relation with permanently missing endpoint to stay unapplied")
+				}
+			},
+		},
+		{
+			name:         "endpoint arriving in another pending chunk resolves without skipping",
+			mode:         importModeCloud,
+			relChunkID:   "chunk-1135-rel-first",
+			relChunk:     relationMissingEndpointChunk("sess-1135-cross", "obs-1135-c", "obs-1135-d", "rel-1135-cross"),
+			extraChunkID: "chunk-1135-obs-second",
+			extraChunk: ChunkData{Mutations: []store.SyncMutation{
+				{
+					Entity:    store.SyncEntitySession,
+					EntityKey: "sess-1135-endpoints",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"id":"sess-1135-endpoints","project":"proj-a","directory":"/tmp/proj-a"}`,
+				},
+				{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: "obs-1135-c",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"obs-1135-c","session_id":"sess-1135-endpoints","type":"decision","title":"c","content":"endpoint c","project":"proj-a","scope":"project"}`,
+				},
+				{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: "obs-1135-d",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"obs-1135-d","session_id":"sess-1135-endpoints","type":"decision","title":"d","content":"endpoint d","project":"proj-a","scope":"project"}`,
+				},
+			}},
+			wantChunks:       2,
+			wantSkippedEdges: nil,
+			wantDeferred:     0,
+			wantDead:         0,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				relation, err := s.GetRelation("rel-1135-cross")
+				if err != nil {
+					t.Fatalf("expected cross-chunk relation to resolve through normal passes: %v", err)
+				}
+				if relation.SourceID != "obs-1135-c" || relation.TargetID != "obs-1135-d" {
+					t.Fatalf("unexpected cross-chunk relation: %+v", relation)
+				}
+			},
+		},
+		{
+			name:       "local import keeps current deferral behavior for missing endpoints",
+			mode:       importModeLocal,
+			relChunkID: "chunk-1135-local",
+			relChunk:   relationMissingEndpointChunk("sess-1135-local", "obs-1135-local", "obs-1135-local-missing", "rel-1135-local"),
+			wantChunks: 1,
+			// Local mode is untouched by this fix: the store defers the
+			// FK-missing relation and no skip warning is produced.
+			wantSkippedEdges: nil,
+			wantDeferred:     1,
+			wantDead:         0,
+			assertStore: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				if _, err := s.GetObservationBySyncID("obs-1135-local"); err != nil {
+					t.Fatalf("expected observation to import in local mode: %v", err)
+				}
+				if _, err := s.GetRelation("rel-1135-local"); err == nil {
+					t.Fatal("expected unresolved relation to remain unapplied in local mode")
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+
+			var importer *Syncer
+			if tt.mode == importModeCloud {
+				if err := s.EnrollProject("proj-a"); err != nil {
+					t.Fatalf("enroll project: %v", err)
+				}
+				transport := newFakeCloudTransport()
+				entries := []ChunkEntry{{ID: tt.relChunkID, CreatedAt: "2026-08-25T00:00:00Z"}}
+				transport.chunks[tt.relChunkID] = mustJSONChunk(t, tt.relChunkID, tt.relChunk)
+				if tt.extraChunkID != "" {
+					entries = append(entries, ChunkEntry{ID: tt.extraChunkID, CreatedAt: "2026-08-25T00:01:00Z"})
+					transport.chunks[tt.extraChunkID] = mustJSONChunk(t, tt.extraChunkID, tt.extraChunk)
+				}
+				transport.manifest = &Manifest{Version: 1, Chunks: entries}
+				importer = NewCloudWithTransport(s, transport, "proj-a")
+			} else {
+				syncDir := t.TempDir()
+				writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: tt.relChunkID, CreatedAt: "2026-08-25T00:00:00Z"}}})
+				writeLocalChunkFile(t, syncDir, tt.relChunkID, tt.relChunk)
+				importer = New(s, syncDir)
+			}
+
+			result, err := importer.Import()
+			if tt.wantErr && err == nil {
+				t.Fatal("expected import to fail")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("import: %v", err)
+			}
+			if result.ChunksImported != tt.wantChunks {
+				t.Fatalf("expected %d imported chunks, got %+v", tt.wantChunks, result)
+			}
+			if got := strings.Join(tt.wantSkippedEdges, "\n"); got != "" {
+				if len(result.SkippedRelations) != len(tt.wantSkippedEdges) {
+					t.Fatalf("expected skipped relations %q, got %+v", got, result.SkippedRelations)
+				}
+				for i, want := range tt.wantSkippedEdges {
+					if result.SkippedRelations[i] != want {
+						t.Fatalf("skipped relation %d: want %q, got %q", i, want, result.SkippedRelations[i])
+					}
+				}
+			} else if len(result.SkippedRelations) != 0 {
+				t.Fatalf("expected no skipped relations, got %+v", result.SkippedRelations)
+			}
+			deferred, dead, err := s.CountDeferredAndDead()
+			if err != nil {
+				t.Fatalf("count deferred and dead: %v", err)
+			}
+			if deferred != tt.wantDeferred || dead != tt.wantDead {
+				t.Fatalf("unexpected deferred state: deferred=%d dead=%d, want deferred=%d dead=%d", deferred, dead, tt.wantDeferred, tt.wantDead)
+			}
+			tt.assertStore(t, s)
+		})
+	}
+}
+
+// TestCloudImportKnownDeleteEvidenceSkipsLaterRelationOnlyChunk proves that a
+// hard-delete chunk imported in an earlier cloud cycle remains usable manifest
+// evidence when a later relation-only chunk arrives.
+func TestCloudImportKnownDeleteEvidenceSkipsLaterRelationOnlyChunk(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	deleteChunkID := "chunk-known-delete"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: deleteChunkID, CreatedAt: "2026-09-15T00:00:00Z"}}}
+	transport.chunks[deleteChunkID] = mustJSONChunk(t, deleteChunkID, withObservationDelete(ChunkData{Mutations: []store.SyncMutation{
+		{Entity: store.SyncEntitySession, EntityKey: "sess-known-delete", Op: store.SyncOpUpsert, Payload: `{"id":"sess-known-delete","project":"proj-a","directory":"/tmp/proj-a"}`},
+		{Entity: store.SyncEntityObservation, EntityKey: "obs-known-delete-source", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-known-delete-source","session_id":"sess-known-delete","type":"decision","title":"source","content":"present endpoint","project":"proj-a","scope":"project"}`},
+	}}, "obs-known-delete-target"))
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+	if _, err := importer.Import(); err != nil {
+		t.Fatalf("import delete evidence: %v", err)
+	}
+
+	relationChunkID := "chunk-known-delete-relation"
+	transport.manifest.Chunks = append(transport.manifest.Chunks, ChunkEntry{ID: relationChunkID, CreatedAt: "2026-09-15T01:00:00Z"})
+	transport.chunks[relationChunkID] = mustJSONChunk(t, relationChunkID, ChunkData{Mutations: []store.SyncMutation{
+		{Entity: store.SyncEntityRelation, EntityKey: "rel-known-delete", Op: store.SyncOpUpsert, Payload: `{"sync_id":"rel-known-delete","source_id":"obs-known-delete-source","target_id":"obs-known-delete-target","relation":"related","judgment_status":"judged","marked_by_actor":"test-actor","marked_by_kind":"test","project":"proj-a"}`},
+	}})
+	result, err := importer.Import()
+	if err != nil {
+		t.Fatalf("import later relation-only chunk: %v", err)
+	}
+	if got, want := result.SkippedRelations, []string{"relation rel-known-delete obs-known-delete-source->obs-known-delete-target: referenced observation missing permanently"}; !equalStrings(got, want) {
+		t.Fatalf("skipped relations = %q, want %q", got, want)
+	}
+	if result.RelationsDeferred != 1 || result.RelationsDead != 0 {
+		t.Fatalf("deferred state = %+v, want one live queued relation", result)
+	}
+	rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+	if err != nil {
+		t.Fatalf("list queued relations: %v", err)
+	}
+	if len(rows) != 1 || rows[0].SyncID != "rel-known-delete" {
+		t.Fatalf("queued relations = %+v, want rel-known-delete", rows)
+	}
+}
+
+// TestCloudImportKnownUnreadableChunkDoesNotFailNewImport confirms that known
+// chunk inspection is evidence-only: its absence or corruption cannot fail an
+// otherwise valid pending cloud import.
+func TestCloudImportKnownUnreadableChunkDoesNotFailNewImport(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		knownChunk []byte
+	}{
+		{name: "missing", knownChunk: nil},
+		{name: "corrupt", knownChunk: []byte("not-json")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnrollProject("proj-a"); err != nil {
+				t.Fatalf("enroll project: %v", err)
+			}
+			if err := s.CreateSession("sess-known-unreadable", "proj-a", "/tmp/proj-a"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			sourceID, err := s.AddObservation(store.AddObservationParams{SessionID: "sess-known-unreadable", Type: "decision", Title: "source", Content: "source", Project: "proj-a", Scope: "project"})
+			if err != nil {
+				t.Fatalf("add source: %v", err)
+			}
+			targetID, err := s.AddObservation(store.AddObservationParams{SessionID: "sess-known-unreadable", Type: "decision", Title: "target", Content: "target", Project: "proj-a", Scope: "project"})
+			if err != nil {
+				t.Fatalf("add target: %v", err)
+			}
+			source, err := s.GetObservation(sourceID)
+			if err != nil {
+				t.Fatalf("get source: %v", err)
+			}
+			target, err := s.GetObservation(targetID)
+			if err != nil {
+				t.Fatalf("get target: %v", err)
+			}
+
+			transport := newFakeCloudTransport()
+			knownChunkID := "chunk-known-unreadable"
+			pendingChunkID := "chunk-pending-valid"
+			transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: knownChunkID}, {ID: pendingChunkID}}}
+			if tt.knownChunk != nil {
+				transport.chunks[knownChunkID] = tt.knownChunk
+			}
+			transport.chunks[pendingChunkID] = mustJSONChunk(t, pendingChunkID, ChunkData{Mutations: []store.SyncMutation{
+				{Entity: store.SyncEntityRelation, EntityKey: "rel-known-unreadable", Op: store.SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":"rel-known-unreadable","source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","project":"proj-a"}`, source.SyncID, target.SyncID)},
+			}})
+			if err := s.RecordSyncedChunkForTarget(cloudTargetKey("proj-a"), knownChunkID); err != nil {
+				t.Fatalf("record known chunk: %v", err)
+			}
+
+			result, err := NewCloudWithTransport(s, transport, "proj-a").Import()
+			if err != nil {
+				t.Fatalf("import with unreadable known chunk: %v", err)
+			}
+			if result.ChunksImported != 1 || result.ChunksSkipped != 1 {
+				t.Fatalf("chunk result = %+v, want one valid import and one known skip", result)
+			}
+			if _, err := s.GetRelation("rel-known-unreadable"); err != nil {
+				t.Fatalf("expected pending relation to apply: %v", err)
+			}
+		})
+	}
+}
+
+// TestCloudImportSkippedRelationWarningsAreIdempotent verifies that re-running
+// the same cloud import does not re-warn: the offending chunk is already known,
+// so the second run reports no skipped relations.
+func TestCloudImportSkippedRelationWarningsAreIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-1135-idempotent"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-25T00:00:00Z"}}}
+	transport.chunks[chunkID] = mustJSONChunk(t, chunkID, withObservationDelete(relationMissingEndpointChunk("sess-1135-again", "obs-1135-again", "obs-1135-gone", "rel-1135-again"), "obs-1135-gone"))
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+
+	first, err := importer.Import()
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if len(first.SkippedRelations) != 1 {
+		t.Fatalf("expected one skipped relation on first import, got %+v", first)
+	}
+
+	second, err := importer.Import()
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if len(second.SkippedRelations) != 0 {
+		t.Fatalf("expected no skipped relations on idempotent re-import, got %+v", second)
+	}
+	if second.ChunksSkipped != 1 {
+		t.Fatalf("expected chunk to be skipped as already known, got %+v", second)
+	}
+}
+
+func mustJSONChunk(t *testing.T, id string, chunk ChunkData) []byte {
+	t.Helper()
+	payload, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal chunk %s: %v", id, err)
+	}
+	return payload
+}
+
+// TestCloudImportDoesNotSkipRelationWithTombstonedEndpoint pins the oracle's
+// deletion semantics: the store's relation FK precondition counts soft-deleted
+// observations, so an edge whose endpoint is a local tombstone still applies
+// today and must not be reported as permanently missing.
+func TestCloudImportDoesNotSkipRelationWithTombstonedEndpoint(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.CreateSession("sess-tomb", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-tomb",
+		Type:      "decision",
+		Title:     "tombstoned",
+		Content:   "endpoint that was soft-deleted locally",
+		Project:   "proj-a",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	obs, err := s.GetObservation(obsID)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if obs.SyncID == "" {
+		t.Fatal("expected observation to carry a sync_id")
+	}
+	if err := s.DeleteObservation(obsID, false); err != nil {
+		t.Fatalf("soft delete observation: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-1135-tombstone"
+	relationID := "rel-1135-tomb"
+	chunk := ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: relationID,
+			Op:        store.SyncOpUpsert,
+			Payload: fmt.Sprintf(`{"sync_id":%q,"source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","marked_by_actor":"test-actor","marked_by_kind":"test","project":"proj-a"}`,
+				relationID, obs.SyncID, obs.SyncID),
+		},
+	}}
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-25T00:00:00Z"}}}
+	transport.chunks[chunkID] = mustJSONChunk(t, chunkID, chunk)
+
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+	result, err := importer.Import()
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(result.SkippedRelations) != 0 {
+		t.Fatalf("tombstoned endpoint must not be reported permanently missing, got %+v", result.SkippedRelations)
+	}
+	if _, err := s.GetRelation(relationID); err != nil {
+		t.Fatalf("expected relation over tombstoned endpoint to apply as before: %v", err)
+	}
+	deferred, dead, err := s.CountDeferredAndDead()
+	if err != nil {
+		t.Fatalf("count deferred and dead: %v", err)
+	}
+	if deferred != 0 || dead != 0 {
+		t.Fatalf("unexpected deferred state: deferred=%d dead=%d", deferred, dead)
+	}
+}
+
+// TestCloudImportStallPathSurvivesRelationFiltering pins design point 3: a
+// chunk whose filtered remainder still fails for an unrelated reason keeps the
+// original stall semantics instead of appearing fixed while data is lost.
+func TestCloudImportStallPathSurvivesRelationFiltering(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-1135-stall"
+	chunk := ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-stall",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-stall","project":"proj-a","directory":"/tmp/proj-a"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-stall-good",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-stall-good","session_id":"sess-stall","type":"decision","title":"good","content":"importable endpoint","project":"proj-a","scope":"project"}`,
+		},
+		{
+			Entity:    "unknown",
+			EntityKey: "invalid-stall-entity",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{}`,
+		},
+		{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-stall",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"rel-stall","source_id":"obs-stall-good","target_id":"obs-stall-never","relation":"related","judgment_status":"judged","marked_by_actor":"test-actor","marked_by_kind":"test","project":"proj-a"}`,
+		},
+	}}
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-25T00:00:00Z"}}}
+	transport.chunks[chunkID] = mustJSONChunk(t, chunkID, chunk)
+
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+	_, err := importer.Import()
+	if err == nil {
+		t.Fatal("expected the chunk to keep stalling on its unrelated failure")
+	}
+	if !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "unknown sync entity") {
+		t.Fatalf("expected original stall error with unrelated failure, got: %v", err)
+	}
+	synced, err := s.GetSyncedChunks()
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("failed chunk %q must not be marked synced", chunkID)
+	}
+}
+
+// TestCloudImportSkippedRelationHealsWhenEndpointReappears pins the recovery
+// contract of the durable skip queue: a skipped edge is replayable state, so
+// re-importing the known chunk must not re-enqueue or reset it, and when the
+// missing endpoint arrives in a later sync cycle the existing deferred replay
+// applies the queued edge and clears the row.
+func TestCloudImportSkippedRelationHealsWhenEndpointReappears(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	skipChunkID := "chunk-heal-skip"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: skipChunkID, CreatedAt: "2026-08-27T00:00:00Z"}}}
+	transport.chunks[skipChunkID] = mustJSONChunk(t, skipChunkID, withObservationDelete(
+		relationMissingEndpointChunk("sess-heal", "obs-heal-src", "obs-heal-gone", "rel-heal"), "obs-heal-gone"))
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+
+	first, err := importer.Import()
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if len(first.SkippedRelations) != 1 {
+		t.Fatalf("expected the edge to be skipped and queued, got %+v", first)
+	}
+	assertHealRow := func(t *testing.T, wantRetry int, wantPresent bool) {
+		t.Helper()
+		rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+		if err != nil {
+			t.Fatalf("list deferred rows: %v", err)
+		}
+		if !wantPresent {
+			if len(rows) != 0 {
+				t.Fatalf("expected no deferred rows, got %+v", rows)
+			}
+			return
+		}
+		if len(rows) != 1 || rows[0].SyncID != "rel-heal" || rows[0].RetryCount != wantRetry {
+			t.Fatalf("expected exactly one rel-heal row with retry_count=%d, got %+v", wantRetry, rows)
+		}
+	}
+	// finalizeImport replays the queue after every import, so a freshly queued
+	// row is attempted once against the still-missing endpoint before this
+	// assertion runs: retry_count 1. The re-import below must NOT reset that
+	// progress — the count may only advance by the one replay each import runs.
+	assertHealRow(t, 1, true)
+
+	// Re-importing while the chunk is known must not re-enqueue or reset the row.
+	if _, err := importer.Import(); err != nil {
+		t.Fatalf("re-import of the known chunk: %v", err)
+	}
+	assertHealRow(t, 2, true)
+
+	// Drive the skipped relation to the retry cap without re-enqueueing it: each
+	// known-chunk import gets exactly one replay, then the row becomes dead.
+	for wantRetry := 3; wantRetry <= 5; wantRetry++ {
+		retry, err := importer.Import()
+		if err != nil {
+			t.Fatalf("known-chunk retry %d: %v", wantRetry, err)
+		}
+		if len(retry.SkippedRelations) != 0 {
+			t.Fatalf("known-chunk retry %d must not re-warn, got %+v", wantRetry, retry.SkippedRelations)
+		}
+		if wantRetry < 5 {
+			assertHealRow(t, wantRetry, true)
+		}
+	}
+	if row, err := s.GetDeferred("rel-heal"); err != nil || row.ApplyStatus != "dead" || row.RetryCount != 5 {
+		t.Fatalf("retry-cap row = %+v, err=%v; want dead at retry 5", row, err)
+	}
+
+	// The endpoint reappears in a new remote chunk; the original retry-cap dead
+	// edge must be re-armed only because it is now satisfiable in this scope.
+
+	healChunkID := "chunk-heal-endpoint"
+	transport.manifest.Chunks = append(transport.manifest.Chunks, ChunkEntry{ID: healChunkID, CreatedAt: "2026-08-27T01:00:00Z"})
+	transport.chunks[healChunkID] = mustJSONChunk(t, healChunkID, ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-heal-endpoint",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-heal-endpoint","project":"proj-a","directory":"/tmp/proj-a"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-heal-gone",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-heal-gone","session_id":"sess-heal-endpoint","type":"decision","title":"back","content":"endpoint reappeared","project":"proj-a","scope":"project"}`,
+		},
+	}})
+	third, err := importer.Import()
+	if err != nil {
+		t.Fatalf("healing import: %v", err)
+	}
+	if third.ChunksSkipped != 1 || third.ChunksImported != 1 {
+		t.Fatalf("unexpected healing import result: %+v", third)
+	}
+	if len(third.SkippedRelations) != 0 {
+		t.Fatalf("healing import must not re-warn, got %+v", third.SkippedRelations)
+	}
+	if _, err := s.GetRelation("rel-heal"); err != nil {
+		t.Fatalf("expected the queued edge to heal once the endpoint reappeared: %v", err)
+	}
+	deferred, dead, err := s.CountDeferredAndDead()
+	if err != nil {
+		t.Fatalf("count deferred and dead: %v", err)
+	}
+	if deferred != 0 || dead != 0 {
+		t.Fatalf("expected the healed row to be cleared, got deferred=%d dead=%d", deferred, dead)
+	}
+}
+
+// TestCloudImportAbortsWhenDeferredEnqueueFails pins the ordering guarantee of
+// the skip queue: enqueueing a skipped edge happens BEFORE the filtered chunk
+// can apply or be marked synced, so an enqueue error aborts the import with no
+// chunk mutation and no synced marker — the edge is never lost silently.
+func TestCloudImportAbortsWhenDeferredEnqueueFails(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-enqueue-failure"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-27T02:00:00Z"}}}
+	transport.chunks[chunkID] = mustJSONChunk(t, chunkID, withObservationDelete(
+		relationMissingEndpointChunk("sess-enq-fail", "obs-enq-fail-src", "obs-enq-fail-gone", "rel-enq-fail"), "obs-enq-fail-gone"))
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+
+	orig := storeEnqueueDeferredRelation
+	storeEnqueueDeferredRelation = func(*store.Store, string, store.SyncMutation) error {
+		return fmt.Errorf("enqueue offline")
+	}
+	defer func() { storeEnqueueDeferredRelation = orig }()
+
+	_, err := importer.Import()
+	if err == nil || !strings.Contains(err.Error(), "enqueue offline") {
+		t.Fatalf("expected the import to abort on the enqueue error, got %v", err)
+	}
+	synced, err := s.GetSyncedChunksForTarget(cloudTargetKey("proj-a"))
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("chunk %q must not be marked synced when its skipped edge could not be queued", chunkID)
+	}
+	if _, err := s.GetSession("sess-enq-fail"); err == nil {
+		t.Fatal("no semantic mutation of the chunk may apply when enqueueing its skipped edge fails")
+	}
+	if _, err := s.GetObservationBySyncID("obs-enq-fail-src"); err == nil {
+		t.Fatal("no semantic mutation of the chunk may apply when enqueueing its skipped edge fails")
+	}
+}
+
+// TestCloudImportReadsEachPendingChunkOnce pins the classification cache: a
+// cloud chunk parsed during classification (or by the apply loop) must be
+// reused instead of read and unmarshalled from the transport a second time.
+// Entries absent from classification keep their remote-read fallback, and the
+// total transport reads for two pending chunks stay at exactly two.
+func TestCloudImportReadsEachPendingChunkOnce(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	relChunkID := "chunk-cache-rel"
+	obsChunkID := "chunk-cache-obs"
+	// The relation chunk comes first so classification runs while both chunks
+	// are still pending; the observation chunk then applies from the cache.
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: relChunkID, CreatedAt: "2026-08-28T00:00:00Z"},
+		{ID: obsChunkID, CreatedAt: "2026-08-28T00:01:00Z"},
+	}}
+	transport.chunks[relChunkID] = mustJSONChunk(t, relChunkID, ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-cache-endpoints",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-cache-endpoints","project":"proj-a","directory":"/tmp/proj-a"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-cache-src",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-cache-src","session_id":"sess-cache-endpoints","type":"decision","title":"src","content":"cached source endpoint","project":"proj-a","scope":"project"}`,
+		},
+		{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-cache",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"rel-cache","source_id":"obs-cache-src","target_id":"obs-cache-dst","relation":"related","judgment_status":"judged","marked_by_actor":"test-actor","marked_by_kind":"test","project":"proj-a"}`,
+		},
+	}})
+	transport.chunks[obsChunkID] = mustJSONChunk(t, obsChunkID, ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-cache-endpoints",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-cache-endpoints","project":"proj-a","directory":"/tmp/proj-a"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-cache-dst",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-cache-dst","session_id":"sess-cache-endpoints","type":"decision","title":"dst","content":"cached target endpoint","project":"proj-a","scope":"project"}`,
+		},
+	}})
+
+	result, err := NewCloudWithTransport(s, transport, "proj-a").Import()
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.ChunksImported != 2 {
+		t.Fatalf("expected both chunks to import, got %+v", result)
+	}
+	if _, err := s.GetRelation("rel-cache"); err != nil {
+		t.Fatalf("expected cross-chunk relation to apply: %v", err)
+	}
+	// One transport read per pending chunk: the relation chunk is read by the
+	// apply loop and cached for classification, the observation chunk is read
+	// by classification and cached for the apply loop.
+	if transport.readChunkCalls != 2 {
+		t.Fatalf("expected exactly 2 transport chunk reads, got %d", transport.readChunkCalls)
+	}
+}
+
+// TestImportDependencyOracleClassificationSets triangulates the store's
+// observation identity contract: both identities are trimmed, a blank payload
+// sync_id falls back to a non-blank entity_key, and mismatched, effectively
+// blank, or undecodable identities contribute no evidence.
+func TestImportDependencyOracleClassificationSets(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		mutations   []store.SyncMutation
+		wantUpserts []string
+		wantDeletes []string
+	}{
+		{
+			name: "matching identities are trimmed on both ops",
+			mutations: []store.SyncMutation{
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-matching-up ", Op: store.SyncOpUpsert, Payload: `{"sync_id":" obs-matching-up "}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-matching-del ", Op: store.SyncOpDelete, Payload: `{"sync_id":" obs-matching-del "}`},
+			},
+			wantUpserts: []string{"obs-matching-up"},
+			wantDeletes: []string{"obs-matching-del"},
+		},
+		{
+			name: "blank payload sync id falls back to entity key on both ops",
+			mutations: []store.SyncMutation{
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-fallback-up ", Op: store.SyncOpUpsert, Payload: `{"sync_id":" "}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " obs-fallback-del ", Op: store.SyncOpDelete, Payload: `{"other":"x"}`},
+			},
+			wantUpserts: []string{"obs-fallback-up"},
+			wantDeletes: []string{"obs-fallback-del"},
+		},
+		{
+			name: "payload-only mismatched blank and malformed identities are ignored",
+			mutations: []store.SyncMutation{
+				{Entity: store.SyncEntityObservation, EntityKey: "", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-payload-only"}`},
+				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-mismatch", Op: store.SyncOpDelete, Payload: `{"sync_id":"obs-payload-mismatch"}`},
+				{Entity: store.SyncEntityObservation, EntityKey: " \t", Op: store.SyncOpUpsert, Payload: `{"sync_id":" "}`},
+				{Entity: store.SyncEntityObservation, EntityKey: "obs-keyed-malformed", Op: store.SyncOpUpsert, Payload: `not-json`},
+			},
+			wantUpserts: nil,
+			wantDeletes: nil,
+		},
+		{
+			name: "deletes are excluded from the upsert set and non-observations skipped",
+			mutations: []store.SyncMutation{
+				{Entity: store.SyncEntityObservation, EntityKey: "obs-both", Op: store.SyncOpDelete, Payload: `{"sync_id":"obs-both"}`},
+				{Entity: store.SyncEntityRelation, EntityKey: "rel-x", Op: store.SyncOpUpsert, Payload: `{}`},
+				{Entity: store.SyncEntitySession, EntityKey: "sess-x", Op: store.SyncOpUpsert, Payload: `{}`},
+			},
+			wantUpserts: nil,
+			wantDeletes: []string{"obs-both"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sy := New(newTestStore(t), t.TempDir())
+			transport := newFakeCloudTransport()
+			transport.manifest = &Manifest{Version: 1}
+			transport.chunks["chunk-sets"] = mustJSONChunk(t, "chunk-sets", ChunkData{Mutations: tt.mutations})
+			sy.transport = transport
+
+			oracle := newImportDependencyOracle(sy, []ChunkEntry{{ID: "chunk-sets"}}, map[string]bool{}, nil, ownershipModeManifestVersion)
+			if err := oracle.ensureBuilt(); err != nil {
+				t.Fatalf("classification: %v", err)
+			}
+			if got := sortedKeys(oracle.pendingObservationIDs); !equalStrings(got, tt.wantUpserts) {
+				t.Fatalf("upsert set = %q, want %q", got, tt.wantUpserts)
+			}
+			if got := sortedKeys(oracle.deletedObservationIDs); !equalStrings(got, tt.wantDeletes) {
+				t.Fatalf("delete set = %q, want %q", got, tt.wantDeletes)
+			}
+		})
+	}
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestCloudImportLegacyManifestStillChecksChunkOwnership guards the ownership
+// downgrade protection through the classification cache refactor: on a legacy
+// manifest (version < 2) a cloud chunk carrying project-owned sessions must
+// still fail the import through ensureChunkOwnershipCompatibility, no matter
+// which path parsed the chunk.
+func TestCloudImportLegacyManifestStillChecksChunkOwnership(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-legacy-ownership"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-29T00:00:00Z"}}}
+	transport.chunks[chunkID] = mustJSONChunk(t, chunkID, ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-legacy-owned",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-legacy-owned","project":"proj-a","ownership_mode":"project_owned","directory":"/tmp/proj-a"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-legacy-owned",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-legacy-owned","session_id":"sess-legacy-owned","type":"decision","title":"owned","content":"project owned endpoint","project":"proj-a","scope":"project"}`,
+		},
+	}})
+
+	_, err := NewCloudWithTransport(s, transport, "proj-a").Import()
+	if err == nil || !strings.Contains(err.Error(), "downgrade is unsupported") {
+		t.Fatalf("expected the legacy ownership downgrade guard to fail the import, got %v", err)
+	}
+	synced, err := s.GetSyncedChunksForTarget(cloudTargetKey("proj-a"))
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("a downgrade-incompatible chunk must never be marked synced")
 	}
 }

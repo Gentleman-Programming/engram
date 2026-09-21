@@ -875,6 +875,42 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	}
 }
 
+func TestHandleSavePrefersCurrentLeasedRuntimeSessionOverRecentLegacySession(t *testing.T) {
+	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	directory := runtimeSessionDirectory("/work/engram")
+
+	if err := s.CreateSession("legacy-yesterday", "engram", directory); err != nil {
+		t.Fatalf("create legacy session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = datetime('now', '-1 day') WHERE id = ?`, "legacy-yesterday"); err != nil {
+		t.Fatalf("backdate legacy session: %v", err)
+	}
+	if err := s.StartSession("leased-current", "engram", directory); err != nil {
+		t.Fatalf("start leased session: %v", err)
+	}
+
+	res, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Lease-aware active session resolution",
+		"content": "The leased runtime owner supersedes the recent legacy root.",
+		"type":    "bugfix",
+		"project": "engram",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, res))
+	}
+
+	observations, err := s.RecentObservations("engram", "project", 1)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].SessionID != "leased-current" {
+		t.Fatalf("omitted-session save attached to %#v, want leased-current", observations)
+	}
+}
+
 func TestHandleSaveBindsNestedWriteToSessionRegisteredAtRepositoryRoot(t *testing.T) {
 	s := newMCPTestStore(t)
 	repository := project.DetectProjectFull(".")
@@ -1533,6 +1569,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		Content:   "Fix panic in parser branch when args are missing",
 		Project:   "engram",
 		Scope:     "project",
+		TopicKey:  "bugfix/parser-panic",
 	})
 	if err != nil {
 		t.Fatalf("add observation: %v", err)
@@ -1569,6 +1606,32 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if firstResult["pinned"] != true {
 		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
+	}
+	if firstResult["topic_key"] != "bugfix/parser-panic" {
+		t.Fatalf("expected search result topic_key, got %v", firstResult["topic_key"])
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-mcp",
+		Type:      "bugfix",
+		Title:     "No topic key",
+		Content:   "Normal search omits absent topic keys.",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation without topic key: %v", err)
+	}
+	noTopicKeyRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "absent topic keys", "project": "engram", "scope": "project",
+	}}})
+	if err != nil || noTopicKeyRes.IsError {
+		t.Fatalf("search observation without topic key: err=%v result=%s", err, callResultText(t, noTopicKeyRes))
+	}
+	noTopicKeyResults, ok := callResultJSON(t, noTopicKeyRes)["results"].([]any)
+	if !ok || len(noTopicKeyResults) != 1 {
+		t.Fatalf("expected one result without topic key, got %#v", noTopicKeyResults)
+	}
+	if _, ok := noTopicKeyResults[0].(map[string]any)["topic_key"]; ok {
+		t.Fatalf("search result with no topic key included topic_key: %#v", noTopicKeyResults[0])
 	}
 
 	update := handleUpdate(s, MCPConfig{})
@@ -1610,6 +1673,48 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if !strings.Contains(callResultText(t, delRes), "permanently deleted") {
 		t.Fatalf("expected hard delete message")
+	}
+}
+
+func TestHandleSearchOmitsEmptyPulledTopicKey(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("pulled-empty-topic-key-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	const payload = `{"sync_id":"pulled-empty-topic-key","session_id":"pulled-empty-topic-key-session","type":"bugfix","title":"Pulled empty topic key","content":"Search must omit an empty pulled topic key.","project":"engram","scope":"project","topic_key":""}`
+	if err := s.ApplyPulledMutation(store.DefaultSyncTargetKey, store.SyncMutation{
+		Seq:       1,
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "pulled-empty-topic-key",
+		Op:        store.SyncOpUpsert,
+		Payload:   payload,
+		Source:    store.SyncSourceRemote,
+		Project:   "engram",
+	}); err != nil {
+		t.Fatalf("apply pulled observation: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	for _, tt := range []struct {
+		name, responseFormat string
+	}{{"normal", ""}, {"compact", "compact"}} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := map[string]any{"query": "pulled empty", "project": "engram"}
+			if tt.responseFormat != "" {
+				args["response_format"] = tt.responseFormat
+			}
+			res, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil || res.IsError {
+				t.Fatalf("search: err=%v result=%s", err, callResultText(t, res))
+			}
+			results, ok := callResultJSON(t, res)["results"].([]any)
+			if !ok || len(results) != 1 {
+				t.Fatalf("results = %#v, want one observation", results)
+			}
+			if _, ok := results[0].(map[string]any)["topic_key"]; ok {
+				t.Fatalf("empty pulled topic key must be omitted: %#v", results[0])
+			}
+		})
 	}
 }
 
@@ -8261,6 +8366,7 @@ func TestHandleSearch_CompactResponseUsesBoundedPreviewAndRelations(t *testing.T
 		Title:     "Older compact search decision",
 		Content:   content,
 		Project:   projectName,
+		TopicKey:  "decision/compact-search",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -8323,9 +8429,15 @@ func TestHandleSearch_CompactResponseUsesBoundedPreviewAndRelations(t *testing.T
 			if entry["truncated"] != true {
 				t.Fatalf("truncated = %#v, want true", entry["truncated"])
 			}
+			if entry["topic_key"] != "decision/compact-search" {
+				t.Fatalf("topic_key = %#v, want decision/compact-search", entry["topic_key"])
+			}
 			foundPreview = true
 		}
 		if entry["id"] == float64(newID) {
+			if _, ok := entry["topic_key"]; ok {
+				t.Fatalf("compact result with no topic key included topic_key: %#v", entry)
+			}
 			relations := entry["relations"].(map[string]any)
 			asSource := relations["as_source"].([]any)
 			if len(asSource) == 0 || asSource[0].(map[string]any)["relation"] != store.RelationSupersedes {

@@ -75,6 +75,29 @@ func TestCompressedEnvelopeRejectsMalformedUnsupportedAndOversizedPayloads(t *te
 	}
 }
 
+func TestHasGzipMagic(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		want    bool
+	}{
+		{name: "gzip magic with header bytes", payload: []byte{0x1f, 0x8b, 0x08, 0x00}, want: true},
+		{name: "exactly gzip magic", payload: []byte{0x1f, 0x8b}, want: true},
+		{name: "empty payload", payload: nil, want: false},
+		{name: "single gzip byte", payload: []byte{0x1f}, want: false},
+		{name: "json payload", payload: []byte(`{"project":"proj-a"}`), want: false},
+		{name: "magic bytes not at start", payload: []byte{0x00, 0x1f, 0x8b}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasGzipMagic(tt.payload); got != tt.want {
+				t.Fatalf("HasGzipMagic(% x) = %t, want %t", tt.payload, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCompressedEnvelopeAcceptNegotiation(t *testing.T) {
 	tests := []struct {
 		name   string

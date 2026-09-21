@@ -306,6 +306,22 @@ Do not manually edit SQLite without a backup.
 
 ---
 
+## Error: `invalid push payload: invalid character '\x1f' looking for beginning of value`
+
+Full symptom during `engram sync --cloud`:
+
+```text
+write chunk: cloud: push chunk ...: status 400: invalid push payload: invalid character '\x1f' looking for beginning of value
+```
+
+**Cause:** the client sends the push body as a gzip-compressed envelope declared with `Content-Type: application/vnd.engram.sync+gzip; version=1`. `\x1f` is the first byte of the gzip magic number (`0x1f 0x8b`), so this error means the server tried to decode raw gzip bytes as plain JSON. That happens when a proxy in front of the cloud server dropped or rewrote the request `Content-Type` header, or when the running server binary predates the compressed envelope support.
+
+**Current server behavior:** up-to-date `engram cloud serve` binaries sniff the gzip magic bytes and decode the compressed envelope when the declared `Content-Type` is missing or rewritten to a non-envelope value such as `application/json`, so a rewritten header no longer causes this error server-side. One shape still fails before sniffing: a request that still declares `application/vnd.engram.sync+gzip` with an unsupported `version` parameter is rejected with HTTP 415 (`unsupported push payload`), because the declared envelope version is validated before the request body is read. If you still see this error, the running server binary is older than this fix — upgrade the server.
+
+**Proxy advice:** if you run a proxy (nginx, Traefik, an API gateway, a WAF) in front of the cloud server, configure it to preserve the client request `Content-Type` header — in particular `application/vnd.engram.sync+gzip; version=1` — instead of replacing it with `application/json` or stripping it.
+
+---
+
 ## Error: `transport_failed`
 
 `transport_failed` is a wrapper around network, auth, server, or payload errors. Look for the concrete error message below it.
@@ -329,7 +345,7 @@ Do not manually edit SQLite without a backup.
 |---|---|---|
 | `a managed admin already exists; refusing to create a duplicate first admin via CLI bootstrap` | A managed admin was already bootstrapped (via CLI or dashboard). | This is expected safety behavior, not a bug. Use the existing managed admin, or a documented recovery path, instead of re-running first-admin bootstrap. |
 | `--issue-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | `--issue-token` was passed without `ENGRAM_CLOUD_TOKEN_PEPPER` set. | Set `ENGRAM_CLOUD_TOKEN_PEPPER` to a dedicated secret (distinct from `ENGRAM_JWT_SECRET`) and re-run. No admin/user was created by the failed attempt. |
-| `stranded admin token recovery is not eligible` | `recover-token` found anything other than exactly one enabled managed human admin and zero principal tokens. | Use `engram cloud bootstrap recover-token` only for the documented partial-bootstrap state; it intentionally refuses a normal, ambiguous, or already recovered deployment. |
+| `stranded admin token recovery is not eligible` | `recover-token` found an unsafe admin or token state. | Use `engram cloud bootstrap recover-token` only for the documented partial-bootstrap state. To replace one unused active bootstrap token whose output was lost, explicitly add `--revoke-existing`; it may be retried after another lost output only while the current token remains unused, and refuses used, revoked, ambiguous, or multiple-active-token states. |
 | `recover-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | The recovery command cannot hash a managed token safely. | Set the dedicated pepper, then retry. No token was created. |
 | `connect cloud store` | `ENGRAM_DATABASE_URL` is missing/unreachable, same as any other `engram cloud` database command. | Verify `ENGRAM_DATABASE_URL` and that Postgres is reachable, same as `engram cloud serve`. |
 

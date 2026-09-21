@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,13 +28,147 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+const (
+	windowsTempDirCleanupAttempts = 10
+	windowsTempDirCleanupDelay    = 10 * time.Millisecond
+	windowsErrorDirNotEmpty       = syscall.Errno(145)
+)
+
+func TestRemoveWindowsTestTempDir(t *testing.T) {
+	const dir = "test-dir"
+
+	wrappedDirNotEmpty := fmt.Errorf("wrapped: %w", windowsErrorDirNotEmpty)
+	wrappedPermission := fmt.Errorf("wrapped: %w", os.ErrPermission)
+	exhaustedRemoveErrors := make([]error, windowsTempDirCleanupAttempts)
+	for i := range exhaustedRemoveErrors {
+		exhaustedRemoveErrors[i] = wrappedDirNotEmpty
+	}
+
+	tests := []struct {
+		name            string
+		removeErrors    []error
+		wantRemoveCalls int
+		wantSleepCalls  int
+		wantErr         error
+		wantErrMessage  string
+	}{
+		{
+			name:            "immediate successful removal",
+			removeErrors:    []error{nil},
+			wantRemoveCalls: 1,
+		},
+		{
+			name:            "wrapped directory not empty followed by success",
+			removeErrors:    []error{wrappedDirNotEmpty, nil},
+			wantRemoveCalls: 2,
+			wantSleepCalls:  1,
+		},
+		{
+			name:            "immediate wrapped non-directory-not-empty error",
+			removeErrors:    []error{wrappedPermission},
+			wantRemoveCalls: 1,
+			wantErr:         os.ErrPermission,
+			wantErrMessage:  fmt.Sprintf("remove test temp directory %q: %v", dir, wrappedPermission),
+		},
+		{
+			name:            "wrapped directory not empty through retry exhaustion",
+			removeErrors:    exhaustedRemoveErrors,
+			wantRemoveCalls: windowsTempDirCleanupAttempts,
+			wantSleepCalls:  windowsTempDirCleanupAttempts - 1,
+			wantErr:         windowsErrorDirNotEmpty,
+			wantErrMessage: fmt.Sprintf("remove test temp directory %q after %d attempts: %v",
+				dir, windowsTempDirCleanupAttempts, wrappedDirNotEmpty),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var removeDirs []string
+			removeAll := func(gotDir string) error {
+				removeDirs = append(removeDirs, gotDir)
+				return tc.removeErrors[len(removeDirs)-1]
+			}
+			var sleepDurations []time.Duration
+			sleep := func(duration time.Duration) {
+				sleepDurations = append(sleepDurations, duration)
+			}
+
+			err := removeWindowsTestTempDir(dir, removeAll, sleep)
+
+			if len(removeDirs) != tc.wantRemoveCalls {
+				t.Fatalf("remove calls = %d, want %d", len(removeDirs), tc.wantRemoveCalls)
+			}
+			for _, gotDir := range removeDirs {
+				if gotDir != dir {
+					t.Fatalf("remove directory = %q, want %q", gotDir, dir)
+				}
+			}
+			if len(sleepDurations) != tc.wantSleepCalls {
+				t.Fatalf("sleep calls = %d, want %d", len(sleepDurations), tc.wantSleepCalls)
+			}
+			for _, gotDuration := range sleepDurations {
+				if gotDuration != windowsTempDirCleanupDelay {
+					t.Fatalf("sleep duration = %s, want %s", gotDuration, windowsTempDirCleanupDelay)
+				}
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("removeWindowsTestTempDir() error = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("removeWindowsTestTempDir() error = %v, want errors.Is(..., %v)", err, tc.wantErr)
+			}
+			if err.Error() != tc.wantErrMessage {
+				t.Fatalf("removeWindowsTestTempDir() error = %q, want %q", err, tc.wantErrMessage)
+			}
+		})
+	}
+}
+
+func removeWindowsTestTempDir(dir string, removeAll func(string) error, sleep func(time.Duration)) error {
+	var cleanupErr error
+	for attempt := 1; attempt <= windowsTempDirCleanupAttempts; attempt++ {
+		cleanupErr = removeAll(dir)
+		if cleanupErr == nil {
+			return nil
+		}
+		if !errors.Is(cleanupErr, windowsErrorDirNotEmpty) {
+			return fmt.Errorf("remove test temp directory %q: %w", dir, cleanupErr)
+		}
+		if attempt < windowsTempDirCleanupAttempts {
+			sleep(windowsTempDirCleanupDelay)
+		}
+	}
+	return fmt.Errorf("remove test temp directory %q after %d attempts: %w", dir, windowsTempDirCleanupAttempts, cleanupErr)
+}
+
+func testTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return t.TempDir()
+	}
+
+	dir, err := os.MkdirTemp("", "engram-test-")
+	if err != nil {
+		t.Fatalf("create test temp directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := removeWindowsTestTempDir(dir, os.RemoveAll, time.Sleep); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return dir
+}
+
 func testConfig(t *testing.T) store.Config {
 	t.Helper()
 	cfg, err := store.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)
 	}
-	cfg.DataDir = t.TempDir()
+	cfg.DataDir = testTempDir(t)
 	return cfg
 }
 
@@ -612,6 +748,76 @@ func TestCmdSyncCloudRegressionPreservesLegacyBehaviorWithUpgradeStatePresent(t 
 	}
 }
 
+func TestParseSaveArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    saveArgs
+		wantErr string
+	}{
+		{
+			name: "flags before positionals",
+			args: []string{"--project", "myproject", "title", "content"},
+			want: saveArgs{title: "title", content: "content", typ: "manual", projectName: "myproject", scope: "project"},
+		},
+		{
+			name: "positional first remains supported",
+			args: []string{"title", "content", "--type", "bugfix", "--project", "alpha", "--scope", "personal", "--topic", "auth/token"},
+			want: saveArgs{title: "title", content: "content", typ: "bugfix", projectName: "alpha", scope: "personal", topicKey: "auth/token"},
+		},
+		{
+			name: "flags between positionals",
+			args: []string{"title", "--scope", "global", "content"},
+			want: saveArgs{title: "title", content: "content", typ: "manual", scope: "global"},
+		},
+		{
+			name: "end of options permits dash-prefixed positionals",
+			args: []string{"--project", "myproject", "--", "--title", "--content"},
+			want: saveArgs{title: "--title", content: "--content", typ: "manual", projectName: "myproject", scope: "project"},
+		},
+		{name: "missing flag value", args: []string{"title", "content", "--project"}, wantErr: "--project requires a value"},
+		{name: "flag cannot consume following flag", args: []string{"--project", "--scope", "global", "title", "content"}, wantErr: "--project requires a value"},
+		{name: "unknown flag", args: []string{"title", "content", "--unknown"}, wantErr: "unknown save flag: --unknown"},
+		{name: "missing positionals", args: []string{"--project", "myproject"}, wantErr: "save requires exactly two positional arguments"},
+		{name: "extra positional", args: []string{"title", "content", "extra"}, wantErr: "save requires exactly two positional arguments"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSaveArgs(tc.args)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseSaveArgs(%v) error = %v, want %q", tc.args, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseSaveArgs(%v): %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseSaveArgs(%v) = %#v, want %#v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCmdSaveRejectsFlagOnlyArgumentsBeforeOpeningStore(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	withArgs(t, "engram", "save", "--project", "myproject")
+
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("cmdSave panic = %v, want exitCode", recovered)
+	}
+	if !strings.Contains(stderr, "usage: engram save") || !strings.Contains(stderr, "save requires exactly two positional arguments") {
+		t.Fatalf("cmdSave stderr = %q, want usage error", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid save opened store or left state: %v", err)
+	}
+}
+
 func TestCmdSaveAndSearch(t *testing.T) {
 	cfg := testConfig(t)
 
@@ -647,6 +853,39 @@ func TestCmdSaveAndSearch(t *testing.T) {
 	}
 	if !strings.Contains(noneOut, "No memories found") {
 		t.Fatalf("expected empty search message, got: %q", noneOut)
+	}
+}
+
+func TestCmdSaveReportsContentTruncation(t *testing.T) {
+	cfg := testConfig(t)
+	content := strings.Repeat("x", cfg.MaxObservationLength+1)
+	withArgs(t, "engram", "save", "oversized-title", content, "--project", "alpha")
+
+	stdout, stderr := captureOutput(t, func() { cmdSave(cfg) })
+	if !strings.Contains(stdout, "Memory saved:") {
+		t.Fatalf("save output = %q, want success", stdout)
+	}
+	wantWarning := fmt.Sprintf("WARNING: Content was truncated from %d to %d bytes", len(content), cfg.MaxObservationLength)
+	if !strings.Contains(stderr, wantWarning) {
+		t.Fatalf("save stderr = %q, want truncation warning %q", stderr, wantWarning)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	var storedContent string
+	if err := s.DB().QueryRow(`SELECT content FROM observations WHERE title = ?`, "oversized-title").Scan(&storedContent); err != nil {
+		t.Fatalf("load saved observation: %v", err)
+	}
+	if !strings.Contains(storedContent, "... [truncated]") {
+		t.Fatalf("stored content = %q, want truncation marker", storedContent)
 	}
 }
 
@@ -985,7 +1224,9 @@ func TestCmdSyncStatusExportAndImport(t *testing.T) {
 }
 
 func TestCmdSyncDefaultProjectNoData(t *testing.T) {
-	workDir := filepath.Join(t.TempDir(), "repo-name")
+	fixtureParent := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", fixtureParent)
+	workDir := filepath.Join(fixtureParent, "repo-name")
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}

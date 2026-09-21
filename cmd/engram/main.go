@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,7 +73,30 @@ var (
 	newMCPServerWithTools  = mcp.NewServerWithTools
 	newMCPServerWithConfig = mcp.NewServerWithConfig
 	resolveMCPTools        = mcp.ResolveTools
-	serveMCP               = mcpserver.ServeStdio
+	serveMCP               = runMCPStdio
+
+	// mcpStdioInput is the raw stdin source for the MCP stdio transport. It is
+	// injectable for testing so tests can drive EOF-driven shutdown with an
+	// os.Pipe instead of the real stdin. runMCPStdio wraps it in exactly one
+	// eofShutdownReader; nothing else may read from it.
+	mcpStdioInput io.Reader = os.Stdin
+
+	// mcpStdioStopAutosync publishes cmdMCP's once-guarded autosync stop to
+	// runMCPStdio so the graceful shutdown sequence releases the sync lease
+	// when the parent closes the stdio pipe or SIGINT/SIGTERM arrives.
+	// It is read once when runMCPStdio starts serving. The fixed serveMCP
+	// signature leaves no other way to hand the stop closure over.
+	mcpStdioStopAutosync = func() {}
+
+	mcpStdioEOFCancelAfter = 5 * time.Second
+
+	// listenMCPStdio runs the mcp-go stdio transport on the given streams.
+	// Injectable for testing: mcp-go's StdioServer.Listen registers a
+	// package-singleton stdio session, so tests keep it to a single real
+	// invocation per test process.
+	listenMCPStdio = func(ctx context.Context, server *mcpserver.MCPServer, stdin io.Reader, stdout io.Writer) error {
+		return mcpserver.NewStdioServer(server).Listen(ctx, stdin, stdout)
+	}
 
 	// detectProject is injectable for testing; wraps project.DetectProject.
 	detectProject = project.DetectProject
@@ -120,6 +145,7 @@ var (
 		}
 		return runner.RunAll(ctx, scope)
 	}
+	buildRepairPlan = diagnostic.BuildRepairPlan
 
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
@@ -243,12 +269,28 @@ type startableAutosyncManager interface {
 	Stop()
 }
 
+// autosyncStartHandshake is the optional capability that starts the autosync
+// run loop through a startup handshake: Start launches Run in a goroutine and
+// guarantees the manager signals readiness only once the run loop registered
+// with its wait group, so a subsequent Stop cannot race the not-yet-scheduled
+// goroutine when the stdio pipe closes immediately after startup (CodeRabbit
+// PR #1189).
+type autosyncStartHandshake interface {
+	Start(context.Context)
+}
+
 type autosyncManagerAdapter struct {
 	manager *autosync.Manager
 }
 
 func (a autosyncManagerAdapter) Run(ctx context.Context) {
 	a.manager.Run(ctx)
+}
+
+// Start forwards to the wrapped manager's handshake start, satisfying the
+// optional autosyncStartHandshake capability used by tryStartAutosync.
+func (a autosyncManagerAdapter) Start(ctx context.Context) {
+	a.manager.Start(ctx)
 }
 
 func (a autosyncManagerAdapter) NotifyDirty() {
@@ -681,8 +723,8 @@ func main() {
 		}
 	}
 
-	// Allow overriding data dir via env
-	if dir := os.Getenv("ENGRAM_DATA_DIR"); dir != "" {
+	// Allow overriding data dir via env. Blank values retain the resolved default.
+	if dir := os.Getenv("ENGRAM_DATA_DIR"); strings.TrimSpace(dir) != "" {
 		cfg.DataDir = dir
 	}
 
@@ -756,7 +798,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h", "init":
+	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -967,12 +1009,28 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	// so tests can stub the factory and avoid real goroutine/network side effects.
 	mgr := newAutosyncManager(s, transport, mgrCfg)
 
-	go mgr.Run(ctx)
+	// Startup handshake (CodeRabbit PR #1189): when the manager supports the
+	// Start handshake, launch through it so Stop always waits until the run
+	// loop registered with its wait group — an immediate-EOF shutdown can
+	// otherwise return before the goroutine is even scheduled. Deterministic
+	// test fakes without Start keep the plain goroutine launch.
+	if starter, ok := mgr.(autosyncStartHandshake); ok {
+		starter.Start(ctx)
+	} else {
+		go mgr.Run(ctx)
+	}
 	log.Printf("[autosync] started (server=%s)", serverURL)
 	return mgr, mgr.Stop
 }
 
 func cmdMCP(cfg store.Config) {
+	// On Windows, arrange parent-owned process lifetime before opening any
+	// resources. Setup is best-effort to preserve existing MCP startup behavior
+	// when parent wrappers, nested jobs, or process permissions reject it.
+	if err := retainMCPProcessUntilParentExit(); err != nil {
+		log.Printf("[mcp] WARNING: parent-lifetime job setup unavailable: %v", err)
+	}
+
 	toolsFilter := ""
 	// The --project flag below is the explicit process argument of the shared
 	// override rule; project.ProcessOverride supplies the ENGRAM_PROJECT step.
@@ -1011,16 +1069,17 @@ func cmdMCP(cfg store.Config) {
 	// startup fatal when cloud config is missing or invalid.
 	ctx, cancel := context.WithCancel(context.Background())
 	_, mgrStop := tryStartAutosync(ctx, s, cfg)
-	autosyncStopped := false
+	// stopAutosync is invoked concurrently: cmdMCP's deferred call runs on the
+	// main goroutine while the stdio EOF unwind hook may call it from the
+	// MCP reader goroutine. sync.Once provides the required synchronization.
+	var stopAutosyncOnce sync.Once
 	stopAutosync := func() {
-		if autosyncStopped {
-			return
-		}
-		autosyncStopped = true
-		cancel()
-		if mgrStop != nil {
-			mgrStop()
-		}
+		stopAutosyncOnce.Do(func() {
+			cancel()
+			if mgrStop != nil {
+				mgrStop()
+			}
+		})
 	}
 	defer stopAutosync()
 
@@ -1028,9 +1087,121 @@ func cmdMCP(cfg store.Config) {
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 
+	// Publish the once-guarded autosync stop to the stdio transport so an
+	// EOF- or signal-initiated unwind (issue #886) releases the sync lease
+	// before Listen returns.
+	mcpStdioStopAutosync = stopAutosync
+
 	if err := serveMCP(mcpSrv); err != nil {
 		stopAutosync()
 		fatal(err)
+	}
+}
+
+// runMCPStdio serves server over stdio with engram-owned lifecycle handling.
+// It replaces mcp-go's ServeStdio (issue #886): when the parent closes its
+// end of the stdio pipe, EOF surfaces through eofShutdownReader, which starts
+// a bounded cancellation deadline while mcp-go drains queued tool calls. SIGINT and
+// SIGTERM still cancel the transport context. A signal-initiated shutdown
+// makes the transport return context.Canceled, which is translated to nil so
+// cmdMCP exits cleanly via its own defers instead of fatal.
+func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eofCancelTimer := time.AfterFunc(time.Hour, cancel)
+	eofCancelTimer.Stop()
+	var eofCancelOnce sync.Once
+	scheduleEOFCancel := func() {
+		eofCancelOnce.Do(func() { eofCancelTimer.Reset(mcpStdioEOFCancelAfter) })
+	}
+	defer eofCancelTimer.Stop()
+
+	// shutdown is the graceful sequence shared by the signal watcher and the
+	// return path; once-guarded so either trigger runs it exactly once.
+	var stopAutosyncOnce sync.Once
+	stopAutosync := func() {
+		stopAutosyncOnce.Do(mcpStdioStopAutosync)
+	}
+	defer stopAutosync()
+
+	// shutdownTransport is reserved for signal handling. EOF must reach
+	// Listen with ctx still active so its worker queue drains normally.
+	var shutdownTransportOnce sync.Once
+	shutdownTransport := func() {
+		shutdownTransportOnce.Do(func() {
+			cancel()
+			stopAutosync()
+		})
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM (mirrors cmdServe).
+	sigCh := make(chan os.Signal, 1)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-sigCh:
+			log.Println("[engram] shutting down...")
+			shutdownTransport()
+		case <-done:
+		}
+	}()
+
+	err := listenMCPStdio(ctx, server, &eofShutdownReader{inner: mcpStdioInput, onUnwind: scheduleEOFCancel}, os.Stdout)
+	if errors.Is(err, context.Canceled) {
+		// Signal-initiated shutdown is graceful: exit cleanly instead of fatal.
+		return nil
+	}
+	return err
+}
+
+// eofShutdownReader is the single reader between the MCP stdio transport and
+// the process stdin: the SDK's bufio.Reader sits on top of it, so no second
+// raw reader ever touches the stream. Bytes pass through untouched; when the
+// underlying stream reports EOF or a read error — the parent closed its end
+// of the pipe — it starts a bounded cancellation deadline while mcp-go drains
+// queued tool calls before Listen unwinds. A read that returns data together
+// with io.EOF is special: the EOF is retained (pendingEOF) and the graceful
+// sequence runs only when that retained EOF is surfaced on a later zero-byte
+// read, after bufio has served the final buffered request. onUnwind must be
+// once-guarded because bufio may issue further reads after the stream has ended.
+type eofShutdownReader struct {
+	inner      io.Reader
+	onUnwind   func()
+	pendingEOF bool
+}
+
+func (r *eofShutdownReader) Read(p []byte) (int, error) {
+	if r.pendingEOF {
+		// The retained EOF is all that is left: the transport consumed the
+		// buffered bytes, so it is safe to unwind and surface the real
+		// end of stream. pendingEOF stays set — EOF is sticky, and onUnwind
+		// is once-guarded by the caller.
+		r.onUnwind()
+		return 0, io.EOF
+	}
+	n, err := r.inner.Read(p)
+	switch {
+	case err == io.EOF && n > 0:
+		// Data arrived together with EOF. Returning the EOF now would let a
+		// cancelled context abandon the final buffered request inside mcp-go
+		// (readNextLine/processMessage), and bufio would cache the EOF so
+		// this wrapper would never be called again — the shutdown would race
+		// the last request. Retaining the EOF and returning nil forces bufio
+		// to call back once its buffer drains; that next call surfaces the
+		// retained EOF and unwinds.
+		r.pendingEOF = true
+		return n, nil
+	case err != nil:
+		// Immediate EOF (n == 0) or a real read error: unwind before the
+		// transport sees it.
+		r.onUnwind()
+		return n, err
+	default:
+		return n, err
 	}
 }
 
@@ -1138,47 +1309,81 @@ func cmdSearch(cfg store.Config) {
 	}
 }
 
-func cmdSave(cfg store.Config) {
-	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
-		exitFunc(1)
-	}
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
 
-	title := os.Args[2]
-	content := os.Args[3]
-	typ := "manual"
-	projectName := ""
-	scope := "project"
-	topicKey := ""
+type saveArgs struct {
+	title       string
+	content     string
+	typ         string
+	projectName string
+	scope       string
+	topicKey    string
+}
 
-	for i := 4; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--type":
-			if i+1 < len(os.Args) {
-				typ = os.Args[i+1]
-				i++
+// parseSaveArgs accepts save flags anywhere around the two required positionals.
+// A conventional -- ends option parsing so titles and content may begin with --.
+func parseSaveArgs(args []string) (saveArgs, error) {
+	parsed := saveArgs{typ: "manual", scope: "project"}
+	positionals := make([]string, 0, 2)
+	endOfOptions := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !endOfOptions && arg == "--" {
+			endOfOptions = true
+			continue
+		}
+		if !endOfOptions && strings.HasPrefix(arg, "-") {
+			if arg != "--type" && arg != "--project" && arg != "--scope" && arg != "--topic" {
+				return saveArgs{}, fmt.Errorf("unknown save flag: %s", arg)
 			}
-		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
-				i++
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || strings.HasPrefix(args[i+1], "-") {
+				return saveArgs{}, fmt.Errorf("%s requires a value", arg)
 			}
-		case "--scope":
-			if i+1 < len(os.Args) {
-				scope = os.Args[i+1]
-				i++
+			i++
+			switch arg {
+			case "--type":
+				parsed.typ = args[i]
+			case "--project":
+				parsed.projectName = args[i]
+			case "--scope":
+				parsed.scope = args[i]
+			case "--topic":
+				parsed.topicKey = args[i]
 			}
-		case "--topic":
-			if i+1 < len(os.Args) {
-				topicKey = os.Args[i+1]
-				i++
-			}
+			continue
+		}
+		positionals = append(positionals, arg)
+		if len(positionals) > 2 {
+			return saveArgs{}, errors.New("save requires exactly two positional arguments")
 		}
 	}
 
+	if len(positionals) != 2 {
+		return saveArgs{}, errors.New("save requires exactly two positional arguments")
+	}
+	parsed.title = positionals[0]
+	parsed.content = positionals[1]
+	return parsed, nil
+}
+
+func cmdSave(cfg store.Config) {
+	args, err := parseSaveArgs(os.Args[2:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, saveUsage)
+		fatal(err)
+		return
+	}
+	title := args.title
+	content := args.content
+	typ := args.typ
+	projectName := args.projectName
+	scope := args.scope
+	topicKey := args.topicKey
+
 	// Reject titleless saves before opening the store or creating a session
 	// (#459). The store applies the same rule as a backstop.
-	if err := store.ValidateObservationTitle(title); err != nil {
+	if err := store.ValidateObservationTitle(args.title); err != nil {
 		fatal(err)
 		return
 	}
@@ -1232,6 +1437,7 @@ func cmdSave(cfg store.Config) {
 	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
 	}
+	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      typ,
@@ -1246,6 +1452,9 @@ func cmdSave(cfg store.Config) {
 	}
 
 	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+	if truncation.Truncated {
+		fmt.Fprintf(os.Stderr, "⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.\n", truncation.OriginalBytes, truncation.LimitBytes)
+	}
 }
 
 func cmdDelete(cfg store.Config) {
@@ -1988,6 +2197,7 @@ func cmdSync(cfg store.Config) {
 				fmt.Printf("  (%d chunks already imported)\n", result.ChunksSkipped)
 			}
 			printImportRelationCounts(result)
+			printSkippedRelationWarnings(result)
 			return
 		}
 
@@ -2003,6 +2213,7 @@ func cmdSync(cfg store.Config) {
 			fmt.Printf("  Skipped:      %d (already imported)\n", result.ChunksSkipped)
 		}
 		printImportRelationCounts(result)
+		printSkippedRelationWarnings(result)
 		return
 	}
 
@@ -2060,6 +2271,15 @@ func printImportRelationCounts(result *engramsync.ImportResult) {
 	fmt.Printf("  Relations replayed: %d\n", result.RelationsReplayed)
 	fmt.Printf("  Relations deferred: %d\n", result.RelationsDeferred)
 	fmt.Printf("  Relations dead:     %d\n", result.RelationsDead)
+}
+
+// printSkippedRelationWarnings surfaces relation upserts that were skipped
+// because their referenced observations are permanently missing (issue #1135),
+// so a stale edge is visible instead of silently dying in the deferred queue.
+func printSkippedRelationWarnings(result *engramsync.ImportResult) {
+	for _, warning := range result.SkippedRelations {
+		fmt.Printf("  WARNING skipped %s\n", warning)
+	}
 }
 
 func printSyncUsage() {
@@ -3322,8 +3542,9 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
 		if result.MCPConfigured {
-			fmt.Printf("  3. MCP config written to %s using absolute binary path\n", setup.ClaudeCodeUserMCPPath())
-			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+			fmt.Printf("  3. Claude CLI registered the user MCP server in %s using an absolute binary path\n", setup.ClaudeCodeUserMCPPath())
+			fmt.Println("     If the binary moves, run: claude mcp remove engram --scope user")
+			fmt.Println("     Then re-run: engram setup claude-code")
 		} else {
 			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
 		}
@@ -3434,7 +3655,8 @@ Commands:
   help               Show this help
 
 Environment:
-  ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
+  ENGRAM_DATA_DIR    Engram CLI data directory. Empty or whitespace-only values use the
+                     platform default; nonblank values are used as provided (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Process-level default project override, applied by every entry point
                      with one precedence rule: explicit request project (engram save --project,

@@ -103,7 +103,7 @@ func TestPrintPostInstallClaudeCodeReportsMCPStatus(t *testing.T) {
 
 	t.Run("configured", func(t *testing.T) {
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
-		expected := "MCP config written to " + setup.ClaudeCodeUserMCPPath()
+		expected := "Claude CLI registered the user MCP server in " + setup.ClaudeCodeUserMCPPath()
 		stdout, stderr := captureOutput(t, func() {
 			printPostInstall(&setup.Result{Agent: "claude-code", MCPConfigured: true})
 		})
@@ -115,7 +115,7 @@ func TestPrintPostInstallClaudeCodeReportsMCPStatus(t *testing.T) {
 	t.Run("configured with CLAUDE_CONFIG_DIR override", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("CLAUDE_CONFIG_DIR", dir)
-		expected := "MCP config written to " + filepath.Join(dir, "mcp", "engram.json")
+		expected := "Claude CLI registered the user MCP server in " + filepath.Join(dir, ".claude.json")
 		stdout, stderr := captureOutput(t, func() {
 			printPostInstall(&setup.Result{Agent: "claude-code", MCPConfigured: true})
 		})
@@ -126,7 +126,7 @@ func TestPrintPostInstallClaudeCodeReportsMCPStatus(t *testing.T) {
 
 	t.Run("not configured", func(t *testing.T) {
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
-		notExpected := "MCP config written to " + setup.ClaudeCodeUserMCPPath()
+		notExpected := "Claude CLI registered the user MCP server in " + setup.ClaudeCodeUserMCPPath()
 		stdout, stderr := captureOutput(t, func() {
 			printPostInstall(&setup.Result{Agent: "claude-code"})
 		})

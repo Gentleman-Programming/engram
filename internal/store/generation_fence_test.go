@@ -143,6 +143,45 @@ func TestStatsPropagatesGenerationChange(t *testing.T) {
 	assertGenerationChanged(t, err)
 }
 
+func TestWithReadTxPropagatesRollbackGenerationChange(t *testing.T) {
+	callbackErr := errors.New("callback failed")
+	for _, tt := range []struct {
+		name                 string
+		callbackErr          error
+		invalidateGeneration bool
+		wantGenerationError  bool
+	}{
+		{name: "after successful callback", invalidateGeneration: true, wantGenerationError: true},
+		{name: "alongside callback error", callbackErr: callbackErr, invalidateGeneration: true, wantGenerationError: true},
+		{name: "preserves callback error when rollback succeeds", callbackErr: callbackErr},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			err := s.withReadTx(func(tx *sql.Tx) error {
+				var value int
+				if err := tx.QueryRow("SELECT 1").Scan(&value); err != nil {
+					t.Fatalf("query in read transaction: %v", err)
+				}
+				if tt.invalidateGeneration {
+					s.generation.mu.Lock()
+					s.generation.err = ErrDatabaseGenerationChanged
+					s.generation.mu.Unlock()
+				}
+				return tt.callbackErr
+			})
+
+			if tt.wantGenerationError {
+				assertGenerationChanged(t, err)
+			} else if errors.Is(err, ErrDatabaseGenerationChanged) {
+				t.Fatalf("error = %v, did not want generation error", err)
+			}
+			if tt.callbackErr != nil && !errors.Is(err, tt.callbackErr) {
+				t.Fatalf("error = %v, want callback error", err)
+			}
+		})
+	}
+}
+
 func TestGenerationRowsNextResultSetIsFenced(t *testing.T) {
 	generation, dbPath := newTestDatabaseGeneration(t, false, false)
 	base := &testFenceRows{hasNextResultSet: true, nextResultSet: func() { replaceTestFile(t, dbPath) }}

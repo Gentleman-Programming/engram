@@ -37,6 +37,7 @@ type fakeCloudBootstrapStore struct {
 	createGrantCalls      int
 	createTokenCalls      int
 	recoverTokenCalls     int
+	recoverTokenParams    cloudstore.RecoverStrandedAdminTokenParams
 	createFirstAdminCalls int
 	auditCalls            int
 	closeCalls            int
@@ -134,6 +135,7 @@ func (s *fakeCloudBootstrapStore) CreatePrincipalTokenWithAudit(_ context.Contex
 
 func (s *fakeCloudBootstrapStore) RecoverStrandedAdminTokenWithAudit(_ context.Context, params cloudstore.RecoverStrandedAdminTokenParams, audit cloudstore.AuthAuditEvent) (cloudstore.PrincipalToken, error) {
 	s.recoverTokenCalls++
+	s.recoverTokenParams = params
 	if s.recoverTokenErr != nil {
 		return cloudstore.PrincipalToken{}, s.recoverTokenErr
 	}
@@ -161,6 +163,23 @@ func fakePrincipalToken(params cloudstore.CreatePrincipalTokenParams) cloudstore
 		Name:                 params.Name,
 		CreatedByPrincipalID: params.CreatedByPrincipalID,
 	}
+}
+
+type bootstrapManagedTokenLookup struct {
+	token     cloudstore.PrincipalToken
+	principal cloudauth.Principal
+}
+
+func (l bootstrapManagedTokenLookup) FindManagedTokenByHash(_ context.Context, hash string) (cloudauth.ManagedTokenRecord, cloudauth.Principal, error) {
+	if hash != l.token.TokenHash {
+		return cloudauth.ManagedTokenRecord{}, cloudauth.Principal{}, cloudauth.ErrUnknownToken
+	}
+	return cloudauth.ManagedTokenRecord{
+		ID:          l.token.ID,
+		PrincipalID: l.token.PrincipalID,
+		Hash:        l.token.TokenHash,
+		RevokedAt:   l.token.RevokedAt,
+	}, l.principal, nil
 }
 
 func (s *fakeCloudBootstrapStore) CreateProjectGrant(_ context.Context, params cloudstore.CreateProjectGrantParams) (cloudstore.ProjectGrant, error) {
@@ -491,9 +510,9 @@ func TestCloudBootstrapAdminAuditFailureStillCreatesAdminAndExitsNonZero(t *test
 	}
 }
 
-// TestCloudBootstrapAdminIssuesTokenExactlyOnce proves --issue-token prints
-// the raw token exactly once, never persists/audits it, and requires the
-// dedicated cloud token pepper to be configured.
+// TestCloudBootstrapAdminIssuesTokenExactlyOnce proves --issue-token atomically
+// persists a resolvable token hash with its completion audit before disclosing
+// the raw token exactly once.
 func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	stubExitWithPanic(t)
 	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
@@ -532,10 +551,45 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	}
 	for _, event := range store.auditEvents {
 		for key, value := range event.Metadata {
-			if s, ok := value.(string); ok && s == rawToken {
+			if s, ok := value.(string); ok && strings.Contains(s, rawToken) {
 				t.Fatalf("audit metadata key %q leaked the raw token secret: %q", key, s)
 			}
 		}
+	}
+
+	if len(store.auditEvents) != 2 {
+		t.Fatalf("expected admin-created and token completion audit events, got %+v", store.auditEvents)
+	}
+	completion := store.auditEvents[1]
+	if completion.ActorPrincipalID != "" || completion.ActorSource != string(cloudauth.PrincipalSourceBootstrapCLI) || completion.TargetPrincipalID != store.tokens[0].PrincipalID || completion.Action != cloudBootstrapAuditAction || completion.Outcome != cloudBootstrapAuditOutcomeSuccess || completion.ReasonCode != "bootstrap_completed" {
+		t.Fatalf("unexpected bootstrap token completion audit: %+v", completion)
+	}
+	if len(completion.Metadata) != 4 || completion.Metadata["created_admin"] != true || completion.Metadata["username"] != "carol" || completion.Metadata["issued_token"] != true || completion.Metadata["token_prefix"] != store.tokens[0].TokenPrefix {
+		t.Fatalf("expected exactly the complete, non-secret bootstrap token audit metadata, got %+v", completion.Metadata)
+	}
+
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte("dedicated-cloud-token-pepper-for-tests"))
+	if err != nil {
+		t.Fatalf("new managed token hasher: %v", err)
+	}
+	resolver := cloudauth.NewPrincipalResolver(cloudauth.ResolverConfig{
+		Hasher: hasher,
+		ManagedTokens: bootstrapManagedTokenLookup{
+			token: store.tokens[0],
+			principal: cloudauth.Principal{
+				ID:      store.tokens[0].PrincipalID,
+				Kind:    cloudauth.PrincipalKindHuman,
+				Role:    cloudauth.RoleAdmin,
+				Enabled: true,
+			},
+		},
+	})
+	principal, err := resolver.ResolveBearerToken(context.Background(), rawToken)
+	if err != nil {
+		t.Fatalf("bootstrap-issued token must resolve through the managed token resolver: %v", err)
+	}
+	if principal.ID != store.tokens[0].PrincipalID || principal.TokenID != store.tokens[0].ID || principal.Role != cloudauth.RoleAdmin || principal.Source != cloudauth.PrincipalSourceManagedToken {
+		t.Fatalf("unexpected resolved principal for bootstrap-issued token: %+v", principal)
 	}
 }
 
@@ -752,6 +806,22 @@ func TestCloudBootstrapRecoverTokenIssuesOneTokenAndAuditsRecovery(t *testing.T)
 		if value == rawToken {
 			t.Fatalf("recovery audit metadata leaked the raw token: %+v", event.Metadata)
 		}
+	}
+}
+
+func TestCloudBootstrapRecoverTokenPassesExplicitReplacementOptIn(t *testing.T) {
+	stubExitWithPanic(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
+	store := &fakeCloudBootstrapStore{}
+	stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token", "--revoke-existing")
+	_, _, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	if recovered != nil {
+		t.Fatalf("expected explicit replacement recovery to succeed, got %v", recovered)
+	}
+	if store.recoverTokenCalls != 1 || !store.recoverTokenParams.RevokeExisting {
+		t.Fatalf("expected recovery to receive explicit revoke opt-in, calls=%d params=%+v", store.recoverTokenCalls, store.recoverTokenParams)
 	}
 }
 

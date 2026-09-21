@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +22,9 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 	seedOrphanedObservationSession(t, s, "obs-empty", "", "alpha", nil)
 	seedOrphanedObservationSession(t, s, "obs-spaces", "  ", "alpha", nil)
 	seedOrphanedObservationSession(t, s, "obs-tab", "\t", "alpha", nil)
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at = CASE sync_id WHEN 'obs-alpha-active' THEN '2026-01-02 00:00:00' WHEN 'obs-alpha-deleted' THEN '2026-01-01 00:00:00' ELSE created_at END`); err != nil {
+		t.Fatalf("set deterministic orphan timestamps: %v", err)
+	}
 	assertForeignKeysEnabled(t, s)
 
 	got, err := s.ListOrphanedObservationSessionEvidence("")
@@ -37,9 +42,12 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 		t.Fatalf("evidence=%+v, want %+v", got, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("evidence[%d]=%+v, want %+v", i, got[i], want[i])
+		if got[i].Project != want[i].Project || got[i].SessionID != want[i].SessionID || got[i].ObservationCount != want[i].ObservationCount || got[i].FirstObservedAt == "" {
+			t.Fatalf("evidence[%d]=%+v, want %+v with first observation timestamp", i, got[i], want[i])
 		}
+	}
+	if got[2].FirstObservedAt != "2026-01-01 00:00:00" {
+		t.Fatalf("first observed at=%q, want earliest timestamp", got[2].FirstObservedAt)
 	}
 
 	scoped, err := s.ListOrphanedObservationSessionEvidence(" Alpha ")
@@ -48,6 +56,168 @@ func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t
 	}
 	if len(scoped) != 2 || scoped[0].Project != "alpha" || scoped[0].SessionID != "missing-1" || scoped[1].SessionID != "missing-2" {
 		t.Fatalf("scoped evidence=%+v", scoped)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRollsBackOnFailure proves that a
+// mid-batch insert failure rolls the whole transaction back so no partial
+// placeholder set survives.
+func TestRestoreOrphanedObservationSessionsRollsBackOnFailure(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-a", "missing-a", "engram", nil)
+	seedOrphanedObservationSession(t, s, "obs-b", "missing-b", "engram", nil)
+	original := s.hooks.exec
+	calls := 0
+	wantErr := errors.New("insert failed")
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		calls++
+		if calls == 2 {
+			return nil, wantErr
+		}
+		return db.Exec(query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = original })
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-a", Project: "engram", StartedAt: "2026-01-01 00:00:00"}, {SessionID: "missing-b", Project: "engram", StartedAt: "2026-01-01 00:00:00"}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error=%v, want %v", err, wantErr)
+	}
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sessions WHERE id IN ('missing-a', 'missing-b')`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("placeholder count=%d err=%v", count, err)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRejectsConflictingEvidence proves
+// the store fails closed when a session ID is referenced by observations from
+// multiple projects, persisting no placeholder.
+func TestRestoreOrphanedObservationSessionsRejectsConflictingEvidence(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-alpha", "missing-shared", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-beta", "missing-shared", "beta", nil)
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-shared", Project: "alpha", StartedAt: "2026-01-01 00:00:00"}})
+	if err == nil || !strings.Contains(err.Error(), "multiple projects") {
+		t.Fatalf("error=%v, want multiple-project conflict", err)
+	}
+	if count := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-shared"); count != 0 {
+		t.Fatalf("placeholder count=%d, want 0", count)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRejectsExistingOwnershipConflict
+// proves the store refuses to attach an existing session ID to a different
+// project and leaves the current owner untouched.
+func TestRestoreOrphanedObservationSessionsRejectsExistingOwnershipConflict(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("existing-session", "beta", "/work/beta"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "existing-session", Project: "alpha", StartedAt: "2026-01-01 00:00:00"}})
+	if err == nil || !strings.Contains(err.Error(), "already belongs") {
+		t.Fatalf("error=%v, want ownership conflict", err)
+	}
+	if got := scalarString(t, s, `SELECT project FROM sessions WHERE id = ?`, "existing-session"); got != "beta" {
+		t.Fatalf("project=%q, want beta", got)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRollsBackBatchOnConflict proves
+// that a conflict discovered after earlier actions already inserted rows
+// aborts the transaction and rolls the whole batch back.
+func TestRestoreOrphanedObservationSessionsRollsBackBatchOnConflict(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-safe", "missing-safe", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-conflict-alpha", "missing-conflict", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-conflict-beta", "missing-conflict", "beta", nil)
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{
+		{SessionID: "missing-safe", Project: "alpha", StartedAt: "2026-01-01 00:00:00"},
+		{SessionID: "missing-conflict", Project: "alpha", StartedAt: "2026-01-01 00:00:00"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple projects") {
+		t.Fatalf("error=%v, want conflict", err)
+	}
+	if count := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id IN ('missing-safe', 'missing-conflict')`); count != 0 {
+		t.Fatalf("placeholder count=%d, want full rollback", count)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsTreatsMatchingExistingSessionAsNoop
+// proves that a session already owned by the same project is reported as an
+// applied no-op rather than an error or a duplicate insert.
+func TestRestoreOrphanedObservationSessionsTreatsMatchingExistingSessionAsNoop(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("existing-session", "alpha", "/work/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	applied, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "existing-session", Project: "alpha", StartedAt: "2026-01-01 00:00:00"}})
+	if err != nil {
+		t.Fatalf("RestoreOrphanedObservationSessions: %v", err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("applied=%+v, want no-op", applied)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRecomputesStaleMetadata proves the
+// store derives the placeholder's observation count and earliest timestamp
+// from the current observations inside the transaction, so a stale planned or
+// caller-supplied action can never persist outdated placeholder metadata. The
+// recomputed set includes soft-deleted observations, matching the diagnostic
+// evidence query.
+func TestRestoreOrphanedObservationSessionsRecomputesStaleMetadata(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-stale-active", "missing-stale", "engram", nil)
+	seedOrphanedObservationSession(t, s, "obs-stale-deleted", "missing-stale", "engram", "2026-01-15 00:00:00")
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at = CASE sync_id WHEN 'obs-stale-active' THEN '2026-01-20 00:00:00' WHEN 'obs-stale-deleted' THEN '2026-01-10 00:00:00' ELSE created_at END`); err != nil {
+		t.Fatalf("set deterministic orphan timestamps: %v", err)
+	}
+
+	applied, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-stale", Project: "engram", ObservationCount: 99, StartedAt: "2099-01-01 00:00:00"}})
+	if err != nil {
+		t.Fatalf("RestoreOrphanedObservationSessions: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied=%+v", applied)
+	}
+	if applied[0].ObservationCount != 2 || applied[0].StartedAt != "2026-01-10 00:00:00" {
+		t.Fatalf("applied=%+v, want recomputed count 2 and earliest timestamp", applied[0])
+	}
+	if got := scalarString(t, s, `SELECT started_at FROM sessions WHERE id = ?`, "missing-stale"); got != "2026-01-10 00:00:00" {
+		t.Fatalf("started_at=%q, want recomputed earliest timestamp", got)
+	}
+	if got := scalarString(t, s, `SELECT ended_at FROM sessions WHERE id = ?`, "missing-stale"); got != "2026-01-10 00:00:00" {
+		t.Fatalf("ended_at=%q, want immediately-ended placeholder", got)
+	}
+	if got := scalarString(t, s, `SELECT ownership_mode FROM sessions WHERE id = ?`, "missing-stale"); got != SessionOwnershipProjectOwned {
+		t.Fatalf("ownership_mode=%q", got)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM observations WHERE session_id = ?`, "missing-stale"); got != 2 {
+		t.Fatalf("observations=%d, want 2 preserved", got)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "missing-stale"); got != 0 {
+		t.Fatalf("session mutations=%d, want 0", got)
+	}
+}
+
+// TestRestoreOrphanedObservationSessionsRejectsMissingObservationTimestamp
+// proves the store fails closed when the current observations have no usable
+// created_at value, persisting no placeholder with fabricated metadata.
+func TestRestoreOrphanedObservationSessionsRejectsMissingObservationTimestamp(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-no-time", "missing-no-time", "engram", nil)
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at = '   ' WHERE sync_id = 'obs-no-time'`); err != nil {
+		t.Fatalf("blank created_at: %v", err)
+	}
+
+	_, err := s.RestoreOrphanedObservationSessions([]OrphanedSessionPlaceholder{{SessionID: "missing-no-time", Project: "engram", StartedAt: "2026-01-01 00:00:00"}})
+	if err == nil || !strings.Contains(err.Error(), "first observation timestamp") {
+		t.Fatalf("error=%v, want first-observation-timestamp failure", err)
+	}
+	if count := scalarInt(t, s, `SELECT COUNT(*) FROM sessions WHERE id = ?`, "missing-no-time"); count != 0 {
+		t.Fatalf("placeholder count=%d, want 0", count)
 	}
 }
 
@@ -160,6 +330,36 @@ func TestEstimateSessionProjectReclassificationDoesNotMutate(t *testing.T) {
 		t.Fatalf("counts=%+v", counts)
 	}
 	assertRepairProjects(t, s, "repair-s1", "sias-app", "sias-app", "sias-app")
+}
+
+func TestSessionProjectReclassificationCountsAndPreservesSoftDeletedObservations(t *testing.T) {
+	s := newTestStore(t)
+	seedRepairRows(t, s, "repair-soft-deleted", "sias-app")
+	if _, err := s.DB().Exec(`UPDATE observations SET deleted_at = '2026-01-01 00:00:00' WHERE session_id = ?`, "repair-soft-deleted"); err != nil {
+		t.Fatalf("soft-delete observation: %v", err)
+	}
+	beforeDeletedAt := scalarString(t, s, `SELECT deleted_at FROM observations WHERE session_id = ?`, "repair-soft-deleted")
+	actions := []SessionProjectReclassification{{SessionID: "repair-soft-deleted", FromProject: "sias-app", ToProject: "engram"}}
+
+	estimate, err := s.EstimateSessionProjectReclassification(actions)
+	if err != nil {
+		t.Fatalf("EstimateSessionProjectReclassification: %v", err)
+	}
+	if estimate.Sessions != 1 || estimate.Observations != 1 || estimate.Prompts != 1 {
+		t.Fatalf("estimate=%+v", estimate)
+	}
+
+	result, err := s.ApplySessionProjectReclassification(actions)
+	if err != nil {
+		t.Fatalf("ApplySessionProjectReclassification: %v", err)
+	}
+	if result.Counts != estimate {
+		t.Fatalf("apply counts=%+v, want estimate=%+v", result.Counts, estimate)
+	}
+	assertRepairProjects(t, s, "repair-soft-deleted", "engram", "engram", "engram")
+	if got := scalarString(t, s, `SELECT deleted_at FROM observations WHERE session_id = ?`, "repair-soft-deleted"); got != beforeDeletedAt {
+		t.Fatalf("deleted_at=%q, want %q", got, beforeDeletedAt)
+	}
 }
 
 func TestApplySessionProjectReclassificationBacksUpAndUpdatesAllowedTables(t *testing.T) {

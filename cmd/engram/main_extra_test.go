@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -127,6 +128,108 @@ func stubExitWithPanic(t *testing.T) {
 	old := exitFunc
 	exitFunc = func(code int) { panic(exitCode(code)) }
 	t.Cleanup(func() { exitFunc = old })
+}
+
+func TestMainDataDirEnvBlankUsesDefault(t *testing.T) {
+	stubExitWithPanic(t)
+
+	oldStoreDefaultConfig := storeDefaultConfig
+	t.Cleanup(func() { storeDefaultConfig = oldStoreDefaultConfig })
+
+	oldCheckForUpdates := checkForUpdates
+	checkForUpdates = func(string) versioncheck.CheckResult { return versioncheck.CheckResult{} }
+	t.Cleanup(func() { checkForUpdates = oldCheckForUpdates })
+
+	cwd := t.TempDir()
+	withCwd(t, cwd)
+
+	explicitDataDir := " explicit-data-dir "
+	if runtime.GOOS == "windows" {
+		// Windows does not preserve trailing spaces in directory names.
+		explicitDataDir = " explicit-data-dir"
+	}
+
+	tests := []struct {
+		name          string
+		unsetEnv      bool
+		envValue      string
+		createDataDir bool
+		wantDataDir   func(defaultDir string) string
+	}{
+		{
+			name:        "absent uses default",
+			unsetEnv:    true,
+			wantDataDir: func(defaultDir string) string { return defaultDir },
+		},
+		{
+			name:        "empty uses default",
+			envValue:    "",
+			wantDataDir: func(defaultDir string) string { return defaultDir },
+		},
+		{
+			name:        "whitespace only uses default",
+			envValue:    " \t\n ",
+			wantDataDir: func(defaultDir string) string { return defaultDir },
+		},
+		{
+			name:          "explicit path is preserved",
+			envValue:      explicitDataDir,
+			createDataDir: true,
+			wantDataDir:   func(string) string { return filepath.Join(cwd, explicitDataDir) },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defaultDir := filepath.Join(t.TempDir(), "default")
+			storeDefaultConfig = func() (store.Config, error) {
+				return store.Config{DataDir: defaultDir}, nil
+			}
+
+			if tc.unsetEnv {
+				previous, wasSet := os.LookupEnv("ENGRAM_DATA_DIR")
+				if err := os.Unsetenv("ENGRAM_DATA_DIR"); err != nil {
+					t.Fatalf("unset ENGRAM_DATA_DIR: %v", err)
+				}
+				t.Cleanup(func() {
+					if wasSet {
+						_ = os.Setenv("ENGRAM_DATA_DIR", previous)
+						return
+					}
+					_ = os.Unsetenv("ENGRAM_DATA_DIR")
+				})
+			} else {
+				t.Setenv("ENGRAM_DATA_DIR", tc.envValue)
+			}
+
+			wantDataDir := tc.wantDataDir(defaultDir)
+			if tc.createDataDir {
+				if err := os.MkdirAll(wantDataDir, 0o755); err != nil {
+					t.Fatalf("create explicit data directory: %v", err)
+				}
+			}
+
+			withArgs(t, "engram", "instance-id")
+			stdout, stderr, recovered := captureOutputAndRecover(t, main)
+			if recovered != nil || stderr != "" {
+				t.Fatalf("instance-id should succeed, panic=%v stderr=%q", recovered, stderr)
+			}
+
+			id := strings.TrimSpace(stdout)
+			if len(id) != 32 {
+				t.Fatalf("instance ID length = %d, want 32: %q", len(id), id)
+			}
+			for _, char := range id {
+				if char < '0' || char > '9' && char < 'a' || char > 'f' {
+					t.Fatalf("instance ID = %q, want lowercase hex", id)
+				}
+			}
+
+			if _, err := os.Stat(filepath.Join(wantDataDir, ".instance-id")); err != nil {
+				t.Fatalf("instance ID file in expected data directory: %v", err)
+			}
+		})
+	}
 }
 
 func stubRuntimeHooks(t *testing.T) {
@@ -744,6 +847,7 @@ func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
 		{name: "help short", args: []string{"-h"}},
 		{name: "help long", args: []string{"--help"}},
 		{name: "tui", args: []string{"tui"}},
+		{name: "doctor", args: []string{"doctor"}},
 		{name: "regular command", args: []string{"search", "query"}, want: true},
 	}
 
@@ -4094,15 +4198,28 @@ func TestCmdImportStoreImportFailure(t *testing.T) {
 }
 
 func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
+	stubExitWithPanic(t)
 	cfg := testConfig(t)
 
 	withArgs(t, "engram", "save", "dangling-title", "dangling-content", "--type")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("save with dangling flag panic = %v, want exitCode", recovered)
+	}
+	if !strings.Contains(stderr, "--type requires a value") {
+		t.Fatalf("save with dangling flag stderr = %q, want --type requires a value", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("save with dangling flag opened store or left state: %v", err)
+	}
+
+	withArgs(t, "engram", "save", "dangling-title", "dangling-content")
 	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
 	if recovered != nil || stderr != "" {
-		t.Fatalf("save with dangling flag failed, panic=%v stderr=%q", recovered, stderr)
+		t.Fatalf("valid save failed, panic=%v stderr=%q", recovered, stderr)
 	}
 	if !strings.Contains(stdout, "Memory saved:") {
-		t.Fatalf("unexpected save output: %q", stdout)
+		t.Fatalf("unexpected valid save output: %q", stdout)
 	}
 
 	withArgs(t, "engram", "search", "dangling-content", "--limit", "not-a-number", "--project")
@@ -4872,5 +4989,86 @@ func TestCmdSyncCloudNoOpImportRendersInitialAndFinalProgress(t *testing.T) {
 	}
 	if strings.LastIndex(stdout, "Cloud import progress:") > strings.Index(stdout, "No new chunks to import.") {
 		t.Fatalf("final no-op progress must precede the existing summary: %q", stdout)
+	}
+}
+
+// TestCmdSyncCloudImportPrintsSkippedRelationWarnings verifies that relation
+// upserts skipped for permanently missing endpoints surface as visible CLI
+// warnings (issue #1135) instead of dying silently in the deferred queue, on
+// both the imported-chunks path and the no-new-chunks path.
+func TestCmdSyncCloudImportPrintsSkippedRelationWarnings(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	originalSyncImport := syncImport
+	originalSyncImportWithProgress := syncImportWithProgress
+	originalSyncStatus := syncStatus
+	t.Cleanup(func() {
+		syncImport = originalSyncImport
+		syncImportWithProgress = originalSyncImportWithProgress
+		syncStatus = originalSyncStatus
+	})
+
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	cfg := testConfig(t)
+
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("proj-a"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		result *engramsync.ImportResult
+	}{
+		{
+			name: "imported chunks",
+			result: &engramsync.ImportResult{
+				ChunksImported:       1,
+				SessionsImported:     1,
+				ObservationsImported: 1,
+				SkippedRelations:     []string{"relation rel-a obs-a->obs-b: referenced observation missing permanently"},
+			},
+		},
+		{
+			name: "no new chunks",
+			result: &engramsync.ImportResult{
+				ChunksSkipped:    1,
+				SkippedRelations: []string{"relation rel-a obs-a->obs-b: referenced observation missing permanently"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			syncImportWithProgress = func(_ *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+				report(engramsync.ImportProgress{Percentage: 100})
+				report(engramsync.ImportProgress{Percentage: 100})
+				return tc.result, nil
+			}
+			syncStatus = func(*engramsync.Syncer) (int, int, int, error) {
+				return 1, 1, 0, nil
+			}
+
+			withArgs(t, "engram", "sync", "--cloud", "--import", "--project", "proj-a")
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("expected successful cloud import, panic=%v stderr=%q", recovered, stderr)
+			}
+			if !strings.Contains(stdout, "WARNING skipped relation rel-a obs-a->obs-b: referenced observation missing permanently") {
+				t.Fatalf("expected skipped relation warning in import output, got:\n%s", stdout)
+			}
+		})
 	}
 }
