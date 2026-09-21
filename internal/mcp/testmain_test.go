@@ -3,13 +3,15 @@ package mcp
 import (
 	"os"
 	"testing"
-
-	"github.com/Gentleman-Programming/engram/v2/internal/testenv"
 )
 
 func TestMain(m *testing.M) {
-	restore := testenv.PrependTempDirGitCeiling()
-	code := m.Run()
-	restore()
-	os.Exit(code)
+	ceiling := os.TempDir()
+	if existing := os.Getenv("GIT_CEILING_DIRECTORIES"); existing != "" {
+		ceiling += string(os.PathListSeparator) + existing
+	}
+	if err := os.Setenv("GIT_CEILING_DIRECTORIES", ceiling); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
 }
