@@ -135,6 +135,10 @@ func claudeCodePermissionTools(agentTools map[string]bool) []string {
 // codexEngramBlock is retained for non-Windows fallback compatibility tests.
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
 
+// windowsHookCommandMarkerPrefix identifies the first-line command pin consumed
+// by the Windows hook. Its value is JSON so PowerShell can decode it losslessly.
+const windowsHookCommandMarkerPrefix = "# engram-windows-hook-command-v1: "
+
 // codexEngramBlockStr returns the Codex TOML block for the supplied canonical
 // Engram command. installCodex resolves the command before it writes any setup
 // state so Windows cannot persist a PATH-dependent fallback.
@@ -1631,6 +1635,7 @@ func injectCodexMCP(configPath, command string) error {
 	}
 
 	updated := upsertCodexEngramBlock(string(data), command)
+	updated = upsertCodexWindowsHookMarker(updated, command, runtimeGOOS == "windows")
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
@@ -1707,6 +1712,34 @@ func upsertCodexEngramBlock(content, command string) string {
 	}
 
 	return base + "\n\n" + block + "\n"
+}
+
+// upsertCodexWindowsHookMarker replaces setup-owned markers only while they
+// are the first physical lines in the file. Later lookalikes are opaque TOML or
+// user content: the Windows hook reads only line 1 and must ignore them.
+func upsertCodexWindowsHookMarker(content, command string, enabled bool) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+	for len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+		lines = lines[1:]
+	}
+	body := strings.Join(lines, "\n")
+
+	if !enabled {
+		return body
+	}
+
+	encodedCommand, err := json.Marshal(command)
+	if err != nil {
+		// json.Marshal cannot fail for a string; retain a fail-closed invariant if
+		// that ever changes rather than emitting an undecodable hook command.
+		panic(fmt.Sprintf("marshal Windows hook command: %v", err))
+	}
+	marker := windowsHookCommandMarkerPrefix + string(encodedCommand)
+	if body == "" {
+		return marker + "\n"
+	}
+	return marker + "\n" + body
 }
 
 func upsertTopLevelTOMLString(content, key, value string) string {

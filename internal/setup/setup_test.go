@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -304,6 +305,9 @@ func TestInstallCodexFailsClosedForWindowsRuntimeWhenExecutableCannotResolve(t *
 			if string(got) != original {
 				t.Fatalf("Codex config changed after failed setup:\n%s", got)
 			}
+			if strings.Contains(string(got), windowsHookCommandMarkerPrefix) {
+				t.Fatalf("fail-closed Codex setup wrote a Windows hook marker:\n%s", got)
+			}
 			for _, path := range []string{codexInstructionsPath(), codexCompactPromptPath()} {
 				if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 					t.Fatalf("setup created %s before executable validation: %v", path, statErr)
@@ -313,9 +317,123 @@ func TestInstallCodexFailsClosedForWindowsRuntimeWhenExecutableCannotResolve(t *
 	}
 }
 
+func TestInstallCodexWindowsWritesOneCanonicalHookMarker(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	runtimeGOOS = "windows"
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+
+	first := `C:\Program Files\Engram\工具\engram.exe`
+	second := `C:\Program Files\Engram Next\工具\engram.exe`
+	osExecutable = func() (string, error) { return first, nil }
+
+	configPath := codexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("create Codex config directory: %v", err)
+	}
+	staleMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\stale\engram.exe`)
+	duplicateMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\duplicate\engram.exe`)
+	multilineMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\opaque\multiline.exe`)
+	commentMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\opaque\comment.exe`)
+	opaqueTOML := strings.Join([]string{
+		"[profile]",
+		`name = "preserve"`,
+		`instructions = """`,
+		multilineMarker,
+		`"""`,
+		commentMarker,
+	}, "\n")
+	original := strings.Join([]string{
+		staleMarker,
+		duplicateMarker,
+		opaqueTOML,
+		"",
+		"[mcp_servers.engram]",
+		`command = "wrong"`,
+		`args = ["wrong"]`,
+		"",
+		"[mcp_servers.other]",
+		`command = "other"`,
+	}, "\n")
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write initial Codex config: %v", err)
+	}
+
+	assertMarkerAndCommand := func(want string) string {
+		t.Helper()
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read Codex config: %v", err)
+		}
+		text := string(raw)
+		lines := strings.Split(text, "\n")
+		if len(lines) == 0 || !strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+			t.Fatalf("expected one authoritative Windows hook marker at byte/line 1, got:\n%s", text)
+		}
+		if len(lines) > 1 && strings.HasPrefix(lines[1], windowsHookCommandMarkerPrefix) {
+			t.Fatalf("expected repeated top-level markers to be removed, got:\n%s", text)
+		}
+		var markerCommand string
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[0], windowsHookCommandMarkerPrefix)), &markerCommand); err != nil {
+			t.Fatalf("decode Windows hook marker as JSON: %v", err)
+		}
+		if markerCommand != want {
+			t.Fatalf("marker command = %q, want %q", markerCommand, want)
+		}
+		section := strings.SplitN(text, "[mcp_servers.engram]\n", 2)
+		if len(section) != 2 {
+			t.Fatalf("missing Engram MCP section:\n%s", text)
+		}
+		var mcpCommand string
+		for _, line := range strings.Split(section[1], "\n") {
+			if value, ok := strings.CutPrefix(line, "command = "); ok {
+				if err := json.Unmarshal([]byte(value), &mcpCommand); err != nil {
+					t.Fatalf("decode MCP command as JSON: %v", err)
+				}
+				break
+			}
+		}
+		if mcpCommand != markerCommand {
+			t.Fatalf("marker command %q does not match MCP command %q", markerCommand, mcpCommand)
+		}
+		if !strings.Contains(text, opaqueTOML) {
+			t.Fatalf("expected opaque TOML marker-like content to be preserved byte-for-byte:\n%s", text)
+		}
+		if !strings.Contains(text, "[mcp_servers.other]") {
+			t.Fatalf("expected unrelated MCP content to be preserved:\n%s", text)
+		}
+		return text
+	}
+
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("initial Windows Codex setup: %v", err)
+	}
+	installed := assertMarkerAndCommand(first)
+	if strings.Contains(installed, staleMarker) || strings.Contains(installed, duplicateMarker) {
+		t.Fatalf("expected stale first-line markers to be replaced, got:\n%s", installed)
+	}
+
+	osExecutable = func() (string, error) { return second, nil }
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("refresh Windows Codex setup after executable move: %v", err)
+	}
+	refreshed := assertMarkerAndCommand(second)
+	if strings.Contains(refreshed, first) {
+		t.Fatalf("refreshed config retained moved executable %q:\n%s", first, refreshed)
+	}
+
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("idempotent Windows Codex setup: %v", err)
+	}
+	if got := assertMarkerAndCommand(second); got != refreshed {
+		t.Fatalf("idempotent setup changed config:\nfirst:\n%s\nsecond:\n%s", refreshed, got)
+	}
+}
+
 func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
+	runtimeGOOS = "linux"
 
 	configPath := codexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -323,6 +441,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	}
 
 	original := strings.Join([]string{
+		windowsHookCommandMarkerPrefix + strconv.Quote(`C:\stale\engram.exe`),
 		"[profile]",
 		"name = \"dev\"",
 		"",
@@ -367,6 +486,10 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 		}
 		if strings.Count(text, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected exactly one engram section, got:\n%s", text)
+		}
+		lines := strings.Split(text, "\n")
+		if len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+			t.Fatalf("non-Windows Codex config must not retain a setup-owned first-line marker:\n%s", text)
 		}
 		// resolveEngramCommand() uses os.Executable() on all platforms — command
 		// will be the real absolute path in tests, not bare "engram".
