@@ -158,6 +158,7 @@ type codexCloseErrorBody struct {
 }
 
 func (b *codexCloseErrorBody) Close() error { (*b.closes)++; return errors.New("close failed") }
+
 func TestCodexUserPromptSubmitIOReadErrorHasNoSideEffects(t *testing.T) {
 	stateDir, readErr := t.TempDir(), errors.New("read failed")
 	var requests atomic.Int32
@@ -175,15 +176,29 @@ func TestCodexUserPromptSubmitIOReadErrorHasNoSideEffects(t *testing.T) {
 		t.Fatalf("output=%q requests=%d, want no side effects", output.String(), requests.Load())
 	}
 }
-func TestCodexUserPromptSubmitIOWriteErrorIsReturnedWithoutRetry(t *testing.T) {
+
+func TestCodexUserPromptSubmitIOWriteFailuresReturnWithoutRetry(t *testing.T) {
 	writeErr := errors.New("write failed")
-	writes := 0
-	writer := codexWriterFunc(func([]byte) (int, error) { writes++; return 0, writeErr })
-	err := runCodexUserPromptSubmitIO(strings.NewReader(`{"session_id":"write-error"}`), writer, "", t.TempDir(), time.Now)
-	if !errors.Is(err, writeErr) || writes != 1 {
-		t.Fatalf("error=%v writes=%d, want write error once", err, writes)
+	tests := []struct {
+		name  string
+		write func([]byte) (int, error)
+		want  error
+	}{
+		{name: "writer error", write: func([]byte) (int, error) { return 0, writeErr }, want: writeErr},
+		{name: "short write", write: func(data []byte) (int, error) { return len(data) - 1, nil }, want: io.ErrShortWrite},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writes := 0
+			writer := codexWriterFunc(func(data []byte) (int, error) { writes++; return tt.write(data) })
+			err := runCodexUserPromptSubmitIO(strings.NewReader(`{"session_id":"write-error"}`), writer, "", t.TempDir(), time.Now)
+			if !errors.Is(err, tt.want) || writes != 1 {
+				t.Fatalf("error=%v writes=%d, want %v once", err, writes, tt.want)
+			}
+		})
 	}
 }
+
 func TestCodexJSONToleratesResponseCloseError(t *testing.T) {
 	var requests, closes int
 	client := &http.Client{Transport: codexRoundTripper(func(*http.Request) (*http.Response, error) {
