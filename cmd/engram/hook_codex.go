@@ -26,11 +26,16 @@ type codexPromptInput struct {
 }
 
 func cmdCodexUserPromptSubmit() {
-	input, err := io.ReadAll(os.Stdin)
-	if err != nil { input = nil }
-	output := runCodexUserPromptSubmit(input, codexHookURL(), os.TempDir(), time.Now)
-	if !json.Valid(output) { output = []byte("{}") }
-	_, _ = os.Stdout.Write(output)
+	_ = runCodexUserPromptSubmitIO(os.Stdin, os.Stdout, codexHookURL(), os.TempDir(), time.Now)
+}
+
+func runCodexUserPromptSubmitIO(input io.Reader, output io.Writer, baseURL, stateDir string, now func() time.Time) error {
+	data, err := io.ReadAll(input); if err != nil { return err }
+	response := runCodexUserPromptSubmit(data, baseURL, stateDir, now)
+	if !json.Valid(response) { response = []byte("{}") }
+	written, err := output.Write(response); if err != nil { return err }
+	if written != len(response) { return io.ErrShortWrite }
+	return nil
 }
 
 func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func() time.Time) []byte {

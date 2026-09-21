@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -16,13 +20,11 @@ func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
 		t.Fatal("first message must not call the local server")
 	}))
 	defer server.Close()
-
 	output := runCodexUserPromptSubmit([]byte(`{"cwd":"C:/work","session_id":"first"}`), server.URL, t.TempDir(), time.Now)
 	if !strings.Contains(string(output), "CRITICAL FIRST ACTION") || !json.Valid(output) {
 		t.Fatalf("first output = %q, want valid ToolSearch JSON", output)
 	}
 }
-
 func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testing.T) {
 	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
 	var promptPosts atomic.Int32
@@ -42,7 +44,6 @@ func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testin
 		}
 	}))
 	defer server.Close()
-
 	stateDir := t.TempDir()
 	input := []byte(`{"cwd":"C:/work","session_id":"s-1","prompt":"persist once"}`)
 	if got := string(runCodexUserPromptSubmit(input, server.URL, stateDir, func() time.Time { return now })); !strings.Contains(got, "CRITICAL FIRST ACTION") {
@@ -55,7 +56,6 @@ func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testin
 		t.Fatalf("prompt posts = %d, want one dispatch without retry", got)
 	}
 }
-
 func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
 	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -84,7 +84,6 @@ func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-
 			input, stateDir := []byte(`{"cwd":"C:/work","session_id":"s-1"}`), t.TempDir()
 			runCodexUserPromptSubmit(input, server.URL, stateDir, func() time.Time { return now })
 			got := string(runCodexUserPromptSubmit(input, server.URL, stateDir, func() time.Time { return now }))
@@ -97,7 +96,6 @@ func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
 		})
 	}
 }
-
 func TestCodexUserPromptSessionMarkersAreIsolated(t *testing.T) {
 	stateDir := t.TempDir()
 	for _, sessionID := range []string{"one", "two"} {
@@ -107,7 +105,6 @@ func TestCodexUserPromptSessionMarkersAreIsolated(t *testing.T) {
 		}
 	}
 }
-
 func TestCodexUserPromptDeadlineHasHostSafetyMargin(t *testing.T) {
 	if codexUserPromptDeadline <= 0 || codexUserPromptDeadline >= 2*time.Second {
 		t.Fatalf("aggregate deadline = %s, want positive safety margin below host 2s", codexUserPromptDeadline)
@@ -116,7 +113,6 @@ func TestCodexUserPromptDeadlineHasHostSafetyMargin(t *testing.T) {
 		t.Fatalf("aggregate deadline = %s, want at least 500ms host safety margin", codexUserPromptDeadline)
 	}
 }
-
 func TestCodexUserPromptTimeoutFailsOpenWithoutRetry(t *testing.T) {
 	var posts atomic.Int32
 	release := make(chan struct{})
@@ -141,10 +137,64 @@ func TestCodexUserPromptTimeoutFailsOpenWithoutRetry(t *testing.T) {
 		t.Fatalf("timed-out prompt posts = %d, want no retry", got)
 	}
 }
-
 func TestCodexUserPromptMalformedInputFailsOpen(t *testing.T) {
 	output := runCodexUserPromptSubmit([]byte(`{`), "http://127.0.0.1:1", t.TempDir(), time.Now)
 	if !json.Valid(output) || !strings.Contains(string(output), "CRITICAL FIRST ACTION") {
 		t.Fatalf("malformed output = %q, want valid first-message JSON", output)
+	}
+}
+
+type codexWriterFunc func([]byte) (int, error)
+
+func (f codexWriterFunc) Write(data []byte) (int, error) { return f(data) }
+
+type codexRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f codexRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type codexCloseErrorBody struct {
+	io.Reader
+	closes *int
+}
+
+func (b *codexCloseErrorBody) Close() error { (*b.closes)++; return errors.New("close failed") }
+func TestCodexUserPromptSubmitIOReadErrorHasNoSideEffects(t *testing.T) {
+	stateDir, readErr := t.TempDir(), errors.New("read failed")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer server.Close()
+	var output strings.Builder
+	if err := runCodexUserPromptSubmitIO(iotest.ErrReader(readErr), &output, server.URL, stateDir, time.Now); !errors.Is(err, readErr) {
+		t.Fatalf("error = %v, want %v", err, readErr)
+	}
+	loaded, _ := codexPromptStatePaths(stateDir, "unknown")
+	if _, err := os.Stat(loaded); !os.IsNotExist(err) {
+		t.Fatalf("state marker error = %v, want not exist", err)
+	}
+	if output.Len() != 0 || requests.Load() != 0 {
+		t.Fatalf("output=%q requests=%d, want no side effects", output.String(), requests.Load())
+	}
+}
+func TestCodexUserPromptSubmitIOWriteErrorIsReturnedWithoutRetry(t *testing.T) {
+	writeErr := errors.New("write failed")
+	writes := 0
+	writer := codexWriterFunc(func([]byte) (int, error) { writes++; return 0, writeErr })
+	err := runCodexUserPromptSubmitIO(strings.NewReader(`{"session_id":"write-error"}`), writer, "", t.TempDir(), time.Now)
+	if !errors.Is(err, writeErr) || writes != 1 {
+		t.Fatalf("error=%v writes=%d, want write error once", err, writes)
+	}
+}
+func TestCodexJSONToleratesResponseCloseError(t *testing.T) {
+	var requests, closes int
+	client := &http.Client{Transport: codexRoundTripper(func(*http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusOK, Body: &codexCloseErrorBody{Reader: strings.NewReader(`{"project":"engram"}`), closes: &closes}}, nil
+	})}
+	var decoded map[string]string
+	if !codexJSON(context.Background(), client, http.MethodGet, "http://example.test", nil, &decoded) {
+		t.Fatal("codexJSON returned false")
+	}
+	if decoded["project"] != "engram" || requests != 1 || closes != 1 {
+		t.Fatalf("decoded=%q requests=%d closes=%d, want one successful request and close", decoded["project"], requests, closes)
 	}
 }
