@@ -62,6 +62,12 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - Synchronous NORMAL
 - Foreign keys ON
 
+### Data-directory filesystem safety
+
+Persistent SQLite WAL is unsafe on network filesystems. Engram rejects known NFS and SMB/CIFS data directories before it opens, migrates, or changes the database files. An unknown filesystem remains compatible, but is not a proof that the directory is local.
+
+If startup reports a network filesystem, stop **all** Engram processes, then copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet together to local storage. Set `ENGRAM_DATA_DIR` to that local directory, start Engram, and run `engram doctor` plus `sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"`. Engram does not auto-repair, quarantine, checkpoint, or fall back to rollback journaling for this condition.
+
 ---
 
 ## HTTP API Endpoints

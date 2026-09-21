@@ -7,6 +7,26 @@ import (
 	"testing"
 )
 
+func TestWindowsDriveTypeClassifier(t *testing.T) {
+	tests := []struct {
+		name      string
+		driveType uint32
+		want      filesystemSupport
+	}{
+		{name: "remote", driveType: windowsDriveRemote, want: filesystemRemote},
+		{name: "fixed", driveType: windowsDriveFixed, want: filesystemLocal},
+		{name: "unknown", driveType: 0, want: filesystemUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyWindowsDriveType(tt.driveType).Support; got != tt.want {
+				t.Errorf("classifyWindowsDriveType(%d) support = %q, want %q", tt.driveType, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWindowsFilesystemAdapterRejectsResolvedRemotePath(t *testing.T) {
 	dataDir := t.TempDir()
 	var gotRoot string
@@ -37,9 +57,10 @@ func TestWindowsFilesystemAdapterAllowsTemporaryDirectory(t *testing.T) {
 
 func TestWindowsFilesystemAdapterPropagatesResolverError(t *testing.T) {
 	want := errors.New("resolve path")
-	original := resolveWindowsPath
-	resolveWindowsPath = func(string) (string, error) { return "", want }
-	t.Cleanup(func() { resolveWindowsPath = original })
+	setWindowsFilesystemAdapter(t,
+		func(string) (string, error) { return "", want },
+		func(string) (uint32, error) { return windowsDriveFixed, nil },
+	)
 	if _, err := detectFilesystem("data"); !errors.Is(err, want) {
 		t.Fatalf("detectFilesystem error = %v, want %v", err, want)
 	}
