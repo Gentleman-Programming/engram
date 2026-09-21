@@ -357,6 +357,10 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
     try {
       data = await res.json();
     } catch (error) {
+      if (isTimeoutError(error)) {
+        if (opts.signal?.aborted) throw error;
+        return { data: null, transportFailure: { operation: policy.operation, outcome: policy.operation === "write" || policy.operation === "session-registration" ? "unknown" : "timed_out", timeoutMs: policy.timeoutMs } };
+      }
       if (res.ok) throw error;
     }
   }

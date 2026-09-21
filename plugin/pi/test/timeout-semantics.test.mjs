@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
-
 function runtimeContext(sessionId) {
   return {
     cwd: PLUGIN_ROOT,
@@ -18,7 +17,6 @@ function listen(server) {
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
-
 test("a delayed committed memory write is sent once and reports an unknown outcome", async () => {
   const committedWrites = [];
   let observationRequests = 0;
@@ -39,8 +37,10 @@ test("a delayed committed memory write is sent once and reports an unknown outco
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       committedWrites.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.write('{"id":');
       setTimeout(() => {
-        response.end(JSON.stringify({ id: committedWrites.length }));
+        response.end(`${committedWrites.length}}`);
         delayedResponseSent();
       }, 1500);
       return;
