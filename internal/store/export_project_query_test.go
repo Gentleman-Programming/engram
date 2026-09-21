@@ -1,0 +1,170 @@
+package store
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+type exportedQuery struct {
+	query string
+	args  []any
+}
+
+func TestExportProjectQueriesUseProjectIndexes(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("target-session", "target", "/tmp/target"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "target-session", Type: "note", Title: "target", Content: "target", Project: "target", Scope: "project"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "target-session", Content: "target", Project: "target"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured []exportedQuery
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		captured = append(captured, exportedQuery{query: query, args: append([]any(nil), args...)})
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return sqlRowScanner{rows: rows}, nil
+	}
+	if _, err := s.ExportProject("target"); err != nil {
+		t.Fatalf("ExportProject: %v", err)
+	}
+
+	assertExportQueryUsesIndex(t, s, captured, "SELECT id, ifnull(project, ''), directory", "idx_sessions_project")
+	assertExportQueryUsesIndex(t, s, captured, "SELECT "+observationSelectColumns, "idx_obs_project")
+	assertExportQueryUsesIndex(t, s, captured, "SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts", "idx_prompts_project")
+}
+
+func assertExportQueryUsesIndex(t *testing.T, s *Store, queries []exportedQuery, prefix, index string) {
+	t.Helper()
+	var details []string
+	for _, candidate := range queries {
+		if !strings.HasPrefix(strings.TrimSpace(candidate.query), prefix) {
+			continue
+		}
+		rows, err := s.db.Query("EXPLAIN QUERY PLAN "+candidate.query, candidate.args...)
+		if err != nil {
+			t.Fatalf("explain %s: %v", index, err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var selectID, order, from int
+			var detail string
+			if err := rows.Scan(&selectID, &order, &from, &detail); err != nil {
+				t.Fatal(err)
+			}
+			details = append(details, detail)
+			if strings.Contains(detail, index) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	t.Fatalf("export query %q did not use %s: %v", prefix, index, details)
+}
+
+func TestProjectRelationExportsAvoidFullScanTail(t *testing.T) {
+	s, _, _ := setupExportRelationsStore(t)
+	var captured []exportedQuery
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		captured = append(captured, exportedQuery{query: query, args: append([]any(nil), args...)})
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return sqlRowScanner{rows: rows}, nil
+	}
+	if _, err := s.ExportProject("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ExportRelationMutations("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	plans := 0
+	for _, candidate := range captured {
+		if !strings.HasPrefix(strings.TrimSpace(candidate.query), "WITH project_observations") {
+			continue
+		}
+		plans++
+		rows, err := s.db.Query("EXPLAIN QUERY PLAN "+candidate.query, candidate.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var selectID, order, from int
+			var detail string
+			if err := rows.Scan(&selectID, &order, &from, &detail); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			if strings.Contains(detail, "SCAN r") {
+				_ = rows.Close()
+				t.Fatalf("project relation export retained a full relation scan: %s", detail)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if plans != 2 {
+		t.Fatalf("project relation query plans = %d, want 2", plans)
+	}
+}
+
+func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
+	s, relationID, _ := setupExportRelationsStore(t)
+	if _, err := s.db.Exec(`UPDATE observations SET project = CASE id % 2 WHEN 0 THEN NULL ELSE '' END WHERE session_id = ?`, "ses-exp-alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, NULL), (?, ?, ?, '')`, "legacy-null", "ses-exp-alpha", "null prompt", "legacy-blank", "ses-exp-alpha", "blank prompt"); err != nil {
+		t.Fatal(err)
+	}
+
+	exported, err := s.ExportProject("alpha")
+	if err != nil {
+		t.Fatalf("ExportProject: %v", err)
+	}
+	if len(exported.Observations) != 2 || len(exported.Prompts) != 2 || len(exported.Relations) != 1 {
+		t.Fatalf("legacy export counts = obs:%d prompts:%d relations:%d", len(exported.Observations), len(exported.Prompts), len(exported.Relations))
+	}
+	againExported, err := s.ExportProject("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported.ExportedAt, againExported.ExportedAt = "", ""
+	exportBytes, _ := json.Marshal(exported)
+	againExportBytes, _ := json.Marshal(againExported)
+	if string(exportBytes) != string(againExportBytes) {
+		t.Fatalf("project export order is not deterministic: %s != %s", exportBytes, againExportBytes)
+	}
+	mutations, err := s.ExportRelationMutations("alpha")
+	if err != nil || len(mutations) != 1 || mutations[0].EntityKey != relationID {
+		t.Fatalf("legacy relation mutations = %+v, %v", mutations, err)
+	}
+	again, err := s.ExportRelationMutations("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstBytes, _ := json.Marshal(mutations)
+	againBytes, _ := json.Marshal(again)
+	if string(firstBytes) != string(againBytes) {
+		t.Fatalf("relation mutation order is not deterministic: %s != %s", firstBytes, againBytes)
+	}
+
+	dst := newTestStore(t)
+	if _, err := dst.Import(exported); err != nil {
+		t.Fatalf("import project export: %v", err)
+	}
+	if _, err := dst.GetRelation(relationID); err != nil {
+		t.Fatalf("imported relation: %v", err)
+	}
+}
