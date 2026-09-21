@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -9,6 +11,63 @@ import (
 func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	if shouldCheckForUpdates([]string{"hook", "claude-pre-tool-use"}) {
 		t.Fatal("internal hook must not run the update check before emitting a Claude hook response")
+	}
+}
+
+func TestCmdHookEmitsJSONDenialWhenClaudeInputReadFails(t *testing.T) {
+	stdinReader, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdin pipe: %v", err)
+	}
+	if err := stdinWriter.Close(); err != nil {
+		t.Fatalf("close stdin writer: %v", err)
+	}
+	if err := stdinReader.Close(); err != nil {
+		t.Fatalf("close stdin reader: %v", err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = stdinReader
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = stdoutWriter
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = stdoutWriter.Close()
+		_ = stdoutReader.Close()
+	})
+	cmdHook([]string{"claude-pre-tool-use"})
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatalf("close stdout writer: %v", err)
+	}
+	os.Stdout = oldStdout
+
+	output, err := io.ReadAll(stdoutReader)
+	if err != nil {
+		t.Fatalf("read hook output: %v", err)
+	}
+	var response struct {
+		HookSpecificOutput struct {
+			HookEventName            string `json:"hookEventName"`
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("command output = %q, want JSON denial: %v", output, err)
+	}
+	if response.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Fatalf("hook event = %q, want PreToolUse", response.HookSpecificOutput.HookEventName)
+	}
+	if response.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("permissionDecision = %q, want deny", response.HookSpecificOutput.PermissionDecision)
+	}
+	if response.HookSpecificOutput.PermissionDecisionReason != "cannot read authoritative Claude hook input" {
+		t.Fatalf("permissionDecisionReason = %q", response.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 

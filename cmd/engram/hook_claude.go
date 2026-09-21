@@ -43,7 +43,7 @@ func cmdHook(args []string) {
 
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fmt.Print(claudePreToolUseDeny("cannot read authoritative Claude hook input"))
+		fmt.Print(string(claudePreToolUseDeny("cannot read authoritative Claude hook input")))
 		return
 	}
 	fmt.Print(string(transformClaudePreToolUse(input)))
