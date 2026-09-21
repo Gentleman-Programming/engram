@@ -1040,6 +1040,10 @@ async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<un
   }
 }
 
+function isReloadShutdown(event: unknown): boolean {
+  return typeof event === "object" && event !== null && (event as { reason?: unknown }).reason === "reload";
+}
+
 function requireResolvedProject(): void {
   if (projectResolutionError) throw new Error(projectResolutionError);
   if (projectDetectionPending) throw new Error("Engram project detection is unavailable; cannot safely choose a project");
@@ -1569,9 +1573,16 @@ export default function registerEngram(pi: ExtensionAPI) {
     } catch {}
   });
 
-  pi.on("session_shutdown", async (_event: unknown, ctx: SessionContext) => {
+  pi.on("session_shutdown", async (event: unknown, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
     if (!sessionId) return;
+    if (isReloadShutdown(event)) {
+      await waitForSessionRegistration(sessionId);
+      toolCounts.delete(sessionId);
+      forgetKnownSession(sessionId);
+      forgetSelfHealContext(sessionId);
+      return;
+    }
     knownSessions.add(`\u0000closing:${sessionId}`);
     try {
       await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(

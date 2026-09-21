@@ -1390,3 +1390,76 @@ test("registered Pi-native mem_pin and mem_unpin target the observation pin rout
     else process.env.ENGRAM_URL = originalUrl;
   }
 });
+
+test("Pi session shutdown with reload reason does not end the session or block subsequent writes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const runtimeSessionId = "reloadable-runtime-session";
+  const endedSessions = new Set();
+  const sessionCalls = [];
+  const observationCalls = [];
+
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") {
+      return new Response(JSON.stringify({ project: "pi", project_source: "dir_basename", project_path: ROOT }));
+    }
+    if (path === "/sessions") {
+      const body = JSON.parse(init.body);
+      sessionCalls.push(body);
+      if (endedSessions.has(body.id)) {
+        return new Response(JSON.stringify({ error: "session has already ended", code: "session_already_ended" }), { status: 409 });
+      }
+      return new Response(JSON.stringify({ status: "created", id: body.id }), { status: 201 });
+    }
+    if (path === `/sessions/${encodeURIComponent(runtimeSessionId)}/end`) {
+      endedSessions.add(runtimeSessionId);
+      return new Response(JSON.stringify({ status: "ended", id: runtimeSessionId }));
+    }
+    if (path === "/observations") {
+      const body = JSON.parse(init.body);
+      observationCalls.push(body);
+      if (endedSessions.has(body.session_id)) {
+        return new Response(JSON.stringify({ error: "session has already ended", code: "session_already_ended" }), { status: 409 });
+      }
+      return new Response(JSON.stringify({ id: observationCalls.length, status: "saved" }), { status: 201 });
+    }
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+      const memSave = registeredTools.get("mem_save");
+      const ctx = runtimeContext(runtimeSessionId);
+
+      // 1. Start session and perform initial write
+      await eventHandlers.get("session_start")({}, ctx);
+      const initialSave = await memSave.execute("initial", { title: "before reload", content: "works before reload" }, undefined, undefined, ctx);
+      assert.equal(initialSave.isError, undefined, "initial write should succeed");
+      assert.equal(endedSessions.size, 0, "session should be active");
+
+      // 2. Pi performs /reload: emits session_shutdown with reason "reload"
+      await eventHandlers.get("session_shutdown")({ type: "session_shutdown", reason: "reload" }, ctx);
+      assert.equal(endedSessions.size, 0, "reload shutdown must NOT end the session on the server");
+
+      // 3. Extension is restarted in the same session: emits session_start with same session ID
+      await eventHandlers.get("session_start")({ type: "session_start", reason: "reload" }, ctx);
+
+      // 4. Perform write after reload in the same session
+      const postReloadSave = await memSave.execute("after-reload", { title: "after reload", content: "works after reload" }, undefined, undefined, ctx);
+      assert.equal(postReloadSave.isError, undefined, "write after reload must succeed and not be rejected as ended");
+      assert.equal(endedSessions.size, 0, "session remains active across reload");
+
+      // 5. Terminal shutdown (quit / no reload reason) DOES end the session
+      await eventHandlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, ctx);
+      assert.equal(endedSessions.has(runtimeSessionId), true, "terminal shutdown must end the session on the server");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
