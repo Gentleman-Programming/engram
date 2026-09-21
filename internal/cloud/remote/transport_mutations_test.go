@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mustNewMutationTransport is a test helper that panics on error.
@@ -91,7 +93,7 @@ func TestMutationTransportPullSinceSeq(t *testing.T) {
 	defer srv.Close()
 
 	mt := mustNewMutationTransport(t, srv.URL, "")
-	resp, err := mt.PullMutations(5, 100)
+	resp, err := mt.PullMutations(context.Background(), 5, 100)
 	if err != nil {
 		t.Fatalf("PullMutations: %v", err)
 	}
@@ -117,7 +119,7 @@ func TestMutationTransportPullUnauth(t *testing.T) {
 	defer srv.Close()
 
 	mt := mustNewMutationTransport(t, srv.URL, "")
-	_, err := mt.PullMutations(0, 100)
+	_, err := mt.PullMutations(context.Background(), 0, 100)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -159,7 +161,7 @@ func TestMutationTransportPull404ServerUnsupported(t *testing.T) {
 	defer srv.Close()
 
 	mt := mustNewMutationTransport(t, srv.URL, "")
-	_, err := mt.PullMutations(0, 100)
+	_, err := mt.PullMutations(context.Background(), 0, 100)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -292,7 +294,7 @@ func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 		if _, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}}); err != nil {
 			t.Fatalf("authenticated HTTPS push: %v", err)
 		}
-		if _, err := transport.PullMutations(0, 100); err != nil {
+		if _, err := transport.PullMutations(context.Background(), 0, 100); err != nil {
 			t.Fatalf("authenticated HTTPS pull: %v", err)
 		}
 	})
@@ -373,5 +375,53 @@ func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "server_unsupported") {
 		t.Fatalf("expected log to contain 'server_unsupported', got: %q", logOutput)
+	}
+}
+
+// TestMutationTransportPullContextCancellation verifies that a mutation pull
+// request is bound to the caller context: cancelling the context aborts an
+// in-flight request promptly instead of waiting for the HTTP client timeout.
+func TestMutationTransportPullContextCancellation(t *testing.T) {
+	requestReceived := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-requestReceived:
+		default:
+			close(requestReceived)
+		}
+		// Block until the client aborts the in-flight request on cancellation.
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	mt := mustNewMutationTransport(t, srv.URL, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := mt.PullMutations(ctx, 0, 100)
+		done <- err
+	}()
+
+	select {
+	case <-requestReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never received the pull request")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected PullMutations to fail after context cancellation, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PullMutations did not abort promptly after context cancellation")
 	}
 }

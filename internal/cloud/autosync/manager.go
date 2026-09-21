@@ -19,7 +19,6 @@ import (
 	"log"
 	"math/rand"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -115,7 +114,9 @@ func (e *nonEnrolledPendingError) Error() string {
 // CloudTransport is the subset of remote.MutationTransport methods the manager needs.
 type CloudTransport interface {
 	PushMutations(mutations []MutationEntry) (*PushMutationsResult, error)
-	PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error)
+	// PullMutations is bound to ctx so an in-flight pull request aborts when
+	// the caller cancels (e.g. CLI Ctrl+C or manager shutdown).
+	PullMutations(ctx context.Context, sinceSeq int64, limit int) (*PullMutationsResponse, error)
 }
 
 // transportStatusError is an optional interface that transport errors may implement.
@@ -685,85 +686,14 @@ func (m *Manager) pull(ctx context.Context) error {
 
 	m.setPhase(PhasePulling)
 
-	state, err := m.store.GetSyncState(m.cfg.TargetKey)
+	report, err := PullMutations(ctx, m.store, m.transport, m.cfg.TargetKey, m.cfg.PullBatchSize)
 	if err != nil {
-		return fmt.Errorf("get sync state: %w", err)
+		return err
 	}
-
-	sinceSeq := state.LastPulledSeq
-
-	touchedProjects := make(map[string]struct{})
-	projectOrder := make([]string, 0)
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		resp, err := m.transport.PullMutations(sinceSeq, m.cfg.PullBatchSize)
-		if err != nil {
-			return fmt.Errorf("transport pull: %w", err)
-		}
-
-		for _, rm := range resp.Mutations {
-			localMut := store.SyncMutation{
-				Seq:        rm.Seq,
-				TargetKey:  m.cfg.TargetKey,
-				Project:    rm.Project,
-				Entity:     rm.Entity,
-				EntityKey:  rm.EntityKey,
-				Op:         rm.Op,
-				Payload:    string(rm.Payload),
-				Source:     store.SyncSourceRemote,
-				OccurredAt: rm.OccurredAt,
-			}
-			// Phase E: per-entity error policy (design §9).
-			// ApplyPulledMutation handles relation FK misses internally by writing
-			// to sync_apply_deferred and returning nil — the cursor advances normally.
-			// All other errors (legacy entities, decode errors) propagate and halt the pull.
-			if err := m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut); err != nil {
-				return fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, err)
-			}
-			project := strings.TrimSpace(rm.Project)
-			if project != "" {
-				if _, seen := touchedProjects[project]; !seen {
-					touchedProjects[project] = struct{}{}
-					projectOrder = append(projectOrder, project)
-				}
-			}
-			if rm.Seq > sinceSeq {
-				sinceSeq = rm.Seq
-			}
-		}
-
-		if !resp.HasMore {
-			break
-		}
-	}
-
-	pendingProjects, err := m.store.ListDeferredProjectsForTarget(m.cfg.TargetKey)
-	if err != nil {
-		log.Printf("[autosync] list deferred projects target=%q error: %v", m.cfg.TargetKey, err)
-	} else {
-		for _, project := range pendingProjects {
-			project = strings.TrimSpace(project)
-			if project == "" {
-				continue
-			}
-			if _, seen := touchedProjects[project]; seen {
-				continue
-			}
-			touchedProjects[project] = struct{}{}
-			projectOrder = append(projectOrder, project)
-		}
-	}
-	sort.Strings(projectOrder)
-
-	for _, project := range projectOrder {
-		if res, err := m.store.ReplayDeferredForScope(m.cfg.TargetKey, project); err != nil {
-			log.Printf("[autosync] replayDeferred project=%q error: %v", project, err)
-		} else if res.Retried > 0 {
+	for _, replay := range report.Replays {
+		if replay.Retried > 0 {
 			log.Printf("[autosync] replayDeferred project=%q retried=%d succeeded=%d failed=%d dead=%d",
-				project, res.Retried, res.Succeeded, res.Failed, res.Dead)
+				replay.Project, replay.Retried, replay.Succeeded, replay.Failed, replay.Dead)
 		}
 	}
 

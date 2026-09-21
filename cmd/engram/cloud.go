@@ -222,16 +222,18 @@ var runUpgradeRemirror = func(s *store.Store, project string, cc *cloudconfig.Co
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
+		fmt.Fprintln(os.Stderr, "supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: engram cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
+		fmt.Println("supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
 		return
 	}
 
 	switch os.Args[2] {
+	case "pull-mutations":
+		cmdCloudPullMutations(cfg)
 	case "status":
 		cmdCloudStatus(cfg)
 	case "enroll":
@@ -250,7 +252,7 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudBootstrap()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
+		fmt.Fprintln(os.Stderr, "supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
 		exitFunc(1)
 	}
 }
