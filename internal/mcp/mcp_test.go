@@ -1128,9 +1128,14 @@ func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 				t.Fatal("expected ambiguous omitted session_id to fail")
 			}
 			got := callResultText(t, res)
-			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions", `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`, "writes to an independent project manual-save session and does not bind it to this MCP session"} {
+			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions", "engram save", `resolved project is "engram"`, "pass that exact name as the --project value", "never invent another", "writes to an independent project manual-save session and does not bind it to this MCP session"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("expected actionable ambiguity error containing %q, got %q", want, got)
+				}
+			}
+			for _, forbidden := range []string{"--project PROJECT", `engram save "TITLE" "CONTENT"`, `--project "engram"`} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("ambiguity error must not contain a copyable project command template %q: %q", forbidden, got)
 				}
 			}
 			for _, id := range []string{"uuid-first", "uuid-second"} {
@@ -1147,6 +1152,38 @@ func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 				t.Fatalf("expected no write attributed to either candidate, got %#v", obs)
 			}
 		})
+	}
+}
+
+func TestAmbiguousSessionGuidanceTreatsResolvedProjectAsData(t *testing.T) {
+	const project = "$(command)"
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/command-substitution" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+
+	s := newMCPTestStore(t)
+	runtimeDirectory := runtimeSessionDirectory("")
+	for _, id := range []string{"uuid-first", "uuid-second"} {
+		if err := s.CreateSession(id, project, runtimeDirectory); err != nil {
+			t.Fatalf("create session %q: %v", id, err)
+		}
+	}
+
+	_, err := resolveFallbackSessionID(s, project)
+	if err == nil {
+		t.Fatal("expected ambiguous fallback to fail")
+	}
+	got := err.Error()
+	for _, want := range []string{`resolved project is "$(command)"`, "pass that exact name as the --project value", "never invent another"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected project data guidance containing %q, got %q", want, got)
+		}
+	}
+	for _, forbidden := range []string{`--project "$(command)"`, `engram save "TITLE" "CONTENT"`} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("dangerous project value must not appear in a copyable command template %q: %q", forbidden, got)
+		}
 	}
 }
 
