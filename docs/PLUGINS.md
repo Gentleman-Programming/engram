@@ -24,6 +24,11 @@
 
 Pi and OpenCode activity renews the local runtime lease through their existing session registration paths. This is local SQLite liveness only: it has no timer, cloud synchronization, or cross-machine coordination.
 
+### Codex on Windows
+- The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
+- The adapter reads the setup-owned absolute pin and invokes its native hook command.
+- This path needs no Git Bash, `jq`, or `curl`.
+
 ---
 
 ## OpenCode Plugin
