@@ -94,7 +94,7 @@ func TestSQLiteRuntimeIncludesWALResetIntegrityFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var version string
 	if err := s.db.QueryRow("SELECT sqlite_version()").Scan(&version); err != nil {
