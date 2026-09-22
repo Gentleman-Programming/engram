@@ -5961,8 +5961,23 @@ func TestExportImportRoundTripPreservesOrphanedRelationsWithoutEndpoints(t *test
 	if err != nil {
 		t.Fatalf("export restored backup: %v", err)
 	}
+	for i := range exported.Relations {
+		if exported.Relations[i].SyncID == "rel-orphaned-missing-target" {
+			exported.Relations[i].JudgmentStatus = JudgmentStatusOrphaned
+		}
+	}
 	if !reflect.DeepEqual(restored.Relations, exported.Relations) {
-		t.Fatalf("restored orphaned relations = %#v, want %#v", restored.Relations, exported.Relations)
+		t.Fatalf("restored orphaned relations = %#v, want canonical %#v", restored.Relations, exported.Relations)
+	}
+
+	visible, err := destination.GetRelationsForObservations([]string{sourceObservation.SyncID, targetObservation.SyncID})
+	if err != nil {
+		t.Fatalf("get restored relations: %v", err)
+	}
+	for syncID, relationSet := range visible {
+		if len(relationSet.AsSource) != 0 || len(relationSet.AsTarget) != 0 {
+			t.Fatalf("visible orphaned relations for %q = %#v", syncID, relationSet)
+		}
 	}
 }
 
