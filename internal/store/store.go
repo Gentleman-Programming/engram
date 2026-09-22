@@ -71,9 +71,14 @@ var (
 	// different one. Guessing there would split a record from its session.
 	ErrProjectOwnershipAmbiguous   = errors.New("session project ownership is ambiguous")
 	ErrObservationProjectImmutable = errors.New("observation project cannot be reassigned")
-	ErrObservationTitleRequired    = errors.New("observation title is required")
-	ErrObservationContentRequired  = errors.New("observation content is required")
-	ErrPromptContentRequired       = errors.New("prompt content is required")
+	ErrObservationTitleRequired                 = errors.New("observation title is required")
+	ErrObservationContentRequired               = errors.New("observation content is required")
+	ErrObservationFindReplacePairRequired       = errors.New("find and replace must be provided together")
+	ErrObservationFindReplaceContentConflict    = errors.New("find and replace cannot be combined with content")
+	ErrObservationFindReplaceInputTooLarge      = errors.New("find and replace inputs exceed maximum observation length")
+	ErrObservationFindReplaceResultTooLarge     = errors.New("replacement result exceeds maximum observation length")
+	ErrObservationFindReplaceLegacyContentLarge = errors.New("cannot partially replace oversized legacy observation")
+	ErrPromptContentRequired                    = errors.New("prompt content is required")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -279,6 +284,8 @@ type UpdateObservationParams struct {
 	Type     *string `json:"type,omitempty"`
 	Title    *string `json:"title,omitempty"`
 	Content  *string `json:"content,omitempty"`
+	Find     *string `json:"find,omitempty"`
+	Replace  *string `json:"replace,omitempty"`
 	Project  *string `json:"project,omitempty"`
 	Scope    *string `json:"scope,omitempty"`
 	TopicKey *string `json:"topic_key,omitempty"`
@@ -3709,6 +3716,8 @@ func (s *Store) prepareStoredContent(content string) (string, TruncationMetadata
 	return truncateContent(content, s.cfg.MaxObservationLength), metadata
 }
 
+const observationTruncationMarker = "... [truncated]"
+
 func truncateContent(content string, max int) string {
 	if len(content) <= max {
 		return content
@@ -3718,7 +3727,7 @@ func truncateContent(content string, max int) string {
 	for end > 0 && !utf8.RuneStart(content[end]) {
 		end--
 	}
-	return content[:end] + "... [truncated]"
+	return content[:end] + observationTruncationMarker
 }
 
 func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
@@ -4029,6 +4038,16 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 	// Admission runs before the transaction so a rejected update opens no
 	// transaction, touches no row and enqueues no sync mutation. The title is
 	// checked post-strip so redaction cannot smuggle an empty one through.
+	hasFindReplace := p.Find != nil || p.Replace != nil
+	if hasFindReplace && (p.Find == nil || p.Replace == nil) {
+		return nil, ErrObservationFindReplacePairRequired
+	}
+	if hasFindReplace && p.Content != nil {
+		return nil, ErrObservationFindReplaceContentConflict
+	}
+	if hasFindReplace && (len(*p.Find) > s.cfg.MaxObservationLength || len(*p.Replace) > s.cfg.MaxObservationLength) {
+		return nil, ErrObservationFindReplaceInputTooLarge
+	}
 	if p.Title != nil {
 		if err := ValidateObservationTitle(stripPrivateTags(*p.Title)); err != nil {
 			return nil, err
@@ -4038,6 +4057,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		return nil, ErrObservationContentRequired
 	}
 
+	hasMetadata := p.Type != nil || p.Title != nil || p.Project != nil || p.Scope != nil || p.TopicKey != nil
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
@@ -4063,6 +4083,17 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		}
 		if p.Content != nil {
 			content, _ = s.prepareStoredContent(*p.Content)
+		}
+		if hasFindReplace {
+			var contentNoop bool
+			content, contentNoop, err = replaceObservationContent(content, *p.Find, *p.Replace, s.cfg.MaxObservationLength)
+			if err != nil {
+				return err
+			}
+			if contentNoop && !hasMetadata {
+				updated = obs
+				return nil
+			}
 		}
 		if p.Project != nil {
 			requestedProject, _ := NormalizeProject(*p.Project)
@@ -4111,6 +4142,46 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		return nil, err
 	}
 	return updated, nil
+}
+
+// replaceObservationContent applies a bounded literal replacement to content.
+// The growth proof runs before strings.ReplaceAll so an oversized result is
+// rejected instead of being truncated or risking an overflowing allocation.
+func replaceObservationContent(content, find, replacement string, max int) (string, bool, error) {
+	if find == "" {
+		return content, true, nil
+	}
+
+	prefix := content
+	marker := ""
+	oversized := len(content) > max
+	if strings.HasSuffix(content, observationTruncationMarker) {
+		marker = observationTruncationMarker
+		prefix = strings.TrimSuffix(content, marker)
+		oversized = len(prefix) > max
+	}
+	if !strings.Contains(prefix, find) {
+		return content, true, nil
+	}
+	if oversized {
+		return "", false, ErrObservationFindReplaceLegacyContentLarge
+	}
+
+	if growth := len(replacement) - len(find); growth > 0 {
+		remaining := max - len(prefix)
+		if remaining < 0 || strings.Count(prefix, find) > remaining/growth {
+			return "", false, ErrObservationFindReplaceResultTooLarge
+		}
+	}
+	prefix = stripPrivateTags(strings.ReplaceAll(prefix, find, replacement))
+	if prefix == "" {
+		return "", false, ErrObservationContentRequired
+	}
+	if len(prefix) > max {
+		return "", false, ErrObservationFindReplaceResultTooLarge
+	}
+	result := prefix + marker
+	return result, result == content, nil
 }
 
 func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
@@ -5513,12 +5584,16 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	// Relations are imported only after all observation endpoints have been
-	// written. Any missing endpoint aborts this transaction and rolls back the
-	// sessions, observations, prompts, and earlier relation rows together.
+	// written. A missing endpoint aborts and rolls back the transaction unless
+	// the relation is explicitly orphaned for audit preservation.
 	importedRelations := make(map[string]bool, len(data.Relations))
 	for _, relation := range data.Relations {
 		if strings.TrimSpace(relation.SyncID) == "" {
 			return nil, errors.New("import relation: sync id is required")
+		}
+		judgmentStatus := relation.JudgmentStatus
+		if isOrphanedBackupRelation(judgmentStatus) {
+			judgmentStatus = JudgmentStatusOrphaned
 		}
 		for _, endpoint := range []struct {
 			role   string
@@ -5534,7 +5609,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observations WHERE sync_id = ?)`, endpoint.syncID).Scan(&exists); err != nil {
 				return nil, fmt.Errorf("import relation %s: check %s endpoint: %w", relation.SyncID, endpoint.role, err)
 			}
-			if !exists {
+			if !exists && judgmentStatus != JudgmentStatusOrphaned {
 				return nil, fmt.Errorf("import relation %s: relation endpoint %s not found", relation.SyncID, endpoint.role)
 			}
 		}
@@ -5543,7 +5618,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			 marked_by_actor, marked_by_kind, marked_by_model, session_id, superseded_at, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation,
-			relation.Reason, relation.Evidence, relation.Confidence, relation.JudgmentStatus,
+			relation.Reason, relation.Evidence, relation.Confidence, judgmentStatus,
 			relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
 			relation.SupersededAt, relation.CreatedAt, relation.UpdatedAt,
 		)
@@ -5557,7 +5632,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		importedRelations[relation.SyncID] = inserted == 1
 	}
 	for _, relation := range data.Relations {
-		if !importedRelations[relation.SyncID] || relation.SupersededByRelationSyncID == nil {
+		if relation.SupersededByRelationSyncID == nil {
 			continue
 		}
 		var supersedingID int64
@@ -5566,6 +5641,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 				return nil, fmt.Errorf("import relation %s: superseding relation %s not found", relation.SyncID, *relation.SupersededByRelationSyncID)
 			}
 			return nil, fmt.Errorf("import relation %s: lookup superseding relation: %w", relation.SyncID, err)
+		}
+		if !importedRelations[relation.SyncID] {
+			continue
 		}
 		if _, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id = ? WHERE sync_id = ?`, supersedingID, relation.SyncID); err != nil {
 			return nil, fmt.Errorf("import relation %s: set superseding relation: %w", relation.SyncID, err)
@@ -5577,6 +5655,13 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	return result, nil
+}
+
+// isOrphanedBackupRelation permits missing observation endpoints only for audit
+// rows that normalize to the exact orphaned status. Accepted variants are stored
+// canonically so every downstream consumer continues to recognize them.
+func isOrphanedBackupRelation(status string) bool {
+	return strings.ToLower(strings.TrimSpace(status)) == JudgmentStatusOrphaned
 }
 
 type ImportResult struct {
@@ -6436,6 +6521,16 @@ func isSyncInboxTarget(targetKey string) bool {
 }
 
 func (s *Store) MarkSyncBlocked(targetKey, reasonCode, message string) error {
+	return s.markSyncBlocked(targetKey, reasonCode, message, false)
+}
+
+// MarkSyncBlockedAfterSuccess atomically records a successful inbound poll while
+// retaining the final degraded state that blocks outbound replication.
+func (s *Store) MarkSyncBlockedAfterSuccess(targetKey, reasonCode, message string) error {
+	return s.markSyncBlocked(targetKey, reasonCode, message, true)
+}
+
+func (s *Store) markSyncBlocked(targetKey, reasonCode, message string, recordSuccess bool) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	if isSyncInboxTarget(targetKey) {
 		return nil
@@ -6446,9 +6541,10 @@ func (s *Store) MarkSyncBlocked(targetKey, reasonCode, message string) error {
 		}
 		_, err := s.execHook(tx,
 			`UPDATE sync_state
-			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = ?, reason_message = ?, last_error = ?, updated_at = datetime('now')
+			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = ?, reason_message = ?, last_error = ?,
+			     last_success_at = CASE WHEN ? THEN datetime('now') ELSE last_success_at END, updated_at = datetime('now')
 			 WHERE target_key = ?`,
-			SyncLifecycleDegraded, reasonCode, message, message, targetKey,
+			SyncLifecycleDegraded, reasonCode, message, message, recordSuccess, targetKey,
 		)
 		return err
 	})
@@ -6543,6 +6639,17 @@ func (s *Store) MarkSyncPending(targetKey string) error {
 //
 // Every other apply failure keeps its existing fail-closed behavior.
 func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) error {
+	return s.applyPulledMutation(targetKey, mutation, false)
+}
+
+// ApplyPulledMutationPreservingSyncState advances the pull cursor without
+// changing the current lifecycle, reason, or failure state. It is used when
+// inbound replication succeeds while outbound sync remains policy-blocked.
+func (s *Store) ApplyPulledMutationPreservingSyncState(targetKey string, mutation SyncMutation) error {
+	return s.applyPulledMutation(targetKey, mutation, true)
+}
+
+func (s *Store) applyPulledMutation(targetKey string, mutation SyncMutation, preserveSyncState bool) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	return s.withTx(func(tx *sql.Tx) error {
 		state, err := s.getSyncStateTx(tx, targetKey)
@@ -6570,6 +6677,14 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 					}
 				}
 			}
+		}
+
+		if preserveSyncState {
+			_, err = s.execHook(tx,
+				`UPDATE sync_state SET last_pulled_seq = ?, updated_at = datetime('now') WHERE target_key = ?`,
+				mutation.Seq, targetKey,
+			)
+			return err
 		}
 
 		_, err = s.execHook(tx,

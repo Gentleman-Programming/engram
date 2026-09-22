@@ -40,7 +40,8 @@ jobs:
                 const pulls = await resolveAssociatedPullRequests(github, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  commitSha: context.payload.merge_group.head_sha,
+                  baseRef: context.payload.merge_group.base_ref,
+                  headRef: context.payload.merge_group.head_ref,
                 });
                 failures = await aggregatePullRequestResults(pulls, validate);
               } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
@@ -107,7 +108,8 @@ jobs:
                 const pulls = await resolveAssociatedPullRequests(github, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  commitSha: context.payload.merge_group.head_sha,
+                  baseRef: context.payload.merge_group.base_ref,
+                  headRef: context.payload.merge_group.head_ref,
                 });
                 failures = await aggregatePullRequestResults(pulls, validate);
               } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }

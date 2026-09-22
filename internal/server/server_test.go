@@ -3961,6 +3961,46 @@ func TestHandleAddObservationBlankTitleNotMaskedBySessionError(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateObservationFindReplace(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	if err := st.CreateSession("s-find-replace", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-find-replace", Type: "note", Title: "Original", Content: "old old", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	replace := httptest.NewRecorder()
+	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
+	if replace.Code != http.StatusOK {
+		t.Fatalf("replacement PATCH = %d: %s", replace.Code, replace.Body.String())
+	}
+	var updated store.Observation
+	if err := json.Unmarshal(replace.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode replacement response: %v", err)
+	}
+	if updated.Content != "new new" {
+		t.Fatalf("replacement content = %q", updated.Content)
+	}
+
+	for _, body := range []string{`{"find":"new"}`, `{"find":"new","replace":"old","content":"other"}`} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("invalid replacement PATCH %s = %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"find":"old","replace":"new"}`)))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing replacement PATCH = %d: %s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

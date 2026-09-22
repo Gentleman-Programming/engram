@@ -145,13 +145,14 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 	findings := make([]Finding, 0)
 	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
-		if _, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects); knownManualTarget {
-			continue
-		}
+		nameTarget, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
 		directory := strings.TrimSpace(session.Directory)
 		directoryProject, ok := detectSessionDirectoryProject(scope, detected, directory)
-		sessionProject := normalizeProjectName(session.Project)
-		if !ok || directoryProject.Project == "" || sessionProject == "" || directoryProject.Project == sessionProject {
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameTarget, knownManualTarget, directoryProject)
+		if !decision.shouldReportDirectoryMismatch() {
 			continue
 		}
 		findings = append(findings, Finding{
@@ -177,14 +178,20 @@ func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject
 	}
 	if scope.DetectProject != nil {
 		detected, ok := scope.DetectProject(directory)
+		if !ok || !isAcceptedDirectoryAuthoritySource(detected.Source) {
+			return DetectedProject{}, false
+		}
 		cache[directory] = detected
-		return detected, ok && detected.Project != ""
+		return detected, detected.Project != ""
 	}
 	if _, err := os.Stat(directory); err != nil {
 		return DetectedProject{}, false
 	}
 	res := projectpkg.DetectProjectFull(directory)
-	if res.Error != nil || (res.Source != projectpkg.SourceGitRemote && res.Source != projectpkg.SourceGitRoot) {
+	if res.Error != nil {
+		return DetectedProject{}, false
+	}
+	if !isAcceptedDirectoryAuthoritySource(res.Source) {
 		return DetectedProject{}, false
 	}
 	detected := DetectedProject{Project: normalizeProjectName(res.Project), Source: res.Source, Path: res.Path}
@@ -203,10 +210,15 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 		return CheckResult{}, err
 	}
 	findings := make([]Finding, 0)
+	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
 		nameProject, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
-		sessionProject := normalizeProjectName(session.Project)
-		if nameProject == "" || sessionProject == "" || nameProject == sessionProject || !knownManualTarget {
+		directoryProject, ok := detectSessionDirectoryProject(scope, detected, strings.TrimSpace(session.Directory))
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameProject, knownManualTarget, directoryProject)
+		if !decision.shouldReportManualNameMismatch() {
 			continue
 		}
 		findings = append(findings, Finding{
@@ -223,15 +235,101 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
 }
 
+// sessionProjectAuthorityDecision centralizes the evidence hierarchy shared by
+// doctor findings and repair planning. Trusted Git evidence can establish a
+// move. A basename can only corroborate the persisted project and veto a
+// conflicting manual-name move; it can never establish a new target.
+type sessionProjectAuthority string
+
+const (
+	sessionProjectAuthorityNone             sessionProjectAuthority = ""
+	sessionProjectAuthorityTrustedDirectory sessionProjectAuthority = "trusted_directory"
+	sessionProjectAuthorityManualName       sessionProjectAuthority = "manual_name"
+)
+
+type sessionProjectAuthorityDecision struct {
+	persistedProject                       string
+	directoryProject                       string
+	directorySource                        string
+	directoryPath                          string
+	knownManualTarget                      bool
+	directoryBasenameCorroboratesPersisted bool
+	authority                              sessionProjectAuthority
+	repairTarget                           string
+	repairEvidenceSource                   string
+	repairEvidencePath                     string
+}
+
+func decideSessionProjectAuthority(persistedProject, manualTarget string, knownManualTarget bool, directory DetectedProject) sessionProjectAuthorityDecision {
+	decision := sessionProjectAuthorityDecision{
+		persistedProject:  normalizeProjectName(persistedProject),
+		directoryProject:  normalizeProjectName(directory.Project),
+		directorySource:   strings.TrimSpace(directory.Source),
+		directoryPath:     directory.Path,
+		knownManualTarget: knownManualTarget,
+	}
+	manualTarget = normalizeProjectName(manualTarget)
+	if decision.persistedProject == "" {
+		return decision
+	}
+	if isTrustedDirectoryEvidence(decision.directorySource) && decision.directoryProject != "" {
+		if decision.directoryProject != decision.persistedProject {
+			decision.authority = sessionProjectAuthorityTrustedDirectory
+			decision.repairTarget = decision.directoryProject
+			decision.repairEvidenceSource = decision.directorySource
+			decision.repairEvidencePath = decision.directoryPath
+		}
+		return decision
+	}
+	if decision.directorySource == projectpkg.SourceDirBasename {
+		decision.directoryBasenameCorroboratesPersisted = decision.directoryProject == decision.persistedProject
+		return decision
+	}
+	if knownManualTarget && manualTarget != "" && manualTarget != decision.persistedProject {
+		decision.authority = sessionProjectAuthorityManualName
+		decision.repairTarget = manualTarget
+	}
+	return decision
+}
+
+func (d sessionProjectAuthorityDecision) shouldReportDirectoryMismatch() bool {
+	return d.authority == sessionProjectAuthorityTrustedDirectory
+}
+
+func (d sessionProjectAuthorityDecision) shouldReportManualNameMismatch() bool {
+	return d.authority == sessionProjectAuthorityManualName
+}
+
+func (d sessionProjectAuthorityDecision) shouldRepairFromTrustedDirectory() bool {
+	return d.authority == sessionProjectAuthorityTrustedDirectory
+}
+
+func (d sessionProjectAuthorityDecision) shouldRepairFromManualName() bool {
+	return d.authority == sessionProjectAuthorityManualName
+}
+
+func isAcceptedDirectoryAuthoritySource(source string) bool {
+	switch strings.TrimSpace(source) {
+	case projectpkg.SourceGitRemote, projectpkg.SourceGitRoot, projectpkg.SourceDirBasename:
+		return true
+	default:
+		return false
+	}
+}
+
 // knownManualSessionTarget recognizes the exact manual session name convention
 // only when its normalized target is evidenced by a local session project. A
 // manual-looking name without that local evidence remains untrusted.
 func knownManualSessionTarget(name string, knownProjects map[string]bool) (string, bool) {
-	if !strings.HasPrefix(name, "manual-save-") {
-		return "", false
-	}
-	target := normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
+	target := manualSessionNameTarget(name)
 	return target, target != "" && knownProjects[target]
+}
+
+func manualSessionNameTarget(name string) string {
+	if !strings.HasPrefix(name, "manual-save-") {
+		return ""
+	}
+	return normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
 }
 
 func knownSessionProjects(scope Scope) (map[string]bool, error) {

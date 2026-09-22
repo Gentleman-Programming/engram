@@ -86,8 +86,10 @@ type LocalStore interface {
 	AcquireSyncLease(targetKey, owner string, ttl time.Duration, now time.Time) (bool, error)
 	ReleaseSyncLease(targetKey, owner string) error
 	ApplyPulledMutation(targetKey string, mutation store.SyncMutation) error
+	ApplyPulledMutationPreservingSyncState(targetKey string, mutation store.SyncMutation) error
 	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
 	MarkSyncBlocked(targetKey, reasonCode, message string) error
+	MarkSyncBlockedAfterSuccess(targetKey, reasonCode, message string) error
 	MarkSyncHealthy(targetKey string) error
 	ListDeferredProjectsForTarget(targetKey string) ([]string, error)
 	ReplayDeferredForScope(targetKey, project string) (store.ReplayDeferredResult, error)
@@ -489,15 +491,28 @@ func (m *Manager) cycle(ctx context.Context) {
 	m.leaseHeld = true
 	m.mu.Unlock()
 
-	// Push, then pull.
+	// Push, then pull. A typed non-enrollment block applies only to outbound
+	// mutations, so inbound replication can still progress without changing the
+	// final degraded state that explains the blocked outbound backlog.
 	if err := m.push(ctx); err != nil {
 		var blocked *nonEnrolledPendingError
-		if errors.As(err, &blocked) {
-			m.recordBlocked(err.Error(), constants.ReasonNonEnrolledPendingMutations)
+		if !errors.As(err, &blocked) {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
 			return
 		}
-		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
+
+		blockedMessage := err.Error()
+		m.recordBlocked(blockedMessage, constants.ReasonNonEnrolledPendingMutations)
+		if err := m.pullPreservingSyncState(ctx); err != nil {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
+			return
+		}
+		if err := m.recordBlockedAfterSuccess(blockedMessage, constants.ReasonNonEnrolledPendingMutations); err != nil {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("persist blocked state after successful pull: %v", err), err), reasonCode)
+		}
 		return
 	}
 
@@ -679,6 +694,14 @@ func (m *Manager) push(ctx context.Context) error {
 // ─── Pull ────────────────────────────────────────────────────────────────────
 
 func (m *Manager) pull(ctx context.Context) error {
+	return m.pullWithSyncState(ctx, false)
+}
+
+func (m *Manager) pullPreservingSyncState(ctx context.Context) error {
+	return m.pullWithSyncState(ctx, true)
+}
+
+func (m *Manager) pullWithSyncState(ctx context.Context, preserveSyncState bool) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -720,7 +743,12 @@ func (m *Manager) pull(ctx context.Context) error {
 			// ApplyPulledMutation handles relation FK misses internally by writing
 			// to sync_apply_deferred and returning nil — the cursor advances normally.
 			// All other errors (legacy entities, decode errors) propagate and halt the pull.
-			if err := m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut); err != nil {
+			if preserveSyncState {
+				err = m.store.ApplyPulledMutationPreservingSyncState(m.cfg.TargetKey, localMut)
+			} else {
+				err = m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut)
+			}
+			if err != nil {
 				return fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, err)
 			}
 			project := strings.TrimSpace(rm.Project)
@@ -787,6 +815,7 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	m.status.ConsecutiveFailures = failures
 	m.status.LastError = msg
 	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = msg
 
 	backoff := m.computeBackoff(failures)
 	bu := time.Now().Add(backoff)
@@ -816,6 +845,24 @@ func (m *Manager) recordBlocked(msg, reasonCode string) {
 	m.mu.Unlock()
 
 	_ = m.store.MarkSyncBlocked(m.cfg.TargetKey, reasonCode, msg)
+}
+
+func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) error {
+	if err := m.store.MarkSyncBlockedAfterSuccess(m.cfg.TargetKey, reasonCode, msg); err != nil {
+		return err
+	}
+
+	now := time.Now()
+	m.mu.Lock()
+	m.status.Phase = PhasePushFailed
+	m.status.ConsecutiveFailures = 0
+	m.status.LastError = msg
+	m.status.BackoffUntil = nil
+	m.status.LastSyncAt = &now
+	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = msg
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) recordSuccess() {
