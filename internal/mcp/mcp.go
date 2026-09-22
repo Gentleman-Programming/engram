@@ -564,7 +564,13 @@ Examples:
 					mcp.Description("New title"),
 				),
 				mcp.WithString("content",
-					mcp.Description("New content"),
+					mcp.Description("New content; cannot be combined with find and replace"),
+				),
+				mcp.WithString("find",
+					mcp.Description("Literal case-sensitive text to replace everywhere; requires replace"),
+				),
+				mcp.WithString("replace",
+					mcp.Description("Literal replacement text; requires find"),
 				),
 				mcp.WithString("type",
 					mcp.Description("New type/category"),
@@ -1660,6 +1666,12 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		if v, ok := req.GetArguments()["content"].(string); ok {
 			update.Content = &v
 		}
+		if v, ok := req.GetArguments()["find"].(string); ok {
+			update.Find = &v
+		}
+		if v, ok := req.GetArguments()["replace"].(string); ok {
+			update.Replace = &v
+		}
 		if v, ok := req.GetArguments()["type"].(string); ok {
 			update.Type = &v
 		}
@@ -1670,7 +1682,7 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			update.TopicKey = &v
 		}
 
-		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
+		if update.Title == nil && update.Content == nil && update.Find == nil && update.Replace == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 

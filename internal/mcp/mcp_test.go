@@ -2453,6 +2453,67 @@ func TestHandleSuggestTopicKeyReturnsErrorWhenSuggestionEmpty(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateFindReplace(t *testing.T) {
+	t.Run("schema exposes paired fields", func(t *testing.T) {
+		tool := NewServer(newMCPTestStore(t)).GetTool("mem_update")
+		for _, field := range []string{"find", "replace"} {
+			if _, ok := tool.Tool.InputSchema.Properties[field]; !ok {
+				t.Fatalf("mem_update schema missing %q", field)
+			}
+		}
+	})
+
+	t.Run("forwards replacements and reports invalid pairs", func(t *testing.T) {
+		s := newMCPTestStore(t)
+		if err := s.CreateSession("s-find-replace", "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		id, err := s.AddObservation(store.AddObservationParams{SessionID: "s-find-replace", Type: "note", Title: "Original", Content: "old old", Project: "engram", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		h := handleUpdate(s, MCPConfig{DefaultProject: "engram"})
+		result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "old", "replace": "new"}}})
+		if err != nil || result.IsError {
+			t.Fatalf("find/replace update = %#v, %v", result, err)
+		}
+		updated, err := s.GetObservation(id)
+		if err != nil || updated.Content != "new new" {
+			t.Fatalf("forwarded content = %#v, err=%v", updated, err)
+		}
+		invalid, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "new"}}})
+		if err != nil || !invalid.IsError || !strings.Contains(callResultText(t, invalid), "find and replace") {
+			t.Fatalf("incomplete pair result = %#v, err=%v", invalid, err)
+		}
+		conflict, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "new", "replace": "old", "content": "other"}}})
+		if err != nil || !conflict.IsError || !strings.Contains(callResultText(t, conflict), "content") {
+			t.Fatalf("content conflict result = %#v, err=%v", conflict, err)
+		}
+	})
+
+	t.Run("retains ownership checks", func(t *testing.T) {
+		s := newMCPTestStore(t)
+		if err := s.CreateSession("s-current", "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create current-project session: %v", err)
+		}
+		if err := s.CreateSession("s-owned", "other-project", "/tmp/other-project"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		id, err := s.AddObservation(store.AddObservationParams{SessionID: "s-owned", Type: "note", Title: "Original", Content: "old", Project: "other-project", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		result, err := handleUpdate(s, MCPConfig{DefaultProject: "engram"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "old", "replace": "new"}}})
+		if err != nil || !result.IsError {
+			t.Fatalf("cross-project replacement = %#v, %v", result, err)
+		}
+		envelope := callResultJSON(t, result)
+		if envelope["error_code"] != "project_mismatch" {
+			t.Fatalf("error code = %v, want project_mismatch", envelope["error_code"])
+		}
+	})
+}
+
 func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-all-fields", "engram", "/tmp/engram"); err != nil {
