@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="1024" alt="Engram — One Brain. Local or Cloud." src="assets/branding/engram-banner.png" />
+  <img width="1024" alt="Engram neon elephant banner: the elephant exhales a memory stream (remember, sync, recall), the ENGRAM wordmark is written on, and the tagline One Brain. Local or Cloud. appears" src="assets/branding/engram-banner.gif" />
 </p>
 
 <p align="center">

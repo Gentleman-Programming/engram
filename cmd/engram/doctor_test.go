@@ -268,7 +268,8 @@ func TestCmdDoctorRepairClassificationMatrixAndDispatchInvariant(t *testing.T) {
 
 func TestCmdDoctorRepairManualSessionNamePlanDryRunApplyJSON(t *testing.T) {
 	cfg := testConfig(t)
-	seedDoctorRepairRows(t, cfg, "manual-save-engram", "sias-app", "/work/not-a-repository")
+	missingDirectory := filepath.Join(t.TempDir(), "not-a-repository")
+	seedDoctorRepairRows(t, cfg, "manual-save-engram", "sias-app", missingDirectory)
 	seedDoctorSession(t, cfg, "known-engram", "engram", "/work/engram")
 
 	withArgs(t, "engram", "doctor", "repair", "--project", "sias-app", "--check", "manual_session_name_project_mismatch", "--plan")

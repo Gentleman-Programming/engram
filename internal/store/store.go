@@ -5513,12 +5513,16 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	// Relations are imported only after all observation endpoints have been
-	// written. Any missing endpoint aborts this transaction and rolls back the
-	// sessions, observations, prompts, and earlier relation rows together.
+	// written. A missing endpoint aborts and rolls back the transaction unless
+	// the relation is explicitly orphaned for audit preservation.
 	importedRelations := make(map[string]bool, len(data.Relations))
 	for _, relation := range data.Relations {
 		if strings.TrimSpace(relation.SyncID) == "" {
 			return nil, errors.New("import relation: sync id is required")
+		}
+		judgmentStatus := relation.JudgmentStatus
+		if isOrphanedBackupRelation(judgmentStatus) {
+			judgmentStatus = JudgmentStatusOrphaned
 		}
 		for _, endpoint := range []struct {
 			role   string
@@ -5534,7 +5538,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observations WHERE sync_id = ?)`, endpoint.syncID).Scan(&exists); err != nil {
 				return nil, fmt.Errorf("import relation %s: check %s endpoint: %w", relation.SyncID, endpoint.role, err)
 			}
-			if !exists && !isOrphanedBackupRelation(relation.JudgmentStatus) {
+			if !exists && judgmentStatus != JudgmentStatusOrphaned {
 				return nil, fmt.Errorf("import relation %s: relation endpoint %s not found", relation.SyncID, endpoint.role)
 			}
 		}
@@ -5543,7 +5547,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			 marked_by_actor, marked_by_kind, marked_by_model, session_id, superseded_at, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation,
-			relation.Reason, relation.Evidence, relation.Confidence, relation.JudgmentStatus,
+			relation.Reason, relation.Evidence, relation.Confidence, judgmentStatus,
 			relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
 			relation.SupersededAt, relation.CreatedAt, relation.UpdatedAt,
 		)
@@ -5583,8 +5587,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 }
 
 // isOrphanedBackupRelation permits missing observation endpoints only for audit
-// rows that normalize to the exact orphaned status. Import still writes the
-// original status unchanged so direct backups remain lossless.
+// rows that normalize to the exact orphaned status. Accepted variants are stored
+// canonically so every downstream consumer continues to recognize them.
 func isOrphanedBackupRelation(status string) bool {
 	return strings.ToLower(strings.TrimSpace(status)) == JudgmentStatusOrphaned
 }
