@@ -4527,7 +4527,7 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 		t.Fatalf("unexpected new prompts: %+v", newOnly.Prompts)
 	}
 
-	if got := normalizeTime("2025-01-01T15:04:05Z"); got != "2025-01-01 15:04:05" {
+	if got := normalizeTime("2025-01-01T15:04:05.123456789Z"); got != "2025-01-01 15:04:05.123456789" {
 		t.Fatalf("unexpected RFC3339 normalization: %q", got)
 	}
 	if got := normalizeTime(" 2025-01-01 15:04:05 "); got != "2025-01-01 15:04:05" {

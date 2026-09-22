@@ -2523,9 +2523,9 @@ func decodeSyncPayloadForProject(payload []byte, dest any) error {
 func normalizeTime(t string) string {
 	// Try RFC3339 first
 	if parsed, err := time.Parse(time.RFC3339, t); err == nil {
-		return parsed.UTC().Format("2006-01-02 15:04:05")
+		return parsed.UTC().Format("2006-01-02 15:04:05.000000000")
 	}
-	// Already in "2006-01-02 15:04:05" format
+	// Already in SQLite time format
 	return strings.TrimSpace(t)
 }
 

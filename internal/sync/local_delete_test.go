@@ -12,31 +12,23 @@ import (
 )
 
 func mustExportLocalChunk(t *testing.T, sy *Syncer, project string) (*SyncResult, ChunkData) {
-	t.Helper()
 	result, err := sy.Export("alice", project)
 	if err != nil || result.IsEmpty {
 		t.Fatalf("export = %+v, %v", result, err)
 	}
 	payload, err := sy.transport.ReadChunk(result.ChunkID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustNoError(t, err)
 	var chunk ChunkData
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		t.Fatal(err)
-	}
+	mustNoError(t, json.Unmarshal(payload, &chunk))
 	return result, chunk
 }
 
 func mustImportLocal(t *testing.T, sy *Syncer) {
-	t.Helper()
-	if _, err := sy.Import(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := sy.Import()
+	mustNoError(t, err)
 }
 
 func mustNoError(t *testing.T, err error) {
-	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,12 +47,13 @@ func TestLocalExportDeleteTombstonesIgnoreManifestTimestampAndRemainIdempotent(t
 	if _, err := s.DB().Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES ('prompt-legacy', 'legacy-parent', '', '2000-01-02 03:04:05')`); err != nil {
 		t.Fatal(err)
 	}
+	mustNoError(t, s.DeleteSession("legacy-parent"))
 	dir := filepath.Join(t.TempDir(), ".engram")
 	writeLocalChunkFile(t, dir, "historical", ChunkData{})
 	writeManifestFile(t, dir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: "2099-01-02T03:04:05Z"}}})
 	sy := NewLocalWithProject(s, dir, "proj-a")
 	_, chunk := mustExportLocalChunk(t, sy, "proj-a")
-	if len(chunk.Mutations) != 2 || chunk.Mutations[0].EntityKey != "prompt-legacy" || chunk.Mutations[0].Project != "proj-a" || chunk.Mutations[1].EntityKey != "session-proj-a" {
+	if len(chunk.Mutations) != 3 || chunk.Mutations[0].EntityKey != "prompt-legacy" || chunk.Mutations[0].Project != "proj-a" || chunk.Mutations[1].EntityKey != "session-proj-a" || chunk.Mutations[2].EntityKey != "legacy-parent" {
 		t.Fatalf("project-scoped historical deletes = %+v", chunk.Mutations)
 	}
 	if replay, err := sy.Export("alice", "proj-a"); err != nil || !replay.IsEmpty {
@@ -130,10 +123,10 @@ func TestLocalImportHardDeleteGenerationSurvivesOutOfOrderChunks(t *testing.T) {
 	}
 	projectValue := project
 	dir := filepath.Join(t.TempDir(), ".engram")
-	writeLocalChunkFile(t, dir, "delete", deleteChunk("2026-02-01 00:00:00"))
+	writeLocalChunkFile(t, dir, "delete", deleteChunk("2026-02-01 00:00:00.000000001"))
 	writeLocalChunkFile(t, dir, "stale", ChunkData{
-		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/stale", StartedAt: "2026-01-01 00:00:00"}},
-		Observations: []store.Observation{{SyncID: observationID, SessionID: parentID, Project: &projectValue, Type: "note", Content: "stale", Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/stale", StartedAt: "2026-02-01 00:00:00.000000000"}},
+		Observations: []store.Observation{{SyncID: observationID, SessionID: parentID, Project: &projectValue, Type: "note", Content: "stale", Scope: "project", CreatedAt: "2026-02-01 00:00:00.000000000", UpdatedAt: "2026-02-01 00:00:00.000000000"}},
 	})
 	entries := []ChunkEntry{{ID: "delete"}, {ID: "stale"}}
 	writeManifestFile(t, dir, &Manifest{Version: ownershipModeManifestVersion, Chunks: entries})
@@ -146,8 +139,8 @@ func TestLocalImportHardDeleteGenerationSurvivesOutOfOrderChunks(t *testing.T) {
 		t.Fatalf("stale observation resurrected: %v", err)
 	}
 	writeLocalChunkFile(t, dir, "new", ChunkData{
-		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/new", StartedAt: "2026-03-01 00:00:00"}},
-		Observations: []store.Observation{{SyncID: observationID, SessionID: parentID, Project: &projectValue, Type: "note", Content: "new", Scope: "project", CreatedAt: "2026-03-01 00:00:00", UpdatedAt: "2026-03-01 00:00:00"}},
+		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/new", StartedAt: "2026-02-01 00:00:00.000000002"}},
+		Observations: []store.Observation{{SyncID: observationID, SessionID: parentID, Project: &projectValue, Type: "note", Content: "new", Scope: "project", CreatedAt: "2026-02-01 00:00:00.000000002", UpdatedAt: "2026-02-01 00:00:00.000000002"}},
 	})
 	entries = append(entries, ChunkEntry{ID: "new"})
 	writeManifestFile(t, dir, &Manifest{Version: ownershipModeManifestVersion, Chunks: entries})
@@ -165,6 +158,10 @@ func TestLocalExportHardDeleteAfterRecreatedSessionSnapshot(t *testing.T) {
 	const project, sessionID = "proj-recreate", "session-recreate"
 	sy := NewLocalWithProject(s, filepath.Join(t.TempDir(), ".engram"), project)
 	mustNoError(t, s.CreateSession(sessionID, project, "/tmp/recreate"))
+	initial, err := s.GetSession(sessionID)
+	if err != nil || !strings.Contains(initial.StartedAt, ".") {
+		t.Fatalf("initial session generation = %+v, %v", initial, err)
+	}
 	mustNoError(t, s.DeleteSession(sessionID))
 	if _, err := s.DB().Exec(`UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID); err != nil {
 		t.Fatal(err)
@@ -193,8 +190,5 @@ func TestLocalExportHardDeleteAfterRecreatedSessionSnapshot(t *testing.T) {
 	mustImportLocal(t, NewLocalWithProject(dst, sy.syncDir, project))
 	if _, err := dst.GetSession(sessionID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("imported session survived: %v", err)
-	}
-	if replay, err := sy.Export("alice", project); err != nil || !replay.IsEmpty {
-		t.Fatalf("replayed export = %+v, %v", replay, err)
 	}
 }

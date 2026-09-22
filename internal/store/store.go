@@ -5269,11 +5269,11 @@ func (s *Store) ExportLocalDeleteTombstones(project string) ([]SyncMutation, err
 
 	promptWhere, promptArgs := "1 = 1", []any{}
 	if project != "" {
-		promptWhere += " AND (ifnull(p.project, '') = ? OR (ifnull(p.project, '') = '' AND ifnull(s.project, '') = ?))"
-		promptArgs = append(promptArgs, project, project)
+		promptWhere += " AND coalesce(nullif(p.project, ''), nullif(s.project, ''), ifnull((SELECT st.project FROM sync_delete_tombstones st WHERE st.entity = 'session' AND st.entity_key = p.session_id AND st.active = 1), '')) = ?"
+		promptArgs = append(promptArgs, project)
 	}
 	promptRows, err := s.queryItHook(s.db, `
-		SELECT p.sync_id, ifnull(p.session_id, ''), coalesce(nullif(p.project, ''), ifnull(s.project, '')), p.deleted_at
+		SELECT p.sync_id, ifnull(p.session_id, ''), coalesce(nullif(p.project, ''), nullif(s.project, ''), ifnull((SELECT st.project FROM sync_delete_tombstones st WHERE st.entity = 'session' AND st.entity_key = p.session_id AND st.active = 1), '')), p.deleted_at
 		FROM prompt_tombstones p LEFT JOIN sessions s ON s.id = p.session_id
 		WHERE `+promptWhere, promptArgs...)
 	if err != nil {
@@ -8304,26 +8304,26 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string)
 		return err
 	}
 	_, err := s.execHook(tx,
-		`INSERT INTO sessions (id, project, ownership_mode, directory) VALUES (?, ?, ?, ?)
+		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
 		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END`,
-		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		id, project, mode, directory, Now(), sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	return err
 }
 
 func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory, mode string) error {
 	result, err := s.execHook(tx,
-		`INSERT INTO sessions (id, project, ownership_mode, directory, runtime_lease_expires_at) VALUES (?, ?, ?, ?, datetime('now', ?))
+		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, runtime_lease_expires_at) VALUES (?, ?, ?, ?, ?, datetime('now', ?))
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
 		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END,
 		   runtime_lease_expires_at = excluded.runtime_lease_expires_at
 		 WHERE sessions.ended_at IS NULL`,
-		id, project, mode, directory, runtimeSessionLeaseDuration, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		id, project, mode, directory, Now(), runtimeSessionLeaseDuration, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err
@@ -11410,9 +11410,9 @@ func ClassifyTool(toolName string) string {
 	}
 }
 
-// Now returns the current time formatted for SQLite.
+// Now returns the current time formatted for SQLite with persisted generation precision.
 func Now() string {
-	return time.Now().UTC().Format("2006-01-02 15:04:05")
+	return time.Now().UTC().Format("2006-01-02 15:04:05.000000000")
 }
 
 // ─── Test-accessor helpers (REQ-009 / Phase G integration tests) ──────────────
