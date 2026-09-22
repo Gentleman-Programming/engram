@@ -1485,7 +1485,12 @@ func (s *Server) handleMergeProjects(w http.ResponseWriter, r *http.Request) {
 		To        string   `json:"to"`
 		Confirmed bool     `json:"confirmed"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
 		jsonError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}

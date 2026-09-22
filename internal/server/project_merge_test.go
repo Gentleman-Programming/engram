@@ -102,6 +102,44 @@ func TestHandleMergeProjectsValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestHandleMergeProjectsRejectsTrailingBodyBeforeMerge(t *testing.T) {
+	t.Setenv("ENGRAM_HTTP_TOKEN", projectMergeTestToken)
+	valid := `{"from":["Engram"],"to":"engram","confirmed":true}`
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "second JSON", body: valid + `{}`},
+		{name: "oversized trailing data", body: valid + strings.Repeat("x", 8<<10)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newServerTestStore(t)
+			seedHTTPProjectMerge(t, st, "Engram")
+			srv := New(st, 0)
+			var writes int32
+			srv.SetOnWrite(func() { atomic.AddInt32(&writes, 1) })
+
+			rec := serveProjectMerge(t, srv.Handler(), tt.body, "Bearer "+projectMergeTestToken)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			var legacy, canonical int
+			if err := st.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'Engram'`).Scan(&legacy); err != nil {
+				t.Fatalf("count legacy observations: %v", err)
+			}
+			if err := st.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'engram'`).Scan(&canonical); err != nil {
+				t.Fatalf("count canonical observations: %v", err)
+			}
+			if legacy != 1 || canonical != 0 {
+				t.Fatalf("rejected request merged observations: legacy=%d canonical=%d", legacy, canonical)
+			}
+			if atomic.LoadInt32(&writes) != 0 {
+				t.Fatal("rejected request notified autosync")
+			}
+		})
+	}
+}
+
 func TestHandleMergeProjectsMergesSyncIdentityAndIsIdempotent(t *testing.T) {
 	t.Setenv("ENGRAM_HTTP_TOKEN", projectMergeTestToken)
 	st := newServerTestStore(t)
