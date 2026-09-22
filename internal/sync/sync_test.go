@@ -4534,8 +4534,8 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 		t.Fatalf("unexpected plain normalization: %q", got)
 	}
 
-	m := &Manifest{Chunks: []ChunkEntry{{ID: "old", CreatedAt: "2025-01-01T00:00:00Z"}, {ID: "new", CreatedAt: "2025-02-01T00:00:00Z"}}}
-	if got := sy.lastChunkTime(m); got != "2025-02-01T00:00:00Z" {
+	m := &Manifest{Chunks: []ChunkEntry{{ID: "old", CreatedAt: "2025-02-01T00:00:00Z"}, {ID: "new", CreatedAt: "2025-02-01T00:00:00.5Z"}}}
+	if got := sy.lastChunkTime(m); got != "2025-02-01T00:00:00.5Z" {
 		t.Fatalf("unexpected last chunk time: %q", got)
 	}
 }

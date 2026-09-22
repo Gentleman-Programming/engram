@@ -5227,8 +5227,7 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 	return mutations, nil
 }
 
-// ExportLocalDeleteTombstones projects locally retained hard-delete intent
-// into canonical mutations. Manifest history reconciles them by identity.
+// ExportLocalDeleteTombstones projects locally retained hard-delete intent into canonical mutations.
 func (s *Store) ExportLocalDeleteTombstones(project string) ([]SyncMutation, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)

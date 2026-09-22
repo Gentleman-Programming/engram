@@ -1983,7 +1983,7 @@ func (sy *Syncer) lastChunkTime(m *Manifest) string {
 	// Find the most recent chunk
 	latest := m.Chunks[0].CreatedAt
 	for _, c := range m.Chunks[1:] {
-		if c.CreatedAt > latest {
+		if normalizeTime(c.CreatedAt) > normalizeTime(latest) {
 			latest = c.CreatedAt
 		}
 	}
