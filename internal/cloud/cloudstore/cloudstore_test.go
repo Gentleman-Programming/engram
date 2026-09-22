@@ -257,18 +257,23 @@ func TestMaterializedChunkMutationsSkipsUnsupportedTypedOperations(t *testing.T)
 	}
 }
 
-func TestMaterializedChunkMutationsRejectsMalformedTypedUpserts(t *testing.T) {
-	for _, payload := range []string{`{`, `null`} {
-		for _, entity := range []string{store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt} {
-			t.Run(entity+"/"+payload, func(t *testing.T) {
-				_, err := materializedChunkMutations("proj-malformed", engramsync.ChunkData{Mutations: []store.SyncMutation{{
-					Entity: entity, EntityKey: entity + "-1", Op: store.SyncOpUpsert, Payload: payload,
-				}}})
-				if err == nil {
-					t.Fatalf("expected malformed %s upsert to fail", entity)
-				}
-			})
-		}
+func TestMaterializedChunkMutationsRejectsInvalidTypedUpserts(t *testing.T) {
+	tests := []struct{ name, entity, payload string }{
+		{"session/malformed", store.SyncEntitySession, `{`},
+		{"observation/malformed", store.SyncEntityObservation, `{`},
+		{"prompt/malformed", store.SyncEntityPrompt, `{`},
+		{"null", store.SyncEntitySession, `null`},
+		{"session/mismatch", store.SyncEntitySession, `{"id":"payload-id"}`},
+		{"observation/mismatch", store.SyncEntityObservation, `{"sync_id":"payload-id"}`},
+		{"prompt/mismatch", store.SyncEntityPrompt, `{"sync_id":"payload-id"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := materializeChunkMutation("project", store.SyncMutation{Entity: test.entity, EntityKey: "entity-key", Op: store.SyncOpUpsert, Payload: test.payload})
+			if err == nil {
+				t.Fatalf("expected invalid %s upsert to fail", test.entity)
+			}
+		})
 	}
 }
 
