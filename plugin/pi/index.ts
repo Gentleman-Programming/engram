@@ -155,8 +155,6 @@ interface EngramFetchPolicy {
 type EngramFetcher = <TResponse = unknown>(path: string, opts?: FetchOptions) => Promise<TResponse | null>;
 
 function isIdempotentSessionRegistration(path: string, method: string): boolean {
-  // The core registration route uses INSERT OR IGNORE for the runtime session identity. This is
-  // the only POST replayed by Pi; every other mutation lacks an idempotency key.
   return method === "POST" && path === "/sessions";
 }
 

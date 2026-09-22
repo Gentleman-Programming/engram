@@ -1321,7 +1321,7 @@ test("Pi transport policy gives reads and doctor a longer bounded retry budget w
   assert.match(source, /return \{ operation: "write", timeoutMs: ENGRAM_WRITE_TIMEOUT_MS, maxAttempts: 1, replaySafe: false \};/);
   assert.match(source, /return \{ operation: "read", timeoutMs: ENGRAM_READ_TIMEOUT_MS, maxAttempts: ENGRAM_READ_MAX_ATTEMPTS, replaySafe: true \};/);
   assert.match(source, /return \{ operation: "doctor", timeoutMs: ENGRAM_DOCTOR_TIMEOUT_MS, maxAttempts: ENGRAM_READ_MAX_ATTEMPTS, replaySafe: true \};/);
-  assert.match(source, /function isIdempotentSessionRegistration[\s\S]*INSERT OR IGNORE[\s\S]*return method === "POST" && path === "\/sessions";/);
+  assert.match(source, /function isIdempotentSessionRegistration[\s\S]*return method === "POST" && path === "\/sessions";/);
 });
 
 test("native tool fetches retry transient HTTP startup failures", async () => {
