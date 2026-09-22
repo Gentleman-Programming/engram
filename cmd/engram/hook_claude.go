@@ -51,8 +51,8 @@ func cmdHook(args []string) {
 
 // transformClaudePreToolUse consumes Claude Code's authoritative PreToolUse
 // input. It never grants a permission decision: successful calls use only
-// updatedInput to replace an untrusted model-provided session_id. Invalid hook
-// input is denied, rather than allowing a write whose session cannot be bound.
+// updatedInput to replace the tool's untrusted model-provided session reference.
+// Invalid hook input is denied, rather than allowing a write whose session cannot be bound.
 func transformClaudePreToolUse(input []byte) []byte {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(input, &payload); err != nil {
@@ -85,7 +85,7 @@ func transformClaudePreToolUse(input []byte) []byte {
 	if err != nil {
 		return claudePreToolUseDeny("cannot bind authoritative Claude session_id")
 	}
-	toolInput["session_id"] = boundSessionID
+	toolInput[claudeAuthoritativeSessionField(toolName)] = boundSessionID
 	updatedInput, err := json.Marshal(toolInput)
 	if err != nil {
 		return claudePreToolUseDeny("cannot encode bound Claude tool input")
@@ -104,6 +104,13 @@ func claudeHookRequiredString(payload map[string]json.RawMessage, field string) 
 		return "", false
 	}
 	return value, true
+}
+
+func claudeAuthoritativeSessionField(toolName string) string {
+	if strings.HasSuffix(toolName, "__mem_session_start") || strings.HasSuffix(toolName, "__mem_session_end") {
+		return "id"
+	}
+	return "session_id"
 }
 
 func isClaudeEngramWriteOrSessionTool(name string) bool {

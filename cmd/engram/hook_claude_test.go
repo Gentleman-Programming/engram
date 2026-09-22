@@ -115,7 +115,11 @@ func TestTransformClaudePreToolUseBindsEveryEngramWriteAndSessionTool(t *testing
 	for _, tool := range claudeEngramWriteAndSessionTools {
 		for _, server := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
 			t.Run(server+tool, func(t *testing.T) {
-				input := []byte(`{"session_id":"subagent-session","tool_name":"` + server + tool + `","tool_input":{"session_id":"wrong","value":"preserved"}}`)
+				bindingField := "session_id"
+				if tool == "mem_session_start" || tool == "mem_session_end" {
+					bindingField = "id"
+				}
+				input := []byte(`{"session_id":"subagent-session","tool_name":"` + server + tool + `","tool_input":{"` + bindingField + `":"wrong","value":"preserved"}}`)
 				output := transformClaudePreToolUse(input)
 				var response struct {
 					HookSpecificOutput struct {
@@ -125,8 +129,8 @@ func TestTransformClaudePreToolUseBindsEveryEngramWriteAndSessionTool(t *testing
 				if err := json.Unmarshal(output, &response); err != nil {
 					t.Fatalf("decode response: %v", err)
 				}
-				if got := response.HookSpecificOutput.UpdatedInput["session_id"]; got != "subagent-session" {
-					t.Fatalf("session_id = %#v, want subagent authoritative session", got)
+				if got := response.HookSpecificOutput.UpdatedInput[bindingField]; got != "subagent-session" {
+					t.Fatalf("%s = %#v, want subagent authoritative session", bindingField, got)
 				}
 				if got := response.HookSpecificOutput.UpdatedInput["value"]; got != "preserved" {
 					t.Fatalf("unrelated tool input = %#v, want preserved", got)
