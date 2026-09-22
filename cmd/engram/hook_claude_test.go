@@ -81,7 +81,7 @@ func TestTransformClaudePreToolUseBindsEngramWritesToAuthoritativeSession(t *tes
 	output := transformClaudePreToolUse(input)
 	var response struct {
 		HookSpecificOutput struct {
-			HookEventName     string         `json:"hookEventName"`
+			HookEventName      string         `json:"hookEventName"`
 			UpdatedInput       map[string]any `json:"updatedInput"`
 			PermissionDecision string         `json:"permissionDecision"`
 		} `json:"hookSpecificOutput"`
@@ -162,7 +162,7 @@ func TestTransformClaudePreToolUseFailsClosedForMalformedAuthoritativeInput(t *t
 		output := transformClaudePreToolUse(input)
 		var response struct {
 			HookSpecificOutput struct {
-				HookEventName     string `json:"hookEventName"`
+				HookEventName      string `json:"hookEventName"`
 				PermissionDecision string `json:"permissionDecision"`
 			} `json:"hookSpecificOutput"`
 		}
