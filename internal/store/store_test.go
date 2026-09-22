@@ -1883,6 +1883,24 @@ func TestUpdateObservationFindReplace(t *testing.T) {
 			}
 		})
 
+		t.Run("lowered limit permits metadata with an absent find", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			prefix := strings.TrimSuffix(before.Content, observationTruncationMarker)
+			s.cfg.MaxObservationLength = len(prefix) - 1
+			mutationsBefore := mutationCount(t, s)
+			updated, err := s.UpdateObservation(id, params(t, `{"find":"absent","replace":"replacement","title":"Updated"}`))
+			if err != nil {
+				t.Fatalf("metadata update with absent find: %v", err)
+			}
+			if updated.Title != "Updated" || updated.Content != before.Content || updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+				t.Fatalf("absent-find metadata update changed semantics: before=%#v after=%#v", before, updated)
+			}
+		})
+
 		t.Run("lowered limit rejects an oversized marked prefix", func(t *testing.T) {
 			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
 			before, err := s.GetObservation(id)

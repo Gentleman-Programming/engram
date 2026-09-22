@@ -4154,20 +4154,17 @@ func replaceObservationContent(content, find, replacement string, max int) (stri
 
 	prefix := content
 	marker := ""
+	oversized := len(content) > max
 	if strings.HasSuffix(content, observationTruncationMarker) {
 		marker = observationTruncationMarker
 		prefix = strings.TrimSuffix(content, marker)
-		if len(prefix) > max {
-			return "", false, ErrObservationFindReplaceLegacyContentLarge
-		}
-	} else if len(content) > max {
-		if !strings.Contains(content, find) {
-			return content, true, nil
-		}
-		return "", false, ErrObservationFindReplaceLegacyContentLarge
+		oversized = len(prefix) > max
 	}
 	if !strings.Contains(prefix, find) {
 		return content, true, nil
+	}
+	if oversized {
+		return "", false, ErrObservationFindReplaceLegacyContentLarge
 	}
 
 	if growth := len(replacement) - len(find); growth > 0 {
