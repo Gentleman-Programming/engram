@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -3323,8 +3324,88 @@ func exposeHookToolWithLink(binDir, toolPath string, link func(string, string) e
 	return nil
 }
 
+func TestGitForWindowsRoot(t *testing.T) {
+	root := `C:\Program Files\Git`
+	tests := []struct {
+		name string
+		seed string
+		want string
+		ok   bool
+	}{
+		{name: "cmd git", seed: filepath.Join(root, "cmd", "git.exe"), want: root, ok: true},
+		{name: "root bin git with mixed case", seed: filepath.Join(root, "BIN", "GIT.EXE"), want: root, ok: true},
+		{name: "mingw64 bin git with mixed case", seed: filepath.Join(root, "MiNgW64", "BiN", "git.exe"), want: root, ok: true},
+		{name: "usr bin git with mixed case", seed: filepath.Join(root, "UsR", "bIn", "git.exe"), want: root, ok: true},
+		{name: "mingw64 git exec path with mixed case", seed: filepath.Join(root, "mInGw64", "LiBeXeC", "GiT-CoRe"), want: root, ok: true},
+		{name: "unrelated shim", seed: `C:\Users\Test\scoop\shims\git.exe`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := gitForWindowsRoot(tt.seed)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("gitForWindowsRoot(%q) = (%q, %t), want (%q, %t)", tt.seed, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func gitForWindowsRoot(seed string) (string, bool) {
+	path := filepath.Clean(seed)
+	parent := filepath.Dir(path)
+
+	if strings.EqualFold(filepath.Base(path), "git.exe") {
+		if strings.EqualFold(filepath.Base(parent), "cmd") {
+			return filepath.Dir(parent), true
+		}
+		if strings.EqualFold(filepath.Base(parent), "bin") {
+			platformDir := filepath.Dir(parent)
+			if strings.EqualFold(filepath.Base(platformDir), "mingw64") || strings.EqualFold(filepath.Base(platformDir), "usr") {
+				return filepath.Dir(platformDir), true
+			}
+			return platformDir, true
+		}
+	}
+
+	if strings.EqualFold(filepath.Base(path), "git-core") && strings.EqualFold(filepath.Base(parent), "libexec") {
+		platformDir := filepath.Dir(parent)
+		if strings.EqualFold(filepath.Base(platformDir), "mingw64") {
+			return filepath.Dir(platformDir), true
+		}
+	}
+
+	return "", false
+}
+
 func isolatedHookPath(t *testing.T) (string, []string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		gitPath, err := exec.LookPath("git")
+		if err != nil {
+			t.Skipf("Git for Windows installation-root bin/bash.exe is required for Claude Code hook regression: git is not in PATH: %v", err)
+		}
+
+		seeds := []string{gitPath}
+		if output, err := exec.Command(gitPath, "--exec-path").Output(); err == nil {
+			if execPath := strings.TrimSpace(string(output)); execPath != "" {
+				seeds = append(seeds, execPath)
+			}
+		}
+		for _, seed := range seeds {
+			gitRoot, ok := gitForWindowsRoot(seed)
+			if !ok {
+				continue
+			}
+			gitBash := filepath.Join(gitRoot, "bin", "bash.exe")
+			if _, err := os.Stat(gitBash); err == nil {
+				pathDirs := []string{filepath.Join(gitRoot, "usr", "bin"), filepath.Join(gitRoot, "bin"), os.Getenv("SystemRoot") + `\System32`}
+				assertJQAbsent(t, pathDirs)
+				return gitBash, pathDirs
+			}
+		}
+		t.Skipf("Git for Windows installation-root bin/bash.exe is required for Claude Code hook regression: no root launcher was proven from git seed %q or its --exec-path", gitPath)
+	}
+
 	if gitPath, err := exec.LookPath("git"); err == nil {
 		gitRoot := filepath.Dir(filepath.Dir(gitPath))
 		gitBash := filepath.Join(gitRoot, "bin", "bash.exe")

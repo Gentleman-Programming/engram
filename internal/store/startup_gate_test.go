@@ -39,6 +39,7 @@ func TestSQLiteRuntimeVersionAtLeast(t *testing.T) {
 		{name: "earlier patch", version: "3.51.2", want: false},
 		{name: "earlier minor", version: "3.50.99", want: false},
 		{name: "missing patch", version: "3.51", wantErr: true},
+		{name: "empty minor", version: "3..3", wantErr: true},
 		{name: "non-numeric patch", version: "3.51.x", wantErr: true},
 		{name: "suffix", version: "3.51.3-beta", wantErr: true},
 	}
@@ -94,7 +95,11 @@ func TestSQLiteRuntimeIncludesWALResetIntegrityFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 
 	var version string
 	if err := s.db.QueryRow("SELECT sqlite_version()").Scan(&version); err != nil {

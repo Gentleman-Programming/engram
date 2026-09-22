@@ -5782,17 +5782,17 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 			Pinned bool   `json:"pinned"`
 		} `json:"observations"`
 		Relations []struct {
-			SyncID                       string  `json:"sync_id"`
-			Reason                       *string `json:"reason"`
-			Evidence                     *string `json:"evidence"`
-			Confidence                   *float64 `json:"confidence"`
-			JudgmentStatus               string  `json:"judgment_status"`
-			MarkedByActor                *string `json:"marked_by_actor"`
-			MarkedByKind                 *string `json:"marked_by_kind"`
-			MarkedByModel                *string `json:"marked_by_model"`
-			SessionID                    *string `json:"session_id"`
-			SupersededAt                 *string `json:"superseded_at"`
-			SupersededByRelationSyncID   *string `json:"superseded_by_relation_sync_id"`
+			SyncID                     string   `json:"sync_id"`
+			Reason                     *string  `json:"reason"`
+			Evidence                   *string  `json:"evidence"`
+			Confidence                 *float64 `json:"confidence"`
+			JudgmentStatus             string   `json:"judgment_status"`
+			MarkedByActor              *string  `json:"marked_by_actor"`
+			MarkedByKind               *string  `json:"marked_by_kind"`
+			MarkedByModel              *string  `json:"marked_by_model"`
+			SessionID                  *string  `json:"session_id"`
+			SupersededAt               *string  `json:"superseded_at"`
+			SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
 		} `json:"relations"`
 	}
 	if err := json.Unmarshal(bytes, &payload); err != nil {
@@ -5818,17 +5818,17 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 		t.Fatalf("backup relations = %+v, want two complete relation records", payload.Relations)
 	}
 	var firstRelation *struct {
-		SyncID                     string  `json:"sync_id"`
-		Reason                     *string `json:"reason"`
-		Evidence                   *string `json:"evidence"`
+		SyncID                     string   `json:"sync_id"`
+		Reason                     *string  `json:"reason"`
+		Evidence                   *string  `json:"evidence"`
 		Confidence                 *float64 `json:"confidence"`
-		JudgmentStatus             string  `json:"judgment_status"`
-		MarkedByActor              *string `json:"marked_by_actor"`
-		MarkedByKind               *string `json:"marked_by_kind"`
-		MarkedByModel              *string `json:"marked_by_model"`
-		SessionID                  *string `json:"session_id"`
-		SupersededAt               *string `json:"superseded_at"`
-		SupersededByRelationSyncID *string `json:"superseded_by_relation_sync_id"`
+		JudgmentStatus             string   `json:"judgment_status"`
+		MarkedByActor              *string  `json:"marked_by_actor"`
+		MarkedByKind               *string  `json:"marked_by_kind"`
+		MarkedByModel              *string  `json:"marked_by_model"`
+		SessionID                  *string  `json:"session_id"`
+		SupersededAt               *string  `json:"superseded_at"`
+		SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
 	}
 	for i := range payload.Relations {
 		if payload.Relations[i].SyncID == "rel-backup-first" {
