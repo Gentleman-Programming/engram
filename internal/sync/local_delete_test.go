@@ -208,3 +208,61 @@ func TestLocalExportImportsHardDeletesAfterInitialSnapshot(t *testing.T) {
 		t.Fatalf("replayed local export = %+v, %v; want idempotent empty result", replay, err)
 	}
 }
+
+func TestLocalExportHardDeleteAfterRecreatedSessionSnapshot(t *testing.T) {
+	src := newTestStore(t)
+	const project, sessionID = "proj-recreate", "session-recreate"
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	exporter := NewLocalWithProject(src, syncDir, project)
+
+	if err := src.CreateSession(sessionID, project, "/tmp/proj-recreate"); err != nil {
+		t.Fatalf("create initial session: %v", err)
+	}
+	if err := src.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete initial session: %v", err)
+	}
+	if _, err := src.DB().Exec(`UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID); err != nil {
+		t.Fatalf("make initial delete distinct: %v", err)
+	}
+	first, err := exporter.Export("alice", project)
+	if err != nil || first.IsEmpty || first.MutationsExported != 1 {
+		t.Fatalf("initial delete export = %+v, %v", first, err)
+	}
+
+	if err := src.CreateSession(sessionID, project, "/tmp/proj-recreate"); err != nil {
+		t.Fatalf("recreate session: %v", err)
+	}
+	if _, err := src.DB().Exec(`UPDATE sessions SET started_at = '2099-01-02 03:04:05' WHERE id = ?`, sessionID); err != nil {
+		t.Fatalf("make recreated session incrementally exportable: %v", err)
+	}
+	second, err := exporter.Export("alice", project)
+	if err != nil || second.IsEmpty || second.SessionsExported != 1 {
+		t.Fatalf("recreated snapshot export = %+v, %v", second, err)
+	}
+	if err := src.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete recreated session: %v", err)
+	}
+	third, err := exporter.Export("alice", project)
+	if err != nil || third.IsEmpty || third.MutationsExported != 1 {
+		t.Fatalf("second delete export = %+v, %v", third, err)
+	}
+	payload, err := readGzip(filepath.Join(syncDir, "chunks", third.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read second delete chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil || len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != sessionID {
+		t.Fatalf("second delete mutation = %+v, %v", chunk.Mutations, err)
+	}
+
+	dst := newTestStore(t)
+	if _, err := NewLocalWithProject(dst, syncDir, project).Import(); err != nil {
+		t.Fatalf("import full manifest: %v", err)
+	}
+	if _, err := dst.GetSession(sessionID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("imported session = %v, want absent", err)
+	}
+	if replay, err := exporter.Export("alice", project); err != nil || !replay.IsEmpty {
+		t.Fatalf("replayed export = %+v, %v; want empty", replay, err)
+	}
+}

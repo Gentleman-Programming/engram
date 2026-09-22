@@ -2191,10 +2191,17 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 			observationKeys[observation.SyncID] = struct{}{}
 			historicalObservationKeys[observation.SyncID] = struct{}{}
 		}
-		for _, mutation := range chunk.Mutations {
+		// Reconcile delete intent in manifest order. A later snapshot or upsert
+		// starts a new identity generation; a later delete restores suppression.
+		for _, mutation := range effectiveMutationsForImport(chunk) {
+			key := mutationIdentityKey(mutation)
 			if mutation.Op == store.SyncOpDelete {
-				deleteKeys[mutationIdentityKey(mutation)] = struct{}{}
+				deleteKeys[key] = struct{}{}
+			} else {
+				delete(deleteKeys, key)
 			}
+		}
+		for _, mutation := range chunk.Mutations {
 			if mutation.Entity == store.SyncEntityRelation {
 				relationKeys[mutation.EntityKey] = struct{}{}
 			}
