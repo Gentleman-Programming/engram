@@ -3,11 +3,31 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"strings"
 	"testing"
 )
+
+func claudeHookStdin(t *testing.T, input string, closed bool) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdin pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	if _, err := writer.Write([]byte(input)); err != nil {
+		t.Fatalf("write Claude hook input: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stdin writer: %v", err)
+	}
+	if closed {
+		if err := reader.Close(); err != nil {
+			t.Fatalf("close stdin reader: %v", err)
+		}
+	}
+	return reader
+}
 
 func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	if shouldCheckForUpdates([]string{"hook", "claude-pre-tool-use"}) {
@@ -15,89 +35,46 @@ func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	}
 }
 
-func TestCmdHookExitsWhenClaudeResponseWriteFails(t *testing.T) {
-	stdinReader, stdinWriter, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdin pipe: %v", err)
+func TestCmdHookWritesTransformedResponse(t *testing.T) {
+	oldStdin, oldOutput := os.Stdin, claudeHookOutput
+	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
+	os.Stdin = claudeHookStdin(t, `{"session_id":"claude-session","tool_name":"mcp__engram__mem_save","tool_input":{"title":"decision"}}`, false)
+	var output []byte
+	claudeHookOutput = func(response []byte) error { output = append([]byte(nil), response...); return nil }
+	cmdHook([]string{"claude-pre-tool-use"})
+	var response struct {
+		HookSpecificOutput struct {
+			UpdatedInput       map[string]any `json:"updatedInput"`
+			PermissionDecision string         `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
 	}
-	t.Cleanup(func() {
-		_ = stdinWriter.Close()
-		_ = stdinReader.Close()
-	})
-	if _, err := stdinWriter.Write([]byte(`{"session_id":"claude-session","tool_name":"mcp__engram__mem_save","tool_input":{"title":"decision"}}`)); err != nil {
-		t.Fatalf("write Claude hook input: %v", err)
+	if err := json.Unmarshal(output, &response); err != nil || response.HookSpecificOutput.UpdatedInput["session_id"] != "claude-session" || response.HookSpecificOutput.PermissionDecision != "" {
+		t.Fatalf("successful hook output = %s, %v", output, err)
 	}
-	if err := stdinWriter.Close(); err != nil {
-		t.Fatalf("close stdin writer: %v", err)
-	}
+}
 
-	oldStdin := os.Stdin
-	t.Cleanup(func() { os.Stdin = oldStdin })
-	oldClaudeHookOutput := claudeHookOutput
+func TestCmdHookExitsWhenClaudeResponseWriteFails(t *testing.T) {
+	oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
+	t.Cleanup(func() { os.Stdin, claudeHookOutput, exitFunc = oldStdin, oldOutput, oldExit })
 	claudeHookOutput = func([]byte) error { return errors.New("write Claude hook response") }
-	t.Cleanup(func() { claudeHookOutput = oldClaudeHookOutput })
-	oldExit := exitFunc
 	var exitCodes []int
 	exitFunc = func(code int) { exitCodes = append(exitCodes, code) }
-	t.Cleanup(func() { exitFunc = oldExit })
-
-	os.Stdin = stdinReader
+	os.Stdin = claudeHookStdin(t, `{"session_id":"claude-session","tool_name":"mcp__engram__mem_save","tool_input":{"title":"decision"}}`, false)
 	cmdHook([]string{"claude-pre-tool-use"})
-
-	closedReader, closedWriter, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create closed stdin pipe: %v", err)
-	}
-	if err := closedWriter.Close(); err != nil {
-		t.Fatalf("close stdin writer: %v", err)
-	}
-	if err := closedReader.Close(); err != nil {
-		t.Fatalf("close stdin reader: %v", err)
-	}
-	os.Stdin = closedReader
+	os.Stdin = claudeHookStdin(t, "", true)
 	cmdHook([]string{"claude-pre-tool-use"})
-
 	if len(exitCodes) != 2 || exitCodes[0] != 1 || exitCodes[1] != 1 {
 		t.Fatalf("exit codes = %v, want [1 1] after Claude hook response write failures", exitCodes)
 	}
 }
 
 func TestCmdHookEmitsJSONDenialWhenClaudeInputReadFails(t *testing.T) {
-	stdinReader, stdinWriter, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdin pipe: %v", err)
-	}
-	if err := stdinWriter.Close(); err != nil {
-		t.Fatalf("close stdin writer: %v", err)
-	}
-	if err := stdinReader.Close(); err != nil {
-		t.Fatalf("close stdin reader: %v", err)
-	}
-	oldStdin := os.Stdin
-	os.Stdin = stdinReader
-	t.Cleanup(func() { os.Stdin = oldStdin })
-
-	stdoutReader, stdoutWriter, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdout pipe: %v", err)
-	}
-	oldStdout := os.Stdout
-	os.Stdout = stdoutWriter
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		_ = stdoutWriter.Close()
-		_ = stdoutReader.Close()
-	})
+	oldStdin, oldOutput := os.Stdin, claudeHookOutput
+	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
+	os.Stdin = claudeHookStdin(t, "", true)
+	var output []byte
+	claudeHookOutput = func(response []byte) error { output = append([]byte(nil), response...); return nil }
 	cmdHook([]string{"claude-pre-tool-use"})
-	if err := stdoutWriter.Close(); err != nil {
-		t.Fatalf("close stdout writer: %v", err)
-	}
-	os.Stdout = oldStdout
-
-	output, err := io.ReadAll(stdoutReader)
-	if err != nil {
-		t.Fatalf("read hook output: %v", err)
-	}
 	var response struct {
 		HookSpecificOutput struct {
 			HookEventName            string `json:"hookEventName"`
