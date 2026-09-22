@@ -5513,8 +5513,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	// Relations are imported only after all observation endpoints have been
-	// written. Any missing endpoint aborts this transaction and rolls back the
-	// sessions, observations, prompts, and earlier relation rows together.
+	// written. A missing endpoint aborts and rolls back the transaction unless
+	// the relation is explicitly orphaned for audit preservation.
 	importedRelations := make(map[string]bool, len(data.Relations))
 	for _, relation := range data.Relations {
 		if strings.TrimSpace(relation.SyncID) == "" {
