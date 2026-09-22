@@ -464,27 +464,34 @@ func validateMaterializedChunkUpsert(entry MutationEntry) error {
 	if strings.TrimSpace(string(entry.Payload)) == "null" {
 		return errors.New("payload must be a JSON object")
 	}
-	if entry.Entity == store.SyncEntitySession {
-		_, err := sessionFromMaterializedMutation(entry)
-		return err
-	}
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(entry.Payload, &object); err != nil {
-		return err
-	}
-	if object == nil {
-		return errors.New("payload must be a JSON object")
-	}
+	var identity, field string
 	switch entry.Entity {
+	case store.SyncEntitySession:
+		session, err := sessionFromMaterializedMutation(entry)
+		if err != nil {
+			return err
+		}
+		identity, field = session.ID, "id"
 	case store.SyncEntityObservation:
 		var observation store.Observation
-		return json.Unmarshal(entry.Payload, &observation)
+		if err := json.Unmarshal(entry.Payload, &observation); err != nil {
+			return err
+		}
+		identity, field = observation.SyncID, "sync_id"
 	case store.SyncEntityPrompt:
 		var prompt store.Prompt
-		return json.Unmarshal(entry.Payload, &prompt)
+		if err := json.Unmarshal(entry.Payload, &prompt); err != nil {
+			return err
+		}
+		identity, field = prompt.SyncID, "sync_id"
 	default:
 		return nil
 	}
+	identity = strings.TrimSpace(identity)
+	if identity != "" && identity != entry.EntityKey {
+		return fmt.Errorf("payload.%s %q does not match entity_key %q", field, identity, entry.EntityKey)
+	}
+	return nil
 }
 
 func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []MutationEntry) error {

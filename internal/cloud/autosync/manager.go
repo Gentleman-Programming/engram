@@ -509,7 +509,10 @@ func (m *Manager) cycle(ctx context.Context) {
 			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
 			return
 		}
-		m.recordBlockedAfterSuccess(blockedMessage, constants.ReasonNonEnrolledPendingMutations)
+		if err := m.recordBlockedAfterSuccess(blockedMessage, constants.ReasonNonEnrolledPendingMutations); err != nil {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("persist blocked state after successful pull: %v", err), err), reasonCode)
+		}
 		return
 	}
 
@@ -844,7 +847,11 @@ func (m *Manager) recordBlocked(msg, reasonCode string) {
 	_ = m.store.MarkSyncBlocked(m.cfg.TargetKey, reasonCode, msg)
 }
 
-func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) {
+func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) error {
+	if err := m.store.MarkSyncBlockedAfterSuccess(m.cfg.TargetKey, reasonCode, msg); err != nil {
+		return err
+	}
+
 	now := time.Now()
 	m.mu.Lock()
 	m.status.Phase = PhasePushFailed
@@ -855,8 +862,7 @@ func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) {
 	m.status.ReasonCode = reasonCode
 	m.status.ReasonMessage = msg
 	m.mu.Unlock()
-
-	_ = m.store.MarkSyncBlockedAfterSuccess(m.cfg.TargetKey, reasonCode, msg)
+	return nil
 }
 
 func (m *Manager) recordSuccess() {

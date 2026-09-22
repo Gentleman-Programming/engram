@@ -40,10 +40,12 @@ jobs:
             if (context.eventName === 'merge_group') {
               const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
               try {
+                const { base_ref: baseRef, head_ref: headRef } = context.payload.merge_group;
                 const pulls = await resolveAssociatedPullRequests(github, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  commitSha: context.payload.merge_group.head_sha,
+                  baseRef,
+                  headRef,
                 });
                 failures = await aggregatePullRequestResults(pulls, validate);
               } catch (err) { core.setFailed(`❌ Could not fetch current pull request metadata: ${err.message}`); return; }
