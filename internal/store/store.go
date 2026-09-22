@@ -5196,7 +5196,7 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 	if err != nil {
 		return nil, fmt.Errorf("export relation mutations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	mutations := []SyncMutation{}
 	for rows.Next() {

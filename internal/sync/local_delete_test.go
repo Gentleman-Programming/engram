@@ -31,10 +31,7 @@ func mustNoError(t *testing.T, err error) {
 	}
 }
 
-func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
-	_, err := db.Exec(query, args...)
-	mustNoError(t, err)
-}
+func mustSQL(t *testing.T, d *sql.DB, q string, a ...any) { _, e := d.Exec(q, a...); mustNoError(t, e) }
 
 func TestLocalExportDeleteTombstonesIgnoreManifestTimestampAndRemainIdempotent(t *testing.T) {
 	s := newTestStore(t)
@@ -49,9 +46,9 @@ func TestLocalExportDeleteTombstonesIgnoreManifestTimestampAndRemainIdempotent(t
 		mustNoError(t, s.CreateSession("session-"+project, project, "/tmp/"+project))
 		mustNoError(t, s.DeleteSession("session-"+project))
 	}
-	mustExec(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05'`)
+	mustSQL(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05'`)
 	mustNoError(t, s.CreateSession("legacy-parent", "proj-a", "/tmp/legacy"))
-	mustExec(t, s.DB(), `INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES ('prompt-legacy', 'legacy-parent', '', '2000-01-02 03:04:05')`)
+	mustSQL(t, s.DB(), `INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES ('prompt-legacy', 'legacy-parent', '', '2000-01-02 03:04:05')`)
 	mustNoError(t, s.DeleteSession("legacy-parent"))
 	dir := filepath.Join(t.TempDir(), ".engram")
 	writeLocalChunkFile(t, dir, "historical", ChunkData{})
@@ -164,19 +161,19 @@ func TestLocalExportHardDeleteAfterRecreatedSessionSnapshot(t *testing.T) {
 		t.Fatalf("initial session generation = %+v, %v", initial, err)
 	}
 	mustNoError(t, s.DeleteSession(sessionID))
-	mustExec(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID)
+	mustSQL(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID)
 	first, _ := mustExportLocalChunk(t, sy, project)
 	if first.MutationsExported != 1 {
 		t.Fatalf("initial delete export = %+v", first)
 	}
 	mustNoError(t, s.CreateSession(sessionID, project, "/tmp/recreate"))
-	mustExec(t, s.DB(), `UPDATE sessions SET started_at = '2099-01-02 03:04:05' WHERE id = ?`, sessionID)
+	mustSQL(t, s.DB(), `UPDATE sessions SET started_at = '2099-01-02 03:04:05' WHERE id = ?`, sessionID)
 	second, _ := mustExportLocalChunk(t, sy, project)
 	if second.SessionsExported != 1 {
 		t.Fatalf("recreated export = %+v", second)
 	}
 	mustNoError(t, s.DeleteSession(sessionID))
-	mustExec(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2100-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID)
+	mustSQL(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2100-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID)
 	third, chunk := mustExportLocalChunk(t, sy, project)
 	if third.MutationsExported != 1 || len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != sessionID {
 		t.Fatalf("second delete = %+v, %+v", third, chunk.Mutations)
