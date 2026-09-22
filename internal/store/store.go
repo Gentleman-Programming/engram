@@ -5269,10 +5269,13 @@ func (s *Store) ExportLocalDeleteTombstones(project string) ([]SyncMutation, err
 
 	promptWhere, promptArgs := "1 = 1", []any{}
 	if project != "" {
-		promptWhere += " AND ifnull(project, '') = ?"
-		promptArgs = append(promptArgs, project)
+		promptWhere += " AND (ifnull(p.project, '') = ? OR (ifnull(p.project, '') = '' AND ifnull(s.project, '') = ?))"
+		promptArgs = append(promptArgs, project, project)
 	}
-	promptRows, err := s.queryItHook(s.db, `SELECT sync_id, ifnull(session_id, ''), ifnull(project, ''), deleted_at FROM prompt_tombstones WHERE `+promptWhere, promptArgs...)
+	promptRows, err := s.queryItHook(s.db, `
+		SELECT p.sync_id, ifnull(p.session_id, ''), coalesce(nullif(p.project, ''), ifnull(s.project, '')), p.deleted_at
+		FROM prompt_tombstones p LEFT JOIN sessions s ON s.id = p.session_id
+		WHERE `+promptWhere, promptArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("export local prompt tombstones: %w", err)
 	}
@@ -8600,6 +8603,24 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 	return err
 }
 
+func (s *Store) localUpsertBlockedByTombstoneTx(tx *sql.Tx, entity, entityKey, generation string) (bool, error) {
+	var deletedAt string
+	err := tx.QueryRow(`SELECT deleted_at FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return generationNotAfterDelete(generation, deletedAt), nil
+}
+
+func generationNotAfterDelete(generation, deletedAt string) bool {
+	generation = normalizeComparableTimestamp(generation)
+	deletedAt = normalizeComparableTimestamp(deletedAt)
+	return generation == "" || deletedAt == "" || generation <= deletedAt
+}
+
 func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
 	if targetKey == DefaultSyncTargetKey {
 		var active int
@@ -9819,13 +9840,25 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 			return fmt.Errorf("%w: %v", ErrPulledSessionIdentityInvalid, err)
 		}
 		if mutation.Op == SyncOpDelete || isSessionDeletePayload(payload) {
-			if err := s.applySessionDeleteTx(tx, payload); err != nil || !cloud {
+			if err := s.applySessionDeleteTx(tx, payload); err != nil {
 				return err
 			}
-			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, "", payload.Project, payload.DeletedAt, payload.HardDelete, mutation.Seq)
+			if cloud {
+				return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, "", payload.Project, payload.DeletedAt, payload.HardDelete, mutation.Seq)
+			}
+			deletedAt := strings.TrimSpace(derefString(payload.DeletedAt))
+			if deletedAt == "" {
+				deletedAt = Now()
+			}
+			return s.recordSyncDeleteTombstoneTx(tx, SyncEntitySession, payload.ID, "", payload.Project, deletedAt)
 		}
 		if cloud {
 			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntitySession, payload.ID, mutation.Seq)
+			if err != nil || blocked {
+				return err
+			}
+		} else {
+			blocked, err := s.localUpsertBlockedByTombstoneTx(tx, SyncEntitySession, payload.ID, payload.StartedAt)
 			if err != nil || blocked {
 				return err
 			}
@@ -9848,17 +9881,32 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 			return fmt.Errorf("%w: mutation entity_key %q does not match payload sync_id %q", ErrPulledObservationIdentityInvalid, entityKey, payload.SyncID)
 		}
 		if mutation.Op == SyncOpDelete {
-			if err := s.applyObservationDeleteTx(tx, payload); err != nil || !cloud {
+			deletedAt := strings.TrimSpace(derefString(payload.DeletedAt))
+			if err := s.applyObservationDeleteTx(tx, payload); err != nil {
 				return err
 			}
-			entityKey := payload.SyncID
-			if strings.TrimSpace(entityKey) == "" {
-				entityKey = mutation.EntityKey
+			if !cloud {
+				if !payload.HardDelete {
+					return nil
+				}
+				if deletedAt == "" {
+					deletedAt = Now()
+				}
+				return s.recordSyncDeleteTombstoneTx(tx, SyncEntityObservation, payload.SyncID, payload.SessionID, derefString(payload.Project), deletedAt)
 			}
-			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntityObservation, entityKey, payload.SessionID, derefString(payload.Project), payload.DeletedAt, payload.HardDelete, mutation.Seq)
+			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, payload.SessionID, derefString(payload.Project), payload.DeletedAt, payload.HardDelete, mutation.Seq)
 		}
 		if cloud {
 			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, mutation.Seq)
+			if err != nil || blocked {
+				return err
+			}
+		} else {
+			generation := payload.UpdatedAt
+			if strings.TrimSpace(generation) == "" {
+				generation = payload.CreatedAt
+			}
+			blocked, err := s.localUpsertBlockedByTombstoneTx(tx, SyncEntityObservation, payload.SyncID, generation)
 			if err != nil || blocked {
 				return err
 			}
