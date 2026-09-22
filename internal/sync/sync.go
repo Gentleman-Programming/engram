@@ -539,7 +539,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	entry := ChunkEntry{
 		ID:        chunkID,
 		CreatedBy: createdBy,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Sessions:  len(chunk.Sessions),
 		Memories:  len(chunk.Observations),
 		Prompts:   len(chunk.Prompts),
@@ -633,7 +633,7 @@ func (sy *Syncer) exportCloudMutationChunks(manifest *Manifest, knownChunks map[
 		entry := ChunkEntry{
 			ID:        chunkID,
 			CreatedBy: createdBy,
-			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 			Sessions:  len(part.chunk.Sessions),
 			Memories:  len(part.chunk.Observations),
 			Prompts:   len(part.chunk.Prompts),
@@ -1983,7 +1983,7 @@ func (sy *Syncer) lastChunkTime(m *Manifest) string {
 	// Find the most recent chunk
 	latest := m.Chunks[0].CreatedAt
 	for _, c := range m.Chunks[1:] {
-		if c.CreatedAt > latest {
+		if normalizeTime(c.CreatedAt) > normalizeTime(latest) {
 			latest = c.CreatedAt
 		}
 	}
@@ -2523,9 +2523,9 @@ func decodeSyncPayloadForProject(payload []byte, dest any) error {
 func normalizeTime(t string) string {
 	// Try RFC3339 first
 	if parsed, err := time.Parse(time.RFC3339, t); err == nil {
-		return parsed.UTC().Format("2006-01-02 15:04:05")
+		return parsed.UTC().Format("2006-01-02 15:04:05.000000000")
 	}
-	// Already in "2006-01-02 15:04:05" format
+	// Already in SQLite time format
 	return strings.TrimSpace(t)
 }
 

@@ -36,6 +36,7 @@ type fakeLocalStore struct {
 	ackErr            error
 	healthyCalls              int
 	blockedAfterSuccessCalls int
+	blockedAfterSuccessErr   error
 	nonEnrolledCounts        []store.PendingSyncMutationProjectCount
 	deferredProjects  []string
 	listDeferredErr   error
@@ -202,6 +203,9 @@ func (s *fakeLocalStore) MarkSyncBlockedAfterSuccess(_, reasonCode, message stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blockedAfterSuccessCalls++
+	if s.blockedAfterSuccessErr != nil {
+		return s.blockedAfterSuccessErr
+	}
 	s.blockedReason = reasonCode
 	s.blockedMessage = message
 	return nil
@@ -2093,6 +2097,33 @@ func TestManagerCyclePullsWhileNonEnrolledPendingMutationsRemain(t *testing.T) {
 	}
 	if ls.blockedAfterSuccessCalls != 1 {
 		t.Fatalf("expected blocked pull to persist success timing and blocked state once, got %d calls", ls.blockedAfterSuccessCalls)
+	}
+}
+
+func TestManagerCycleRecordsBlockedStatePersistenceFailureAfterSuccessfulPull(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{{Project: "alpha", Count: 1}}
+	ls.blockedAfterSuccessErr = errors.New("blocked persistence failed")
+	tr := newFakeTransport()
+	mgr := New(ls, tr, DefaultConfig())
+	previous := time.Now().Add(-time.Hour).UTC()
+	mgr.status.LastSyncAt = &previous
+
+	mgr.cycle(context.Background())
+
+	if ls.blockedAfterSuccessCalls != 1 {
+		t.Fatalf("blocked persistence attempts = %d, want 1", ls.blockedAfterSuccessCalls)
+	}
+	st := mgr.Status()
+	if st.LastSyncAt == nil || !st.LastSyncAt.Equal(previous) {
+		t.Fatalf("LastSyncAt = %v, want unchanged %v", st.LastSyncAt, previous)
+	}
+	if st.Phase != PhasePullFailed || st.ReasonCode != "transport_failed" ||
+		!strings.Contains(st.LastError, "blocked persistence failed") || st.ReasonMessage != st.LastError {
+		t.Fatalf("blocked persistence failure must be reported truthfully, got %+v", st)
+	}
+	if ls.failureReason != st.ReasonCode || ls.failureMessage != st.LastError {
+		t.Fatalf("failure was not persisted truthfully, reason=%q message=%q", ls.failureReason, ls.failureMessage)
 	}
 }
 

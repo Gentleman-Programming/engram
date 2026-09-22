@@ -1685,6 +1685,245 @@ func TestUpdateObservationRejectsBlankContentBeforePersistenceAndSync(t *testing
 	}
 }
 
+func TestUpdateObservationFindReplace(t *testing.T) {
+	newObservation := func(t *testing.T, content string, max int) (*Store, int64) {
+		t.Helper()
+		s := newTestStore(t)
+		if max > 0 {
+			s.cfg.MaxObservationLength = max
+		}
+		if err := s.CreateSession("s-find-replace", "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if err := s.EnrollProject("engram"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-find-replace", Type: "note", Title: "Original", Content: content, Project: "engram", Scope: "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		return s, id
+	}
+	params := func(t *testing.T, body string) UpdateObservationParams {
+		t.Helper()
+		var p UpdateObservationParams
+		if err := json.Unmarshal([]byte(body), &p); err != nil {
+			t.Fatalf("decode update params: %v", err)
+		}
+		return p
+	}
+	mutationCount := func(t *testing.T, s *Store) int {
+		t.Helper()
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&count); err != nil {
+			t.Fatalf("count sync mutations: %v", err)
+		}
+		return count
+	}
+
+	t.Run("rejects incomplete pairs and content conflicts without side effects", func(t *testing.T) {
+		for _, tc := range []struct {
+			body string
+			want error
+		}{
+			{`{"find":"old"}`, ErrObservationFindReplacePairRequired},
+			{`{"replace":"new"}`, ErrObservationFindReplacePairRequired},
+			{`{"find":"old","replace":"new","content":"replacement"}`, ErrObservationFindReplaceContentConflict},
+		} {
+			s, id := newObservation(t, "old value", 0)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation before update: %v", err)
+			}
+			mutationsBefore := mutationCount(t, s)
+			if _, err := s.UpdateObservation(id, params(t, tc.body)); !errors.Is(err, tc.want) {
+				t.Fatalf("UpdateObservation(%s) error = %v, want %v", tc.body, err, tc.want)
+			}
+			after, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation after rejected update: %v", err)
+			}
+			if after.Content != before.Content || after.RevisionCount != before.RevisionCount || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("rejected update changed observation or sync state: before=%#v after=%#v", before, after)
+			}
+		}
+	})
+
+	t.Run("replaces literal case-sensitive occurrences globally", func(t *testing.T) {
+		s, id := newObservation(t, "go Go go café", 0)
+		before, _ := s.GetObservation(id)
+		mutationsBefore := mutationCount(t, s)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"go","replace":"X"}`))
+		if err != nil {
+			t.Fatalf("replace content: %v", err)
+		}
+		if updated.Content != "X Go X café" {
+			t.Fatalf("content = %q, want literal case-sensitive replacement", updated.Content)
+		}
+		if updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+			t.Fatalf("successful replacement did not update exactly once: before=%#v after=%#v", before, updated)
+		}
+		var hash string
+		if err := s.DB().QueryRow(`SELECT normalized_hash FROM observations WHERE id = ?`, id).Scan(&hash); err != nil {
+			t.Fatalf("read normalized hash: %v", err)
+		}
+		if hash != hashNormalized(updated.Content) {
+			t.Fatalf("normalized hash = %q, want hash of replacement content", hash)
+		}
+		utf8Updated, err := s.UpdateObservation(id, params(t, `{"find":"café","replace":"té"}`))
+		if err != nil || utf8Updated.Content != "X Go X té" {
+			t.Fatalf("UTF-8 literal replacement = %#v, err=%v", utf8Updated, err)
+		}
+	})
+
+	t.Run("content no-ops preserve observation and sync state", func(t *testing.T) {
+		for _, body := range []string{`{"find":"","replace":"X"}`, `{"find":"absent","replace":"X"}`, `{"find":"value","replace":" value "}`} {
+			s, id := newObservation(t, "value", 0)
+			before, _ := s.GetObservation(id)
+			mutationsBefore := mutationCount(t, s)
+			updated, err := s.UpdateObservation(id, params(t, body))
+			if err != nil {
+				t.Fatalf("no-op replacement %s: %v", body, err)
+			}
+			if updated.Content != before.Content || updated.RevisionCount != before.RevisionCount || updated.UpdatedAt != before.UpdatedAt || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("replacement no-op changed state: before=%#v after=%#v", before, updated)
+			}
+		}
+	})
+
+	t.Run("metadata still updates when replacement is a content no-op", func(t *testing.T) {
+		s, id := newObservation(t, "value", 0)
+		before, _ := s.GetObservation(id)
+		mutationsBefore := mutationCount(t, s)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"absent","replace":"X","title":"Updated"}`))
+		if err != nil {
+			t.Fatalf("update metadata with no-op replacement: %v", err)
+		}
+		if updated.Content != before.Content || updated.Title != "Updated" || updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+			t.Fatalf("metadata update semantics changed: before=%#v after=%#v", before, updated)
+		}
+	})
+
+	t.Run("redacts private tags and rejects normalized-empty results", func(t *testing.T) {
+		s, id := newObservation(t, "start target end", 0)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"<private>secret</private>"}`))
+		if err != nil {
+			t.Fatalf("replace private tag: %v", err)
+		}
+		if updated.Content != "start [REDACTED] end" {
+			t.Fatalf("private replacement content = %q", updated.Content)
+		}
+		if _, err := s.UpdateObservation(id, params(t, `{"find":"start [REDACTED] end","replace":"  "}`)); err == nil {
+			t.Fatal("normalized-empty replacement succeeded")
+		}
+	})
+
+	t.Run("bounds inputs and output growth", func(t *testing.T) {
+		s, id := newObservation(t, "aa", 8)
+		tooLong := strings.Repeat("x", 9)
+		if _, err := s.UpdateObservation(id, params(t, fmt.Sprintf(`{"find":%q,"replace":"x"}`, tooLong))); !errors.Is(err, ErrObservationFindReplaceInputTooLarge) {
+			t.Fatalf("oversized find error = %v", err)
+		}
+		if _, err := s.UpdateObservation(id, params(t, fmt.Sprintf(`{"find":"a","replace":%q}`, tooLong))); !errors.Is(err, ErrObservationFindReplaceInputTooLarge) {
+			t.Fatalf("oversized replace error = %v", err)
+		}
+		if _, err := s.UpdateObservation(id, params(t, `{"find":"a","replace":"12345"}`)); !errors.Is(err, ErrObservationFindReplaceResultTooLarge) {
+			t.Fatalf("oversized replacement result error = %v", err)
+		}
+	})
+
+	t.Run("preserves recognized marker and rejects oversized legacy content", func(t *testing.T) {
+		s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+		before, _ := s.GetObservation(id)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"fixed"}`))
+		if err != nil {
+			t.Fatalf("replace marked content: %v", err)
+		}
+		marker := "... [truncated]"
+		want := strings.ReplaceAll(strings.TrimSuffix(before.Content, marker), "target", "fixed") + marker
+		if updated.Content != want {
+			t.Fatalf("marked replacement = %q, want %q", updated.Content, want)
+		}
+		if _, err := s.DB().Exec(`UPDATE observations SET content = ? WHERE id = ?`, strings.Repeat("legacy ", 5), id); err != nil {
+			t.Fatalf("seed legacy oversized content: %v", err)
+		}
+		if _, err := s.UpdateObservation(id, params(t, `{"find":"legacy","replace":"modern"}`)); !errors.Is(err, ErrObservationFindReplaceLegacyContentLarge) {
+			t.Fatalf("oversized legacy replacement error = %v", err)
+		}
+	})
+
+	t.Run("reserves markers across configuration changes", func(t *testing.T) {
+		t.Run("raised limit cannot replace the marker", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			if !strings.HasSuffix(before.Content, observationTruncationMarker) {
+				t.Fatalf("seed content missing marker: %q", before.Content)
+			}
+			s.cfg.MaxObservationLength = len(before.Content) + 1
+			mutationsBefore := mutationCount(t, s)
+			unchanged, err := s.UpdateObservation(id, params(t, fmt.Sprintf(`{"find":%q,"replace":"changed"}`, observationTruncationMarker)))
+			if err != nil {
+				t.Fatalf("replace reserved marker: %v", err)
+			}
+			if unchanged.Content != before.Content || unchanged.RevisionCount != before.RevisionCount || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("reserved marker replacement changed state: before=%#v after=%#v", before, unchanged)
+			}
+			updated, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"fixed"}`))
+			if err != nil {
+				t.Fatalf("replace marked prefix after raised limit: %v", err)
+			}
+			want := strings.ReplaceAll(strings.TrimSuffix(before.Content, observationTruncationMarker), "target", "fixed") + observationTruncationMarker
+			if updated.Content != want {
+				t.Fatalf("marked prefix replacement = %q, want %q", updated.Content, want)
+			}
+		})
+
+		t.Run("lowered limit permits metadata with an absent find", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			prefix := strings.TrimSuffix(before.Content, observationTruncationMarker)
+			s.cfg.MaxObservationLength = len(prefix) - 1
+			mutationsBefore := mutationCount(t, s)
+			updated, err := s.UpdateObservation(id, params(t, `{"find":"absent","replace":"replacement","title":"Updated"}`))
+			if err != nil {
+				t.Fatalf("metadata update with absent find: %v", err)
+			}
+			if updated.Title != "Updated" || updated.Content != before.Content || updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+				t.Fatalf("absent-find metadata update changed semantics: before=%#v after=%#v", before, updated)
+			}
+		})
+
+		t.Run("lowered limit rejects an oversized marked prefix", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			prefix := strings.TrimSuffix(before.Content, observationTruncationMarker)
+			s.cfg.MaxObservationLength = len(prefix) - 1
+			mutationsBefore := mutationCount(t, s)
+			if _, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"fixed"}`)); !errors.Is(err, ErrObservationFindReplaceLegacyContentLarge) {
+				t.Fatalf("lowered-limit marked replacement error = %v, want legacy size error", err)
+			}
+			after, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation after rejected replacement: %v", err)
+			}
+			if after.Content != before.Content || after.RevisionCount != before.RevisionCount || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("lowered-limit rejection changed state: before=%#v after=%#v", before, after)
+			}
+		})
+	})
+}
+
 func TestAddPromptRejectsBlankContentBeforePersistenceAndSync(t *testing.T) {
 	type addResult struct {
 		err      error
@@ -5782,17 +6021,17 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 			Pinned bool   `json:"pinned"`
 		} `json:"observations"`
 		Relations []struct {
-			SyncID                       string  `json:"sync_id"`
-			Reason                       *string `json:"reason"`
-			Evidence                     *string `json:"evidence"`
-			Confidence                   *float64 `json:"confidence"`
-			JudgmentStatus               string  `json:"judgment_status"`
-			MarkedByActor                *string `json:"marked_by_actor"`
-			MarkedByKind                 *string `json:"marked_by_kind"`
-			MarkedByModel                *string `json:"marked_by_model"`
-			SessionID                    *string `json:"session_id"`
-			SupersededAt                 *string `json:"superseded_at"`
-			SupersededByRelationSyncID   *string `json:"superseded_by_relation_sync_id"`
+			SyncID                     string   `json:"sync_id"`
+			Reason                     *string  `json:"reason"`
+			Evidence                   *string  `json:"evidence"`
+			Confidence                 *float64 `json:"confidence"`
+			JudgmentStatus             string   `json:"judgment_status"`
+			MarkedByActor              *string  `json:"marked_by_actor"`
+			MarkedByKind               *string  `json:"marked_by_kind"`
+			MarkedByModel              *string  `json:"marked_by_model"`
+			SessionID                  *string  `json:"session_id"`
+			SupersededAt               *string  `json:"superseded_at"`
+			SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
 		} `json:"relations"`
 	}
 	if err := json.Unmarshal(bytes, &payload); err != nil {
@@ -5818,17 +6057,17 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 		t.Fatalf("backup relations = %+v, want two complete relation records", payload.Relations)
 	}
 	var firstRelation *struct {
-		SyncID                     string  `json:"sync_id"`
-		Reason                     *string `json:"reason"`
-		Evidence                   *string `json:"evidence"`
+		SyncID                     string   `json:"sync_id"`
+		Reason                     *string  `json:"reason"`
+		Evidence                   *string  `json:"evidence"`
 		Confidence                 *float64 `json:"confidence"`
-		JudgmentStatus             string  `json:"judgment_status"`
-		MarkedByActor              *string `json:"marked_by_actor"`
-		MarkedByKind               *string `json:"marked_by_kind"`
-		MarkedByModel              *string `json:"marked_by_model"`
-		SessionID                  *string `json:"session_id"`
-		SupersededAt               *string `json:"superseded_at"`
-		SupersededByRelationSyncID *string `json:"superseded_by_relation_sync_id"`
+		JudgmentStatus             string   `json:"judgment_status"`
+		MarkedByActor              *string  `json:"marked_by_actor"`
+		MarkedByKind               *string  `json:"marked_by_kind"`
+		MarkedByModel              *string  `json:"marked_by_model"`
+		SessionID                  *string  `json:"session_id"`
+		SupersededAt               *string  `json:"superseded_at"`
+		SupersededByRelationSyncID *string  `json:"superseded_by_relation_sync_id"`
 	}
 	for i := range payload.Relations {
 		if payload.Relations[i].SyncID == "rel-backup-first" {
@@ -5961,8 +6200,23 @@ func TestExportImportRoundTripPreservesOrphanedRelationsWithoutEndpoints(t *test
 	if err != nil {
 		t.Fatalf("export restored backup: %v", err)
 	}
+	for i := range exported.Relations {
+		if exported.Relations[i].SyncID == "rel-orphaned-missing-target" {
+			exported.Relations[i].JudgmentStatus = JudgmentStatusOrphaned
+		}
+	}
 	if !reflect.DeepEqual(restored.Relations, exported.Relations) {
-		t.Fatalf("restored orphaned relations = %#v, want %#v", restored.Relations, exported.Relations)
+		t.Fatalf("restored orphaned relations = %#v, want canonical %#v", restored.Relations, exported.Relations)
+	}
+
+	visible, err := destination.GetRelationsForObservations([]string{sourceObservation.SyncID, targetObservation.SyncID})
+	if err != nil {
+		t.Fatalf("get restored relations: %v", err)
+	}
+	for syncID, relationSet := range visible {
+		if len(relationSet.AsSource) != 0 || len(relationSet.AsTarget) != 0 {
+			t.Fatalf("visible orphaned relations for %q = %#v", syncID, relationSet)
+		}
 	}
 }
 

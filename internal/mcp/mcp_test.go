@@ -446,6 +446,48 @@ func TestNewServerScopeDescriptions(t *testing.T) {
 	}
 }
 
+func TestNewServerSessionIDDescriptions(t *testing.T) {
+	srv := NewServer(newMCPTestStore(t))
+
+	const wantSessionID = "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed."
+	if got := len(wantSessionID); got > 180 {
+		t.Fatalf("shared session_id description length = %d bytes; want <= 180", got)
+	}
+
+	for _, toolName := range []string{"mem_save", "mem_save_prompt", "mem_session_summary", "mem_capture_passive"} {
+		t.Run(toolName, func(t *testing.T) {
+			tool := srv.GetTool(toolName)
+			if tool == nil {
+				t.Fatalf("tool %q not registered", toolName)
+			}
+			sessionID, ok := tool.Tool.InputSchema.Properties["session_id"].(map[string]any)
+			if !ok {
+				t.Fatalf("tool %q session_id schema = %T; want object", toolName, tool.Tool.InputSchema.Properties["session_id"])
+			}
+			if got, _ := sessionID["description"].(string); got != wantSessionID {
+				t.Errorf("tool %q session_id description = %q; want %q", toolName, got, wantSessionID)
+			}
+		})
+	}
+
+	start := srv.GetTool("mem_session_start")
+	if start == nil {
+		t.Fatal("mem_session_start not registered")
+	}
+	const wantStartDescription = "Register a caller-provided session ID. Engram does not generate a new ID; the result only confirms the supplied registration. Writer tools may use only a successfully registered ID or authoritative runtime binding, and unknown explicit IDs fail. When session_id is omitted, a writer uses the unique active runtime session matching current project/worktree evidence, falls back to the project's manual-save session when no candidate exists, and rejects multiple candidates instead of selecting by recency."
+	if got := start.Tool.Description; got != wantStartDescription {
+		t.Errorf("mem_session_start description = %q; want %q", got, wantStartDescription)
+	}
+	id, ok := start.Tool.InputSchema.Properties["id"].(map[string]any)
+	if !ok {
+		t.Fatalf("mem_session_start id schema = %T; want object", start.Tool.InputSchema.Properties["id"])
+	}
+	const wantIDDescription = "Caller-provided unique session ID; Engram does not generate one."
+	if got, _ := id["description"].(string); got != wantIDDescription {
+		t.Errorf("mem_session_start id description = %q; want %q", got, wantIDDescription)
+	}
+}
+
 func TestHandleMergeProjectsRejectsNonEquivalentSourceWithoutMutation(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("merge-source", "engram-memory", "/tmp/engram-memory"); err != nil {
@@ -1128,9 +1170,14 @@ func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 				t.Fatal("expected ambiguous omitted session_id to fail")
 			}
 			got := callResultText(t, res)
-			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions", `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`, "writes to an independent project manual-save session and does not bind it to this MCP session"} {
+			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions", "engram save", `resolved project is "engram"`, "pass that exact name as the --project value", "never invent another", "writes to an independent project manual-save session and does not bind it to this MCP session"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("expected actionable ambiguity error containing %q, got %q", want, got)
+				}
+			}
+			for _, forbidden := range []string{"--project PROJECT", `engram save "TITLE" "CONTENT"`, `--project "engram"`} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("ambiguity error must not contain a copyable project command template %q: %q", forbidden, got)
 				}
 			}
 			for _, id := range []string{"uuid-first", "uuid-second"} {
@@ -1147,6 +1194,38 @@ func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 				t.Fatalf("expected no write attributed to either candidate, got %#v", obs)
 			}
 		})
+	}
+}
+
+func TestAmbiguousSessionGuidanceTreatsResolvedProjectAsData(t *testing.T) {
+	const project = "$(command)"
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/command-substitution" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+
+	s := newMCPTestStore(t)
+	runtimeDirectory := runtimeSessionDirectory("")
+	for _, id := range []string{"uuid-first", "uuid-second"} {
+		if err := s.CreateSession(id, project, runtimeDirectory); err != nil {
+			t.Fatalf("create session %q: %v", id, err)
+		}
+	}
+
+	_, err := resolveFallbackSessionID(s, project)
+	if err == nil {
+		t.Fatal("expected ambiguous fallback to fail")
+	}
+	got := err.Error()
+	for _, want := range []string{`resolved project is "$(command)"`, "pass that exact name as the --project value", "never invent another"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected project data guidance containing %q, got %q", want, got)
+		}
+	}
+	for _, forbidden := range []string{`--project "$(command)"`, `engram save "TITLE" "CONTENT"`} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("dangerous project value must not appear in a copyable command template %q: %q", forbidden, got)
+		}
 	}
 }
 
@@ -2372,6 +2451,67 @@ func TestHandleSuggestTopicKeyReturnsErrorWhenSuggestionEmpty(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected tool error when suggestion is empty")
 	}
+}
+
+func TestHandleUpdateFindReplace(t *testing.T) {
+	t.Run("schema exposes paired fields", func(t *testing.T) {
+		tool := NewServer(newMCPTestStore(t)).GetTool("mem_update")
+		for _, field := range []string{"find", "replace"} {
+			if _, ok := tool.Tool.InputSchema.Properties[field]; !ok {
+				t.Fatalf("mem_update schema missing %q", field)
+			}
+		}
+	})
+
+	t.Run("forwards replacements and reports invalid pairs", func(t *testing.T) {
+		s := newMCPTestStore(t)
+		if err := s.CreateSession("s-find-replace", "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		id, err := s.AddObservation(store.AddObservationParams{SessionID: "s-find-replace", Type: "note", Title: "Original", Content: "old old", Project: "engram", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		h := handleUpdate(s, MCPConfig{DefaultProject: "engram"})
+		result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "old", "replace": "new"}}})
+		if err != nil || result.IsError {
+			t.Fatalf("find/replace update = %#v, %v", result, err)
+		}
+		updated, err := s.GetObservation(id)
+		if err != nil || updated.Content != "new new" {
+			t.Fatalf("forwarded content = %#v, err=%v", updated, err)
+		}
+		invalid, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "new"}}})
+		if err != nil || !invalid.IsError || !strings.Contains(callResultText(t, invalid), "find and replace") {
+			t.Fatalf("incomplete pair result = %#v, err=%v", invalid, err)
+		}
+		conflict, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "new", "replace": "old", "content": "other"}}})
+		if err != nil || !conflict.IsError || !strings.Contains(callResultText(t, conflict), "content") {
+			t.Fatalf("content conflict result = %#v, err=%v", conflict, err)
+		}
+	})
+
+	t.Run("retains ownership checks", func(t *testing.T) {
+		s := newMCPTestStore(t)
+		if err := s.CreateSession("s-current", "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create current-project session: %v", err)
+		}
+		if err := s.CreateSession("s-owned", "other-project", "/tmp/other-project"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		id, err := s.AddObservation(store.AddObservationParams{SessionID: "s-owned", Type: "note", Title: "Original", Content: "old", Project: "other-project", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		result, err := handleUpdate(s, MCPConfig{DefaultProject: "engram"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "old", "replace": "new"}}})
+		if err != nil || !result.IsError {
+			t.Fatalf("cross-project replacement = %#v, %v", result, err)
+		}
+		envelope := callResultJSON(t, result)
+		if envelope["error_code"] != "project_mismatch" {
+			t.Fatalf("error code = %v, want project_mismatch", envelope["error_code"])
+		}
+	})
 }
 
 func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {

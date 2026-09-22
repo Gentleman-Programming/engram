@@ -28,6 +28,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Cursor          | `engram setup cursor`                                                                        | [Details](#cursor)                                 |
 | VS Code Copilot | `engram setup vscode-copilot`                                                                | [Details](#vs-code-copilot--claude-code-extension) |
 | Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
+| Kimi Code       | `engram setup kimi`                                                                          | [Details](#kimi-code)                              |
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` configures the
@@ -721,6 +722,20 @@ engram setup kilocode
 ```
 
 Registers the engram server under the OpenCode-style `mcp` object in `~/.config/kilo/opencode.json` and writes the Memory Protocol as a marker block in `~/.config/kilo/AGENTS.md`.
+
+---
+
+## Kimi Code
+
+**Automated:**
+
+```bash
+engram setup kimi
+```
+
+Registers `mcpServers.engram` in `~/.kimi-code/mcp.json` and writes the Memory Protocol as a marker block in `~/.kimi-code/AGENTS.md`. Both files live under the Kimi Code data root, so when `KIMI_CODE_HOME` is set the setup honors it and writes there instead.
+
+**`KIMI_CODE_HOME` is only honored when it is an absolute path.** A relative value (for example `KIMI_CODE_HOME=.kimi-code`) is ignored and setup falls back to the default `~/.kimi-code` root, so config never lands in whatever directory you happened to run `engram` from. The `Next steps` printed after setup name the files that were actually written, so they follow the override.
 
 ---
 

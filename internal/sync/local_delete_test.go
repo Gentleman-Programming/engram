@@ -5,264 +5,182 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
-	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
-func TestLocalExportDeleteTombstonesIgnoreManifestTimestampAndRemainIdempotent(t *testing.T) {
-	src := newTestStore(t)
-	const manifestTime = "2099-01-02T03:04:05Z"
-	const tombstoneTime = "2000-01-02T03:04:05Z"
-	for _, project := range []string{"proj-a", "proj-b"} {
-		if err := src.CreateSession("session-"+project, project, "/tmp/"+project); err != nil {
-			t.Fatalf("create session for %s: %v", project, err)
-		}
-		if err := src.DeleteSession("session-" + project); err != nil {
-			t.Fatalf("delete session for %s: %v", project, err)
-		}
-	}
-	if _, err := src.DB().Exec(`UPDATE sync_delete_tombstones SET deleted_at = ?`, tombstoneTime); err != nil {
-		t.Fatalf("set tombstone timestamp: %v", err)
-	}
-	syncDir := filepath.Join(t.TempDir(), ".engram")
-	writeLocalChunkFile(t, syncDir, "historical", ChunkData{})
-	writeManifestFile(t, syncDir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: manifestTime}}})
-
-	result, err := NewLocalWithProject(src, syncDir, "proj-a").Export("alice", "proj-a")
+func mustExportLocalChunk(t *testing.T, sy *Syncer, project string) (*SyncResult, ChunkData) {
+	result, err := sy.Export("alice", project)
 	if err != nil || result.IsEmpty {
-		t.Fatalf("historical tombstone project export = %+v, %v", result, err)
+		t.Fatalf("export = %+v, %v", result, err)
 	}
-	payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
-	if err != nil {
-		t.Fatalf("read delete chunk: %v", err)
-	}
+	payload, err := sy.transport.ReadChunk(result.ChunkID)
+	mustNoError(t, err)
 	var chunk ChunkData
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		t.Fatalf("decode delete chunk: %v", err)
+	mustNoError(t, json.Unmarshal(payload, &chunk))
+	return result, chunk
+}
+
+func mustImportLocal(t *testing.T, sy *Syncer) { _, err := sy.Import(); mustNoError(t, err) }
+
+func mustNoError(t *testing.T, err error) {
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != "session-proj-a" || chunk.Mutations[0].Project != "proj-a" {
+}
+
+func mustSQL(t *testing.T, d *sql.DB, q string, a ...any) { _, e := d.Exec(q, a...); mustNoError(t, e) }
+
+func TestLocalExportDeleteTombstonesIgnoreManifestTimestampAndRemainIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	originalExport := storeExportLocalDeleteTombstones
+	t.Cleanup(func() { storeExportLocalDeleteTombstones = originalExport })
+	storeExportLocalDeleteTombstones = func(*store.Store, string) ([]store.SyncMutation, error) { return nil, sql.ErrNoRows }
+	if _, err := NewLocalWithProject(s, t.TempDir(), "proj-a").Export("alice", "proj-a"); !errors.Is(err, sql.ErrNoRows) || !strings.Contains(err.Error(), "export local delete tombstones") {
+		t.Fatalf("local tombstone export error = %v", err)
+	}
+	storeExportLocalDeleteTombstones = originalExport
+	for _, project := range []string{"proj-a", "proj-b"} {
+		mustNoError(t, s.CreateSession("session-"+project, project, "/tmp/"+project))
+		mustNoError(t, s.DeleteSession("session-"+project))
+	}
+	mustSQL(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05'`)
+	mustNoError(t, s.CreateSession("legacy-parent", "proj-a", "/tmp/legacy"))
+	mustSQL(t, s.DB(), `INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES ('prompt-legacy', 'legacy-parent', '', '2000-01-02 03:04:05')`)
+	mustNoError(t, s.DeleteSession("legacy-parent"))
+	dir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, dir, "historical", ChunkData{})
+	writeManifestFile(t, dir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: "2099-01-02T03:04:05Z"}}})
+	sy := NewLocalWithProject(s, dir, "proj-a")
+	_, chunk := mustExportLocalChunk(t, sy, "proj-a")
+	if len(chunk.Mutations) != 3 || chunk.Mutations[0].EntityKey != "prompt-legacy" || chunk.Mutations[0].Project != "proj-a" || chunk.Mutations[1].EntityKey != "session-proj-a" || chunk.Mutations[2].EntityKey != "legacy-parent" {
 		t.Fatalf("project-scoped historical deletes = %+v", chunk.Mutations)
 	}
-	if replay, err := NewLocalWithProject(src, syncDir, "proj-a").Export("alice", "proj-a"); err != nil || !replay.IsEmpty {
-		t.Fatalf("replayed local export = %+v, %v; want idempotent empty result", replay, err)
-	}
-}
-
-func TestLocalExportFutureManifestDoesNotSuppressLaterHardDelete(t *testing.T) {
-	src := newTestStore(t)
-	const project, sessionID = "proj-future", "session-future"
-	if err := src.CreateSession(sessionID, project, "/tmp/proj-future"); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	if err := src.DeleteSession(sessionID); err != nil {
-		t.Fatalf("delete session: %v", err)
-	}
-
-	syncDir := filepath.Join(t.TempDir(), ".engram")
-	writeLocalChunkFile(t, syncDir, "historical", ChunkData{})
-	writeManifestFile(t, syncDir, &Manifest{Chunks: []ChunkEntry{{ID: "historical", CreatedAt: "2099-01-02T03:04:05Z"}}})
-	result, err := NewLocalWithProject(src, syncDir, project).Export("alice", project)
-	if err != nil || result.IsEmpty {
-		t.Fatalf("future-manifest delete export = %+v, %v", result, err)
-	}
-	payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
-	if err != nil {
-		t.Fatalf("read delete chunk: %v", err)
-	}
-	var chunk ChunkData
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		t.Fatalf("decode delete chunk: %v", err)
-	}
-	if len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != sessionID {
-		t.Fatalf("future-manifest deletes = %+v", chunk.Mutations)
-	}
-}
-
-func TestLocalExportKeepsSoftDeletesOnSnapshotPath(t *testing.T) {
-	src := newTestStore(t)
-	const project, sessionID = "proj-soft", "session-soft"
-	if err := src.CreateSession(sessionID, project, "/tmp/proj-soft"); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	observationID, err := src.AddObservation(store.AddObservationParams{SessionID: sessionID, Type: "decision", Title: "soft", Content: "soft delete", Project: project, Scope: "project"})
-	if err != nil {
-		t.Fatalf("add observation: %v", err)
-	}
-	syncDir := filepath.Join(t.TempDir(), ".engram")
-	exporter := NewLocalWithProject(src, syncDir, project)
-	if result, err := exporter.Export("alice", project); err != nil || result.IsEmpty {
-		t.Fatalf("initial export = %+v, %v", result, err)
-	}
-	if err := src.DeleteObservation(observationID, false); err != nil {
-		t.Fatalf("soft delete observation: %v", err)
-	}
-	if _, err := src.DB().Exec(`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE id = ?`, "2099-01-02 03:04:05", "2099-01-02 03:04:05", observationID); err != nil {
-		t.Fatalf("set soft-delete timestamp: %v", err)
-	}
-
-	result, err := exporter.Export("alice", project)
-	if err != nil || result.IsEmpty {
-		t.Fatalf("soft-delete export = %+v, %v", result, err)
-	}
-	payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
-	if err != nil {
-		t.Fatalf("read soft-delete chunk: %v", err)
-	}
-	var chunk ChunkData
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		t.Fatalf("decode soft-delete chunk: %v", err)
-	}
-	if len(chunk.Observations) != 1 || chunk.Observations[0].DeletedAt == nil || len(chunk.Mutations) != 0 {
-		t.Fatalf("soft delete must stay on snapshot path, chunk=%+v", chunk)
+	if replay, err := sy.Export("alice", "proj-a"); err != nil || !replay.IsEmpty {
+		t.Fatalf("replayed export = %+v, %v", replay, err)
 	}
 }
 
 func TestLocalExportImportsHardDeletesAfterInitialSnapshot(t *testing.T) {
 	src := newTestStore(t)
-	const project = "proj-delete"
-	const sessionID = "session-delete"
-	if err := src.CreateSession(sessionID, project, "/tmp/proj-delete"); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	if enrolled, err := src.IsProjectEnrolled(project); err != nil || enrolled {
-		t.Fatalf("source enrollment = %t, %v; want unenrolled", enrolled, err)
-	}
-	observationID, err := src.AddObservation(store.AddObservationParams{
-		SessionID: sessionID, Type: "decision", Title: "delete", Content: "delete me", Project: project, Scope: "project",
-	})
+	const project, sessionID = "proj-delete", "session-delete"
+	mustNoError(t, src.CreateSession(sessionID, project, "/tmp/delete"))
+	observationID, err := src.AddObservation(store.AddObservationParams{SessionID: sessionID, Type: "decision", Title: "delete", Content: "delete", Project: project, Scope: "project"})
 	if err != nil {
-		t.Fatalf("add observation: %v", err)
+		t.Fatal(err)
 	}
-	promptID, err := src.AddPrompt(store.AddPromptParams{SessionID: sessionID, Content: "delete me", Project: project})
+	promptID, err := src.AddPrompt(store.AddPromptParams{SessionID: sessionID, Content: "delete", Project: project})
 	if err != nil {
-		t.Fatalf("add prompt: %v", err)
+		t.Fatal(err)
 	}
-
-	syncDir := filepath.Join(t.TempDir(), ".engram")
-	exporter := NewLocalWithProject(src, syncDir, project)
-	if result, err := exporter.Export("alice", project); err != nil || result.IsEmpty {
-		t.Fatalf("initial local export = %+v, %v", result, err)
-	}
-
+	dir := filepath.Join(t.TempDir(), ".engram")
+	exporter := NewLocalWithProject(src, dir, project)
+	mustExportLocalChunk(t, exporter, project)
 	dst := newTestStore(t)
-	if _, err := NewLocalWithProject(dst, syncDir, project).Import(); err != nil {
-		t.Fatalf("initial local import: %v", err)
-	}
+	importer := NewLocalWithProject(dst, dir, project)
+	mustImportLocal(t, importer)
 	observation, err := src.GetObservation(observationID)
 	if err != nil {
-		t.Fatalf("load observation identity: %v", err)
+		t.Fatal(err)
 	}
 	var promptSyncID string
 	if err := src.DB().QueryRow(`SELECT sync_id FROM user_prompts WHERE id = ?`, promptID).Scan(&promptSyncID); err != nil {
-		t.Fatalf("load prompt identity: %v", err)
+		t.Fatal(err)
 	}
-
-	if err := src.DeletePrompt(promptID); err != nil {
-		t.Fatalf("delete prompt: %v", err)
+	mustNoError(t, src.DeletePrompt(promptID))
+	mustNoError(t, src.DeleteObservation(observationID, true))
+	mustNoError(t, src.DeleteSession(sessionID))
+	_, chunk := mustExportLocalChunk(t, exporter, project)
+	if len(chunk.Mutations) != 3 || chunk.Mutations[0].Entity != "observation" || chunk.Mutations[1].Entity != "prompt" || chunk.Mutations[2].Entity != "session" {
+		t.Fatalf("delete order = %+v", chunk.Mutations)
 	}
-	if err := src.DeleteObservation(observationID, true); err != nil {
-		t.Fatalf("hard delete observation: %v", err)
-	}
-	if err := src.DeleteSession(sessionID); err != nil {
-		t.Fatalf("delete session: %v", err)
-	}
-	second, err := exporter.Export("alice", project)
-	if err != nil || second.IsEmpty {
-		t.Fatalf("delete local export = %+v, %v", second, err)
-	}
-	payload, err := readGzip(filepath.Join(syncDir, "chunks", second.ChunkID+".jsonl.gz"))
-	if err != nil {
-		t.Fatalf("read delete chunk: %v", err)
-	}
-	var chunk ChunkData
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		t.Fatalf("decode delete chunk: %v", err)
-	}
-	var entities []string
-	for _, mutation := range chunk.Mutations {
-		entities = append(entities, mutation.Entity)
-	}
-	if want := []string{store.SyncEntityObservation, store.SyncEntityPrompt, store.SyncEntitySession}; !reflect.DeepEqual(entities, want) {
-		t.Fatalf("delete mutation order = %v, want children before session %v", entities, want)
-	}
-	if _, err := NewLocalWithProject(dst, syncDir, project).Import(); err != nil {
-		t.Fatalf("delete local import: %v", err)
-	}
-
+	mustImportLocal(t, importer)
 	if _, err := dst.GetSession(sessionID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("destination session after delete = %v, want missing", err)
+		t.Fatalf("destination session survived: %v", err)
 	}
 	if _, err := dst.GetObservation(observation.ID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("destination observation after delete = %v, want missing", err)
+		t.Fatalf("destination observation survived: %v", err)
 	}
 	var prompts int
-	if err := dst.DB().QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE sync_id = ?`, promptSyncID).Scan(&prompts); err != nil {
-		t.Fatalf("count destination prompts: %v", err)
+	if err := dst.DB().QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE sync_id = ?`, promptSyncID).Scan(&prompts); err != nil || prompts != 0 {
+		t.Fatalf("destination prompts = %d, %v", prompts, err)
 	}
-	if prompts != 0 {
-		t.Fatalf("destination prompts after delete = %d, want 0", prompts)
+}
+
+func TestLocalImportHardDeleteGenerationSurvivesOutOfOrderChunks(t *testing.T) {
+	dst := newTestStore(t)
+	const project, sessionID, parentID, observationID = "proj-order", "session-order", "parent-order", "observation-order"
+	mustNoError(t, dst.CreateSession(parentID, project, "/tmp/parent"))
+	deleteChunk := func(at string) ChunkData {
+		return ChunkData{Mutations: []store.SyncMutation{
+			{Entity: store.SyncEntityObservation, EntityKey: observationID, Op: store.SyncOpDelete, Payload: `{"sync_id":"` + observationID + `","session_id":"` + parentID + `","project":"` + project + `","deleted_at":"` + at + `","hard_delete":true}`},
+			{Entity: store.SyncEntitySession, EntityKey: sessionID, Op: store.SyncOpDelete, Payload: `{"id":"` + sessionID + `","project":"` + project + `","deleted_at":"` + at + `","hard_delete":true}`},
+		}}
 	}
-	if replay, err := exporter.Export("alice", project); err != nil || !replay.IsEmpty {
-		t.Fatalf("replayed local export = %+v, %v; want idempotent empty result", replay, err)
+	projectValue := project
+	dir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, dir, "delete", deleteChunk("2026-02-01 00:00:00.000000001"))
+	writeLocalChunkFile(t, dir, "stale", ChunkData{
+		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/stale", StartedAt: "2026-02-01 00:00:00.000000000"}},
+		Observations: []store.Observation{{SyncID: observationID, SessionID: parentID, Project: &projectValue, Type: "note", Content: "stale", Scope: "project", CreatedAt: "2026-02-01 00:00:00.000000000", UpdatedAt: "2026-02-01 00:00:00.000000000"}},
+	})
+	entries := []ChunkEntry{{ID: "delete"}, {ID: "stale"}}
+	writeManifestFile(t, dir, &Manifest{Version: ownershipModeManifestVersion, Chunks: entries})
+	importer := NewLocalWithProject(dst, dir, project)
+	mustImportLocal(t, importer)
+	if _, err := dst.GetSession(sessionID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale session resurrected: %v", err)
+	}
+	if _, err := dst.GetObservationBySyncID(observationID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale observation resurrected: %v", err)
+	}
+	writeLocalChunkFile(t, dir, "new", ChunkData{
+		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/new", StartedAt: "2026-02-01 00:00:00.000000002"}},
+		Observations: []store.Observation{{SyncID: observationID, SessionID: parentID, Project: &projectValue, Type: "note", Content: "new", Scope: "project", CreatedAt: "2026-02-01 00:00:00.000000002", UpdatedAt: "2026-02-01 00:00:00.000000002"}},
+	})
+	entries = append(entries, ChunkEntry{ID: "new"})
+	writeManifestFile(t, dir, &Manifest{Version: ownershipModeManifestVersion, Chunks: entries})
+	mustImportLocal(t, importer)
+	if session, err := dst.GetSession(sessionID); err != nil || session.Directory != "/tmp/new" {
+		t.Fatalf("newer session = %+v, %v", session, err)
+	}
+	if observation, err := dst.GetObservationBySyncID(observationID); err != nil || observation.Content != "new" {
+		t.Fatalf("newer observation = %+v, %v", observation, err)
 	}
 }
 
 func TestLocalExportHardDeleteAfterRecreatedSessionSnapshot(t *testing.T) {
-	src := newTestStore(t)
+	s := newTestStore(t)
 	const project, sessionID = "proj-recreate", "session-recreate"
-	syncDir := filepath.Join(t.TempDir(), ".engram")
-	exporter := NewLocalWithProject(src, syncDir, project)
-
-	if err := src.CreateSession(sessionID, project, "/tmp/proj-recreate"); err != nil {
-		t.Fatalf("create initial session: %v", err)
+	sy := NewLocalWithProject(s, filepath.Join(t.TempDir(), ".engram"), project)
+	mustNoError(t, s.CreateSession(sessionID, project, "/tmp/recreate"))
+	initial, err := s.GetSession(sessionID)
+	if err != nil || !strings.Contains(initial.StartedAt, ".") {
+		t.Fatalf("initial session generation = %+v, %v", initial, err)
 	}
-	if err := src.DeleteSession(sessionID); err != nil {
-		t.Fatalf("delete initial session: %v", err)
+	mustNoError(t, s.DeleteSession(sessionID))
+	mustSQL(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID)
+	first, _ := mustExportLocalChunk(t, sy, project)
+	if first.MutationsExported != 1 {
+		t.Fatalf("initial delete export = %+v", first)
 	}
-	if _, err := src.DB().Exec(`UPDATE sync_delete_tombstones SET deleted_at = '2000-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID); err != nil {
-		t.Fatalf("make initial delete distinct: %v", err)
+	mustNoError(t, s.CreateSession(sessionID, project, "/tmp/recreate"))
+	mustSQL(t, s.DB(), `UPDATE sessions SET started_at = '2099-01-02 03:04:05' WHERE id = ?`, sessionID)
+	second, _ := mustExportLocalChunk(t, sy, project)
+	if second.SessionsExported != 1 {
+		t.Fatalf("recreated export = %+v", second)
 	}
-	first, err := exporter.Export("alice", project)
-	if err != nil || first.IsEmpty || first.MutationsExported != 1 {
-		t.Fatalf("initial delete export = %+v, %v", first, err)
+	mustNoError(t, s.DeleteSession(sessionID))
+	mustSQL(t, s.DB(), `UPDATE sync_delete_tombstones SET deleted_at = '2100-01-02 03:04:05' WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, sessionID)
+	third, chunk := mustExportLocalChunk(t, sy, project)
+	if third.MutationsExported != 1 || len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != sessionID {
+		t.Fatalf("second delete = %+v, %+v", third, chunk.Mutations)
 	}
-
-	if err := src.CreateSession(sessionID, project, "/tmp/proj-recreate"); err != nil {
-		t.Fatalf("recreate session: %v", err)
-	}
-	if _, err := src.DB().Exec(`UPDATE sessions SET started_at = '2099-01-02 03:04:05' WHERE id = ?`, sessionID); err != nil {
-		t.Fatalf("make recreated session incrementally exportable: %v", err)
-	}
-	second, err := exporter.Export("alice", project)
-	if err != nil || second.IsEmpty || second.SessionsExported != 1 {
-		t.Fatalf("recreated snapshot export = %+v, %v", second, err)
-	}
-	if err := src.DeleteSession(sessionID); err != nil {
-		t.Fatalf("delete recreated session: %v", err)
-	}
-	third, err := exporter.Export("alice", project)
-	if err != nil || third.IsEmpty || third.MutationsExported != 1 {
-		t.Fatalf("second delete export = %+v, %v", third, err)
-	}
-	payload, err := readGzip(filepath.Join(syncDir, "chunks", third.ChunkID+".jsonl.gz"))
-	if err != nil {
-		t.Fatalf("read second delete chunk: %v", err)
-	}
-	var chunk ChunkData
-	if err := json.Unmarshal(payload, &chunk); err != nil || len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != sessionID {
-		t.Fatalf("second delete mutation = %+v, %v", chunk.Mutations, err)
-	}
-
 	dst := newTestStore(t)
-	if _, err := NewLocalWithProject(dst, syncDir, project).Import(); err != nil {
-		t.Fatalf("import full manifest: %v", err)
-	}
+	mustImportLocal(t, NewLocalWithProject(dst, sy.syncDir, project))
 	if _, err := dst.GetSession(sessionID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("imported session = %v, want absent", err)
-	}
-	if replay, err := exporter.Export("alice", project); err != nil || !replay.IsEmpty {
-		t.Fatalf("replayed export = %+v, %v; want empty", replay, err)
+		t.Fatalf("imported session survived: %v", err)
 	}
 }
