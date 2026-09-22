@@ -85,22 +85,6 @@ Treat Engram as a curated project memory, not a transcript sink. Use this operat
 **Learned**: Reuse the request id as the idempotency key.
 ```
 
-| Agent                       | One-liner                                                                                    |
-| --------------------------- | -------------------------------------------------------------------------------------------- |
-| Claude Code                 | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
-| Pi                          | `engram setup pi`                                                                            |
-| OpenCode                    | `engram setup opencode`                                                                      |
-| Gemini CLI                  | `engram setup gemini-cli`                                                                    |
-| Codex                       | `engram setup codex`                                                                         |
-| Antigravity CLI             | `engram setup antigravity-cli`                                                               |
-| Windsurf                    | `engram setup windsurf`                                                                      |
-| Qwen Code                   | `engram setup qwen`                                                                          |
-| Kiro                        | `engram setup kiro`                                                                          |
-| Cursor                      | `engram setup cursor`                                                                        |
-| VS Code (Copilot)           | `engram setup vscode-copilot`                                                                |
-| Kilo Code                   | `engram setup kilocode`                                                                      |
-| Kimi Code                   | `engram setup kimi`                                                                          |
-| Any other MCP client        | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |
 Use a short, searchable title and a fitting type with that content. The full [Memory Protocol](DOCS.md#memory-protocol) defines the durable-save rules and session-summary shape.
 
 ### Choose MCP tools by intent
@@ -152,6 +136,7 @@ Run the setup command for the agent you use, then restart that agent. `engram se
 | Cursor | `engram setup cursor` |
 | VS Code (Copilot) | `engram setup vscode-copilot` |
 | Kilo Code | `engram setup kilocode` |
+| Kimi Code | `engram setup kimi` |
 | Another MCP-compatible agent | [Manual MCP setup](docs/AGENT-SETUP.md#any-other-mcp-agent) |
 
 See [Agent Setup](docs/AGENT-SETUP.md) for per-agent configuration, plugin behavior, manual MCP setup, compaction resilience, and troubleshooting. Pi users can also find the package at [`gentle-engram`](plugin/pi/README.md).
