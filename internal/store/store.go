@@ -8617,13 +8617,9 @@ func (s *Store) localUpsertBlockedByTombstoneTx(tx *sql.Tx, entity, entityKey, g
 	if err != nil || !hardDelete {
 		return false, err
 	}
-	return generationNotAfterDelete(generation, deletedAt), nil
-}
-
-func generationNotAfterDelete(generation, deletedAt string) bool {
 	generation = normalizeComparableTimestamp(generation)
 	deletedAt = normalizeComparableTimestamp(deletedAt)
-	return generation != "" && deletedAt != "" && generation <= deletedAt
+	return generation != "" && deletedAt != "" && generation <= deletedAt, nil
 }
 
 func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {

@@ -539,7 +539,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	entry := ChunkEntry{
 		ID:        chunkID,
 		CreatedBy: createdBy,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Sessions:  len(chunk.Sessions),
 		Memories:  len(chunk.Observations),
 		Prompts:   len(chunk.Prompts),
@@ -633,7 +633,7 @@ func (sy *Syncer) exportCloudMutationChunks(manifest *Manifest, knownChunks map[
 		entry := ChunkEntry{
 			ID:        chunkID,
 			CreatedBy: createdBy,
-			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 			Sessions:  len(part.chunk.Sessions),
 			Memories:  len(part.chunk.Observations),
 			Prompts:   len(part.chunk.Prompts),
