@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -11,6 +12,53 @@ import (
 func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	if shouldCheckForUpdates([]string{"hook", "claude-pre-tool-use"}) {
 		t.Fatal("internal hook must not run the update check before emitting a Claude hook response")
+	}
+}
+
+func TestCmdHookExitsWhenClaudeResponseWriteFails(t *testing.T) {
+	stdinReader, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdin pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdinWriter.Close()
+		_ = stdinReader.Close()
+	})
+	if _, err := stdinWriter.Write([]byte(`{"session_id":"claude-session","tool_name":"mcp__engram__mem_save","tool_input":{"title":"decision"}}`)); err != nil {
+		t.Fatalf("write Claude hook input: %v", err)
+	}
+	if err := stdinWriter.Close(); err != nil {
+		t.Fatalf("close stdin writer: %v", err)
+	}
+
+	oldStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = oldStdin })
+	oldClaudeHookOutput := claudeHookOutput
+	claudeHookOutput = func([]byte) error { return errors.New("write Claude hook response") }
+	t.Cleanup(func() { claudeHookOutput = oldClaudeHookOutput })
+	oldExit := exitFunc
+	var exitCodes []int
+	exitFunc = func(code int) { exitCodes = append(exitCodes, code) }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	os.Stdin = stdinReader
+	cmdHook([]string{"claude-pre-tool-use"})
+
+	closedReader, closedWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create closed stdin pipe: %v", err)
+	}
+	if err := closedWriter.Close(); err != nil {
+		t.Fatalf("close stdin writer: %v", err)
+	}
+	if err := closedReader.Close(); err != nil {
+		t.Fatalf("close stdin reader: %v", err)
+	}
+	os.Stdin = closedReader
+	cmdHook([]string{"claude-pre-tool-use"})
+
+	if len(exitCodes) != 2 || exitCodes[0] != 1 || exitCodes[1] != 1 {
+		t.Fatalf("exit codes = %v, want [1 1] after Claude hook response write failures", exitCodes)
 	}
 }
 

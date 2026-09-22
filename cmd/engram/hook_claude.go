@@ -34,6 +34,11 @@ var claudeEngramToolPrefixes = []string{
 	"mcp__plugin_engram_engram__",
 }
 
+var claudeHookOutput = func(response []byte) error {
+	_, err := os.Stdout.Write(response)
+	return err
+}
+
 func cmdHook(args []string) {
 	if len(args) != 1 || args[0] != "claude-pre-tool-use" {
 		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use")
@@ -42,11 +47,14 @@ func cmdHook(args []string) {
 	}
 
 	input, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Print(string(claudePreToolUseDeny("cannot read authoritative Claude hook input")))
+	response := claudePreToolUseDeny("cannot read authoritative Claude hook input")
+	if err == nil {
+		response = transformClaudePreToolUse(input)
+	}
+	if err := claudeHookOutput(response); err != nil {
+		exitFunc(1)
 		return
 	}
-	fmt.Print(string(transformClaudePreToolUse(input)))
 }
 
 // transformClaudePreToolUse consumes Claude Code's authoritative PreToolUse
