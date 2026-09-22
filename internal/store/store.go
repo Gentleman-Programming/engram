@@ -8609,11 +8609,12 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 
 func (s *Store) localUpsertBlockedByTombstoneTx(tx *sql.Tx, entity, entityKey, generation string) (bool, error) {
 	var deletedAt string
-	err := tx.QueryRow(`SELECT deleted_at FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&deletedAt)
+	var hardDelete bool
+	err := tx.QueryRow(`SELECT deleted_at, hard_delete FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&deletedAt, &hardDelete)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	if err != nil {
+	if err != nil || !hardDelete {
 		return false, err
 	}
 	return generationNotAfterDelete(generation, deletedAt), nil
@@ -8622,7 +8623,7 @@ func (s *Store) localUpsertBlockedByTombstoneTx(tx *sql.Tx, entity, entityKey, g
 func generationNotAfterDelete(generation, deletedAt string) bool {
 	generation = normalizeComparableTimestamp(generation)
 	deletedAt = normalizeComparableTimestamp(deletedAt)
-	return generation == "" || deletedAt == "" || generation <= deletedAt
+	return generation != "" && deletedAt != "" && generation <= deletedAt
 }
 
 func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
