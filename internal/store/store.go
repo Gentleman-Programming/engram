@@ -5610,14 +5610,12 @@ func (s *Store) importSessionTx(tx *sql.Tx, sess Session) (bool, error) {
 	var existingID string
 	err := tx.QueryRow(`SELECT id FROM sessions WHERE id = ?`, sess.ID).Scan(&existingID)
 	if errors.Is(err, sql.ErrNoRows) {
-		endedAt := sess.EndedAt
-		if endedAt != nil && strings.TrimSpace(*endedAt) == "" {
-			endedAt = nil
-		}
+		endedAt := normalizeOptionalString(sess.EndedAt)
+		summary := normalizeOptionalString(sess.Summary)
 		_, err := s.execHook(tx,
 			`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
 			 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)`,
-			sess.ID, sess.Project, nullableOwnershipMode(sess.OwnershipMode), sess.Directory, strings.TrimSpace(sess.StartedAt), endedAt, sess.Summary,
+			sess.ID, sess.Project, nullableOwnershipMode(sess.OwnershipMode), sess.Directory, strings.TrimSpace(sess.StartedAt), endedAt, summary,
 		)
 		return true, err
 	}
@@ -5625,16 +5623,14 @@ func (s *Store) importSessionTx(tx *sql.Tx, sess Session) (bool, error) {
 		return false, err
 	}
 
-	endedAt := sess.EndedAt
-	if endedAt != nil && strings.TrimSpace(*endedAt) == "" {
-		endedAt = nil
-	}
+	endedAt := normalizeOptionalString(sess.EndedAt)
+	summary := normalizeOptionalString(sess.Summary)
 	_, err = s.execHook(tx,
 		`UPDATE sessions
-			 SET ended_at = COALESCE(?, ended_at),
-			     summary = COALESCE(?, summary)
+			 SET ended_at = COALESCE(ended_at, ?),
+			     summary = COALESCE(summary, ?)
 			 WHERE id = ?`,
-		endedAt, sess.Summary,
+		endedAt, summary,
 		sess.ID,
 	)
 	return false, err
@@ -10274,17 +10270,15 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 	if strings.TrimSpace(payload.OwnershipMode) != "" && !validSessionOwnershipMode(payload.OwnershipMode) {
 		return fmt.Errorf("%w %q", ErrInvalidSessionOwnershipMode, payload.OwnershipMode)
 	}
-	endedAt := payload.EndedAt
-	if endedAt != nil && strings.TrimSpace(*endedAt) == "" {
-		endedAt = nil
-	}
+	endedAt := normalizeOptionalString(payload.EndedAt)
+	summary := normalizeOptionalString(payload.Summary)
 	_, err := s.execHook(tx,
 		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
 			 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
-			   ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
-			   summary = COALESCE(excluded.summary, sessions.summary)`,
-		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), endedAt, payload.Summary,
+			   ended_at = COALESCE(sessions.ended_at, excluded.ended_at),
+			   summary = COALESCE(sessions.summary, excluded.summary)`,
+		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), endedAt, summary,
 	)
 	if err != nil {
 		return err
@@ -10900,6 +10894,13 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func normalizeOptionalString(value *string) *string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return nil
+	}
+	return value
 }
 
 func truncate(s string, max int) string {
