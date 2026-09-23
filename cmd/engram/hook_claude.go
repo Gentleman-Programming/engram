@@ -44,15 +44,20 @@ func cmdHook(args []string) {
 		cmdCodexUserPromptSubmit()
 		return
 	}
-	if len(args) != 1 || args[0] != "claude-pre-tool-use" {
-		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|codex-user-prompt-submit")
+	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
+		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|codex-pre-tool-use|codex-user-prompt-submit")
 		exitFunc(1)
 		return
 	}
 
 	input, err := io.ReadAll(os.Stdin)
 	response := claudePreToolUseDeny("cannot read authoritative Claude hook input")
-	if err == nil {
+	if args[0] == "codex-pre-tool-use" {
+		response = claudePreToolUseDeny("cannot read authoritative Codex hook input")
+		if err == nil {
+			response = transformCodexPreToolUse(input)
+		}
+	} else if err == nil {
 		response = transformClaudePreToolUse(input)
 	}
 	if err := claudeHookOutput(response); err != nil {
@@ -104,6 +109,38 @@ func transformClaudePreToolUse(input []byte) []byte {
 	}
 
 	return claudePreToolUseResponse(updatedInput)
+}
+
+// Codex requires an explicit allow alongside updatedInput for MCP argument rewrites.
+// Reuse Claude's classification and binder; a denial remains a denial.
+func transformCodexPreToolUse(input []byte) []byte {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(input, &payload); err != nil || payload == nil {
+		return claudePreToolUseDeny("malformed authoritative Codex hook input")
+	}
+	toolName, ok := claudeHookRequiredString(payload, "tool_name")
+	if !ok {
+		return claudePreToolUseDeny("authoritative Codex tool_name is required")
+	}
+	if !isClaudeEngramWriteOrSessionTool(toolName) {
+		return []byte("{}")
+	}
+	response := transformClaudePreToolUse(input)
+	var envelope struct {
+		HookSpecificOutput map[string]json.RawMessage `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		return claudePreToolUseDeny("cannot encode Codex hook response")
+	}
+	if _, bound := envelope.HookSpecificOutput["updatedInput"]; !bound {
+		return response
+	}
+	envelope.HookSpecificOutput["permissionDecision"] = json.RawMessage(`"allow"`)
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return claudePreToolUseDeny("cannot encode Codex hook response")
+	}
+	return encoded
 }
 
 func claudeHookRequiredString(payload map[string]json.RawMessage, field string) (string, bool) {
