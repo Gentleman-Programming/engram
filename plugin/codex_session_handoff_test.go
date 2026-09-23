@@ -15,6 +15,28 @@ import (
 	"time"
 )
 
+func TestCodexPreToolUseManifestRegistersNativeBinder(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	entries := manifest.Hooks["PreToolUse"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 || entries[0].Matcher != "mcp__engram__mem_*|mcp__plugin_engram_engram__mem_*" || entries[0].Hooks[0].Command != "engram hook codex-pre-tool-use" {
+		t.Fatalf("unexpected Codex PreToolUse registration: %+v", entries)
+	}
+}
+
 func TestCodexRegisteredSessionHandoff(t *testing.T) {
 	if testing.Short() {
 		t.Skip("executes lifecycle shell hooks")

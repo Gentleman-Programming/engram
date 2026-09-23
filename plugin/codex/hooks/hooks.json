@@ -26,6 +26,18 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__engram__mem_*|mcp__plugin_engram_engram__mem_*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engram hook codex-pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
