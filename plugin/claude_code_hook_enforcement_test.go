@@ -99,6 +99,42 @@ func assertExactPowerShellToolSearchNames(t *testing.T, listed map[string]bool) 
 // Defect 4: the SessionStart matcher must cover resumed and forked sessions.
 // A resumed/forked session receives no engram context injection when the
 // matcher is only "startup|clear".
+func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("cannot read hooks.json: %v", err)
+	}
+
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("cannot parse hooks.json: %v", err)
+	}
+
+	for _, group := range manifest.Hooks["PreToolUse"] {
+		for _, hook := range group.Hooks {
+			if hook.Command != "engram hook claude-pre-tool-use" {
+				continue
+			}
+			if !strings.Contains(group.Matcher, "mcp__engram__") || !strings.Contains(group.Matcher, "mcp__plugin_engram_engram__") {
+				t.Fatalf("PreToolUse matcher %q must cover both supported Engram MCP server IDs", group.Matcher)
+			}
+			if strings.Contains(strings.ToLower(hook.Command), "bash") || strings.Contains(hook.Command, ".sh") {
+				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
+			}
+			return
+		}
+	}
+	t.Fatal("no portable PreToolUse hook delegates to engram hook claude-pre-tool-use")
+}
+
 func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "hooks", "hooks.json"))

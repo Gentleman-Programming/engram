@@ -26,6 +26,10 @@ the permissions allowlist for both current (`mcp__engram__...`) and older
 plugin-scoped (`mcp__plugin_engram_engram__...`) server ids. If the MCP config
 is a symlink or another non-regular path, replace it manually before rerunning setup.
 
+## Claude session binding
+
+For Engram write and session MCP tools, the Claude plugin binds `session_id` to Claude Code's authoritative session identity before the tool runs. Do not invent, reuse, or try to override this value. Read-only tools are unchanged. Generic or direct MCP clients still require their existing explicit-session contract.
+
 ## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
 
 Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:

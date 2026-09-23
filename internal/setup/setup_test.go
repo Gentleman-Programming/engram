@@ -3475,6 +3475,41 @@ func TestClaudeCodeUserPromptHookIncludesPowerShellFallback(t *testing.T) {
 	}
 }
 
+func TestClaudePreToolUseHookUsesWindowsPortableCommand(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code hooks config: %v", err)
+	}
+
+	var cfg struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse Claude Code hooks config: %v", err)
+	}
+
+	for _, entry := range cfg.Hooks["PreToolUse"] {
+		for _, hook := range entry.Hooks {
+			if hook.Command != "engram hook claude-pre-tool-use" {
+				continue
+			}
+			if strings.ContainsAny(hook.Command, `/$`) || strings.Contains(strings.ToLower(hook.Command), "bash") {
+				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
+			}
+			if !strings.Contains(entry.Matcher, "mcp__engram__") || !strings.Contains(entry.Matcher, "mcp__plugin_engram_engram__") {
+				t.Fatalf("PreToolUse matcher %q must cover both supported Engram MCP server IDs", entry.Matcher)
+			}
+			return
+		}
+	}
+	t.Fatal("Claude PreToolUse manifest is missing the portable core hook command")
+}
+
 func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "hooks", "hooks.json"))
 	if err != nil {
