@@ -4910,11 +4910,11 @@ func TestSessionSyncPayloadPreservesStartedAtOnApply(t *testing.T) {
 	}
 }
 
-func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
+func TestSessionSyncPayloadUpdatesSharedIdentityAndPreservesClosureOnApply(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.db.Exec(
-		`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, ?, ?)`,
-		"remote-existing", "original-project", "/original-directory", "2024-01-02 03:04:05",
+		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at) VALUES (?, ?, ?, ?, ?)`,
+		"remote-existing", "original-project", SessionOwnershipShared, "/original-directory", "2024-01-02 03:04:05",
 	); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
@@ -4927,18 +4927,18 @@ func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
 		Entity:    SyncEntitySession,
 		EntityKey: "remote-existing",
 		Op:        SyncOpUpsert,
-		Payload:   `{"id":"remote-existing","project":"conflicting-project","directory":"/conflicting-directory","started_at":"2025-01-03 04:05:06","ended_at":"2025-01-01 12:00:00","summary":"pulled closure"}`,
+		Payload:   `{"id":"remote-existing","project":"incoming-project","ownership_mode":"project_owned","directory":"/incoming-directory","started_at":"2025-01-03 04:05:06","ended_at":"2025-01-01 12:00:00","summary":"pulled closure"}`,
 	}
 	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
-		t.Fatalf("apply conflicting session mutation: %v", err)
+		t.Fatalf("apply session mutation: %v", err)
 	}
 
 	updated, err := s.GetSession("remote-existing")
 	if err != nil {
 		t.Fatalf("get updated session: %v", err)
 	}
-	if updated.Project != "original-project" || updated.Directory != "/original-directory" || updated.StartedAt != "2024-01-02 03:04:05" {
-		t.Fatalf("pulled mutation changed session identity fields: %+v", updated)
+	if updated.Project != "incoming-project" || updated.OwnershipMode != SessionOwnershipProjectOwned || updated.Directory != "/incoming-directory" || updated.StartedAt != "2025-01-03 04:05:06" {
+		t.Fatalf("pulled mutation did not update shared session identity fields: %+v", updated)
 	}
 	if updated.EndedAt == nil || *updated.EndedAt != endedAt || updated.Summary == nil || *updated.Summary != summary {
 		t.Fatalf("pulled mutation did not apply closure fields: %+v", updated)
@@ -4950,7 +4950,7 @@ func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
 		Entity:    SyncEntitySession,
 		EntityKey: "remote-existing",
 		Op:        SyncOpUpsert,
-		Payload:   `{"id":"remote-existing","project":"stale-project","directory":"/stale-directory","started_at":"2025-01-04 05:06:07"}`,
+		Payload:   `{"id":"remote-existing","project":"stale-project","ownership_mode":"shared","directory":"/latest-directory","started_at":"2025-01-04 05:06:07","ended_at":"2025-02-02 13:00:00","summary":"replacement closure"}`,
 	}); err != nil {
 		t.Fatalf("reapply stale session mutation: %v", err)
 	}
@@ -4960,6 +4960,44 @@ func TestSessionSyncPayloadPreservesExistingIdentityOnApply(t *testing.T) {
 	}
 	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
 		t.Fatalf("stale pulled mutation erased closure fields: %+v", replayed)
+	}
+	if replayed.Project != "incoming-project" || replayed.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("pulled mutation changed project-owned identity: %+v", replayed)
+	}
+	if replayed.Directory != "/latest-directory" || replayed.StartedAt != "2025-01-04 05:06:07" {
+		t.Fatalf("pulled mutation did not update mutable identity fields: %+v", replayed)
+	}
+}
+
+func TestSessionSyncPayloadSummaryOnlyPreservesStartedAtAndReplacesWhitespaceSummary(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at, summary) VALUES (?, ?, ?, ?, ?)`,
+		"remote-whitespace-summary", "engram", "/original", "2024-01-02 03:04:05", " \t\n",
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+		Seq:       2,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-whitespace-summary",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-whitespace-summary","project":"engram","directory":"/incoming","summary":"first meaningful summary"}`,
+	}); err != nil {
+		t.Fatalf("apply session summary: %v", err)
+	}
+
+	updated, err := s.GetSession("remote-whitespace-summary")
+	if err != nil {
+		t.Fatalf("get updated session: %v", err)
+	}
+	if updated.Summary == nil || *updated.Summary != "first meaningful summary" {
+		t.Fatalf("summary = %v, want first meaningful summary", updated.Summary)
+	}
+	if updated.StartedAt != "2024-01-02 03:04:05" {
+		t.Fatalf("started_at = %q, want existing historical timestamp", updated.StartedAt)
 	}
 }
 
@@ -6628,11 +6666,15 @@ func TestImportUpdatesExistingSessionClosureWithoutReopeningIt(t *testing.T) {
 		t.Fatalf("import changed session identity fields: original=%+v imported=%+v", original, closed)
 	}
 
+	replacementEndedAt := "2025-01-02 13:00:00"
+	replacementSummary := "replacement archive"
 	if _, err := s.Import(&ExportData{Sessions: []Session{{
 		ID:        "import-closure",
 		Project:   "stale-project",
 		Directory: "/stale-directory",
 		StartedAt: "2025-01-01 11:00:00",
+		EndedAt:   &replacementEndedAt,
+		Summary:   &replacementSummary,
 	}}}); err != nil {
 		t.Fatalf("replay stale session snapshot: %v", err)
 	}
@@ -6645,6 +6687,34 @@ func TestImportUpdatesExistingSessionClosureWithoutReopeningIt(t *testing.T) {
 	}
 	if replayed.Project != original.Project || replayed.Directory != original.Directory || replayed.StartedAt != original.StartedAt {
 		t.Fatalf("stale replay changed session identity fields: original=%+v replayed=%+v", original, replayed)
+	}
+}
+
+func TestImportReplacesWhitespaceOnlySessionSummary(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at, summary) VALUES (?, ?, ?, ?, ?)`,
+		"import-whitespace-summary", "engram", "/original", "2024-01-02 03:04:05", " \t\n",
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	meaningful := "first meaningful summary"
+	if _, err := s.Import(&ExportData{Sessions: []Session{{
+		ID:        "import-whitespace-summary",
+		Project:   "engram",
+		Directory: "/incoming",
+		Summary:   &meaningful,
+	}}}); err != nil {
+		t.Fatalf("import session summary: %v", err)
+	}
+
+	updated, err := s.GetSession("import-whitespace-summary")
+	if err != nil {
+		t.Fatalf("get updated session: %v", err)
+	}
+	if updated.Summary == nil || *updated.Summary != meaningful {
+		t.Fatalf("summary = %v, want %q", updated.Summary, meaningful)
 	}
 }
 

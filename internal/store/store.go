@@ -2892,7 +2892,6 @@ func (s *Store) EndSession(id string, summary string) error {
 		if endedAt.Valid && strings.TrimSpace(endedAt.String) != "" {
 			return nil
 		}
-
 		if _, err := s.execHook(tx,
 			`UPDATE sessions
 			 SET ended_at = datetime('now'), summary = COALESCE(summary, ?)
@@ -5628,9 +5627,12 @@ func (s *Store) importSessionTx(tx *sql.Tx, sess Session) (bool, error) {
 	_, err = s.execHook(tx,
 		`UPDATE sessions
 			 SET ended_at = COALESCE(ended_at, ?),
-			     summary = COALESCE(summary, ?)
+			     summary = CASE
+			       WHEN summary IS NULL OR trim(summary, ?) = '' THEN ?
+			       ELSE summary
+			     END
 			 WHERE id = ?`,
-		endedAt, summary,
+		endedAt, sqlWhitespaceTrimSet, summary,
 		sess.ID,
 	)
 	return false, err
@@ -10272,13 +10274,23 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 	}
 	endedAt := normalizeOptionalString(payload.EndedAt)
 	summary := normalizeOptionalString(payload.Summary)
+	startedAt := strings.TrimSpace(payload.StartedAt)
 	_, err := s.execHook(tx,
 		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
 			 VALUES (?, ?, COALESCE(?, 'shared'), ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
+			   project = CASE WHEN sessions.ownership_mode = 'project_owned' THEN sessions.project ELSE excluded.project END,
+			   ownership_mode = CASE
+			     WHEN sessions.ownership_mode = 'project_owned' OR excluded.ownership_mode IS NULL THEN sessions.ownership_mode
+			     ELSE excluded.ownership_mode END,
+			   directory = excluded.directory,
+			   started_at = CASE WHEN ? = '' THEN sessions.started_at ELSE excluded.started_at END,
 			   ended_at = COALESCE(sessions.ended_at, excluded.ended_at),
-			   summary = COALESCE(sessions.summary, excluded.summary)`,
-		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, strings.TrimSpace(payload.StartedAt), endedAt, summary,
+			   summary = CASE
+			     WHEN sessions.summary IS NULL OR trim(sessions.summary, ?) = '' THEN excluded.summary
+			     ELSE sessions.summary
+			   END`,
+		payload.ID, payload.Project, nullableOwnershipMode(payload.OwnershipMode), payload.Directory, startedAt, endedAt, summary, startedAt, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err
