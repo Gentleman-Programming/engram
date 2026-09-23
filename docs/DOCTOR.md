@@ -74,7 +74,19 @@ Plain `engram doctor` remains diagnostic-only. Findings that imply data movement
 
 ### Network filesystem startup rejection
 
-Persistent SQLite WAL is unsafe on known NFS and SMB/CIFS data directories. When startup rejects one, stop **all** Engram processes; copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage; set `ENGRAM_DATA_DIR` to that local directory; start Engram; then run `engram doctor` and `sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"`. This condition has no automatic repair, quarantine, checkpoint, or rollback-journal fallback.
+Persistent SQLite WAL is unsafe on known NFS and SMB/CIFS data directories. When startup rejects one, stop **all** Engram processes; copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage; set `ENGRAM_DATA_DIR` to that local directory; start Engram; then run `engram doctor`. Run the integrity check for your shell:
+
+```bash
+# POSIX shell or Git Bash
+sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"
+```
+
+```powershell
+# PowerShell
+sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
+```
+
+This condition has no automatic repair, quarantine, checkpoint, or rollback-journal fallback.
 
 `engram doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth. Project reclassification supports:
 
