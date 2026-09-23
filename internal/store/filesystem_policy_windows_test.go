@@ -71,6 +71,29 @@ func TestWindowsFilesystemAdapterRejectsResolvedRemotePath(t *testing.T) {
 	}
 }
 
+func TestWindowsFilesystemAdapterNormalizesExtendedUNC(t *testing.T) {
+	const extended = `\\?\UNC\server\share\data`
+	resolved := normalizeWindowsFinalPath(extended)
+	if resolved != `\\server\share\data` {
+		t.Fatalf("normalized path = %q, want UNC path", resolved)
+	}
+	var gotRoot string
+	setWindowsFilesystemAdapter(t,
+		func(string) (string, error) { return resolved, nil },
+		func(root string) (uint32, error) {
+			gotRoot = root
+			return windowsDriveRemote, nil
+		},
+	)
+	info, err := detectFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRoot != `\\server\share\` || info.Support != filesystemRemote {
+		t.Fatalf("drive root = %q, support = %q; want UNC share root and remote", gotRoot, info.Support)
+	}
+}
+
 func TestWindowsFilesystemAdapterAllowsTemporaryDirectory(t *testing.T) {
 	dataDir := t.TempDir()
 	setWindowsFilesystemAdapter(t, resolveWindowsFinalPath, func(string) (uint32, error) { return windowsDriveFixed, nil })

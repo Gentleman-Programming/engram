@@ -2,7 +2,21 @@
 
 package store
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLinuxFilesystemAdapterMissingPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+	if _, err := detectFilesystem(missing); !os.IsNotExist(err) {
+		t.Fatalf("detectFilesystem(%q) error = %v, want not exist", missing, err)
+	}
+	if err := checkDataDirectoryFilesystem(missing); err != nil {
+		t.Fatalf("missing path must retain ancestor inspection compatibility: %v", err)
+	}
+}
 
 func TestLinuxFilesystemAdapterRecognizesSigned32BitRemoteMagic(t *testing.T) {
 	for _, tc := range []struct {

@@ -188,6 +188,28 @@ func TestNewRejectsRemoteFilesystemBeforeSQLiteMutation(t *testing.T) {
 	}
 }
 
+func TestNewRejectsRemoteFilesystemBeforeCreatingDataDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "absent-data")
+	setFilesystemInspector(t, func(path string) (filesystemInfo, error) {
+		if path != parent {
+			t.Errorf("inspected %q, want existing parent %q", path, parent)
+		}
+		return filesystemInfo{Type: "NFS", Support: filesystemRemote}, nil
+	})
+	_, err := New(FallbackConfig(dataDir))
+	var rejection *NetworkFilesystemError
+	if !errors.As(err, &rejection) {
+		t.Fatalf("New error = %v, want NetworkFilesystemError", err)
+	}
+	if rejection.DataDir != dataDir || rejection.Filesystem != "NFS" {
+		t.Errorf("rejection = %+v, want data dir %q on NFS", rejection, dataDir)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Errorf("rejected startup created data directory: %v", err)
+	}
+}
+
 func TestNewWithQuestionMarkInDataDirectory(t *testing.T) {
 	if filepath.Separator != '/' {
 		t.Skip("Unix filesystem path behavior")
