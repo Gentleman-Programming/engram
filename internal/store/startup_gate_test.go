@@ -13,6 +13,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -138,6 +139,52 @@ func TestPersistentWALSurvivesClose(t *testing.T) {
 
 	if _, err := os.Stat(walPath); err != nil {
 		t.Fatalf("-wal file was unlinked on close — persistent WAL is not active: %v", err)
+	}
+}
+
+func TestNewRejectsRemoteFilesystemBeforeSQLiteMutation(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "remote-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("create data directory: %v", err)
+	}
+
+	triplet := map[string][]byte{
+		"engram.db":     []byte("database bytes"),
+		"engram.db-wal": []byte("wal bytes"),
+		"engram.db-shm": []byte("shm bytes"),
+	}
+	for name, contents := range triplet {
+		if err := os.WriteFile(filepath.Join(dataDir, name), contents, 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	setFilesystemInspector(t, func(string) (filesystemInfo, error) {
+		return filesystemInfo{Type: "CIFS", Support: filesystemRemote}, nil
+	})
+	_, err := New(FallbackConfig(dataDir))
+	var rejection *NetworkFilesystemError
+	if !errors.As(err, &rejection) {
+		t.Fatalf("New error = %v, want NetworkFilesystemError", err)
+	}
+	if rejection.Filesystem != "CIFS" {
+		t.Errorf("rejection filesystem = %q, want CIFS", rejection.Filesystem)
+	}
+
+	for name, want := range triplet {
+		got, readErr := os.ReadFile(filepath.Join(dataDir, name))
+		if readErr != nil {
+			t.Errorf("read %s after rejected startup: %v", name, readErr)
+			continue
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s changed during rejected startup: got %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{".instance-id", ".instance-id.lock", ".migrate.lock"} {
+		if _, statErr := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(statErr) {
+			t.Errorf("rejected startup created %s: %v", name, statErr)
+		}
 	}
 }
 
