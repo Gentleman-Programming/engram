@@ -5149,6 +5149,97 @@ func TestSessionSyncPayloadPreservesStartedAtOnApply(t *testing.T) {
 	}
 }
 
+func TestSessionSyncPayloadUpdatesSharedIdentityAndPreservesClosureOnApply(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at) VALUES (?, ?, ?, ?, ?)`,
+		"remote-existing", "original-project", SessionOwnershipShared, "/original-directory", "2024-01-02 03:04:05",
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	endedAt := "2025-01-01 12:00:00"
+	summary := "pulled closure"
+	mutation := SyncMutation{
+		Seq:       2,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-existing",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-existing","project":"incoming-project","ownership_mode":"project_owned","directory":"/incoming-directory","started_at":"2025-01-03 04:05:06","ended_at":"2025-01-01 12:00:00","summary":"pulled closure"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatalf("apply session mutation: %v", err)
+	}
+
+	updated, err := s.GetSession("remote-existing")
+	if err != nil {
+		t.Fatalf("get updated session: %v", err)
+	}
+	if updated.Project != "incoming-project" || updated.OwnershipMode != SessionOwnershipProjectOwned || updated.Directory != "/incoming-directory" || updated.StartedAt != "2025-01-03 04:05:06" {
+		t.Fatalf("pulled mutation did not update shared session identity fields: %+v", updated)
+	}
+	if updated.EndedAt == nil || *updated.EndedAt != endedAt || updated.Summary == nil || *updated.Summary != summary {
+		t.Fatalf("pulled mutation did not apply closure fields: %+v", updated)
+	}
+
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+		Seq:       3,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-existing",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-existing","project":"stale-project","ownership_mode":"shared","directory":"/latest-directory","started_at":"2025-01-04 05:06:07","ended_at":"2025-02-02 13:00:00","summary":"replacement closure"}`,
+	}); err != nil {
+		t.Fatalf("reapply stale session mutation: %v", err)
+	}
+	replayed, err := s.GetSession("remote-existing")
+	if err != nil {
+		t.Fatalf("get replayed session: %v", err)
+	}
+	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
+		t.Fatalf("stale pulled mutation erased closure fields: %+v", replayed)
+	}
+	if replayed.Project != "incoming-project" || replayed.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("pulled mutation changed project-owned identity: %+v", replayed)
+	}
+	if replayed.Directory != "/latest-directory" || replayed.StartedAt != "2025-01-04 05:06:07" {
+		t.Fatalf("pulled mutation did not update mutable identity fields: %+v", replayed)
+	}
+}
+
+func TestSessionSyncPayloadSummaryOnlyPreservesStartedAtAndReplacesWhitespaceSummary(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at, summary) VALUES (?, ?, ?, ?, ?)`,
+		"remote-whitespace-summary", "engram", "/original", "2024-01-02 03:04:05", " \t\n",
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+		Seq:       2,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-whitespace-summary",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-whitespace-summary","project":"engram","directory":"/incoming","summary":"first meaningful summary"}`,
+	}); err != nil {
+		t.Fatalf("apply session summary: %v", err)
+	}
+
+	updated, err := s.GetSession("remote-whitespace-summary")
+	if err != nil {
+		t.Fatalf("get updated session: %v", err)
+	}
+	if updated.Summary == nil || *updated.Summary != "first meaningful summary" {
+		t.Fatalf("summary = %v, want first meaningful summary", updated.Summary)
+	}
+	if updated.StartedAt != "2024-01-02 03:04:05" {
+		t.Fatalf("started_at = %q, want existing historical timestamp", updated.StartedAt)
+	}
+}
+
 func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("remote-obs-session", "engram", "/tmp/engram"); err != nil {
@@ -5833,8 +5924,8 @@ func TestEndSessionEdgeCases(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	if err := s.EndSession("missing", "ignored"); err != nil {
-		t.Fatalf("end missing session should be no-op: %v", err)
+	if err := s.EndSession("missing", "ignored"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected missing session error, got %v", err)
 	}
 
 	if err := s.EndSession("s-edge", ""); err != nil {
@@ -5850,6 +5941,77 @@ func TestEndSessionEdgeCases(t *testing.T) {
 	}
 	if sess.Summary != nil {
 		t.Fatalf("expected empty summary to persist as NULL, got %q", *sess.Summary)
+	}
+}
+
+func TestEndSessionIsIdempotentAndPreservesSummary(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-idempotent", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("s-idempotent", "first summary"); err != nil {
+		t.Fatalf("first end: %v", err)
+	}
+
+	first, err := s.GetSession("s-idempotent")
+	if err != nil {
+		t.Fatalf("get first session: %v", err)
+	}
+	if first.EndedAt == nil || first.Summary == nil || *first.Summary != "first summary" {
+		t.Fatalf("unexpected first closure: %+v", first)
+	}
+	mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list mutations before retry: %v", err)
+	}
+
+	if err := s.EndSession("s-idempotent", "replacement summary"); err != nil {
+		t.Fatalf("replayed end: %v", err)
+	}
+	second, err := s.GetSession("s-idempotent")
+	if err != nil {
+		t.Fatalf("get second session: %v", err)
+	}
+	if second.EndedAt == nil || *second.EndedAt != *first.EndedAt {
+		t.Fatalf("replayed end changed ended_at: first=%v second=%v", first.EndedAt, second.EndedAt)
+	}
+	if second.Summary == nil || *second.Summary != "first summary" {
+		t.Fatalf("replayed end changed summary: %v", second.Summary)
+	}
+	mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list mutations after retry: %v", err)
+	}
+	if len(mutationsAfter) != len(mutationsBefore) {
+		t.Fatalf("replayed end enqueued a mutation: before=%d after=%d", len(mutationsBefore), len(mutationsAfter))
+	}
+}
+
+func TestEndSessionReturnsBusyWithoutClosing(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-busy", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	oldBackoffs := sqliteWriteRetryBackoffs
+	sqliteWriteRetryBackoffs = []time.Duration{0}
+	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
+	oldBegin := s.hooks.beginTx
+	s.hooks.beginTx = func(_ *sql.DB) (*sql.Tx, error) {
+		return nil, errors.New("database is locked")
+	}
+
+	err := s.EndSession("s-busy", "must not close")
+	if !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("expected ErrSessionBusy, got %v", err)
+	}
+
+	s.hooks.beginTx = oldBegin
+	session, err := s.GetSession("s-busy")
+	if err != nil {
+		t.Fatalf("get busy session: %v", err)
+	}
+	if session.EndedAt != nil {
+		t.Fatalf("busy closure changed ended_at: %v", session.EndedAt)
 	}
 }
 
@@ -6706,6 +6868,95 @@ func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
 	}
 }
 
+func TestImportUpdatesExistingSessionClosureWithoutReopeningIt(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("import-closure", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	original, err := s.GetSession("import-closure")
+	if err != nil {
+		t.Fatalf("get original session: %v", err)
+	}
+
+	endedAt := "2025-01-01 12:00:00"
+	summary := "imported archive"
+	data := &ExportData{Sessions: []Session{{
+		ID:        "import-closure",
+		Project:   "conflicting-project",
+		Directory: "/conflicting-directory",
+		StartedAt: "2025-01-01 11:00:00",
+		EndedAt:   &endedAt,
+		Summary:   &summary,
+	}}}
+	if result, err := s.Import(data); err != nil {
+		t.Fatalf("import closure update: %v", err)
+	} else if result.SessionsImported != 0 {
+		t.Fatalf("updating an existing session must not count as an insert, got %+v", result)
+	}
+
+	closed, err := s.GetSession("import-closure")
+	if err != nil {
+		t.Fatalf("get imported closure: %v", err)
+	}
+	if closed.EndedAt == nil || *closed.EndedAt != endedAt || closed.Summary == nil || *closed.Summary != summary {
+		t.Fatalf("expected imported closure state, got %+v", closed)
+	}
+	if closed.Project != original.Project || closed.Directory != original.Directory || closed.StartedAt != original.StartedAt {
+		t.Fatalf("import changed session identity fields: original=%+v imported=%+v", original, closed)
+	}
+
+	replacementEndedAt := "2025-01-02 13:00:00"
+	replacementSummary := "replacement archive"
+	if _, err := s.Import(&ExportData{Sessions: []Session{{
+		ID:        "import-closure",
+		Project:   "stale-project",
+		Directory: "/stale-directory",
+		StartedAt: "2025-01-01 11:00:00",
+		EndedAt:   &replacementEndedAt,
+		Summary:   &replacementSummary,
+	}}}); err != nil {
+		t.Fatalf("replay stale session snapshot: %v", err)
+	}
+	replayed, err := s.GetSession("import-closure")
+	if err != nil {
+		t.Fatalf("get replayed closure: %v", err)
+	}
+	if replayed.EndedAt == nil || *replayed.EndedAt != endedAt || replayed.Summary == nil || *replayed.Summary != summary {
+		t.Fatalf("stale replay reopened or erased session: %+v", replayed)
+	}
+	if replayed.Project != original.Project || replayed.Directory != original.Directory || replayed.StartedAt != original.StartedAt {
+		t.Fatalf("stale replay changed session identity fields: original=%+v replayed=%+v", original, replayed)
+	}
+}
+
+func TestImportReplacesWhitespaceOnlySessionSummary(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at, summary) VALUES (?, ?, ?, ?, ?)`,
+		"import-whitespace-summary", "engram", "/original", "2024-01-02 03:04:05", " \t\n",
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	meaningful := "first meaningful summary"
+	if _, err := s.Import(&ExportData{Sessions: []Session{{
+		ID:        "import-whitespace-summary",
+		Project:   "engram",
+		Directory: "/incoming",
+		Summary:   &meaningful,
+	}}}); err != nil {
+		t.Fatalf("import session summary: %v", err)
+	}
+
+	updated, err := s.GetSession("import-whitespace-summary")
+	if err != nil {
+		t.Fatalf("get updated session: %v", err)
+	}
+	if updated.Summary == nil || *updated.Summary != meaningful {
+		t.Fatalf("summary = %v, want %q", updated.Summary, meaningful)
+	}
+}
+
 func TestExportImportEdgeBranches(t *testing.T) {
 	t.Run("export fails when observations query fails", func(t *testing.T) {
 		s := newTestStore(t)
@@ -7075,7 +7326,7 @@ func TestImportExportSeamErrors(t *testing.T) {
 		s.hooks = defaultStoreHooks()
 		origExec := s.hooks.exec
 		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-			if strings.Contains(query, "INSERT OR IGNORE INTO sessions") {
+			if strings.Contains(query, "INSERT INTO sessions") {
 				return nil, errors.New("forced import session insert failure")
 			}
 			return origExec(db, query, args...)
@@ -7091,6 +7342,135 @@ func TestImportExportSeamErrors(t *testing.T) {
 		if _, err := s.Import(&ExportData{}); err == nil || !strings.Contains(err.Error(), "import: commit") {
 			t.Fatalf("expected commit error, got %v", err)
 		}
+
+		s.hooks = defaultStoreHooks()
+		const existingID = "s-existing"
+		const originalEndedAt = "2026-09-18T10:00:00Z"
+		const originalSummary = "original closure"
+		if err := s.CreateSession(existingID, "p", "/original"); err != nil {
+			t.Fatalf("create existing session: %v", err)
+		}
+		if _, err := s.db.Exec(`UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ?`, originalEndedAt, originalSummary, existingID); err != nil {
+			t.Fatalf("seed existing closure: %v", err)
+		}
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if strings.Contains(query, "UPDATE sessions") {
+				return nil, errors.New("forced import session update failure")
+			}
+			return origExec(db, query, args...)
+		}
+		incomingEndedAt := "2026-09-18T11:00:00Z"
+		incomingSummary := "incoming closure"
+		if _, err := s.Import(&ExportData{Sessions: []Session{{ID: existingID, Project: "p", Directory: "/incoming", EndedAt: &incomingEndedAt, Summary: &incomingSummary}}}); err == nil || !strings.Contains(err.Error(), "import session s-existing: forced import session update failure") {
+			t.Fatalf("expected wrapped session update error, got %v", err)
+		}
+		session, err := s.GetSession(existingID)
+		if err != nil {
+			t.Fatalf("get existing session: %v", err)
+		}
+		if session.Directory != "/original" || session.EndedAt == nil || *session.EndedAt != originalEndedAt || session.Summary == nil || *session.Summary != originalSummary {
+			t.Fatalf("session mutated after failed import update: %+v", session)
+		}
+	})
+}
+
+func TestSessionClosureUpsertsPreserveFirstNonEmptyValues(t *testing.T) {
+	const firstEndedAt = "2026-09-18T10:00:00Z"
+	const firstSummary = "first closure"
+	const conflictingEndedAt = "2026-09-18T11:00:00Z"
+	const conflictingSummary = "conflicting closure"
+	blankSummary := " \t"
+	pointer := func(value string) *string { return &value }
+
+	assertFirstClosure := func(t *testing.T, s *Store, id string) {
+		t.Helper()
+		session, err := s.GetSession(id)
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if session.EndedAt == nil || *session.EndedAt != firstEndedAt {
+			t.Fatalf("ended_at = %v, want %q", session.EndedAt, firstEndedAt)
+		}
+		if session.Summary == nil || *session.Summary != firstSummary {
+			t.Fatalf("summary = %v, want %q", session.Summary, firstSummary)
+		}
+	}
+
+	t.Run("import replay", func(t *testing.T) {
+		s := newTestStore(t)
+		first := Session{ID: "import-session", Project: "p", Directory: "/tmp/import", EndedAt: pointer(firstEndedAt), Summary: pointer(firstSummary)}
+		if _, err := s.Import(&ExportData{Sessions: []Session{first}}); err != nil {
+			t.Fatalf("import first closure: %v", err)
+		}
+		conflicting := first
+		conflicting.EndedAt = pointer(conflictingEndedAt)
+		conflicting.Summary = pointer(conflictingSummary)
+		if _, err := s.Import(&ExportData{Sessions: []Session{conflicting}}); err != nil {
+			t.Fatalf("import conflicting closure: %v", err)
+		}
+		blank := first
+		blank.EndedAt = nil
+		blank.Summary = &blankSummary
+		if _, err := s.Import(&ExportData{Sessions: []Session{blank}}); err != nil {
+			t.Fatalf("import blank summary replay: %v", err)
+		}
+		assertFirstClosure(t, s, first.ID)
+	})
+
+	t.Run("sync replay", func(t *testing.T) {
+		s := newTestStore(t)
+		payload := func(endedAt, summary *string) string {
+			t.Helper()
+			encoded, err := json.Marshal(syncSessionPayload{ID: "sync-session", Project: "p", Directory: "/tmp/sync", EndedAt: endedAt, Summary: summary})
+			if err != nil {
+				t.Fatalf("marshal session payload: %v", err)
+			}
+			return string(encoded)
+		}
+		for _, mutation := range []SyncMutation{
+			{Seq: 1, Entity: SyncEntitySession, EntityKey: "sync-session", Op: SyncOpUpsert, Payload: payload(pointer(firstEndedAt), pointer(firstSummary))},
+			{Seq: 2, Entity: SyncEntitySession, EntityKey: "sync-session", Op: SyncOpUpsert, Payload: payload(pointer(conflictingEndedAt), pointer(conflictingSummary))},
+			{Seq: 3, Entity: SyncEntitySession, EntityKey: "sync-session", Op: SyncOpUpsert, Payload: payload(nil, &blankSummary)},
+		} {
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+				t.Fatalf("apply pulled mutation %d: %v", mutation.Seq, err)
+			}
+		}
+		assertFirstClosure(t, s, "sync-session")
+	})
+
+	t.Run("blank summaries normalize to nil", func(t *testing.T) {
+		t.Run("import", func(t *testing.T) {
+			s := newTestStore(t)
+			if _, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "p", Directory: "/tmp/import", Summary: &blankSummary}}}); err != nil {
+				t.Fatalf("import blank summary: %v", err)
+			}
+			session, err := s.GetSession("blank-import")
+			if err != nil {
+				t.Fatalf("get imported session: %v", err)
+			}
+			if session.Summary != nil {
+				t.Fatalf("summary = %q, want nil", *session.Summary)
+			}
+		})
+
+		t.Run("sync", func(t *testing.T) {
+			s := newTestStore(t)
+			payload, err := json.Marshal(syncSessionPayload{ID: "blank-sync", Project: "p", Directory: "/tmp/sync", Summary: &blankSummary})
+			if err != nil {
+				t.Fatalf("marshal session payload: %v", err)
+			}
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "blank-sync", Op: SyncOpUpsert, Payload: string(payload)}); err != nil {
+				t.Fatalf("apply pulled mutation: %v", err)
+			}
+			session, err := s.GetSession("blank-sync")
+			if err != nil {
+				t.Fatalf("get synced session: %v", err)
+			}
+			if session.Summary != nil {
+				t.Fatalf("summary = %q, want nil", *session.Summary)
+			}
+		})
 	})
 }
 
