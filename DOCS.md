@@ -1301,6 +1301,7 @@ Share memories across machines, backup, or migrate:
 
 - `engram export` — Versioned JSON backup of sessions, observations, prompts, local pin state, and memory-relation metadata
 - `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation. Orphaned relation audit rows may retain missing endpoint observations; other dangling relations or missing superseding relations fail the complete transaction.
+- `engram export --help` and `engram import --help` — Show command-specific usage and options without an update check, configuration lookup, database migration, or store access. Export accepts an optional output filename and `--project NAME` or `--all`; import requires a backup filename for normal operation.
 
 ### Git Sync (Chunked)
 
