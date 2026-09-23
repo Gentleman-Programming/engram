@@ -1487,7 +1487,7 @@ func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
 			transport := newFakeCloudTransport()
 			transport.chunks["history"] = raw
 			sy := NewWithTransport(nil, transport)
-			_, available, historical, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
+			_, available, historical, _, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
 			if err != nil {
 				t.Fatalf("exportedChunkKeys: %v", err)
 			}
@@ -3408,6 +3408,47 @@ func TestCloudExportUsesMutationJournalForUpdatesAndDeletes(t *testing.T) {
 	}
 }
 
+func TestCloudExportPropagatesFindReplace(t *testing.T) {
+	s := newTestStore(t)
+	transport := newFakeCloudTransport()
+	sy := NewCloudWithTransport(s, transport, "proj-a")
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.CreateSession("sess-find-replace", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "sess-find-replace", Type: "note", Title: "replace", Content: "old old", Project: "proj-a", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := sy.Export("alice", "proj-a"); err != nil {
+		t.Fatalf("export initial observation: %v", err)
+	}
+	var update store.UpdateObservationParams
+	if err := json.Unmarshal([]byte(`{"find":"old","replace":"new"}`), &update); err != nil {
+		t.Fatalf("decode replacement params: %v", err)
+	}
+	if _, err := s.UpdateObservation(id, update); err != nil {
+		t.Fatalf("replace observation: %v", err)
+	}
+	result, err := sy.Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export replacement: %v", err)
+	}
+	payload, ok := transport.chunks[result.ChunkID]
+	if !ok {
+		t.Fatalf("missing replacement chunk %q", result.ChunkID)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		t.Fatalf("decode replacement chunk: %v", err)
+	}
+	if len(chunk.Observations) != 1 || chunk.Observations[0].Content != "new new" {
+		t.Fatalf("replacement propagation = %+v", chunk.Observations)
+	}
+}
+
 func TestCloudExportWritesMutationOnlyChunkForHardDeletes(t *testing.T) {
 	s := newTestStore(t)
 	transport := newFakeCloudTransport()
@@ -4527,15 +4568,15 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 		t.Fatalf("unexpected new prompts: %+v", newOnly.Prompts)
 	}
 
-	if got := normalizeTime("2025-01-01T15:04:05Z"); got != "2025-01-01 15:04:05" {
+	if got := normalizeTime("2025-01-01T15:04:05.123456789Z"); got != "2025-01-01 15:04:05.123456789" {
 		t.Fatalf("unexpected RFC3339 normalization: %q", got)
 	}
 	if got := normalizeTime(" 2025-01-01 15:04:05 "); got != "2025-01-01 15:04:05" {
 		t.Fatalf("unexpected plain normalization: %q", got)
 	}
 
-	m := &Manifest{Chunks: []ChunkEntry{{ID: "old", CreatedAt: "2025-01-01T00:00:00Z"}, {ID: "new", CreatedAt: "2025-02-01T00:00:00Z"}}}
-	if got := sy.lastChunkTime(m); got != "2025-02-01T00:00:00Z" {
+	m := &Manifest{Chunks: []ChunkEntry{{ID: "old", CreatedAt: "2025-02-01T00:00:00Z"}, {ID: "new", CreatedAt: "2025-02-01T00:00:00.5Z"}}}
+	if got := sy.lastChunkTime(m); got != "2025-02-01T00:00:00.5Z" {
 		t.Fatalf("unexpected last chunk time: %q", got)
 	}
 }

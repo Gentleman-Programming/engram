@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -160,6 +161,23 @@ func agentAdapters() []agentAdapter {
 				"Verify ~/.config/kilo/AGENTS.md has the Memory Protocol block",
 			},
 		},
+		{
+			slug:        "kimi",
+			description: "Kimi Code CLI — MCP registration in ~/.kimi-code/mcp.json plus AGENTS.md Memory Protocol",
+			mcpPath:     kimiMCPPath,
+			mcpFormat:   mcpServersObject,
+			instructions: []instrSurface{
+				{path: kimiAgentsPath, style: markerBlock, body: memoryProtocolMarkdown},
+			},
+			// Built from the resolved paths instead of the default root: an
+			// absolute KIMI_CODE_HOME relocates both files, so a hardcoded
+			// ~/.kimi-code would send the user to files setup never wrote.
+			postInstall: []string{
+				"Restart Kimi Code so MCP config is reloaded",
+				fmt.Sprintf("Verify %s includes mcpServers.engram", kimiMCPPath()),
+				fmt.Sprintf("Verify %s has the Memory Protocol block", kimiAgentsPath()),
+			},
+		},
 	}
 }
 
@@ -290,4 +308,29 @@ func kilocodeConfigPath() string {
 
 func kilocodeAgentsPath() string {
 	return filepath.Join(kilocodeConfigDir(), "AGENTS.md")
+}
+
+// ─── Kimi Code paths ─────────────────────────────────────────────────────────
+//
+// Kimi Code keeps all user-level data under KIMI_CODE_HOME (default
+// ~/.kimi-code on every platform, including Windows). MCP servers are declared
+// in mcp.json (top-level "mcpServers") and global agent instructions in
+// AGENTS.md; both live directly under the data root. Like the XDG/APPDATA
+// helpers above, only an absolute KIMI_CODE_HOME is honored — a relative value
+// falls back to the default root instead of writing under the working directory.
+
+func kimiCodeHome() string {
+	if dir := os.Getenv("KIMI_CODE_HOME"); dir != "" && filepath.IsAbs(dir) {
+		return dir
+	}
+	home, _ := userHome()
+	return filepath.Join(home, ".kimi-code")
+}
+
+func kimiMCPPath() string {
+	return filepath.Join(kimiCodeHome(), "mcp.json")
+}
+
+func kimiAgentsPath() string {
+	return filepath.Join(kimiCodeHome(), "AGENTS.md")
 }

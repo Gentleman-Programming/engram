@@ -25,8 +25,13 @@ const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 
-const ENGRAM_FETCH_TIMEOUT_MS = 3000;
-const ENGRAM_FETCH_MAX_ATTEMPTS = 3;
+// Writes are single-attempt: once dispatched, their server-side outcome may be unknown.
+const ENGRAM_WRITE_TIMEOUT_MS = 3000;
+const ENGRAM_READ_TIMEOUT_MS = 10000;
+const ENGRAM_DOCTOR_TIMEOUT_MS = 15000;
+const ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS = 5000;
+const ENGRAM_READ_MAX_ATTEMPTS = 3;
+const ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS = 2;
 const ENGRAM_FETCH_BACKOFF_BASE_MS = 250;
 const ENGRAM_SELF_HEAL_INTERVAL_MS = 5000;
 const ENGRAM_SELF_HEAL_MAX_ATTEMPTS = 6;
@@ -125,17 +130,49 @@ interface FetchOptions {
   signal?: AbortSignal;
 }
 
+type EngramOperation = "read" | "doctor" | "session-registration" | "write";
+type EngramTransportOutcome = "timed_out" | "unknown";
+
+interface EngramTransportFailure {
+  operation: EngramOperation;
+  outcome: EngramTransportOutcome;
+  timeoutMs: number;
+}
+
 interface EngramFetchResult<TResponse> {
   data: TResponse | null;
-  timedOutMethod?: string;
+  transportFailure?: EngramTransportFailure;
+}
+
+interface EngramFetchPolicy {
+  operation: EngramOperation;
+  timeoutMs: number;
+  maxAttempts: number;
+  replaySafe: boolean;
 }
 
 type EngramFetcher = <TResponse = unknown>(path: string, opts?: FetchOptions) => Promise<TResponse | null>;
 
+function isIdempotentSessionRegistration(path: string, method: string): boolean {
+  // Core uses INSERT OR IGNORE for this registration identity; other POSTs have no replay key.
+  return method === "POST" && path === "/sessions";
+}
+
 function isSafeToReplay(path: string, method: string): boolean {
-  // Session creation is explicitly idempotent on the server (INSERT OR IGNORE). Other writes
-  // have no idempotency key, so only reads and this registration request can be replayed.
-  return method === "GET" || (method === "POST" && path === "/sessions");
+  return method === "GET" || isIdempotentSessionRegistration(path, method);
+}
+
+function engramFetchPolicy(path: string, method: string): EngramFetchPolicy {
+  if (isIdempotentSessionRegistration(path, method)) {
+    return { operation: "session-registration", timeoutMs: ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS, maxAttempts: ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS, replaySafe: true };
+  }
+  if (method === "GET" && path.startsWith("/doctor")) {
+    return { operation: "doctor", timeoutMs: ENGRAM_DOCTOR_TIMEOUT_MS, maxAttempts: ENGRAM_READ_MAX_ATTEMPTS, replaySafe: true };
+  }
+  if (method === "GET") {
+    return { operation: "read", timeoutMs: ENGRAM_READ_TIMEOUT_MS, maxAttempts: ENGRAM_READ_MAX_ATTEMPTS, replaySafe: true };
+  }
+  return { operation: "write", timeoutMs: ENGRAM_WRITE_TIMEOUT_MS, maxAttempts: 1, replaySafe: false };
 }
 
 interface SessionBody {
@@ -240,83 +277,117 @@ function isTimeoutError(error: unknown): boolean {
   return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
-// A completed response with JSON null is a successful result. Timeout metadata travels with
-// its request result so concurrent native tool calls cannot observe one another's outcomes.
+// Socket failures after dispatch can leave writes committed without a readable response.
+const DEFINITE_PRE_DISPATCH_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "ERR_INVALID_URL"]);
+
+function isDefinitelyPreDispatchError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (current === null || (typeof current !== "object" && typeof current !== "function")) return false;
+    try {
+      const code = Reflect.get(current, "code");
+      if (typeof code === "string" && DEFINITE_PRE_DISPATCH_CODES.has(code)) return true;
+      current = Reflect.get(current, "cause");
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+// A completed response with JSON null is a successful result. Failure metadata belongs to
+// the request, so concurrent native tools never share timeout outcomes.
 async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<EngramFetchResult<TResponse>> {
   const method = opts.method ?? "GET";
-  let res: Response | undefined;
+  const policy = engramFetchPolicy(path, method);
   let timedOut = false;
   let refused = false;
-  for (let attempt = 0; attempt < ENGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
+  let ambiguousTransport = false;
+  for (let attempt = 0; attempt < policy.maxAttempts; attempt += 1) {
+    let res: Response;
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
         method,
         headers: opts.body ? { "Content-Type": "application/json" } : undefined,
         body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
         signal: opts.signal
-          ? AbortSignal.any([AbortSignal.timeout(ENGRAM_FETCH_TIMEOUT_MS), opts.signal])
-          : AbortSignal.timeout(ENGRAM_FETCH_TIMEOUT_MS),
+          ? AbortSignal.any([AbortSignal.timeout(policy.timeoutMs), opts.signal])
+          : AbortSignal.timeout(policy.timeoutMs),
       });
-      break;
     } catch (error) {
-      // A timeout means the request may already have reached the server, so re-sending it
-      // could duplicate a non-idempotent write (mem_save and friends carry no idempotency
-      // key). Only pre-send connection failures — the macOS wake-settle case this retry
-      // exists for — are safe to repeat, and a hung server will not recover by retrying.
       if (isTimeoutError(error)) {
         if (opts.signal?.aborted) throw error;
         timedOut = true;
-        break;
+      } else {
+        refused = isConnectionRefusedError(error);
+        ambiguousTransport ||= !refused && !isDefinitelyPreDispatchError(error);
       }
-      refused = isConnectionRefusedError(error);
-      if (!isSafeToReplay(path, method) || attempt === ENGRAM_FETCH_MAX_ATTEMPTS - 1) break;
+      if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
       await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+      continue;
     }
-  }
 
-  if (!res) {
-    if (timedOut) return { data: null, timedOutMethod: method };
-    // A confirmed local refusal after successful initialization means the implicitly owned
-    // server may have died. One generation-scoped recovery is shared by every caller. Only
-    // operations whose idempotence is established above are replayed after it is healthy.
-    if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
-      return engramFetchResult<TResponse>(path, opts);
+    let data: unknown = null;
+    if (res.status !== 204) {
+      try {
+        data = await res.json();
+      } catch (error) {
+        if (isTimeoutError(error)) {
+          if (opts.signal?.aborted) throw error;
+          // Headers establish the HTTP failure even if its body never arrives.
+          if (!res.ok) throw new EngramHttpError(`Engram request failed with HTTP ${res.status}`, res.status, null);
+          timedOut = true;
+          if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
+          await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+          continue;
+        }
+        if (res.ok) {
+          // A broken body does not prove a write was not applied. Even SyntaxError
+          // may mean a cleanly ended but truncated write response, so fail safe.
+          // Keep malformed read bodies as parsing errors. Idempotent session
+          // registration may be retried even when its JSON was truncated.
+          if (error instanceof SyntaxError && (policy.operation === "read" || policy.operation === "doctor")) throw error;
+          if (opts.signal?.aborted) throw error;
+          ambiguousTransport = true;
+          if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
+          await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+          continue;
+        }
+      }
     }
-    throw new Error(unreachableMessage(undefined));
-  }
 
-  let data: unknown = null;
-  if (res.status !== 204) {
-    try {
-      data = await res.json();
-    } catch (error) {
-      if (res.ok) throw error;
+    if (!res.ok) {
+      const message = data && typeof data === "object" && "error" in data && typeof data.error === "string"
+        ? data.error
+        : `Engram request failed with HTTP ${res.status}`;
+      throw new EngramHttpError(message, res.status, data);
     }
+    return { data: data as TResponse };
   }
 
-  if (!res.ok) {
-    const message = data && typeof data === "object" && "error" in data && typeof data.error === "string"
-      ? data.error
-      : `Engram request failed with HTTP ${res.status}`;
-    throw new EngramHttpError(message, res.status, data);
+  if ((timedOut || ambiguousTransport) && (policy.operation === "write" || policy.operation === "session-registration")) {
+    return { data: null, transportFailure: { operation: policy.operation, outcome: "unknown", timeoutMs: policy.timeoutMs } };
   }
-
-  return { data: data as TResponse };
+  if (timedOut) return { data: null, transportFailure: { operation: policy.operation, outcome: "timed_out", timeoutMs: policy.timeoutMs } };
+  if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+    return engramFetchResult<TResponse>(path, opts);
+  }
+  throw new Error(unreachableMessage(undefined));
 }
 
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
   return (await engramFetchResult<TResponse>(path, opts)).data;
 }
 
-function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; timedOutMethod: () => string | undefined } {
-  let timedOutMethod: string | undefined;
+function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; transportFailure: () => EngramTransportFailure | undefined } {
+  let failure: EngramTransportFailure | undefined;
   return {
     async fetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
       const result = await engramFetchResult<TResponse>(path, { ...opts, signal });
-      if (result.timedOutMethod) timedOutMethod = result.timedOutMethod;
+      if (result.transportFailure) failure = result.transportFailure;
       return result.data;
     },
-    timedOutMethod: () => timedOutMethod,
+    transportFailure: () => failure,
   };
 }
 
@@ -335,7 +406,9 @@ function warnEngramFailure(path: string, error: unknown): void {
 
 async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
   try {
-    return await engramFetch<TResponse>(path, opts);
+    const result = await engramFetchResult<TResponse>(path, opts);
+    if (result.transportFailure) warnEngramFailure(path, new Error(unreachableMessage(result.transportFailure)));
+    return result.data;
   } catch (error) {
     warnEngramFailure(path, error);
     return null;
@@ -1272,7 +1345,7 @@ async function archiveCompactionSummary(sessionId: string, summary: string): Pro
         topic_key: "session/compaction-recovery",
       },
     });
-    return result.timedOutMethod ? ArchiveOutcome.Unknown : ArchiveOutcome.Confirmed;
+    return result.transportFailure?.outcome === "unknown" ? ArchiveOutcome.Unknown : ArchiveOutcome.Confirmed;
   } catch (error) {
     warnEngramFailure("/observations", error);
     return ArchiveOutcome.Failed;
@@ -1491,12 +1564,15 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   }
 }
 
-function unreachableMessage(timedOutMethod: string | undefined): string {
-  if (timedOutMethod && timedOutMethod !== "GET") {
-    return `gentle-engram timed out after ${ENGRAM_FETCH_TIMEOUT_MS}ms waiting for the Engram HTTP server at ${ENGRAM_URL}. The ${timedOutMethod} request may already have been applied — do NOT blindly retry it, or you may duplicate the write. Verify with mem_search or mem_doctor first.`;
+function unreachableMessage(failure: EngramTransportFailure | undefined): string {
+  if (failure?.operation === "session-registration" && failure.outcome === "unknown") {
+    return `gentle-engram could not confirm session registration after ${failure.timeoutMs}ms. Registration is idempotent and was retried within its bounded policy, but its final outcome is unknown. No memory write was sent; retrying the memory operation is safe.`;
   }
-  if (timedOutMethod) {
-    return `gentle-engram timed out after ${ENGRAM_FETCH_TIMEOUT_MS}ms waiting for the Engram HTTP server at ${ENGRAM_URL}. The server accepted the connection but did not respond. Run mem_doctor or restart Engram.`;
+  if (failure?.operation === "write" && failure.outcome === "unknown") {
+    return `gentle-engram could not confirm the write after ${failure.timeoutMs}ms. Its outcome is unknown because the server may already have applied it — do NOT blindly retry it, or you may duplicate the write. Verify with mem_search or mem_doctor first.`;
+  }
+  if (failure?.outcome === "timed_out") {
+    return `gentle-engram ${failure.operation} timed out after ${failure.timeoutMs}ms waiting for the Engram HTTP server at ${ENGRAM_URL}. The bounded read policy was exhausted; run mem_doctor or retry the read when the server is healthy.`;
   }
   return `gentle-engram could not reach the Engram HTTP server at ${ENGRAM_URL}. The Pi-native mem_* tools are registered, but the native memory provider is not currently responding. Run mem_doctor or restart Engram.`;
 }
@@ -1512,8 +1588,8 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
     const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch), signal);
-    const timedOutMethod = transport.timedOutMethod();
-    if (timedOutMethod) throw new Error(unreachableMessage(timedOutMethod));
+    const failure = transport.transportFailure();
+    if (failure) throw new Error(unreachableMessage(failure));
 
     const result = { content: [{ type: "text" as const, text: textResult(data, toolName) }], details: { data } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
@@ -1525,11 +1601,11 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     return result;
   } catch (error) {
     if (signal?.aborted) throw error;
-    const timedOutMethod = transport.timedOutMethod();
-    const message = timedOutMethod ? unreachableMessage(timedOutMethod) : error instanceof Error ? error.message : String(error);
+    const failure = transport.transportFailure();
+    const message = failure ? unreachableMessage(failure) : error instanceof Error ? error.message : String(error);
     const details = error instanceof EngramHttpError
       ? { error: message, http_status: error.status, data: error.data }
-      : { error: message };
+      : failure ? { error: message, outcome: failure.outcome, operation: failure.operation } : { error: message };
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${errorStatusLabel(message)}`);
     if (!(error instanceof EngramHttpError)) scheduleEngramSelfHeal(ctx);
     return { content: [{ type: "text" as const, text: message }], details, isError: true };

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	_ "modernc.org/sqlite"
 )
@@ -434,7 +435,7 @@ func TestSessionProjectDirectoryMismatchFinding(t *testing.T) {
 		Project: "api",
 		DetectProject: func(dir string) (DetectedProject, bool) {
 			if dir == "/work/web" {
-				return DetectedProject{Project: "web", Source: "test", Path: dir}, true
+				return DetectedProject{Project: "web", Source: projectpkg.SourceGitRoot, Path: dir}, true
 			}
 			return DetectedProject{}, false
 		},
@@ -455,8 +456,8 @@ func TestSessionProjectDirectoryMismatchDefersToKnownManualTarget(t *testing.T) 
 		knownTarget  bool
 		wantFindings int
 	}{
-		{name: "known manual target beats third project directory", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 0},
-		{name: "healthy known manual session has no directory finding", sessionID: "manual-save-engram", project: "engram", wantFindings: 0},
+		{name: "trusted third project directory beats known manual target", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 1},
+		{name: "trusted directory mismatch beats matching manual suffix", sessionID: "manual-save-engram", project: "engram", wantFindings: 1},
 		{name: "unknown manual target retains trusted directory finding", sessionID: "manual-save-engram", project: "sias-app", wantFindings: 1},
 		{name: "non-manual session retains trusted directory finding", sessionID: "runtime-session", project: "sias-app", wantFindings: 1},
 	}

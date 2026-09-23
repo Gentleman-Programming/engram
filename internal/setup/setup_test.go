@@ -14,7 +14,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -263,9 +266,209 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 	}
 }
 
+func TestInstallCodexFailsClosedForWindowsRuntimeWhenExecutableCannotResolve(t *testing.T) {
+	tests := []struct {
+		name string
+		exe  string
+		err  error
+	}{
+		{name: "executable lookup error", err: errors.New("unavailable")},
+		{name: "bare command fallback", exe: "engram"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			useIsolatedProfile(t)
+			runtimeGOOS = "windows"
+
+			configPath := codexConfigPath()
+			if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+				t.Fatalf("create Codex config directory: %v", err)
+			}
+			original := "[profile]\nname = \"preserve\"\n"
+			if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+				t.Fatalf("write existing Codex config: %v", err)
+			}
+			osExecutable = func() (string, error) { return tt.exe, tt.err }
+			lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+
+			result, err := Install("codex")
+			if err == nil || result != nil {
+				t.Fatalf("Install(codex) = %#v, %v; want fail-closed executable resolution error", result, err)
+			}
+			if !strings.Contains(err.Error(), "resolve") || !strings.Contains(err.Error(), "Codex") {
+				t.Fatalf("expected actionable Codex executable resolution error, got %v", err)
+			}
+			got, readErr := os.ReadFile(configPath)
+			if readErr != nil {
+				t.Fatalf("read existing Codex config: %v", readErr)
+			}
+			if string(got) != original {
+				t.Fatalf("Codex config changed after failed setup:\n%s", got)
+			}
+			if strings.Contains(string(got), windowsHookCommandMarkerPrefix) {
+				t.Fatalf("fail-closed Codex setup wrote a Windows hook marker:\n%s", got)
+			}
+			for _, path := range []string{codexInstructionsPath(), codexCompactPromptPath()} {
+				if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("setup created %s before executable validation: %v", path, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestInstallCodexWindowsPreservesLeadingBOM(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	runtimeGOOS = "windows"
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	osExecutable = func() (string, error) { return `C:\Engram\engram.exe`, nil }
+	configPath := codexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const opaque = "[profile]\nname = \"preserve\"\n# opaque marker: engram-windows-hook-command = \"untouched\"\n"
+	original := "\ufeff" + windowsHookCommandMarkerPrefix + strconv.Quote(`C:\old\engram.exe`) + "\n" + opaque
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := Install("codex"); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.HasPrefix(text, "\ufeff"+windowsHookCommandMarkerPrefix+strconv.Quote(`C:\Engram\engram.exe`)+"\n") {
+			t.Fatalf("run %d: BOM and marker must occupy first line: %q", i, text)
+		}
+		if strings.Contains(text, strconv.Quote(`C:\old\engram.exe`)) || !strings.Contains(text, opaque) || strings.Count(text, "\ufeff") != 1 {
+			t.Fatalf("run %d: stale marker or opaque content damaged: %q", i, text)
+		}
+	}
+}
+
+func TestInstallCodexWindowsWritesOneCanonicalHookMarker(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	runtimeGOOS = "windows"
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+
+	first := `C:\Program Files\Engram\工具\engram.exe`
+	second := `C:\Program Files\Engram Next\工具\engram.exe`
+	osExecutable = func() (string, error) { return first, nil }
+
+	configPath := codexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("create Codex config directory: %v", err)
+	}
+	staleMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\stale\engram.exe`)
+	duplicateMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\duplicate\engram.exe`)
+	multilineMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\opaque\multiline.exe`)
+	commentMarker := windowsHookCommandMarkerPrefix + strconv.Quote(`C:\opaque\comment.exe`)
+	opaqueTOML := strings.Join([]string{
+		"[profile]",
+		`name = "preserve"`,
+		`instructions = """`,
+		multilineMarker,
+		`"""`,
+		commentMarker,
+	}, "\n")
+	original := strings.Join([]string{
+		staleMarker,
+		duplicateMarker,
+		opaqueTOML,
+		"",
+		"[mcp_servers.engram]",
+		`command = "wrong"`,
+		`args = ["wrong"]`,
+		"",
+		"[mcp_servers.other]",
+		`command = "other"`,
+	}, "\n")
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write initial Codex config: %v", err)
+	}
+
+	assertMarkerAndCommand := func(want string) string {
+		t.Helper()
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read Codex config: %v", err)
+		}
+		text := string(raw)
+		lines := strings.Split(text, "\n")
+		if len(lines) == 0 || !strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+			t.Fatalf("expected one authoritative Windows hook marker at byte/line 1, got:\n%s", text)
+		}
+		if len(lines) > 1 && strings.HasPrefix(lines[1], windowsHookCommandMarkerPrefix) {
+			t.Fatalf("expected repeated top-level markers to be removed, got:\n%s", text)
+		}
+		var markerCommand string
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[0], windowsHookCommandMarkerPrefix)), &markerCommand); err != nil {
+			t.Fatalf("decode Windows hook marker as JSON: %v", err)
+		}
+		if markerCommand != want {
+			t.Fatalf("marker command = %q, want %q", markerCommand, want)
+		}
+		section := strings.SplitN(text, "[mcp_servers.engram]\n", 2)
+		if len(section) != 2 {
+			t.Fatalf("missing Engram MCP section:\n%s", text)
+		}
+		var mcpCommand string
+		for _, line := range strings.Split(section[1], "\n") {
+			if value, ok := strings.CutPrefix(line, "command = "); ok {
+				if err := json.Unmarshal([]byte(value), &mcpCommand); err != nil {
+					t.Fatalf("decode MCP command as JSON: %v", err)
+				}
+				break
+			}
+		}
+		if mcpCommand != markerCommand {
+			t.Fatalf("marker command %q does not match MCP command %q", markerCommand, mcpCommand)
+		}
+		if !strings.Contains(text, opaqueTOML) {
+			t.Fatalf("expected opaque TOML marker-like content to be preserved byte-for-byte:\n%s", text)
+		}
+		if !strings.Contains(text, "[mcp_servers.other]") {
+			t.Fatalf("expected unrelated MCP content to be preserved:\n%s", text)
+		}
+		return text
+	}
+
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("initial Windows Codex setup: %v", err)
+	}
+	installed := assertMarkerAndCommand(first)
+	if strings.Contains(installed, staleMarker) || strings.Contains(installed, duplicateMarker) {
+		t.Fatalf("expected stale first-line markers to be replaced, got:\n%s", installed)
+	}
+
+	osExecutable = func() (string, error) { return second, nil }
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("refresh Windows Codex setup after executable move: %v", err)
+	}
+	refreshed := assertMarkerAndCommand(second)
+	if strings.Contains(refreshed, strconv.Quote(first)) {
+		t.Fatalf("refreshed config retained moved executable %q:\n%s", first, refreshed)
+	}
+
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("idempotent Windows Codex setup: %v", err)
+	}
+	if got := assertMarkerAndCommand(second); got != refreshed {
+		t.Fatalf("idempotent setup changed config:\nfirst:\n%s\nsecond:\n%s", refreshed, got)
+	}
+}
+
 func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
+	runtimeGOOS = "linux"
 
 	configPath := codexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -273,6 +476,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	}
 
 	original := strings.Join([]string{
+		windowsHookCommandMarkerPrefix + strconv.Quote(`C:\stale\engram.exe`),
 		"[profile]",
 		"name = \"dev\"",
 		"",
@@ -317,6 +521,10 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 		}
 		if strings.Count(text, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected exactly one engram section, got:\n%s", text)
+		}
+		lines := strings.Split(text, "\n")
+		if len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+			t.Fatalf("non-Windows Codex config must not retain a setup-owned first-line marker:\n%s", text)
 		}
 		// resolveEngramCommand() uses os.Executable() on all platforms — command
 		// will be the real absolute path in tests, not bare "engram".
@@ -539,7 +747,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 2 {
 		t.Fatalf("unexpected install result: %#v", result)
 	}
-	wantCommands := []string{"pi install npm:gentle-engram@0.1.14", "pi install npm:pi-mcp-adapter"}
+	wantCommands := []string{"pi install npm:gentle-engram@0.1.15", "pi install npm:pi-mcp-adapter"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -554,7 +762,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	for _, pkg := range []string{"npm:gentle-engram@0.1.14", "npm:pi-mcp-adapter"} {
+	for _, pkg := range []string{"npm:gentle-engram@0.1.15", "npm:pi-mcp-adapter"} {
 		if !slices.Contains(settings.Packages, pkg) {
 			t.Fatalf("expected settings packages to include %q, got %#v", pkg, settings.Packages)
 		}
@@ -596,7 +804,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		t.Fatalf("mkdir agent dir: %v", err)
 	}
-	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.8","npm:gentle-engram@0.1.11","npm:gentle-engram@0.1.12","npm:gentle-engram@0.1.11","npm:pi-mcp-adapter"]}`), 0644); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.8","npm:gentle-engram@0.1.11","npm:gentle-engram@0.1.12","npm:gentle-engram@0.1.14","npm:gentle-engram@0.1.11","npm:pi-mcp-adapter"]}`), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 	originalMCP := `{"mcpServers":{"engram":{"command":"custom-engram","args":["mcp"],"lifecycle":"eager"},"other":{"command":"other"}}}`
@@ -629,7 +837,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings after install: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.1.14"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.1.15"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("expected settings packages to preserve unrelated entries and migrate legacy pins: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -654,7 +862,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) {
 	resetSetupSeams(t)
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.8","npm:gentle-engram@0.1.11","npm:gentle-engram@0.1.12","npm:gentle-engram@0.1.8","npm:pi-mcp-adapter"]}`), 0644); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.8","npm:gentle-engram@0.1.11","npm:gentle-engram@0.1.12","npm:gentle-engram@0.1.14","npm:gentle-engram@0.1.8","npm:pi-mcp-adapter"]}`), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 
@@ -676,7 +884,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatalf("parse migrated settings: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.1.14"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.1.15"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("unexpected migrated packages: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -696,7 +904,7 @@ func TestInstallPiCommandFailure(t *testing.T) {
 		return []byte("boom"), errors.New("exit 1")
 	}
 	_, err := Install("pi")
-	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.1.14") {
+	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.1.15") {
 		t.Fatalf("expected pi install error, got %v", err)
 	}
 }
@@ -2025,7 +2233,11 @@ func TestCodexBlockUsesAbsolutePath(t *testing.T) {
 			runtimeGOOS = tc.goos
 			osExecutable = func() (string, error) { return tc.exe, nil }
 
-			block := codexEngramBlockStr()
+			command, err := codexEngramCommand()
+			if err != nil {
+				t.Fatalf("resolve Codex command: %v", err)
+			}
+			block := codexEngramBlockStr(command)
 			if !strings.Contains(block, "[mcp_servers.engram]") {
 				t.Fatalf("expected mcp_servers.engram header, got:\n%s", block)
 			}
@@ -2043,7 +2255,11 @@ func TestCodexBlockUsesAbsolutePath(t *testing.T) {
 		runtimeGOOS = "linux"
 		osExecutable = func() (string, error) { return "", errors.New("no executable") }
 
-		block := codexEngramBlockStr()
+		command, err := codexEngramCommand()
+		if err != nil {
+			t.Fatalf("resolve non-Windows Codex fallback: %v", err)
+		}
+		block := codexEngramBlockStr(command)
 		if !strings.Contains(block, `command = "engram"`) {
 			t.Fatalf("expected bare engram fallback in codex block, got:\n%s", block)
 		}
@@ -2188,7 +2404,7 @@ func TestInstallCodexErrorPropagation(t *testing.T) {
 	t.Run("inject mcp fails", func(t *testing.T) {
 		resetSetupSeams(t)
 		writeCodexMemoryInstructionFilesFn = func() (string, error) { return "/tmp/instructions", nil }
-		injectCodexMCPFn = func(string) error { return errors.New("mcp failed") }
+		injectCodexMCPFn = func(string, string) error { return errors.New("mcp failed") }
 
 		_, err := installCodex()
 		if err == nil || !strings.Contains(err.Error(), "mcp failed") {
@@ -2199,7 +2415,7 @@ func TestInstallCodexErrorPropagation(t *testing.T) {
 	t.Run("inject memory config fails", func(t *testing.T) {
 		resetSetupSeams(t)
 		writeCodexMemoryInstructionFilesFn = func() (string, error) { return "/tmp/instructions", nil }
-		injectCodexMCPFn = func(string) error { return nil }
+		injectCodexMCPFn = func(string, string) error { return nil }
 		injectCodexMemoryConfigFn = func(string, string, string) error { return errors.New("memory config failed") }
 
 		_, err := installCodex()
@@ -2414,7 +2630,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			t.Fatalf("make config path directory: %v", err)
 		}
 
-		err := injectCodexMCP(configPath)
+		err := injectCodexMCP(configPath, "/usr/local/bin/engram")
 		if err == nil || !strings.Contains(err.Error(), "read config") {
 			t.Fatalf("expected read config error, got %v", err)
 		}
@@ -2476,7 +2692,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			"command = \"other\"",
 		}, "\n")
 
-		output := upsertCodexEngramBlock(input)
+		output := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
 		if strings.Count(output, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected one engram block, got:\n%s", output)
 		}
@@ -2487,10 +2703,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 
 	t.Run("upsertCodexEngramBlock from empty content", func(t *testing.T) {
 		resetSetupSeams(t)
-		// Force fallback path so output matches the constant.
-		osExecutable = func() (string, error) { return "", errors.New("no executable") }
-
-		output := upsertCodexEngramBlock("\n\n")
+		output := upsertCodexEngramBlock("\n\n", "engram")
 		if output != codexEngramBlock+"\n" {
 			t.Fatalf("unexpected output for empty content:\n%s", output)
 		}
@@ -2567,7 +2780,7 @@ func TestAdditionalHelperBranches(t *testing.T) {
 			t.Fatalf("write blocker: %v", err)
 		}
 
-		err := injectCodexMCP(filepath.Join(blocked, "config.toml"))
+		err := injectCodexMCP(filepath.Join(blocked, "config.toml"), "/usr/local/bin/engram")
 		if err == nil || !strings.Contains(err.Error(), "create config dir") {
 			t.Fatalf("expected create config dir error, got %v", err)
 		}
@@ -2580,7 +2793,7 @@ func TestAdditionalHelperBranches(t *testing.T) {
 			return errors.New("write codex boom")
 		}
 
-		err := injectCodexMCP(configPath)
+		err := injectCodexMCP(configPath, "/usr/local/bin/engram")
 		if err == nil || !strings.Contains(err.Error(), "write config") {
 			t.Fatalf("expected write config error, got %v", err)
 		}
@@ -3323,8 +3536,88 @@ func exposeHookToolWithLink(binDir, toolPath string, link func(string, string) e
 	return nil
 }
 
+func TestGitForWindowsRoot(t *testing.T) {
+	root := `C:\Program Files\Git`
+	tests := []struct {
+		name string
+		seed string
+		want string
+		ok   bool
+	}{
+		{name: "cmd git", seed: filepath.Join(root, "cmd", "git.exe"), want: root, ok: true},
+		{name: "root bin git with mixed case", seed: filepath.Join(root, "BIN", "GIT.EXE"), want: root, ok: true},
+		{name: "mingw64 bin git with mixed case", seed: filepath.Join(root, "MiNgW64", "BiN", "git.exe"), want: root, ok: true},
+		{name: "usr bin git with mixed case", seed: filepath.Join(root, "UsR", "bIn", "git.exe"), want: root, ok: true},
+		{name: "mingw64 git exec path with mixed case", seed: filepath.Join(root, "mInGw64", "LiBeXeC", "GiT-CoRe"), want: root, ok: true},
+		{name: "unrelated shim", seed: `C:\Users\Test\scoop\shims\git.exe`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := gitForWindowsRoot(tt.seed)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("gitForWindowsRoot(%q) = (%q, %t), want (%q, %t)", tt.seed, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func gitForWindowsRoot(seed string) (string, bool) {
+	path := filepath.Clean(seed)
+	parent := filepath.Dir(path)
+
+	if strings.EqualFold(filepath.Base(path), "git.exe") {
+		if strings.EqualFold(filepath.Base(parent), "cmd") {
+			return filepath.Dir(parent), true
+		}
+		if strings.EqualFold(filepath.Base(parent), "bin") {
+			platformDir := filepath.Dir(parent)
+			if strings.EqualFold(filepath.Base(platformDir), "mingw64") || strings.EqualFold(filepath.Base(platformDir), "usr") {
+				return filepath.Dir(platformDir), true
+			}
+			return platformDir, true
+		}
+	}
+
+	if strings.EqualFold(filepath.Base(path), "git-core") && strings.EqualFold(filepath.Base(parent), "libexec") {
+		platformDir := filepath.Dir(parent)
+		if strings.EqualFold(filepath.Base(platformDir), "mingw64") {
+			return filepath.Dir(platformDir), true
+		}
+	}
+
+	return "", false
+}
+
 func isolatedHookPath(t *testing.T) (string, []string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		gitPath, err := exec.LookPath("git")
+		if err != nil {
+			t.Skipf("Git for Windows installation-root bin/bash.exe is required for Claude Code hook regression: git is not in PATH: %v", err)
+		}
+
+		seeds := []string{gitPath}
+		if output, err := exec.Command(gitPath, "--exec-path").Output(); err == nil {
+			if execPath := strings.TrimSpace(string(output)); execPath != "" {
+				seeds = append(seeds, execPath)
+			}
+		}
+		for _, seed := range seeds {
+			gitRoot, ok := gitForWindowsRoot(seed)
+			if !ok {
+				continue
+			}
+			gitBash := filepath.Join(gitRoot, "bin", "bash.exe")
+			if _, err := os.Stat(gitBash); err == nil {
+				pathDirs := []string{filepath.Join(gitRoot, "usr", "bin"), filepath.Join(gitRoot, "bin"), os.Getenv("SystemRoot") + `\System32`}
+				assertJQAbsent(t, pathDirs)
+				return gitBash, pathDirs
+			}
+		}
+		t.Skipf("Git for Windows installation-root bin/bash.exe is required for Claude Code hook regression: no root launcher was proven from git seed %q or its --exec-path", gitPath)
+	}
+
 	if gitPath, err := exec.LookPath("git"); err == nil {
 		gitRoot := filepath.Dir(filepath.Dir(gitPath))
 		gitBash := filepath.Join(gitRoot, "bin", "bash.exe")
@@ -3392,6 +3685,59 @@ func TestClaudeCodeUserPromptHookIncludesPowerShellFallback(t *testing.T) {
 			t.Fatalf("PowerShell user prompt hook missing %q", want)
 		}
 	}
+}
+
+func TestClaudePreToolUseHookUsesWindowsPortableCommand(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code hooks config: %v", err)
+	}
+
+	var cfg struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse Claude Code hooks config: %v", err)
+	}
+
+	for _, entry := range cfg.Hooks["PreToolUse"] {
+		for _, hook := range entry.Hooks {
+			if hook.Command != "engram hook claude-pre-tool-use" {
+				continue
+			}
+			if strings.ContainsAny(hook.Command, `/$`) || strings.Contains(strings.ToLower(hook.Command), "bash") {
+				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
+			}
+			// Current manifest uses only JS-compatible literal alternatives and groups.
+			if !strings.HasPrefix(entry.Matcher, "^") || !strings.HasSuffix(entry.Matcher, "$") {
+				t.Fatalf("PreToolUse matcher must be anchored: %q", entry.Matcher)
+			}
+			matcher, err := regexp.Compile(entry.Matcher)
+			if err != nil {
+				t.Fatalf("invalid PreToolUse matcher %q: %v", entry.Matcher, err)
+			}
+			for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+				if !matcher.MatchString(prefix+"mem_session_end") || !matcher.MatchString(prefix+"mem_save") {
+					t.Errorf("PreToolUse matcher %q misses representative writes for %s", entry.Matcher, prefix)
+				}
+				for _, tool := range []string{"mem_search", "mem_save_extra"} {
+					if matcher.MatchString(prefix + tool) {
+						t.Errorf("PreToolUse matcher %q accepts %s%s", entry.Matcher, prefix, tool)
+					}
+				}
+			}
+			if matcher.MatchString("mcp__other__mem_save") {
+				t.Errorf("PreToolUse matcher %q accepts unrelated server", entry.Matcher)
+			}
+			return
+		}
+	}
+	t.Fatal("Claude PreToolUse manifest is missing the portable core hook command")
 }
 
 func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {

@@ -23,6 +23,8 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 ### Memory core
 
+- **fix(store):** upgrade the embedded SQLite runtime to 3.51.3, which includes SQLite's upstream WAL-reset integrity fix. Engram's WAL and network-filesystem policies are unchanged.
+
 - **fix(project):** make project-scoped reads consistent across CLI and local HTTP. Omitted selectors now resolve the canonical current project; use `--all` or `all_projects=true` for an intentional global read. Search, timeline, stats, export, Obsidian export, conflict inspection, recent lists, review, prompts, and sync status now validate explicit selectors through the shared resolver. Sync status rejects `all_projects=true` because it has no aggregate provider. This is a compatibility change for callers that relied on omitted reads being global.
 - **fix(project):** scan child repositories until EOF, the 200ms deadline, or the second repository. Large noisy directories can no longer auto-promote an early repository while a later repository makes the cwd ambiguous.
 - **fix(store):** establish project ownership forward on legacy sessions instead of rejecting their writes. A database upgraded from the schema where `sessions.project` was nullable still holds sessions that identify no project; those sessions now adopt the project of the write landing on them, in the same transaction and journaled like any other ownership move, so the record and its session agree rather than the write failing permanently. Adoption is refused only when the unowned session already parents a record owned by a different project, which would split that record from its session. Both ownership errors answer `409` with a `code` and a `remedy` naming the exact repair.

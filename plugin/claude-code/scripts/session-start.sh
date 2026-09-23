@@ -55,7 +55,7 @@ if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir}')" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: "project_owned"}')" \
     > /dev/null
 fi
 
