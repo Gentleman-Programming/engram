@@ -948,6 +948,9 @@ func newStore(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
+	if err := checkDataDirectoryFilesystem(cfg.DataDir); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
