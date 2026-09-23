@@ -344,8 +344,9 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
         if (res.ok) {
           // A broken body does not prove a write was not applied. Even SyntaxError
           // may mean a cleanly ended but truncated write response, so fail safe.
-          // Keep malformed read bodies as parsing errors rather than retrying them.
-          if (error instanceof SyntaxError && policy.operation !== "write") throw error;
+          // Keep malformed read bodies as parsing errors. Idempotent session
+          // registration may be retried even when its JSON was truncated.
+          if (error instanceof SyntaxError && (policy.operation === "read" || policy.operation === "doctor")) throw error;
           if (opts.signal?.aborted) throw error;
           ambiguousTransport = true;
           if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;

@@ -1675,6 +1675,11 @@ test("a truncated successful write body may be committed even when JSON parsing 
     assert.equal(calls, 1);
     await assert.rejects(() => engramFetchResult("/observations"), SyntaxError, "malformed reads remain parse errors");
     assert.equal(calls, 2);
+    const { engramFetchResult: registrationFetch } = buildEngramFetchForTest({ wait: async () => {} });
+    assert.deepEqual(await registrationFetch("/sessions", { method: "POST" }), {
+      data: null, transportFailure: { operation: "session-registration", outcome: "unknown", timeoutMs: 5000 },
+    });
+    assert.equal(calls, 4, "idempotent registration retries exactly once after truncated JSON");
   } finally { globalThis.fetch = originalFetch; }
 });
 
