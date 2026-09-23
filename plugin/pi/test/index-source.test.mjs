@@ -1660,12 +1660,21 @@ test("a terminated successful write body is unknown without replay; safe reads r
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("malformed complete successful JSON still surfaces its SyntaxError", async () => {
+test("a truncated successful write body may be committed even when JSON parsing throws SyntaxError", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ status: 200, ok: true, async json() { throw new SyntaxError("bad JSON"); } });
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 200, ok: true, async json() { throw new SyntaxError("Unexpected end of JSON input"); } };
+  };
   try {
     const { engramFetchResult } = buildEngramFetchForTest();
-    await assert.rejects(() => engramFetchResult("/observations", { method: "POST" }), SyntaxError);
+    assert.deepEqual(await engramFetchResult("/observations", { method: "POST" }), {
+      data: null, transportFailure: { operation: "write", outcome: "unknown", timeoutMs: 3000 },
+    });
+    assert.equal(calls, 1);
+    await assert.rejects(() => engramFetchResult("/observations"), SyntaxError, "malformed reads remain parse errors");
+    assert.equal(calls, 2);
   } finally { globalThis.fetch = originalFetch; }
 });
 

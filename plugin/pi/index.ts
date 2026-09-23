@@ -342,9 +342,10 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
           continue;
         }
         if (res.ok) {
-          // A broken response stream does not prove a successful write was not applied.
-          // A complete but malformed JSON body remains a parsing error.
-          if (error instanceof SyntaxError) throw error;
+          // A broken body does not prove a write was not applied. Even SyntaxError
+          // may mean a cleanly ended but truncated write response, so fail safe.
+          // Keep malformed read bodies as parsing errors rather than retrying them.
+          if (error instanceof SyntaxError && policy.operation !== "write") throw error;
           if (opts.signal?.aborted) throw error;
           ambiguousTransport = true;
           if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
