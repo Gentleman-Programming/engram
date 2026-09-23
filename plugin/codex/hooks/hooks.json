@@ -32,7 +32,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/scripts/user-prompt-submit.sh\"",
-            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\run-bash-hook.ps1\" \"${PLUGIN_ROOT}\\scripts\\user-prompt-submit.sh\"",
+            "commandWindows": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\run-native-hook.ps1\"",
             "timeout": 2
           }
         ]

@@ -29,8 +29,7 @@ func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
 	const dispatcher = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\run-bash-hook.ps1"`
 	wantMappings := map[string]string{
 		`"${PLUGIN_ROOT}/scripts/session-start.sh"`:      dispatcher + ` "${PLUGIN_ROOT}\scripts\session-start.sh"`,
-		`"${PLUGIN_ROOT}/scripts/post-compaction.sh"`:    dispatcher + ` "${PLUGIN_ROOT}\scripts\post-compaction.sh"`,
-		`"${PLUGIN_ROOT}/scripts/user-prompt-submit.sh"`: dispatcher + ` "${PLUGIN_ROOT}\scripts\user-prompt-submit.sh"`,
+		`"${PLUGIN_ROOT}/scripts/post-compaction.sh"`: dispatcher + ` "${PLUGIN_ROOT}\scripts\post-compaction.sh"`,
 	}
 	seenMappings := make(map[string]bool, len(wantMappings))
 	for event, groups := range manifest.Hooks {
@@ -92,6 +91,27 @@ func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
 			t.Errorf("dispatcher must not contain %q", forbidden)
 		}
 	}
+}
+
+func TestCodexWindowsUserPromptManifestUsesSystemPowerShellAdapter(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read hooks manifest: %v", err)
+	}
+	var manifest codexHooksManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse hooks manifest: %v", err)
+	}
+	const want = `"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\run-native-hook.ps1"`
+	for _, group := range manifest.Hooks["UserPromptSubmit"] {
+		for _, hook := range group.Hooks {
+			if hook.Command == `"${PLUGIN_ROOT}/scripts/user-prompt-submit.sh"` && hook.CommandWindows == want && hook.Timeout == 2 {
+				return
+			}
+		}
+	}
+	t.Fatal("UserPromptSubmit must retain the Unix script and use the system-qualified native Windows adapter")
 }
 
 func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
