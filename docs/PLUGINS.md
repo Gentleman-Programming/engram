@@ -326,7 +326,7 @@ All eight `/conflicts/*` endpoints are served by `engram serve` on the local run
 | `GET /conflicts/{relation_id}` | Single relation detail |
 | `GET /conflicts/stats` | Aggregate counts |
 | `POST /conflicts/scan` | Run scan (dry-run or apply) |
-| `POST /conflicts/judge` | Record a verdict on an existing pending relation surfaced by conflict detection |
+| `POST /conflicts/judge` | Record a verdict on an existing relation (including a previously judged one) |
 | `POST /conflicts/compare` | Persist an agent-supplied semantic verdict for two observation IDs |
 | `GET /conflicts/deferred` | List deferred queue |
 | `POST /conflicts/deferred/replay` | Trigger ReplayDeferred cycle |
