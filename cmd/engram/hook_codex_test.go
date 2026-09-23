@@ -16,13 +16,38 @@ import (
 )
 
 func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("first message must not call the local server")
-	}))
-	defer server.Close()
-	output := runCodexUserPromptSubmit([]byte(`{"cwd":"C:/work","session_id":"first"}`), server.URL, t.TempDir(), time.Now)
-	if !strings.Contains(string(output), "CRITICAL FIRST ACTION") || !json.Valid(output) {
-		t.Fatalf("first output = %q, want valid ToolSearch JSON", output)
+	for _, tc := range []struct {
+		name, authority string
+		status          int
+		wantPosts       int32
+	}{
+		{"valid", `{"project":"engram","project_source":"git_root"}`, http.StatusOK, 1},
+		{"unavailable", ``, http.StatusServiceUnavailable, 0},
+		{"invalid", `{"error_hint":"missing"}`, http.StatusOK, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.authority)
+				case "/prompts":
+					posts.Add(1)
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			output := runCodexUserPromptSubmit([]byte(`{"cwd":"C:/work","session_id":"first","prompt":"remember this"}`), server.URL, t.TempDir(), time.Now)
+			if !strings.Contains(string(output), "CRITICAL FIRST ACTION") || !json.Valid(output) {
+				t.Fatalf("first output = %q, want valid ToolSearch JSON", output)
+			}
+			if got := posts.Load(); got != tc.wantPosts {
+				t.Fatalf("prompt posts = %d, want %d before ToolSearch returns", got, tc.wantPosts)
+			}
+		})
 	}
 }
 func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testing.T) {
@@ -52,8 +77,8 @@ func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testin
 	if got := string(runCodexUserPromptSubmit(input, server.URL, stateDir, func() time.Time { return now })); !strings.Contains(got, "MEMORY REMINDER") {
 		t.Fatalf("subsequent output = %q, want reminder", got)
 	}
-	if got := promptPosts.Load(); got != 1 {
-		t.Fatalf("prompt posts = %d, want one dispatch without retry", got)
+	if got := promptPosts.Load(); got != 2 {
+		t.Fatalf("prompt posts = %d, want one dispatch per call without retry", got)
 	}
 }
 func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
@@ -95,6 +120,69 @@ func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
 		})
 	}
 }
+func TestCodexUserPromptReminderBoundaries(t *testing.T) {
+	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, started, observations, cooldown string
+		status                                int
+		wantSecond, wantThird                 bool
+	}{
+		{"recent session", `2026-02-20T11:58:00Z`, `[{"created_at":"2026-02-20T11:40:00Z"}]`, "", 200, false, false},
+		{"cooldown", `2026-02-20T11:40:00Z`, `[{"created_at":"2026-02-20T11:40:00Z"}]`, "", 200, true, false},
+		{"zero cooldown", `2026-02-20T11:40:00Z`, `[{"created_at":"2026-02-20T11:40:00Z"}]`, "0", 200, true, true},
+		{"empty observations", `2026-02-20T11:40:00Z`, `[]`, "", 200, true, false},
+		{"alternate timestamps", `2026-02-20 11:40:00`, `[{"created_at":"2026-02-20 11:40:00"}]`, "", 200, true, false},
+		{"non-2xx authority", `2026-02-20T11:40:00Z`, `[]`, "", 503, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENGRAM_NUDGE_COOLDOWN_SECS", tc.cooldown)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/sessions/s":
+					_, _ = io.WriteString(w, `{"started_at":"`+tc.started+`"}`)
+				case "/observations":
+					_, _ = io.WriteString(w, tc.observations)
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			state := t.TempDir()
+			input := []byte(`{"cwd":"C:/work","session_id":"s"}`)
+			for i, want := range []bool{false, tc.wantSecond, tc.wantThird} {
+				got := string(runCodexUserPromptSubmit(input, server.URL, state, func() time.Time { return now }))
+				if i == 0 {
+					if !strings.Contains(got, "CRITICAL FIRST ACTION") {
+						t.Fatalf("first output = %q", got)
+					}
+					continue
+				}
+				if strings.Contains(got, "MEMORY REMINDER") != want {
+					t.Fatalf("call %d output = %q, want reminder %v", i+1, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexUserPromptInvalidPort(t *testing.T) {
+	for _, port := range []string{"invalid", "0", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			t.Setenv("ENGRAM_PORT", port)
+			if got := codexHookURL(); got != "" {
+				t.Fatalf("URL = %q, want empty", got)
+			}
+			output := runCodexUserPromptSubmit([]byte(`{"cwd":"C:/work","session_id":"s","prompt":"hello"}`), codexHookURL(), t.TempDir(), time.Now)
+			if !strings.Contains(string(output), "CRITICAL FIRST ACTION") {
+				t.Fatalf("first output = %q", output)
+			}
+		})
+	}
+}
+
 func TestCodexUserPromptSessionMarkersAreIsolated(t *testing.T) {
 	stateDir := t.TempDir()
 	for _, sessionID := range []string{"one", "two"} {
@@ -127,13 +215,15 @@ func TestCodexUserPromptTimeoutFailsOpenWithoutRetry(t *testing.T) {
 	defer server.Close()
 	stateDir := t.TempDir()
 	input := []byte(`{"cwd":"C:/work","session_id":"timeout","prompt":"once"}`)
-	runCodexUserPromptSubmit(input, server.URL, stateDir, time.Now)
+	if got := string(runCodexUserPromptSubmit(input, server.URL, stateDir, time.Now)); !strings.Contains(got, "CRITICAL FIRST ACTION") {
+		t.Fatalf("timed-out first output = %q, want ToolSearch", got)
+	}
 	if got := string(runCodexUserPromptSubmit(input, server.URL, stateDir, time.Now)); got != "{}" {
 		t.Fatalf("timeout output = %q, want {}", got)
 	}
 	close(release)
-	if got := posts.Load(); got != 1 {
-		t.Fatalf("timed-out prompt posts = %d, want no retry", got)
+	if got := posts.Load(); got != 2 {
+		t.Fatalf("timed-out prompt posts = %d, want one dispatch per call without retry", got)
 	}
 }
 func TestCodexUserPromptMalformedInputFailsOpen(t *testing.T) {
@@ -172,9 +262,9 @@ func TestCodexUserPromptSubmitIOReadErrorHasNoSideEffects(t *testing.T) {
 	if err := runCodexUserPromptSubmitIO(iotest.ErrReader(readErr), &output, server.URL, stateDir, time.Now); !errors.Is(err, readErr) {
 		t.Fatalf("error = %v, want %v", err, readErr)
 	}
-	loaded, _ := codexPromptStatePaths(stateDir, "unknown")
-	if _, err := os.Stat(loaded); !os.IsNotExist(err) {
-		t.Fatalf("state marker error = %v, want not exist", err)
+	entries, err := os.ReadDir(stateDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("state directory entries = %v, error = %v; want empty", entries, err)
 	}
 	if output.Len() != 0 || requests.Load() != 0 {
 		t.Fatalf("output=%q requests=%d, want no side effects", output.String(), requests.Load())

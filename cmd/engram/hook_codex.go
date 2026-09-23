@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// All subsequent-message work shares this deadline; Codex kills hooks at 2s.
+// All prompt work shares this deadline; Codex kills hooks at 2s.
 const codexUserPromptDeadline = 1500 * time.Millisecond
 const codexToolSearchMessage = "CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."
 
@@ -56,11 +56,13 @@ func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func()
 		key = "unknown-" + strconv.Itoa(os.Getpid())
 	}
 	loaded, nudge := codexPromptStatePaths(stateDir, key)
-	if codexFirstPrompt(loaded) {
-		return codexMessage(codexToolSearchMessage)
+	first := codexFirstPrompt(loaded)
+	fallback := []byte("{}")
+	if first {
+		fallback = codexMessage(codexToolSearchMessage)
 	}
 	if !valid || strings.TrimSpace(in.CWD) == "" || baseURL == "" {
-		return []byte("{}")
+		return fallback
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
@@ -68,16 +70,19 @@ func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func()
 	client := &http.Client{}
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, baseURL+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
-		return []byte("{}")
+		return fallback
 	}
 	project, authorized := codexProjectAuthority(authority)
 	if !authorized {
-		return []byte("{}")
+		return fallback
 	}
 	if in.Prompt != "" && in.SessionID != "" {
 		body, _ := json.Marshal(map[string]string{"session_id": in.SessionID, "project": project, "content": in.Prompt})
 		// Do not retry: a timeout cannot prove a dispatched persistence write failed.
 		_ = codexJSON(ctx, client, http.MethodPost, baseURL+"/prompts", body, nil)
+	}
+	if first {
+		return fallback
 	}
 	age, knownAge := codexSessionAge(ctx, client, baseURL, in.SessionID, now())
 	if knownAge && age < 5*time.Minute {
