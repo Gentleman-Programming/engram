@@ -223,7 +223,7 @@ func TestCodexUserPromptFirstPromptPersistsThroughServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	t.Setenv("ENGRAM_PROJECT", "codex-hook-test")
 	ts := httptest.NewServer(server.New(db, 0).Handler())
 	defer ts.Close()
@@ -234,7 +234,7 @@ func TestCodexUserPromptFirstPromptPersistsThroughServer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("create session %s: %d", id, resp.StatusCode)
 		}
@@ -261,7 +261,7 @@ func TestCodexUserPromptFirstPromptPersistsThroughServer(t *testing.T) {
 			}
 			var prompts []store.Prompt
 			decodeErr := json.NewDecoder(resp.Body).Decode(&prompts)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK || decodeErr != nil {
 				t.Fatalf("recent: status %d error %v", resp.StatusCode, decodeErr)
 			}
