@@ -14,6 +14,8 @@ const (
 )
 
 func classifyLinuxFilesystemMagic(magic int64) filesystemInfo {
+	// Statfs_t.Type is signed on 32-bit Linux; compare its unsigned magic bits.
+	magic = int64(uint32(magic))
 	switch magic {
 	case linuxNFSFilesystemMagic:
 		return filesystemInfo{Type: "NFS", Support: filesystemRemote}
