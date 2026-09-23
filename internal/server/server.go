@@ -1041,7 +1041,7 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.store.AddPrompt(body)
+	id, inserted, err := s.store.AddPromptWithResult(body)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPromptContentRequired):
@@ -1053,7 +1053,9 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifyWrite()
+	if inserted {
+		s.notifyWrite()
+	}
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 

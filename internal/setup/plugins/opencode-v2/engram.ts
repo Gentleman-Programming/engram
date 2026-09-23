@@ -688,6 +688,38 @@ export default Plugin.define({
           }
         }
 
+        // --- Durable user prompt admission (OpenCode v2.0.4) ---
+        if (event.type === "session.inbox.enqueued") {
+          const data = event.data as {
+            sessionID?: unknown
+            inboxID?: unknown
+            item?: { type?: unknown; payload?: { text?: unknown } }
+          }
+          const sourceSessionID = typeof data.sessionID === "string" ? data.sessionID : ""
+          const inboxID = typeof data.inboxID === "string" ? data.inboxID : ""
+          if (sourceSessionID && inboxID && data.item?.type === "user" && typeof data.item.payload?.text === "string") {
+            const sessionId = await resolveAuthoritativeSessionID(sourceSessionID)
+            if (sessionId && !subAgentSessions.has(sourceSessionID)) {
+              const finalContent = data.item.payload.text.trim()
+              if (finalContent.length > 10) {
+                const registered = await ensureSession(sessionId)
+                const confirmedSessionID = await resolveAuthoritativeSessionID(sourceSessionID)
+                if (registered && confirmedSessionID === sessionId) {
+                  await engramFetch("/prompts", {
+                    method: "POST",
+                    body: {
+                      session_id: sessionId,
+                      source_inbox_id: inboxID,
+                      content: stripPrivateTags(truncate(finalContent, 2000)),
+                      project,
+                    },
+                  })
+                }
+              }
+            }
+          }
+        }
+
         // --- Session Deleted ---
         if (event.type === "session.deleted") {
           const sessionId = typeof (event.data as { sessionID?: unknown }).sessionID === "string"
@@ -704,34 +736,6 @@ export default Plugin.define({
       }
     })().catch(() => {
       // Stream aborted on unload or server restart — nothing to do
-    })
-
-    // ─── User Prompt Capture ──────────────────────────────────────
-    // The prompt hook runs once per user prompt, before the LLM sees it.
-    // event.sessionID is always reliable here (no knownSessions workaround).
-    // Where V1's chat.message read output.parts, V2 exposes event.prompt.text.
-
-    await ctx.session.hook("prompt", async (event) => {
-      const sessionId = await resolveAuthoritativeSessionID(event.sessionID)
-      // Skip child prompts even when ownership was discovered through the SDK.
-      if (!sessionId || subAgentSessions.has(event.sessionID)) return
-
-      const finalContent = (event.prompt.text ?? "").trim()
-
-      // Only capture non-trivial prompts (>10 chars)
-      if (finalContent.length > 10) {
-        const registered = await ensureSession(sessionId)
-        const confirmedSessionID = await resolveAuthoritativeSessionID(event.sessionID)
-        if (!registered || confirmedSessionID !== sessionId) return
-        await engramFetch("/prompts", {
-          method: "POST",
-          body: {
-            session_id: sessionId,
-            content: stripPrivateTags(truncate(finalContent, 2000)),
-            project,
-          },
-        })
-      }
     })
 
     // ─── Tool Execution Hooks ────────────────────────────────────

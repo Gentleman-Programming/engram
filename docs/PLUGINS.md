@@ -50,7 +50,7 @@ OpenCode 2.x loads a new plugin API, which no longer runs V1 plugin implementati
 engram setup opencode-v2
 ```
 
-It writes the same plugin path (`~/.config/opencode/plugins/engram.ts`) and registers the MCP server under `mcp.servers`, the V2 config shape. The adapter keeps the same behavior contract as the 1.x plugin — runtime session resolution, Memory Protocol injection, save nudges, compaction context, and passive capture — and uses `node:child_process`/`node:fs` instead of `Bun.*` so it also runs in hosts without a `Bun` global (issue [#1218](https://github.com/Gentleman-Programming/engram/issues/1218)).
+It writes the same plugin path (`~/.config/opencode/plugins/engram.ts`) and registers the MCP server under `mcp.servers`, the V2 config shape. The adapter keeps the same behavior contract as the 1.x plugin — runtime session resolution, Memory Protocol injection, save nudges, compaction context, and passive capture — and uses `node:child_process`/`node:fs` instead of `Bun.*` so it also runs in hosts without a `Bun` global (issue [#1218](https://github.com/Gentleman-Programming/engram/issues/1218)). OpenCode 2.x captures user prompts after durable `session.inbox.enqueued` admission, not in the pre-admission prompt hook. The inbox ID makes replayed events idempotent within a session; distinct admitted inbox items remain distinct even when their text matches. OpenCode 1.x capture is unchanged.
 
 > Run only one of `engram setup opencode` (OpenCode 1.x) or `engram setup opencode-v2` (OpenCode 2.x): both install to the same plugin file.
 
