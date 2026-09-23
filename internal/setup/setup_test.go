@@ -1132,6 +1132,52 @@ func TestInstallOpenCodeV2IsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInstallOpenCodeV2PreservesConflictingMCP(t *testing.T) {
+	command, err := json.Marshal([]string{resolveEngramCommand(), "mcp", "--tools=agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, entry string }{
+		{"valid existing", fmt.Sprintf(`{"type":"local","command":%s,"disabled":false}`, command)},
+		{"disabled", `{"type":"local","command":["engram","mcp","--tools=agent"],"disabled":true}`},
+		{"wrong type", `{"type":"remote","url":"https://example.test"}`},
+		{"stale command", `{"type":"local","command":["old","mcp","--tools=agent"]}`},
+		{"malformed", `"invalid"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			home := useTestHome(t)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+			path := filepath.Join(home, "xdg", "opencode", "opencode.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte(`{"mcp":{"servers":{"engram":` + tc.entry + `}}}`)
+			if err := os.WriteFile(path, original, 0644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := installOpenCodeV2()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedFiles := 1
+			if tc.name == "valid existing" {
+				expectedFiles = 2
+			}
+			if result.MCPConfigured != (tc.name == "valid existing") || result.Files != expectedFiles {
+				t.Fatalf("unexpected installation result: %+v", result)
+			}
+			actual, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(actual, original) {
+				t.Fatalf("configuration changed: %s", actual)
+			}
+		})
+	}
+}
+
 func TestInstallOpenCodeV2ReadEmbeddedError(t *testing.T) {
 	resetSetupSeams(t)
 	home := useTestHome(t)

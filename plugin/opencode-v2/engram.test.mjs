@@ -17,7 +17,11 @@ async function harness(t) {
     const path = new URL(url).pathname
     const body = options.body ? JSON.parse(options.body) : undefined
     requests.push({ path, body })
-    const value = path === '/project/current' ? { project: 'example' } : path === '/health' ? {} : {}
+    const old = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const value = path === '/project/current' ? { project: 'example' }
+      : path.startsWith('/sessions/') ? { started_at: old }
+      : path === '/observations' ? [{ created_at: old }]
+      : {}
     return { ok: true, json: async () => value }
   }
   let cleanup
@@ -91,6 +95,18 @@ test('V2 captures only admitted root user inbox messages and retains stable iden
   await emit(admitted('root', 'one', 'A useful prompt with text'))
   assert.equal(requests.filter(r => r.path === '/prompts').length, 3)
   assert.deepEqual(requests.filter(r => r.path === '/sessions/root/end').length, 0)
+})
+
+test('V2 child context before creation keeps protocol but never receives root nudge', async t => {
+  const { hooks, requests } = await harness(t)
+  const childSystem = [{ type: 'text', text: 'Existing instructions' }]
+  await hooks.get('context')({ sessionID: 'child', system: childSystem })
+  assert.match(childSystem[0].text, /Engram Persistent Memory/)
+  assert.doesNotMatch(childSystem[0].text, /MEMORY REMINDER/)
+  assert.equal(requests.filter(r => r.path === '/sessions/child').length, 0)
+  const rootSystem = [{ type: 'text', text: 'Existing instructions' }]
+  await hooks.get('context')({ sessionID: 'root', system: rootSystem })
+  assert.match(rootSystem[0].text, /MEMORY REMINDER/)
 })
 
 test('V2 strips private spans and truncates admitted text before HTTP', async t => {

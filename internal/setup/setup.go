@@ -848,9 +848,19 @@ func injectOpenCodeMCPV2() error {
 		servers = make(map[string]json.RawMessage)
 	}
 
-	// Check if engram is already registered
-	if _, exists := servers["engram"]; exists {
-		return nil // already registered, nothing to do
+	// Preserve existing registrations, but only report success for an enabled
+	// local server pointing at the command this installer would write.
+	if raw, exists := servers["engram"]; exists {
+		var entry struct {
+			Type     string   `json:"type"`
+			Command  []string `json:"command"`
+			Disabled bool     `json:"disabled"`
+		}
+		if err := json.Unmarshal(raw, &entry); err != nil || entry.Type != "local" || entry.Disabled ||
+			!slices.Equal(entry.Command, []string{resolveEngramCommand(), "mcp", "--tools=agent"}) {
+			return fmt.Errorf("mcp.servers.engram conflicts with the expected enabled local server; resolve it manually")
+		}
+		return nil
 	}
 
 	// Add engram MCP entry (agent profile — only tools agents need).

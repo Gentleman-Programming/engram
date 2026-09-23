@@ -815,6 +815,7 @@ export default Plugin.define({
         if (!(await ensureResolvedProject())) return
         const sessionID: string = event.sessionID ?? ""
         if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
+        if (await resolveAuthoritativeSessionID(sessionID) !== sessionID) return
 
         const cooldownSecs = parseInt(process.env.ENGRAM_NUDGE_COOLDOWN_SECS ?? "900", 10)
         const nowSecs = Math.floor(Date.now() / 1000)
