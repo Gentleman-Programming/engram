@@ -4,7 +4,10 @@ package store
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsDriveTypeClassifier(t *testing.T) {
@@ -24,6 +27,27 @@ func TestWindowsDriveTypeClassifier(t *testing.T) {
 				t.Errorf("classifyWindowsDriveType(%d) support = %q, want %q", tt.driveType, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWindowsFilesystemResolverRequestsOpenedName(t *testing.T) {
+	dataDir := t.TempDir()
+	original := windowsFinalPathNameByHandle
+	t.Cleanup(func() { windowsFinalPathNameByHandle = original })
+	var calls int
+	windowsFinalPathNameByHandle = func(handle windows.Handle, buffer *uint16, size, flags uint32) (uint32, error) {
+		if flags != 0x8 { // FILE_NAME_OPENED
+			t.Fatalf("GetFinalPathNameByHandle flags = %#x, want FILE_NAME_OPENED", flags)
+		}
+		calls++
+		return original(handle, buffer, size, flags)
+	}
+	resolved, err := resolveWindowsFinalPath(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 || filepath.VolumeName(resolved) == "" {
+		t.Fatalf("resolved path = %q, calls = %d; want local volume", resolved, calls)
 	}
 }
 
