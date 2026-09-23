@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	resolveWindowsPath = resolveWindowsFinalPath
-	windowsDriveType   = getWindowsDriveType
+	resolveWindowsPath           = resolveWindowsFinalPath
+	windowsDriveType             = getWindowsDriveType
+	windowsFinalPathNameByHandle = windows.GetFinalPathNameByHandle
 )
 
 const (
@@ -57,7 +58,7 @@ func resolveWindowsFinalPath(path string) (string, error) {
 	size := uint32(windows.MAX_PATH)
 	for {
 		buffer := make([]uint16, size)
-		n, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], size, 0)
+		n, err := windowsFinalPathNameByHandle(handle, &buffer[0], size, 0x8) // FILE_NAME_OPENED, VOLUME_NAME_DOS
 		if err != nil {
 			return "", err
 		}
