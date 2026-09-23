@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -123,8 +124,37 @@ func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
 			if hook.Command != "engram hook claude-pre-tool-use" {
 				continue
 			}
-			if !strings.Contains(group.Matcher, "mcp__engram__") || !strings.Contains(group.Matcher, "mcp__plugin_engram_engram__") {
-				t.Fatalf("PreToolUse matcher %q must cover both supported Engram MCP server IDs", group.Matcher)
+			// This matcher uses only anchors, groups and literal alternatives: Go's
+			// regexp and Claude's JavaScript RegExp agree on these constructs.
+			if !strings.HasPrefix(group.Matcher, "^") || !strings.HasSuffix(group.Matcher, "$") {
+				t.Fatalf("PreToolUse matcher must be anchored: %q", group.Matcher)
+			}
+			matcher, err := regexp.Compile(group.Matcher)
+			if err != nil {
+				t.Fatalf("invalid PreToolUse matcher %q: %v", group.Matcher, err)
+			}
+			tools := []string{"mem_save", "mem_update", "mem_review", "mem_delete", "mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary", "mem_session_start", "mem_session_end", "mem_capture_passive", "mem_merge_projects", "mem_judge", "mem_compare"}
+			for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+				for _, tool := range tools {
+					if !matcher.MatchString(prefix + tool) {
+						t.Errorf("PreToolUse matcher %q misses %s%s", group.Matcher, prefix, tool)
+					}
+					for _, suffix := range []string{"_extra", "x"} {
+						if matcher.MatchString(prefix + tool + suffix) {
+							t.Errorf("PreToolUse matcher %q accepts near-match %s%s%s", group.Matcher, prefix, tool, suffix)
+						}
+					}
+				}
+				for _, tool := range []string{"mem_search", "mem_context", "mem_get_observation", "mem_current_project", "mem_suggest_topic_key", "mem_doctor", "mem_save_promp"} {
+					if matcher.MatchString(prefix + tool) {
+						t.Errorf("PreToolUse matcher %q accepts non-write tool %s%s", group.Matcher, prefix, tool)
+					}
+				}
+			}
+			for _, name := range []string{"mcp__other__mem_save", "mcp__engram_extra__mem_save", "other_mcp__engram__mem_save", "mem_save"} {
+				if matcher.MatchString(name) {
+					t.Errorf("PreToolUse matcher %q accepts unrelated name %q", group.Matcher, name)
+				}
 			}
 			if strings.Contains(strings.ToLower(hook.Command), "bash") || strings.Contains(hook.Command, ".sh") {
 				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -3501,8 +3502,26 @@ func TestClaudePreToolUseHookUsesWindowsPortableCommand(t *testing.T) {
 			if strings.ContainsAny(hook.Command, `/$`) || strings.Contains(strings.ToLower(hook.Command), "bash") {
 				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
 			}
-			if !strings.Contains(entry.Matcher, "mcp__engram__") || !strings.Contains(entry.Matcher, "mcp__plugin_engram_engram__") {
-				t.Fatalf("PreToolUse matcher %q must cover both supported Engram MCP server IDs", entry.Matcher)
+			// Current manifest uses only JS-compatible literal alternatives and groups.
+			if !strings.HasPrefix(entry.Matcher, "^") || !strings.HasSuffix(entry.Matcher, "$") {
+				t.Fatalf("PreToolUse matcher must be anchored: %q", entry.Matcher)
+			}
+			matcher, err := regexp.Compile(entry.Matcher)
+			if err != nil {
+				t.Fatalf("invalid PreToolUse matcher %q: %v", entry.Matcher, err)
+			}
+			for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+				if !matcher.MatchString(prefix+"mem_session_end") || !matcher.MatchString(prefix+"mem_save") {
+					t.Errorf("PreToolUse matcher %q misses representative writes for %s", entry.Matcher, prefix)
+				}
+				for _, tool := range []string{"mem_search", "mem_save_extra"} {
+					if matcher.MatchString(prefix + tool) {
+						t.Errorf("PreToolUse matcher %q accepts %s%s", entry.Matcher, prefix, tool)
+					}
+				}
+			}
+			if matcher.MatchString("mcp__other__mem_save") {
+				t.Errorf("PreToolUse matcher %q accepts unrelated server", entry.Matcher)
 			}
 			return
 		}
