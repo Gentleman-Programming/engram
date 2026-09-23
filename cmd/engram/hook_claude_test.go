@@ -96,6 +96,42 @@ func TestCmdHookEmitsJSONDenialWhenClaudeInputReadFails(t *testing.T) {
 	}
 }
 
+func TestCodexPreToolUseCommandDeniesUnreadableInput(t *testing.T) {
+	oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
+	t.Cleanup(func() { os.Stdin, claudeHookOutput, exitFunc = oldStdin, oldOutput, oldExit })
+	os.Stdin = claudeHookStdin(t, "", true)
+	var output []byte
+	claudeHookOutput = func(response []byte) error { output = append([]byte(nil), response...); return nil }
+	exitFunc = func(code int) { t.Errorf("unexpected exit code %d", code) }
+	cmdHook([]string{"codex-pre-tool-use"})
+	var response struct {
+		HookSpecificOutput struct {
+			HookEventName            string `json:"hookEventName"`
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("command output = %q, want JSON denial: %v", output, err)
+	}
+	if got := response.HookSpecificOutput; got.HookEventName != "PreToolUse" || got.PermissionDecision != "deny" || got.PermissionDecisionReason != "cannot read authoritative Codex hook input" {
+		t.Fatalf("Codex read failure response = %+v", got)
+	}
+}
+
+func TestCodexPreToolUseCommandExitsWhenResponseWriteFails(t *testing.T) {
+	oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
+	t.Cleanup(func() { os.Stdin, claudeHookOutput, exitFunc = oldStdin, oldOutput, oldExit })
+	os.Stdin = claudeHookStdin(t, `{"session_id":"host","tool_name":"mcp__engram__mem_save","tool_input":{"title":"decision"}}`, false)
+	claudeHookOutput = func([]byte) error { return errors.New("write Codex hook response") }
+	var exitCodes []int
+	exitFunc = func(code int) { exitCodes = append(exitCodes, code) }
+	cmdHook([]string{"codex-pre-tool-use"})
+	if len(exitCodes) != 1 || exitCodes[0] != 1 {
+		t.Fatalf("exit codes = %v, want [1] after Codex response write failure", exitCodes)
+	}
+}
+
 func TestCodexPreToolUseBindsWrites(t *testing.T) {
 	for _, tool := range claudeEngramWriteAndSessionTools {
 		t.Run(tool, func(t *testing.T) {
