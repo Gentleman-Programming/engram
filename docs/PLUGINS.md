@@ -131,8 +131,10 @@ plugin/claude-code/
 
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
-2. The transformer binds Claude's authoritative top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
+2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
+
+Session binding is best-effort if the host times out the PreToolUse hook: normal permission flow can continue without the rewrite, so an explicit wrong same-project session ID might be persisted. This limitation was reproduced with an induced one-second hook timeout in a scratch test; it has not been observed with the production hook timeout.
 
 **On session start** (`startup`):
 1. Ensures the engram HTTP server is running
