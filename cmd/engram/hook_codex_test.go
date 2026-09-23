@@ -1,18 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
@@ -163,6 +169,113 @@ func TestCodexUserPromptReminderBoundaries(t *testing.T) {
 				if strings.Contains(got, "MEMORY REMINDER") != want {
 					t.Fatalf("call %d output = %q, want reminder %v", i+1, got, want)
 				}
+			}
+		})
+	}
+}
+
+func TestCodexUserPromptExactReminderCutoffs(t *testing.T) {
+	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name           string
+		started, saved time.Duration
+		want           bool
+	}{
+		{"session before five minutes", 5*time.Minute - time.Second, 20 * time.Minute, false},
+		{"session at five minutes", 5 * time.Minute, 20 * time.Minute, true},
+		{"session after five minutes", 5*time.Minute + time.Second, 20 * time.Minute, true},
+		{"save before fifteen minutes", 20 * time.Minute, 15*time.Minute - time.Second, false},
+		{"save at fifteen minutes", 20 * time.Minute, 15 * time.Minute, true},
+		{"save after fifteen minutes", 20 * time.Minute, 15*time.Minute + time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/sessions/s":
+					_ = json.NewEncoder(w).Encode(map[string]string{"started_at": now.Add(-tc.started).Format(time.RFC3339)})
+				case "/observations":
+					_ = json.NewEncoder(w).Encode([]map[string]string{{"created_at": now.Add(-tc.saved).Format(time.RFC3339)}})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ts.Close()
+			input := []byte(`{"cwd":"C:/work","session_id":"s"}`)
+			state := t.TempDir()
+			runCodexUserPromptSubmit(input, ts.URL, state, func() time.Time { return now })
+			got := string(runCodexUserPromptSubmit(input, ts.URL, state, func() time.Time { return now }))
+			if strings.Contains(got, "MEMORY REMINDER") != tc.want {
+				t.Fatalf("output = %q, want reminder %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexUserPromptFirstPromptPersistsThroughServer(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DataDir = filepath.Join(t.TempDir(), "db")
+	db, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	t.Setenv("ENGRAM_PROJECT", "codex-hook-test")
+	ts := httptest.NewServer(server.New(db, 0).Handler())
+	defer ts.Close()
+	create := func(id, project string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"id": id, "project": project, "directory": t.TempDir()})
+		resp, err := ts.Client().Post(ts.URL+"/sessions", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create session %s: %d", id, resp.StatusCode)
+		}
+	}
+	create("registered", "codex-hook-test")
+	create("mismatched", "another-project")
+	for _, tc := range []struct {
+		id, prompt  string
+		wantPersist bool
+	}{
+		{"registered", "first prompt survives", true},
+		{"missing", "unknown session must not persist", false},
+		{"mismatched", "wrong project must not persist", false},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			input, _ := json.Marshal(codexPromptInput{CWD: t.TempDir(), SessionID: tc.id, Prompt: tc.prompt})
+			output := runCodexUserPromptSubmit(input, ts.URL, t.TempDir(), time.Now)
+			if !json.Valid(output) || !strings.Contains(string(output), "CRITICAL FIRST ACTION") {
+				t.Fatalf("first output: %s", output)
+			}
+			resp, err := ts.Client().Get(ts.URL + "/prompts/recent?project=" + url.QueryEscape("codex-hook-test"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var prompts []store.Prompt
+			decodeErr := json.NewDecoder(resp.Body).Decode(&prompts)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK || decodeErr != nil {
+				t.Fatalf("recent: status %d error %v", resp.StatusCode, decodeErr)
+			}
+			found := false
+			for _, p := range prompts {
+				if p.Content == tc.prompt {
+					found = true
+					if p.SessionID != tc.id || p.Project != "codex-hook-test" {
+						t.Fatalf("wrong attribution: %+v", p)
+					}
+				}
+			}
+			if found != tc.wantPersist {
+				t.Fatalf("prompt %q persisted=%v, want %v; recent=%+v", tc.prompt, found, tc.wantPersist, prompts)
 			}
 		})
 	}
