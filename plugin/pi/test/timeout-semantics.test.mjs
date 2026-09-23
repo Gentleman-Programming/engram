@@ -7,7 +7,7 @@ function runtimeContext(sessionId) {
   return { cwd: PLUGIN_ROOT, sessionManager: { getSessionId: () => sessionId }, ui: { setStatus() {} } };
 }
 
-async function scenario(headersFirst) {
+async function scenario(headersFirst, delayMs = 3500) {
   let requests = 0;
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
@@ -17,7 +17,7 @@ async function scenario(headersFirst) {
       requests++;
       for await (const _chunk of request) { /* Ensure the server receives the complete write. */ }
       if (headersFirst) { response.writeHead(200, { "Content-Type": "application/json" }); response.write('{"id":'); }
-      setTimeout(() => response.end(headersFirst ? "1}" : '{"id":1}'), 1500);
+      setTimeout(() => response.end(headersFirst ? "1}" : '{"id":1}'), delayMs);
       return;
     }
     response.statusCode = 404; response.end();
@@ -31,10 +31,14 @@ async function scenario(headersFirst) {
       const register = await importPluginFromSandbox(sandbox);
       register({ registerTool(tool) { tools.set(tool.name, tool); }, on() {} });
       const result = await tools.get("mem_save").execute("timeout-write", { title: "committed", content: "once" }, undefined, undefined, runtimeContext("timeout-session"));
-      assert.equal(result.isError, true);
-      assert.equal(result.details.outcome, "unknown");
-      assert.equal(result.details.operation, "write");
-      assert.match(result.content[0].text, /do NOT blindly retry/);
+      if (delayMs > 3000) {
+        assert.equal(result.isError, true);
+        assert.equal(result.details.outcome, "unknown");
+        assert.equal(result.details.operation, "write");
+        assert.match(result.content[0].text, /do NOT blindly retry/);
+      } else {
+        assert.notEqual(result.isError, true, "a confirmed 1.5s write must not be labeled unknown");
+      }
       assert.equal(requests, 1);
     });
   } finally {
@@ -45,4 +49,5 @@ async function scenario(headersFirst) {
 }
 
 test("committed write before response headers has unknown outcome without replay", () => scenario(false));
+test("a confirmed write after 1.5s succeeds without replay", () => scenario(false, 1500));
 test("committed write during response body has unknown outcome without replay", () => scenario(true));

@@ -26,7 +26,7 @@ const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 
 // Writes are single-attempt: once dispatched, their server-side outcome may be unknown.
-const ENGRAM_WRITE_TIMEOUT_MS = 1000;
+const ENGRAM_WRITE_TIMEOUT_MS = 3000;
 const ENGRAM_READ_TIMEOUT_MS = 10000;
 const ENGRAM_DOCTOR_TIMEOUT_MS = 15000;
 const ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS = 5000;
@@ -300,11 +300,11 @@ function isDefinitelyPreDispatchError(error: unknown): boolean {
 async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<EngramFetchResult<TResponse>> {
   const method = opts.method ?? "GET";
   const policy = engramFetchPolicy(path, method);
-  let res: Response | undefined;
   let timedOut = false;
   let refused = false;
   let ambiguousTransport = false;
   for (let attempt = 0; attempt < policy.maxAttempts; attempt += 1) {
+    let res: Response;
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
         method,
@@ -314,7 +314,6 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
           ? AbortSignal.any([AbortSignal.timeout(policy.timeoutMs), opts.signal])
           : AbortSignal.timeout(policy.timeoutMs),
       });
-      break;
     } catch (error) {
       if (isTimeoutError(error)) {
         if (opts.signal?.aborted) throw error;
@@ -325,41 +324,44 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
       }
       if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
       await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+      continue;
     }
-  }
 
-  if (!res) {
-    if ((timedOut || ambiguousTransport) && (policy.operation === "write" || policy.operation === "session-registration")) {
-      return { data: null, transportFailure: { operation: policy.operation, outcome: "unknown", timeoutMs: policy.timeoutMs } };
-    }
-    if (timedOut) return { data: null, transportFailure: { operation: policy.operation, outcome: "timed_out", timeoutMs: policy.timeoutMs } };
-    if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
-      return engramFetchResult<TResponse>(path, opts);
-    }
-    throw new Error(unreachableMessage(undefined));
-  }
-
-  let data: unknown = null;
-  if (res.status !== 204) {
-    try {
-      data = await res.json();
-    } catch (error) {
-      if (isTimeoutError(error)) {
-        if (opts.signal?.aborted) throw error;
-        return { data: null, transportFailure: { operation: policy.operation, outcome: policy.operation === "write" || policy.operation === "session-registration" ? "unknown" : "timed_out", timeoutMs: policy.timeoutMs } };
+    let data: unknown = null;
+    if (res.status !== 204) {
+      try {
+        data = await res.json();
+      } catch (error) {
+        if (isTimeoutError(error)) {
+          if (opts.signal?.aborted) throw error;
+          // Headers establish the HTTP failure even if its body never arrives.
+          if (!res.ok) throw new EngramHttpError(`Engram request failed with HTTP ${res.status}`, res.status, null);
+          timedOut = true;
+          if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
+          await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+          continue;
+        }
+        if (res.ok) throw error;
       }
-      if (res.ok) throw error;
     }
+
+    if (!res.ok) {
+      const message = data && typeof data === "object" && "error" in data && typeof data.error === "string"
+        ? data.error
+        : `Engram request failed with HTTP ${res.status}`;
+      throw new EngramHttpError(message, res.status, data);
+    }
+    return { data: data as TResponse };
   }
 
-  if (!res.ok) {
-    const message = data && typeof data === "object" && "error" in data && typeof data.error === "string"
-      ? data.error
-      : `Engram request failed with HTTP ${res.status}`;
-    throw new EngramHttpError(message, res.status, data);
+  if ((timedOut || ambiguousTransport) && (policy.operation === "write" || policy.operation === "session-registration")) {
+    return { data: null, transportFailure: { operation: policy.operation, outcome: "unknown", timeoutMs: policy.timeoutMs } };
   }
-
-  return { data: data as TResponse };
+  if (timedOut) return { data: null, transportFailure: { operation: policy.operation, outcome: "timed_out", timeoutMs: policy.timeoutMs } };
+  if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+    return engramFetchResult<TResponse>(path, opts);
+  }
+  throw new Error(unreachableMessage(undefined));
 }
 
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
