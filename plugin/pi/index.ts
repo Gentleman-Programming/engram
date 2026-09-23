@@ -341,7 +341,16 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
           await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
           continue;
         }
-        if (res.ok) throw error;
+        if (res.ok) {
+          // A broken response stream does not prove a successful write was not applied.
+          // A complete but malformed JSON body remains a parsing error.
+          if (error instanceof SyntaxError) throw error;
+          if (opts.signal?.aborted) throw error;
+          ambiguousTransport = true;
+          if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
+          await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+          continue;
+        }
       }
     }
 

@@ -1642,6 +1642,33 @@ test("non-success response retains known HTTP status when its body times out", a
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("a terminated successful write body is unknown without replay; safe reads retry", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 200, ok: true, async json() { throw new TypeError("terminated", { cause: Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" }) }); } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({ wait: async () => {} });
+    assert.deepEqual(await engramFetchResult("/observations", { method: "POST" }), {
+      data: null, transportFailure: { operation: "write", outcome: "unknown", timeoutMs: 3000 },
+    });
+    assert.equal(calls, 1, "an acknowledged write must never be replayed");
+    await assert.rejects(() => engramFetchResult("/observations"), /could not reach the Engram HTTP server/);
+    assert.equal(calls, 4, "read-body socket failures should exhaust the bounded retry policy");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("malformed complete successful JSON still surfaces its SyntaxError", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ status: 200, ok: true, async json() { throw new SyntaxError("bad JSON"); } });
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    await assert.rejects(() => engramFetchResult("/observations", { method: "POST" }), SyntaxError);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("caller abort propagates instead of being classified as transport timeout", async () => {
   const originalFetch = globalThis.fetch;
   const controller = new AbortController();
