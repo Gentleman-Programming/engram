@@ -227,16 +227,16 @@ func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {
 				continue
 			}
 			from := normalizeProjectName(ev.SessionProject)
-			to := normalizeProjectName(ev.DirectoryProject)
+			decision := decideSessionProjectAuthority(ev.SessionProject, "", false, DetectedProject{Project: ev.DirectoryProject, Source: ev.DirectoryProjectSource, Path: ev.DirectoryProjectPath})
 			if !isTrustedDirectoryEvidence(ev.DirectoryProjectSource) {
 				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: ev.SessionID, ReasonCode: "untrusted_directory_evidence", Message: "directory evidence is not git_remote or git_root"})
 				continue
 			}
-			if ev.SessionID == "" || from == "" || to == "" || from == to || from != plan.Project {
+			if ev.SessionID == "" || from == "" || !decision.shouldRepairFromTrustedDirectory() || from == decision.repairTarget || from != plan.Project {
 				plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: ev.SessionID, ReasonCode: "invalid_reclassification_evidence", Message: "doctor evidence does not describe a supported project move"})
 				continue
 			}
-			plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: ev.SessionID, FromProject: from, ToProject: to, ReasonCode: finding.ReasonCode, EvidenceSource: ev.DirectoryProjectSource, EvidencePath: ev.DirectoryProjectPath})
+			plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: ev.SessionID, FromProject: from, ToProject: decision.repairTarget, ReasonCode: finding.ReasonCode, EvidenceSource: decision.repairEvidenceSource, EvidencePath: decision.repairEvidencePath})
 		}
 	}
 }
@@ -253,20 +253,34 @@ func planManualSessionRepair(plan *RepairPlan, scope Scope) error {
 			known[project] = true
 		}
 	}
+	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
 		from := normalizeProjectName(session.Project)
 		if from != plan.Project {
 			continue
 		}
-		to, knownManualTarget := knownManualSessionTarget(session.Name, known)
-		if to == "" || from == to {
+		nameTarget := manualSessionNameTarget(session.Name)
+		if nameTarget == "" || from == nameTarget {
+			continue
+		}
+		_, knownManualTarget := knownManualSessionTarget(session.Name, known)
+		directoryProject, ok := detectSessionDirectoryProject(scope, detected, strings.TrimSpace(session.Directory))
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameTarget, knownManualTarget, directoryProject)
+		if decision.directoryBasenameCorroboratesPersisted {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "directory_basename_corroborates_persisted_project", Message: "directory basename corroborates the persisted project and cannot authorize a conflicting manual-name move"})
 			continue
 		}
 		if !knownManualTarget {
 			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "manual_name_unknown_project", Message: "manual session suffix is not a known local project"})
 			continue
 		}
-		plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: session.ID, FromProject: from, ToProject: to, ReasonCode: CheckManualSessionNameProjectMismatch})
+		if !decision.shouldRepairFromManualName() || decision.repairTarget == from {
+			continue
+		}
+		plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: session.ID, FromProject: from, ToProject: decision.repairTarget, ReasonCode: CheckManualSessionNameProjectMismatch, EvidenceSource: decision.repairEvidenceSource, EvidencePath: decision.repairEvidencePath})
 	}
 	return nil
 }

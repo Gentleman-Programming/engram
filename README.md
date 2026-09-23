@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="1024" alt="Engram — One Brain. Local or Cloud." src="assets/branding/engram-banner.png" />
+  <img width="1024" alt="Engram neon elephant banner: the elephant exhales a memory stream (remember, sync, recall), the ENGRAM wordmark is written on, and the tagline One Brain. Local or Cloud. appears" src="assets/branding/engram-banner.gif" />
 </p>
 
 <p align="center">
@@ -136,6 +136,7 @@ Run the setup command for the agent you use, then restart that agent. `engram se
 | Cursor | `engram setup cursor` |
 | VS Code (Copilot) | `engram setup vscode-copilot` |
 | Kilo Code | `engram setup kilocode` |
+| Kimi Code | `engram setup kimi` |
 | CommandCode | `engram setup commandcode` |
 | Another MCP-compatible agent | [Manual MCP setup](docs/AGENT-SETUP.md#any-other-mcp-agent) |
 

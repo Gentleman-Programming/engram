@@ -357,7 +357,12 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]MutationEntry, error) {
 	project = strings.TrimSpace(project)
 	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts)+len(chunk.Mutations))
+	typedUpserts := make(map[string]struct{}, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
 
+	addTypedUpsert := func(entry MutationEntry) {
+		entries = append(entries, entry)
+		typedUpserts[entry.Entity+"\x00"+entry.EntityKey] = struct{}{}
+	}
 	for i, session := range chunk.Sessions {
 		entityKey := strings.TrimSpace(session.ID)
 		if entityKey == "" {
@@ -367,7 +372,7 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		if err != nil {
 			return nil, fmt.Errorf("cloudstore: materialize chunk session %q: %w", entityKey, err)
 		}
-		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntitySession, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+		addTypedUpsert(MutationEntry{Project: project, Entity: store.SyncEntitySession, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
 	}
 
 	for i, observation := range chunk.Observations {
@@ -379,7 +384,7 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		if err != nil {
 			return nil, fmt.Errorf("cloudstore: materialize chunk observation %q: %w", entityKey, err)
 		}
-		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityObservation, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+		addTypedUpsert(MutationEntry{Project: project, Entity: store.SyncEntityObservation, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
 	}
 
 	for i, prompt := range chunk.Prompts {
@@ -391,61 +396,102 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		if err != nil {
 			return nil, fmt.Errorf("cloudstore: materialize chunk prompt %q: %w", entityKey, err)
 		}
-		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+		addTypedUpsert(MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
 	}
 
-	// Relations travel only as relation-entity entries in chunk.Mutations — there is no
-	// typed collection for them like Sessions/Observations/Prompts — so materialize them
-	// here to mirror the mutation-push path (#379).
-	//
-	// Session/observation/prompt UPSERTS are already materialized from the typed
-	// collections above, so they are skipped to avoid duplicate cloud_mutations rows.
-	// Their DELETES are not, and must be materialized here (#837): a hard-deleted row is
-	// gone locally, so it cannot ride in a typed collection at all, and a soft-deleted one
-	// only rides as an upsert carrying deleted_at, which a cloud_mutations replay reads as
-	// still present. Appending the delete after the typed entries gives it the higher seq,
-	// so the tombstone wins on replay.
+	// Relations always travel in chunk.Mutations. Typed entity upserts can also travel
+	// there: materialize them when their typed counterpart is absent, but retain only
+	// one row when both representations are present. Deletes remain ordered after typed
+	// entries so their tombstone wins during replay.
 	for i, mutation := range chunk.Mutations {
-		entity := strings.TrimSpace(mutation.Entity)
-		op := strings.TrimSpace(mutation.Op)
-		if op == "" {
-			op = store.SyncOpUpsert
+		entry, err := materializeChunkMutation(project, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].%w", i, err)
 		}
-		if !materializableChunkMutation(entity, op) {
+		if entry == nil {
 			continue
 		}
-		entityKey := strings.TrimSpace(mutation.EntityKey)
-		if entityKey == "" {
-			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].entity_key is required for %s", i, entity)
-		}
-		payload := json.RawMessage(strings.TrimSpace(mutation.Payload))
-		if len(payload) == 0 {
-			payload = json.RawMessage("{}")
-		}
-		if entity == store.SyncEntityRelation {
-			if field, ok := chunkcodec.ValidateRelationPayload(payload); !ok {
-				return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].payload.%s is required for relation", i, field)
+		if entry.Op == store.SyncOpUpsert {
+			if _, duplicate := typedUpserts[entry.Entity+"\x00"+entry.EntityKey]; duplicate {
+				continue
 			}
 		}
-		entries = append(entries, MutationEntry{Project: project, Entity: entity, EntityKey: entityKey, Op: op, Payload: payload})
+		entries = append(entries, *entry)
 	}
 
 	return entries, nil
 }
 
-// materializableChunkMutation reports whether a chunk.Mutations entry still needs a
-// cloud_mutations row after the typed collections have been materialized.
-func materializableChunkMutation(entity, op string) bool {
-	switch entity {
-	case store.SyncEntityRelation:
-		// Relations have no typed collection, so every relation entry materializes.
-		return true
-	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt:
-		// Upserts already came from the typed collections; only tombstones are missing.
-		return op == store.SyncOpDelete
-	default:
-		return false
+// materializeChunkMutation normalizes the mutation representation shared by direct
+// chunk uploads and mutation-push chunks before either path materializes it.
+func materializeChunkMutation(project string, mutation store.SyncMutation) (*MutationEntry, error) {
+	entity := strings.TrimSpace(mutation.Entity)
+	if !isChunkMaterializableMutationEntity(entity) {
+		return nil, nil
 	}
+	op := strings.TrimSpace(mutation.Op)
+	if op == "" {
+		op = store.SyncOpUpsert
+	}
+	if entity != store.SyncEntityRelation && op != store.SyncOpUpsert && op != store.SyncOpDelete {
+		return nil, nil
+	}
+	entityKey := strings.TrimSpace(mutation.EntityKey)
+	if entityKey == "" {
+		return nil, fmt.Errorf("entity_key is required for %s", entity)
+	}
+	payload := json.RawMessage(strings.TrimSpace(mutation.Payload))
+	if len(payload) == 0 {
+		payload = json.RawMessage("{}")
+	}
+	if entity == store.SyncEntityRelation {
+		if field, ok := chunkcodec.ValidateRelationPayload(payload); !ok {
+			return nil, fmt.Errorf("payload.%s is required for relation", field)
+		}
+	}
+	entry := MutationEntry{Project: strings.TrimSpace(project), Entity: entity, EntityKey: entityKey, Op: op, Payload: payload}
+	if op == store.SyncOpUpsert {
+		if err := validateMaterializedChunkUpsert(entry); err != nil {
+			return nil, fmt.Errorf("invalid %s upsert payload: %w", entity, err)
+		}
+	}
+	return &entry, nil
+}
+
+// validateMaterializedChunkUpsert rejects malformed typed upsert payloads before
+// either direct chunk uploads or mutation-push chunks can materialize them.
+func validateMaterializedChunkUpsert(entry MutationEntry) error {
+	if strings.TrimSpace(string(entry.Payload)) == "null" {
+		return errors.New("payload must be a JSON object")
+	}
+	var identity, field string
+	switch entry.Entity {
+	case store.SyncEntitySession:
+		session, err := sessionFromMaterializedMutation(entry)
+		if err != nil {
+			return err
+		}
+		identity, field = session.ID, "id"
+	case store.SyncEntityObservation:
+		var observation store.Observation
+		if err := json.Unmarshal(entry.Payload, &observation); err != nil {
+			return err
+		}
+		identity, field = observation.SyncID, "sync_id"
+	case store.SyncEntityPrompt:
+		var prompt store.Prompt
+		if err := json.Unmarshal(entry.Payload, &prompt); err != nil {
+			return err
+		}
+		identity, field = prompt.SyncID, "sync_id"
+	default:
+		return nil
+	}
+	identity = strings.TrimSpace(identity)
+	if identity != "" && identity != entry.EntityKey {
+		return fmt.Errorf("payload.%s %q does not match entity_key %q", field, identity, entry.EntityKey)
+	}
+	return nil
 }
 
 func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []MutationEntry) error {
@@ -514,25 +560,33 @@ func collectSessionIDs(chunk engramsync.ChunkData) map[string]struct{} {
 		}
 	}
 	for _, mutation := range chunk.Mutations {
-		if mutation.Entity != "session" || mutation.Op == "delete" {
+		materialized, err := materializeChunkMutation("", mutation)
+		if err != nil || materialized == nil || materialized.Entity != store.SyncEntitySession || materialized.Op != store.SyncOpUpsert {
 			continue
 		}
-		mutationPayload := strings.TrimSpace(mutation.Payload)
-		if mutationPayload == "" {
+		session, err := sessionFromMaterializedMutation(*materialized)
+		if err != nil {
 			continue
 		}
-		var body struct {
-			ID string `json:"id"`
-		}
-		if err := chunkcodec.DecodeSyncMutationPayload(mutationPayload, &body); err != nil {
-			continue
-		}
-		sessionID := strings.TrimSpace(body.ID)
-		if sessionID != "" {
+		if sessionID := strings.TrimSpace(session.ID); sessionID != "" {
 			sessionIDs[sessionID] = struct{}{}
 		}
 	}
 	return sessionIDs
+}
+
+// sessionFromMaterializedMutation projects a normalized session mutation using its
+// entity key when the payload omits the session ID. Both session indexing and
+// mutation-push typed chunks use this projection.
+func sessionFromMaterializedMutation(mutation MutationEntry) (store.Session, error) {
+	var session store.Session
+	if err := chunkcodec.DecodeSyncMutationPayload(string(mutation.Payload), &session); err != nil {
+		return store.Session{}, err
+	}
+	if strings.TrimSpace(session.ID) == "" {
+		session.ID = mutation.EntityKey
+	}
+	return session, nil
 }
 
 func (cs *CloudStore) resolveChunkConflict(ctx context.Context, project, chunkID string, payload []byte) error {
@@ -1128,52 +1182,53 @@ func materializedMutationBatchChunk(batch []MutationEntry) ([]byte, chunkSummary
 		if entryProject != project {
 			return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch: mixed projects %q and %q", project, entryProject)
 		}
-		entity := strings.TrimSpace(entry.Entity)
-		if !isChunkMaterializableMutationEntity(entity) {
-			continue
+		materialized, err := materializeChunkMutation(entryProject, store.SyncMutation{
+			Project:   entryProject,
+			Entity:    entry.Entity,
+			EntityKey: entry.EntityKey,
+			Op:        entry.Op,
+			Payload:   string(entry.Payload),
+		})
+		if err != nil {
+			return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch entry %d: %w", i, err)
 		}
-
-		payload := entry.Payload
-		if len(payload) == 0 {
-			payload = json.RawMessage("{}")
+		if materialized == nil {
+			continue
 		}
 		chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
-			Project:   entryProject,
-			Entity:    entity,
-			EntityKey: strings.TrimSpace(entry.EntityKey),
-			Op:        strings.TrimSpace(entry.Op),
-			Payload:   string(payload),
+			Project:   materialized.Project,
+			Entity:    materialized.Entity,
+			EntityKey: materialized.EntityKey,
+			Op:        materialized.Op,
+			Payload:   string(materialized.Payload),
 		})
 
-		if strings.TrimSpace(entry.Op) != store.SyncOpUpsert {
+		if materialized.Op != store.SyncOpUpsert {
 			continue
 		}
-		switch entity {
+		switch materialized.Entity {
 		case store.SyncEntitySession:
-			var session store.Session
-			if err := json.Unmarshal(payload, &session); err != nil {
-				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch session %q: %w", entry.EntityKey, err)
-			}
-			if strings.TrimSpace(session.ID) == "" {
-				session.ID = strings.TrimSpace(entry.EntityKey)
+			session, err := sessionFromMaterializedMutation(*materialized)
+			if err != nil {
+				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch session %q: %w", materialized.EntityKey, err)
 			}
 			chunk.Sessions = append(chunk.Sessions, session)
 		case store.SyncEntityObservation:
 			var observation store.Observation
-			if err := json.Unmarshal(payload, &observation); err != nil {
-				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch observation %q: %w", entry.EntityKey, err)
+			if err := json.Unmarshal(materialized.Payload, &observation); err != nil {
+				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch observation %q: %w", materialized.EntityKey, err)
 			}
 			if strings.TrimSpace(observation.SyncID) == "" {
-				observation.SyncID = strings.TrimSpace(entry.EntityKey)
+				observation.SyncID = materialized.EntityKey
 			}
 			chunk.Observations = append(chunk.Observations, observation)
 		case store.SyncEntityPrompt:
 			var prompt store.Prompt
-			if err := json.Unmarshal(payload, &prompt); err != nil {
-				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch prompt %q: %w", entry.EntityKey, err)
+			if err := json.Unmarshal(materialized.Payload, &prompt); err != nil {
+				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch prompt %q: %w", materialized.EntityKey, err)
 			}
 			if strings.TrimSpace(prompt.SyncID) == "" {
-				prompt.SyncID = strings.TrimSpace(entry.EntityKey)
+				prompt.SyncID = materialized.EntityKey
 			}
 			chunk.Prompts = append(chunk.Prompts, prompt)
 		}

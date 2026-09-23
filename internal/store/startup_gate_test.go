@@ -18,11 +18,102 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestSQLiteRuntimeVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+		wantErr bool
+	}{
+		{name: "minimum", version: "3.51.3", want: true},
+		{name: "later patch", version: "3.51.4", want: true},
+		{name: "later minor", version: "3.52.0", want: true},
+		{name: "later major", version: "4.0.0", want: true},
+		{name: "earlier patch", version: "3.51.2", want: false},
+		{name: "earlier minor", version: "3.50.99", want: false},
+		{name: "missing patch", version: "3.51", wantErr: true},
+		{name: "empty minor", version: "3..3", wantErr: true},
+		{name: "non-numeric patch", version: "3.51.x", wantErr: true},
+		{name: "suffix", version: "3.51.3-beta", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := sqliteRuntimeAtLeast(tt.version, [3]int{3, 51, 3})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("sqliteRuntimeAtLeast(%q) error = %v, wantErr %t", tt.version, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("sqliteRuntimeAtLeast(%q) = %t, want %t", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func sqliteRuntimeAtLeast(version string, minimum [3]int) (bool, error) {
+	parts := strings.Split(version, ".")
+	if len(parts) != len(minimum) {
+		return false, fmt.Errorf("expected major.minor.patch")
+	}
+
+	var got [3]int
+	for i, part := range parts {
+		if part == "" {
+			return false, fmt.Errorf("version component %d is empty", i+1)
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false, fmt.Errorf("version component %d is not numeric", i+1)
+			}
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return false, fmt.Errorf("parse version component %d: %w", i+1, err)
+		}
+		got[i] = parsed
+	}
+
+	for i := range got {
+		if got[i] != minimum[i] {
+			return got[i] > minimum[i], nil
+		}
+	}
+	return true, nil
+}
+
+func TestSQLiteRuntimeIncludesWALResetIntegrityFix(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	var version string
+	if err := s.db.QueryRow("SELECT sqlite_version()").Scan(&version); err != nil {
+		t.Fatalf("query SQLite runtime version: %v", err)
+	}
+	t.Logf("embedded SQLite runtime version: %s", version)
+	includesFix, err := sqliteRuntimeAtLeast(version, [3]int{3, 51, 3})
+	if err != nil {
+		t.Fatalf("parse embedded SQLite version %q: %v", version, err)
+	}
+	if !includesFix {
+		t.Fatalf("embedded SQLite version = %s, want at least 3.51.3 with the WAL-reset integrity fix", version)
+	}
+}
 
 func TestPersistentWALSurvivesClose(t *testing.T) {
 	cfg := mustDefaultConfig(t)

@@ -197,6 +197,86 @@ func TestMaterializedMutationBatchChunksKeepProjectsSeparate(t *testing.T) {
 	}
 }
 
+// Direct uploads deliberately retain payload IDs; this parity covers only
+// canonically valid inputs and does not broaden direct-upload normalization.
+func TestMutationOnlyChunkAndMutationPushMaterializeEquivalentEntries(t *testing.T) {
+	project := "proj-mutation-parity"
+	projectValue := project
+	marshal := func(value any) json.RawMessage {
+		t.Helper()
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal mutation payload: %v", err)
+		}
+		return payload
+	}
+	batch := []MutationEntry{
+		{Project: project, Entity: store.SyncEntitySession, EntityKey: "sess-1", Op: store.SyncOpUpsert, Payload: marshal(store.Session{ID: "sess-1", Project: project, Directory: "/work/parity", StartedAt: "2026-05-04T09:00:00Z"})},
+		{Project: project, Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: store.SyncOpUpsert, Payload: marshal(store.Observation{SyncID: "obs-1", SessionID: "sess-1", Project: &projectValue, Type: "decision", Title: "Parity", Content: "same materialization", Scope: "project", CreatedAt: "2026-05-04T09:01:00Z"})},
+		{Project: project, Entity: store.SyncEntityPrompt, EntityKey: "prompt-1", Op: store.SyncOpUpsert, Payload: marshal(store.Prompt{SyncID: "prompt-1", SessionID: "sess-1", Project: project, Content: "parity prompt", CreatedAt: "2026-05-04T09:02:00Z"})},
+	}
+	directChunk := engramsync.ChunkData{Mutations: make([]store.SyncMutation, 0, len(batch))}
+	for _, entry := range batch {
+		directChunk.Mutations = append(directChunk.Mutations, store.SyncMutation{Project: entry.Project, Entity: entry.Entity, EntityKey: entry.EntityKey, Op: entry.Op, Payload: string(entry.Payload)})
+	}
+	direct, err := materializedChunkMutations(project, directChunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations direct: %v", err)
+	}
+
+	payload, _, err := materializedMutationBatchChunk(batch)
+	if err != nil {
+		t.Fatalf("materializedMutationBatchChunk: %v", err)
+	}
+	pushed, err := materializedChunkMutations(project, parseMustChunk(t, payload))
+	if err != nil {
+		t.Fatalf("materializedChunkMutations mutation push: %v", err)
+	}
+	if len(direct) != len(pushed) {
+		t.Fatalf("expected %d parity entries, got %d", len(direct), len(pushed))
+	}
+	for i := range direct {
+		if direct[i].Project != pushed[i].Project || direct[i].Entity != pushed[i].Entity || direct[i].EntityKey != pushed[i].EntityKey || direct[i].Op != pushed[i].Op || string(normalizeJSON(direct[i].Payload)) != string(normalizeJSON(pushed[i].Payload)) {
+			t.Fatalf("entry %d differs between direct upload and mutation push\ndirect=%+v\npushed=%+v", i, direct[i], pushed[i])
+		}
+	}
+}
+
+func TestMaterializedChunkMutationsSkipsUnsupportedTypedOperations(t *testing.T) {
+	entries, err := materializedChunkMutations("proj-unsupported-op", engramsync.ChunkData{Mutations: []store.SyncMutation{
+		{Entity: store.SyncEntitySession, EntityKey: "sess-1", Op: "replace", Payload: `{"id":"sess-1"}`},
+		{Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: "patch", Payload: `{"sync_id":"obs-1"}`},
+		{Entity: store.SyncEntityPrompt, EntityKey: "prompt-1", Op: "merge", Payload: `{"sync_id":"prompt-1"}`},
+		{Entity: store.SyncEntityRelation, EntityKey: "rel-1", Op: "replace", Payload: `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"related","judgment_status":"judged","marked_by_actor":"agent-a","marked_by_kind":"agent"}`},
+	}})
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Entity != store.SyncEntityRelation || entries[0].Op != "replace" {
+		t.Fatalf("expected only unchanged relation materialization, got %+v", entries)
+	}
+}
+
+func TestMaterializedChunkMutationsRejectsInvalidTypedUpserts(t *testing.T) {
+	tests := []struct{ name, entity, payload string }{
+		{"session/malformed", store.SyncEntitySession, `{`},
+		{"observation/malformed", store.SyncEntityObservation, `{`},
+		{"prompt/malformed", store.SyncEntityPrompt, `{`},
+		{"null", store.SyncEntitySession, `null`},
+		{"session/mismatch", store.SyncEntitySession, `{"id":"payload-id"}`},
+		{"observation/mismatch", store.SyncEntityObservation, `{"sync_id":"payload-id"}`},
+		{"prompt/mismatch", store.SyncEntityPrompt, `{"sync_id":"payload-id"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := materializeChunkMutation("project", store.SyncMutation{Entity: test.entity, EntityKey: "entity-key", Op: store.SyncOpUpsert, Payload: test.payload})
+			if err == nil {
+				t.Fatalf("expected invalid %s upsert to fail", test.entity)
+			}
+		})
+	}
+}
+
 func TestMutationEntrySignatureMatchesCanonicalChunkMutation(t *testing.T) {
 	entry := MutationEntry{
 		Project:   "proj-signature",
@@ -328,20 +408,21 @@ func TestCollectSessionIDsIncludesChunkSessionsAndMutationSessions(t *testing.T)
 	sessionIDs := collectSessionIDsFromPayload([]byte(`{
 		"sessions":[{"id":"s-1"}],
 		"mutations":[
-			{"entity":"session","op":"upsert","payload":"{\"id\":\"s-2\",\"directory\":\"/tmp/s-2\"}"},
-			{"entity":"session","op":"upsert","payload":"\"{\\\"id\\\":\\\"s-3\\\",\\\"directory\\\":\\\"/tmp/s-3\\\"}\""},
-			{"entity":"observation","op":"upsert","payload":"{\"session_id\":\"s-1\"}"}
+			{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\",\"directory\":\"/tmp/s-1\"}"},
+			{"entity":"session","entity_key":"s-2","op":"upsert","payload":"{\"id\":\"s-2\",\"directory\":\"/tmp/s-2\"}"},
+			{"entity":"session","entity_key":"s-3","op":"upsert","payload":"\"{\\\"id\\\":\\\"s-3\\\",\\\"directory\\\":\\\"/tmp/s-3\\\"}\""},
+			{"entity":"session","entity_key":"s-4","op":"upsert","payload":"{\"directory\":\"/tmp/s-4\"}"},
+			{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"session_id\":\"s-1\"}"}
 		]
 	}`))
 
-	if _, ok := sessionIDs["s-1"]; !ok {
-		t.Fatalf("expected session id from chunk sessions")
+	if len(sessionIDs) != 4 {
+		t.Fatalf("expected typed and mutation session IDs to dedupe, got %d: %+v", len(sessionIDs), sessionIDs)
 	}
-	if _, ok := sessionIDs["s-2"]; !ok {
-		t.Fatalf("expected session id from mutation payload")
-	}
-	if _, ok := sessionIDs["s-3"]; !ok {
-		t.Fatalf("expected session id from double-encoded mutation payload")
+	for _, sessionID := range []string{"s-1", "s-2", "s-3", "s-4"} {
+		if _, ok := sessionIDs[sessionID]; !ok {
+			t.Fatalf("expected session id %q from chunk session or mutation", sessionID)
+		}
 	}
 }
 
@@ -860,6 +941,52 @@ func TestWriteChunkMaterializesMutationsAndIsReplayIdempotent(t *testing.T) {
 	if len(mutationsAfterReplay) != 3 {
 		t.Fatalf("expected replay not to duplicate mutations, got %d: %+v", len(mutationsAfterReplay), mutationsAfterReplay)
 	}
+}
+
+func TestWriteChunkMaterializesCanonicalMutationOnlyUpserts(t *testing.T) {
+	cs := openTestCloudStore(t)
+	project := uniqueCloudstoreTestProject("mutation-only-upserts")
+	cleanupCloudstoreProject(t, cs, project)
+	payload, err := chunkcodec.CanonicalizeForProject([]byte(`{"mutations":[
+		{"entity":"session","entity_key":"sess-1","op":"upsert","payload":"{\"id\":\"sess-1\",\"project\":\"`+project+`\",\"directory\":\"/work\",\"started_at\":\"2026-05-04T09:00:00Z\"}"},
+		{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"`+project+`\",\"type\":\"decision\",\"title\":\"Mutation only\",\"content\":\"materialized\",\"scope\":\"project\",\"created_at\":\"2026-05-04T09:01:00Z\"}"},
+		{"entity":"prompt","entity_key":"prompt-1","op":"upsert","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"`+project+`\",\"content\":\"mutation prompt\",\"created_at\":\"2026-05-04T09:02:00Z\"}"}
+	]}`), project)
+	if err != nil {
+		t.Fatalf("canonicalize chunk: %v", err)
+	}
+	ctx, chunkID := context.Background(), chunkIDFromPayload(payload)
+	if err := cs.WriteChunk(ctx, project, chunkID, "tester", "2026-05-04T09:03:00Z", payload); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	mutations, _, _, err := cs.ListMutationsSince(ctx, 0, 10, []string{project})
+	if err != nil || len(mutations) != 3 {
+		t.Fatalf("expected three materialized mutations, got %+v, %v", mutations, err)
+	}
+	seen := map[string]int{}
+	for _, mutation := range mutations {
+		seen[mutation.Entity+"/"+mutation.EntityKey]++
+	}
+	for _, key := range []string{"session/sess-1", "observation/obs-1", "prompt/prompt-1"} {
+		if seen[key] != 1 {
+			t.Fatalf("expected one materialized %s, got %+v", key, seen)
+		}
+	}
+	known, err := cs.KnownSessionIDs(ctx, project)
+	if err != nil || !containsSessionID(known, "sess-1") {
+		t.Fatalf("expected indexed mutation-only session, got %+v, %v", known, err)
+	}
+	if err := cs.WriteChunk(ctx, project, chunkID, "tester", "2026-05-04T09:03:00Z", payload); err != nil {
+		t.Fatalf("replay WriteChunk: %v", err)
+	}
+	if mutations, _, _, err = cs.ListMutationsSince(ctx, 0, 10, []string{project}); err != nil || len(mutations) != 3 {
+		t.Fatalf("expected idempotent replay, got %+v, %v", mutations, err)
+	}
+}
+
+func containsSessionID(ids map[string]struct{}, id string) bool {
+	_, ok := ids[id]
+	return ok
 }
 
 func TestBackfillMutationChunksMaterializesExistingMutationRows(t *testing.T) {

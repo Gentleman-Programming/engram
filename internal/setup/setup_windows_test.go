@@ -3,7 +3,11 @@
 package setup
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -32,5 +36,47 @@ func TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath(t *testing.T) {
 	}
 	if got != exe {
 		t.Fatalf("claudeCodeEngramCommand(%q) = %q; want %q (preserved absolute path)", exe, got, exe)
+	}
+}
+
+func TestInstallCodexPinsAndRefreshesWindowsExecutable(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+
+	first := filepath.Join(t.TempDir(), "renamed-first.exe")
+	second := filepath.Join(t.TempDir(), "renamed-second.exe")
+	for _, exe := range []string{first, second} {
+		if !filepath.IsAbs(exe) || !strings.EqualFold(filepath.Ext(exe), ".exe") {
+			t.Fatalf("expected rooted Windows executable path, got %q", exe)
+		}
+	}
+
+	osExecutable = func() (string, error) { return first, nil }
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("initial Codex setup: %v", err)
+	}
+	configPath := codexConfigPath()
+	firstConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read initial Codex config: %v", err)
+	}
+	if !strings.Contains(string(firstConfig), "command = "+strconv.Quote(first)) {
+		t.Fatalf("Codex config does not pin first rooted executable:\n%s", firstConfig)
+	}
+
+	osExecutable = func() (string, error) { return second, nil }
+	if _, err := Install("codex"); err != nil {
+		t.Fatalf("repeat Codex setup after executable move: %v", err)
+	}
+	secondConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read refreshed Codex config: %v", err)
+	}
+	if strings.Contains(string(secondConfig), strconv.Quote(first)) || !strings.Contains(string(secondConfig), "command = "+strconv.Quote(second)) {
+		t.Fatalf("Codex config did not replace the executable pin:\n%s", secondConfig)
+	}
+	if strings.Count(string(secondConfig), "[mcp_servers.engram]") != 1 {
+		t.Fatalf("expected one Codex MCP block after rerun:\n%s", secondConfig)
 	}
 }

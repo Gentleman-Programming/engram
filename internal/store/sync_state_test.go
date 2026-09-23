@@ -252,3 +252,60 @@ func TestInboxRefreshHelpersNeverTransitionLifecycle(t *testing.T) {
 		t.Fatalf("inbox lifecycle = %q after refresh, want %q", lifecycle, SyncLifecycleInbox)
 	}
 }
+
+func TestApplyPulledMutationPreservingSyncStateKeepsBlockedState(t *testing.T) {
+	s := newTestStore(t)
+	const (
+		reasonCode = "non_enrolled_pending_mutations"
+		message    = "project enrollment is required"
+	)
+	if err := s.MarkSyncBlocked(DefaultSyncTargetKey, reasonCode, message); err != nil {
+		t.Fatalf("mark sync blocked: %v", err)
+	}
+
+	mutation := SyncMutation{
+		Seq:       1,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntitySession,
+		EntityKey: "remote-session",
+		Op:        SyncOpUpsert,
+		Payload:   `{"id":"remote-session","project":"remote-project","directory":"/remote"}`,
+	}
+	if err := s.ApplyPulledMutationPreservingSyncState(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatalf("apply preserving sync state: %v", err)
+	}
+
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("get sync state: %v", err)
+	}
+	if state.LastPulledSeq != mutation.Seq {
+		t.Fatalf("last pulled seq = %d, want %d", state.LastPulledSeq, mutation.Seq)
+	}
+	if state.Lifecycle != SyncLifecycleDegraded || derefString(state.ReasonCode) != reasonCode || derefString(state.ReasonMessage) != message || derefString(state.LastError) != message {
+		t.Fatalf("preserving apply changed blocked state: %+v", state)
+	}
+}
+
+func TestMarkSyncBlockedAfterSuccessRecordsTimingWithoutHealthyLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	const (
+		reasonCode = "non_enrolled_pending_mutations"
+		message    = "project enrollment is required"
+	)
+
+	if err := s.MarkSyncBlockedAfterSuccess(DefaultSyncTargetKey, reasonCode, message); err != nil {
+		t.Fatalf("mark blocked after success: %v", err)
+	}
+
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("get sync state: %v", err)
+	}
+	if state.LastSuccessAt == nil {
+		t.Fatal("last success timing was not recorded")
+	}
+	if state.Lifecycle != SyncLifecycleDegraded || derefString(state.ReasonCode) != reasonCode || derefString(state.ReasonMessage) != message || derefString(state.LastError) != message {
+		t.Fatalf("blocked-after-success state = %+v", state)
+	}
+}

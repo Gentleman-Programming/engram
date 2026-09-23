@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -865,6 +866,56 @@ func healthyServer(t *testing.T) *httptest.Server {
 // TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard verifies session-start.sh's MCP-migration guard honors CLAUDE_CONFIG_DIR (issue #1081).
 // TestSessionStartAlwaysDelegatesClaudeMCPRegistration confirms the hook has no
 // config-file authority: setup owns inspection, conflict detection, and writes.
+func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
+	requireHookBinaries(t)
+
+	var registered struct {
+		ID            string `json:"id"`
+		Project       string `json:"project"`
+		Directory     string `json:"directory"`
+		OwnershipMode string `json:"ownership_mode"`
+	}
+	var registrations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/project/current":
+			_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+			if err := json.NewDecoder(r.Body).Decode(&registered); err != nil {
+				t.Errorf("decode session registration: %v", err)
+				return
+			}
+			registrations++
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	stubDir := t.TempDir()
+	stub := filepath.Join(stubDir, "engram")
+	if err := os.WriteFile(stub, []byte("#!/bin/bash\nif [ \"$*\" = \"protocol-mode claude-code\" ]; then printf 'slim\\n'; fi\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write engram stub: %v", err)
+	}
+	cwd := t.TempDir()
+	runHook(t, "session-start.sh", `{"session_id":"claude-parent-session","cwd":`+strconv.Quote(cwd)+`}`,
+		map[string]string{
+			"ENGRAM_URL": srv.URL,
+			"PATH":       stubDir + ":" + os.Getenv("PATH"),
+		})
+
+	if registrations != 1 {
+		t.Fatalf("session registrations = %d, want 1", registrations)
+	}
+	if registered.ID != "claude-parent-session" || registered.Project != "engram" || registered.Directory != cwd {
+		t.Fatalf("session registration = %#v, want Claude authoritative session and resolved project", registered)
+	}
+	if registered.OwnershipMode != "project_owned" {
+		t.Fatalf("ownership_mode = %q, want project_owned", registered.OwnershipMode)
+	}
+}
+
 func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
 	requireHookBinaries(t)
 

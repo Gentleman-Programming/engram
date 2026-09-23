@@ -798,7 +798,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init":
+	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -827,6 +827,9 @@ func handleConfigFreeCommand(args []string) bool {
 		}
 	case "init":
 		cmdInit()
+		return true
+	case "hook":
+		cmdHook(args[1:])
 		return true
 	}
 	return false
@@ -3627,7 +3630,7 @@ Commands:
                        --paths-only  Limit pruning to project names containing / or \
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
-                     cursor, vscode-copilot, kilocode, commandcode)
+                     cursor, vscode-copilot, kilocode, kimi, commandcode)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
