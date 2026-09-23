@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -73,24 +74,35 @@ func TestWindowsFilesystemAdapterRejectsResolvedRemotePath(t *testing.T) {
 
 func TestWindowsFilesystemAdapterNormalizesExtendedUNC(t *testing.T) {
 	const extended = `\\?\UNC\server\share\data`
-	resolved := normalizeWindowsFinalPath(extended)
-	if resolved != `\\server\share\data` {
-		t.Fatalf("normalized path = %q, want UNC path", resolved)
-	}
-	var gotRoot string
-	setWindowsFilesystemAdapter(t,
-		func(string) (string, error) { return resolved, nil },
-		func(root string) (uint32, error) {
-			gotRoot = root
-			return windowsDriveRemote, nil
-		},
-	)
-	info, err := detectFilesystem(t.TempDir())
+	dataDir := t.TempDir()
+	name, err := windows.UTF16FromString(extended)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotRoot != `\\server\share\` || info.Support != filesystemRemote {
-		t.Fatalf("drive root = %q, support = %q; want UNC share root and remote", gotRoot, info.Support)
+	original := windowsFinalPathNameByHandle
+	t.Cleanup(func() { windowsFinalPathNameByHandle = original })
+	var calls int
+	windowsFinalPathNameByHandle = func(_ windows.Handle, buffer *uint16, size, _ uint32) (uint32, error) {
+		calls++
+		if size < uint32(len(name)) {
+			return uint32(len(name)), nil
+		}
+		copy(unsafe.Slice(buffer, size), name)
+		return uint32(len(name) - 1), nil // Exclude the UTF-16 terminator.
+	}
+	var gotRoot string
+	originalDriveType := windowsDriveType
+	t.Cleanup(func() { windowsDriveType = originalDriveType })
+	windowsDriveType = func(root string) (uint32, error) {
+		gotRoot = root
+		return windowsDriveRemote, nil
+	}
+	info, err := detectFilesystem(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 || gotRoot != `\\server\share\` || info.Support != filesystemRemote {
+		t.Fatalf("final path calls = %d, drive root = %q, support = %q; want resolver call, UNC share root and remote", calls, gotRoot, info.Support)
 	}
 }
 

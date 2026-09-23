@@ -66,7 +66,7 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 
 Persistent SQLite WAL is unsafe on network filesystems. Engram rejects known NFS and SMB/CIFS data directories before it opens, migrates, or changes the database files. An unknown filesystem remains compatible, but is not a proof that the directory is local.
 
-If startup reports a network filesystem, stop **all** Engram processes, then copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet together to local storage. Set `ENGRAM_DATA_DIR` to that local directory, start Engram, and run `engram doctor`. Then run the integrity check for your shell:
+If startup reports a network filesystem, stop **all** Engram processes, then copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet together to local storage. Set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected), start Engram, and run `engram doctor`. Then run the integrity check for your shell:
 
 ```bash
 # POSIX shell or Git Bash

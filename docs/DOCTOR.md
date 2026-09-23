@@ -74,7 +74,7 @@ Plain `engram doctor` remains diagnostic-only. Findings that imply data movement
 
 ### Network filesystem startup rejection
 
-Persistent SQLite WAL is unsafe on known NFS and SMB/CIFS data directories. When startup rejects one, stop **all** Engram processes; copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage; set `ENGRAM_DATA_DIR` to that local directory; start Engram; then run `engram doctor`. Run the integrity check for your shell:
+Persistent SQLite WAL is unsafe on known NFS and SMB/CIFS data directories. When startup rejects one, stop **all** Engram processes; copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage; set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected); start Engram; then run `engram doctor`. Run the integrity check for your shell:
 
 ```bash
 # POSIX shell or Git Bash

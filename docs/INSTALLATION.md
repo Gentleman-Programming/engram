@@ -205,7 +205,7 @@ The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.
 
 Engram uses persistent SQLite WAL and rejects known NFS and SMB/CIFS data directories before changing the SQLite files. Use a local disk for `ENGRAM_DATA_DIR`; an unknown filesystem remains compatible but is not proven local.
 
-If startup rejects a network data directory, stop **all** Engram processes. Copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage, set `ENGRAM_DATA_DIR` to that local directory, then start Engram and run `engram doctor`. Check SQLite integrity with the command for your shell:
+If startup rejects a network data directory, stop **all** Engram processes. Copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage, set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected), then start Engram and run `engram doctor`. Check SQLite integrity with the command for your shell:
 
 ```bash
 # POSIX shell or Git Bash

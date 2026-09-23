@@ -13,6 +13,12 @@ func TestDarwinFilesystemAdapterMissingPath(t *testing.T) {
 	if _, err := detectFilesystem(missing); !os.IsNotExist(err) {
 		t.Fatalf("detectFilesystem(%q) error = %v, want not exist", missing, err)
 	}
+	setFilesystemInspector(t, func(path string) (filesystemInfo, error) {
+		if path != filepath.Dir(missing) {
+			t.Errorf("inspected path = %q, want existing parent %q", path, filepath.Dir(missing))
+		}
+		return filesystemInfo{Type: "local", Support: filesystemLocal}, nil
+	})
 	if err := checkDataDirectoryFilesystem(missing); err != nil {
 		t.Fatalf("missing path must retain ancestor inspection compatibility: %v", err)
 	}
