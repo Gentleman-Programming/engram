@@ -319,6 +319,39 @@ func TestInstallCodexFailsClosedForWindowsRuntimeWhenExecutableCannotResolve(t *
 	}
 }
 
+func TestInstallCodexWindowsPreservesLeadingBOM(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	runtimeGOOS = "windows"
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	osExecutable = func() (string, error) { return `C:\Engram\engram.exe`, nil }
+	configPath := codexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const opaque = "[profile]\nname = \"preserve\"\n# opaque marker: engram-windows-hook-command = \"untouched\"\n"
+	original := "\ufeff" + windowsHookCommandMarkerPrefix + strconv.Quote(`C:\old\engram.exe`) + "\n" + opaque
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := Install("codex"); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.HasPrefix(text, "\ufeff"+windowsHookCommandMarkerPrefix+strconv.Quote(`C:\Engram\engram.exe`)+"\n") {
+			t.Fatalf("run %d: BOM and marker must occupy first line: %q", i, text)
+		}
+		if strings.Contains(text, strconv.Quote(`C:\old\engram.exe`)) || !strings.Contains(text, opaque) || strings.Count(text, "\ufeff") != 1 {
+			t.Fatalf("run %d: stale marker or opaque content damaged: %q", i, text)
+		}
+	}
+}
+
 func TestInstallCodexWindowsWritesOneCanonicalHookMarker(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
@@ -420,7 +453,7 @@ func TestInstallCodexWindowsWritesOneCanonicalHookMarker(t *testing.T) {
 		t.Fatalf("refresh Windows Codex setup after executable move: %v", err)
 	}
 	refreshed := assertMarkerAndCommand(second)
-	if strings.Contains(refreshed, first) {
+	if strings.Contains(refreshed, strconv.Quote(first)) {
 		t.Fatalf("refreshed config retained moved executable %q:\n%s", first, refreshed)
 	}
 

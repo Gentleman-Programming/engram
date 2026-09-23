@@ -1634,8 +1634,10 @@ func injectCodexMCP(configPath, command string) error {
 		return fmt.Errorf("read config: %w", err)
 	}
 
-	updated := upsertCodexEngramBlock(string(data), command)
+	bom, content := splitCodexBOM(string(data))
+	updated := upsertCodexEngramBlock(content, command)
 	updated = upsertCodexWindowsHookMarker(updated, command, runtimeGOOS == "windows")
+	updated = bom + updated
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
@@ -1671,15 +1673,24 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 		}
 	}
 
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	bom, content := splitCodexBOM(string(data))
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = upsertTopLevelTOMLString(content, "model_instructions_file", instructionsPath)
 	content = upsertTopLevelTOMLString(content, "experimental_compact_prompt_file", compactPromptPath)
 
-	if err := writeFileFn(configPath, []byte(content), 0644); err != nil {
+	if err := writeFileFn(configPath, []byte(bom+content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
 	return nil
+}
+
+// Keep a leading BOM outside the line-oriented upserts so it stays at byte zero.
+func splitCodexBOM(content string) (string, string) {
+	if strings.HasPrefix(content, "\ufeff") {
+		return "\ufeff", strings.TrimPrefix(content, "\ufeff")
+	}
+	return "", content
 }
 
 func upsertCodexEngramBlock(content, command string) string {

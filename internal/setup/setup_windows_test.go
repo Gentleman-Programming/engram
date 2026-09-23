@@ -73,7 +73,7 @@ func TestInstallCodexPinsAndRefreshesWindowsExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read refreshed Codex config: %v", err)
 	}
-	if strings.Contains(string(secondConfig), first) || !strings.Contains(string(secondConfig), "command = "+strconv.Quote(second)) {
+	if strings.Contains(string(secondConfig), strconv.Quote(first)) || !strings.Contains(string(secondConfig), "command = "+strconv.Quote(second)) {
 		t.Fatalf("Codex config did not replace the executable pin:\n%s", secondConfig)
 	}
 	if strings.Count(string(secondConfig), "[mcp_servers.engram]") != 1 {
