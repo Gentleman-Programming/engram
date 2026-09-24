@@ -17,8 +17,9 @@ func TestTemplGenerationIsDashboardScoped(t *testing.T) {
 	}
 	root := t.TempDir()
 	for name, source := range map[string]string{
-		"internal/cloud/dashboard/probe.templ": "package dashboard\n\ntempl probe(value string) {\n<div>{ value }</div>\n}\n",
-		"outside/other.templ": "package outside\n\ntempl other() {\n<div>outside</div>\n}\n",
+		"internal/cloud/dashboard/probe.templ":        "package dashboard\n\ntempl probe(value string) {\n<div>{ value }</div>\n}\n",
+		"internal/cloud/dashboard/nested/probe.templ": "package dashboard\n\ntempl nestedProbe(value string) {\n<div>{ value }</div>\n}\n",
+		"outside/other.templ":                         "package outside\n\ntempl other() {\n<div>outside</div>\n}\n",
 	} {
 		path := filepath.Join(root, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -59,6 +60,13 @@ func TestTemplGenerationIsDashboardScoped(t *testing.T) {
 	}
 	if strings.Contains(string(generated), "FileName: `internal/cloud/dashboard/probe.templ`") {
 		t.Fatal("generated diagnostics must not retain repository-relative paths")
+	}
+	nestedGenerated, err := os.ReadFile(filepath.Join(root, "internal/cloud/dashboard/nested/probe_templ.go"))
+	if err != nil {
+		t.Fatalf("nested dashboard source was not generated: %v", err)
+	}
+	if !strings.Contains(string(nestedGenerated), "FileName: `nested/probe.templ`") {
+		t.Fatal("nested diagnostics must be relative to the dashboard path")
 	}
 }
 
