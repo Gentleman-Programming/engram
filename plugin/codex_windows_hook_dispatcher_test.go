@@ -3,7 +3,11 @@ package plugin_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +16,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
@@ -26,10 +31,10 @@ func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
 		t.Fatalf("parse hooks manifest: %v", err)
 	}
 
-	const dispatcher = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\run-bash-hook.ps1"`
+	const prefix = `\\.\GLOBALROOT\SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand `
 	wantMappings := map[string]string{
-		`"${PLUGIN_ROOT}/scripts/session-start.sh"`:      dispatcher + ` "${PLUGIN_ROOT}\scripts\session-start.sh"`,
-		`"${PLUGIN_ROOT}/scripts/post-compaction.sh"`: dispatcher + ` "${PLUGIN_ROOT}\scripts\post-compaction.sh"`,
+		`"${PLUGIN_ROOT}/scripts/session-start.sh"`:      "session-start.sh",
+		`"${PLUGIN_ROOT}/scripts/post-compaction.sh"`: "post-compaction.sh",
 	}
 	seenMappings := make(map[string]bool, len(wantMappings))
 	for event, groups := range manifest.Hooks {
@@ -44,8 +49,22 @@ func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
 				}
 				if want, ok := wantMappings[hook.Command]; ok {
 					seenMappings[hook.Command] = true
-					if hook.CommandWindows != want {
-						t.Errorf("%s hook commandWindows = %q, want %q", event, hook.CommandWindows, want)
+					if hook.Timeout != 10 || !strings.HasPrefix(hook.CommandWindows, prefix) || strings.ContainsAny(hook.CommandWindows, `"'`) {
+						t.Errorf("%s hook must retain timeout 10 and quote-free pinned launch: %q", event, hook.CommandWindows)
+						continue
+					}
+					payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(hook.CommandWindows, prefix))
+					if err != nil || len(payload)%2 != 0 {
+						t.Errorf("%s invalid UTF-16LE bootstrap: %v", event, err)
+						continue
+					}
+					units := make([]uint16, len(payload)/2)
+					for i := range units {
+						units[i] = binary.LittleEndian.Uint16(payload[i*2:])
+					}
+					bootstrap := `$ProgressPreference = 'SilentlyContinue'; if ($env:PLUGIN_ROOT) { $scripts = Join-Path $env:PLUGIN_ROOT 'scripts'; & (Join-Path $scripts 'run-bash-hook.ps1') (Join-Path $scripts '` + want + `'); exit $LASTEXITCODE }`
+					if got := string(utf16.Decode(units)); got != bootstrap {
+						t.Errorf("%s bootstrap = %q, want %q", event, got, bootstrap)
 					}
 				}
 			}
@@ -93,7 +112,7 @@ func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
 	}
 }
 
-func TestCodexWindowsUserPromptManifestUsesSystemPowerShellAdapter(t *testing.T) {
+func TestCodexWindowsUserPromptManifestKeepsUnixScriptAndTimeout(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "hooks", "hooks.json"))
 	if err != nil {
@@ -103,15 +122,14 @@ func TestCodexWindowsUserPromptManifestUsesSystemPowerShellAdapter(t *testing.T)
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("parse hooks manifest: %v", err)
 	}
-	const want = `"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\run-native-hook.ps1"`
 	for _, group := range manifest.Hooks["UserPromptSubmit"] {
 		for _, hook := range group.Hooks {
-			if hook.Command == `"${PLUGIN_ROOT}/scripts/user-prompt-submit.sh"` && hook.CommandWindows == want && hook.Timeout == 2 {
+			if hook.Command == `"${PLUGIN_ROOT}/scripts/user-prompt-submit.sh"` && hook.Timeout == 2 {
 				return
 			}
 		}
 	}
-	t.Fatal("UserPromptSubmit must retain the Unix script and use the system-qualified native Windows adapter")
+	t.Fatal("UserPromptSubmit must retain the Unix script and 2-second timeout")
 }
 
 func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
@@ -153,7 +171,8 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 		t.Fatalf("resolve expected Bash working directory: %v", err)
 	}
 
-	command := strings.ReplaceAll(codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`), "${PLUGIN_ROOT}", pluginRoot)
+	command := codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`)
+	t.Setenv("PLUGIN_ROOT", pluginRoot)
 	stdout, stderr, code := runCodexWindowsManifestCommand(t, command, input, "")
 	// The fixture sleeps before exiting, so its exit code proves the dispatcher waited for Bash.
 	if code != 23 {
@@ -162,6 +181,14 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 	if stdout != wantWorkingDir.String()+wantStdout || stderr != wantStderr {
 		t.Fatalf("stdout=%q stderr=%q, want current directory and Unicode hook output preserved", stdout, stderr)
 	}
+
+	t.Run("missing root fails open", func(t *testing.T) {
+		t.Setenv("PLUGIN_ROOT", "")
+		out, errOut, status := runCodexWindowsManifestCommand(t, command, input, "")
+		if status != 0 || out != "" || errOut != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", status, out, errOut)
+		}
+	})
 
 	t.Run("rejects unapproved hook names without output", func(t *testing.T) {
 		stdout, stderr, code := runCodexWindowsPowerShellWithEnv(t, dispatcherPath, filepath.Join(pluginRoot, "scripts", "other.sh"), input, nil)
@@ -176,6 +203,56 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent fail-open", code, stdout, stderr)
 		}
 	})
+}
+
+func TestCodexWindowsBashHookDispatcherRealSessionContext(t *testing.T) {
+	if runtime.GOOS != "windows" || testing.Short() {
+		t.Skip("requires Windows external commands")
+	}
+	if _, ok := codexGitForWindowsBash(); !ok {
+		t.Skip("Git for Windows Bash unavailable")
+	}
+	for _, name := range []string{"jq.exe", "curl.exe"} {
+		if _, err := exec.LookPath(name); err != nil {
+			t.Skipf("%s unavailable: %v", name, err)
+		}
+	}
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = w.Write([]byte(`{"project":"fixture-project","project_source":"dir_basename"}`))
+		case "/sessions":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"fixture-session","status":"created"}`))
+		case "/context":
+			_, _ = w.Write([]byte(`{"context":"DISTINCTIVE SESSION CONTEXT FROM FIXTURE"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fixture.Close()
+	root := repoRoot(t)
+	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces")
+	if err := os.MkdirAll(filepath.Join(pluginRoot, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run-bash-hook.ps1", "session-start.sh", "_helpers.sh"} {
+		data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pluginRoot, "scripts", name), data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PLUGIN_ROOT", pluginRoot)
+	t.Setenv("ENGRAM_URL", fixture.URL)
+	command := codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`)
+	stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"fixture-session","cwd":"C:/fixture-project"}`, "")
+	if code != 0 || !strings.Contains(stdout, "DISTINCTIVE SESSION CONTEXT FROM FIXTURE") || !strings.Contains(stdout, "Registered runtime session") {
+		t.Fatalf("exit=%d contextPresent=%t identityPresent=%t stderr=%q", code, strings.Contains(stdout, "DISTINCTIVE SESSION CONTEXT FROM FIXTURE"), strings.Contains(stdout, "Registered runtime session"), stderr)
+	}
 }
 
 func TestCodexWindowsBashHookDispatcherSurvivesConsoleEncodingMutation(t *testing.T) {
@@ -224,7 +301,8 @@ func TestCodexWindowsBashHookDispatcherSurvivesConsoleEncodingMutation(t *testin
 		t.Fatalf("write hook fixture: %v", err)
 	}
 
-	command := strings.ReplaceAll(codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`), "${PLUGIN_ROOT}", pluginRoot)
+	command := codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`)
+	t.Setenv("PLUGIN_ROOT", pluginRoot)
 	dispatcherStdout, dispatcherStderr, code := runCodexWindowsManifestCommand(t, command, input, "")
 	if code != 23 || dispatcherStdout != wantStdout || dispatcherStderr != wantStderr {
 		t.Fatalf("exit=%d stdout=%q stderr=%q, want exact stdin EOF and Unicode fidelity", code, dispatcherStdout, dispatcherStderr)

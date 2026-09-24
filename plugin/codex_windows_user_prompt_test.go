@@ -5,6 +5,8 @@ package plugin_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -19,14 +21,39 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func TestCodexWindowsNativeUserPromptAdapterContract(t *testing.T) {
 	root := repoRoot(t)
 	command := codexWindowsUserPromptCommand(t, root)
-	const want = `"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\run-native-hook.ps1"`
-	if command != want {
-		t.Fatalf("UserPromptSubmit commandWindows = %q, want %q", command, want)
+	// Codex does not expand environment references in executable position.
+	const prefix = `\\.\GLOBALROOT\SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand `
+	if !strings.HasPrefix(command, prefix) || strings.Contains(command, "%SystemRoot%") || strings.ContainsAny(command, `"'`) {
+		t.Fatalf("UserPromptSubmit commandWindows must have quote-free pinned encoded launch: %q", command)
+	}
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(command, prefix))
+	if err != nil || len(payload)%2 != 0 {
+		t.Fatalf("invalid UTF-16LE encoded command: %v", err)
+	}
+	units := make([]uint16, len(payload)/2)
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(payload[i*2:])
+	}
+	const bootstrap = `$ProgressPreference = 'SilentlyContinue'; if ($env:PLUGIN_ROOT) { & (Join-Path $env:PLUGIN_ROOT 'scripts\run-native-hook.ps1'); exit $LASTEXITCODE }`
+	if decoded := string(utf16.Decode(units)); decoded != bootstrap {
+		t.Fatalf("decoded bootstrap = %q, want %q", decoded, bootstrap)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest codexHooksManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Hooks["UserPromptSubmit"][0].Hooks[0].Timeout; got != 2 {
+		t.Fatalf("UserPromptSubmit timeout = %d, want 2", got)
 	}
 
 	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "run-native-hook.ps1"))
@@ -174,6 +201,17 @@ func main() { _ = os.WriteFile(os.Getenv("FAKE_HIJACK_MARKER"), []byte("hijacked
 	}
 }
 
+func TestCodexWindowsNativeUserPromptMissingPluginRootFailsOpen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("executes the native hook command")
+	}
+	command := codexWindowsUserPromptCommand(t, repoRoot(t))
+	stdout, stderr, code := runCodexNativeManifestCommand(t, command, `{"session_id":"missing-root"}`, t.TempDir(), "0", t.TempDir(), t.TempDir(), []string{"PLUGIN_ROOT="})
+	if code != 0 || len(stdout) != 0 || len(stderr) != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want silent fail-open", code, stdout, stderr)
+	}
+}
+
 func TestCodexWindowsNativeUserPromptInvalidPinsFailOpenSilently(t *testing.T) {
 	if testing.Short() {
 		t.Skip("executes the native hook command")
@@ -227,7 +265,8 @@ func codexNativeAdapter(t *testing.T, root string) string {
 	if err := os.WriteFile(destination, source, 0o600); err != nil {
 		t.Fatalf("copy native hook adapter: %v", err)
 	}
-	return strings.ReplaceAll(codexWindowsUserPromptCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
+	t.Setenv("PLUGIN_ROOT", pluginRoot)
+	return codexWindowsUserPromptCommand(t, root)
 }
 
 func codexWindowsUserPromptCommand(t *testing.T, root string) string {
