@@ -17,7 +17,11 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 # last_assistant_message; there is no .stdout field, so reading .stdout captured
 # nothing and every subagent run no-op'd. Keep .stdout as a fallback for other
 # harnesses that reuse this script (parity with plugin/codex/scripts).
-OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
+# jq converts embedded LF to CRLF in Git Bash on Windows. Append a sentinel so
+# command substitution does not strip payload trailing newlines.
+OUTPUT=$(echo "$INPUT" | jq -j '.last_assistant_message // .stdout // empty'; printf '.')
+OUTPUT=${OUTPUT%.}
+OUTPUT=${OUTPUT//$'\r\n'/$'\n'}
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && exit 0

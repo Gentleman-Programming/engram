@@ -576,6 +576,9 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 		{"TestSubagentStopFallsBackToStdout", "sess-fallback", "", "from stdout", "from stdout"},
 		{"TestSubagentStopSkipsEmptyPayload", "sess-empty", "", "", ""},
 		{"TestSubagentStopPreservesShellMetacharacters", "sess-quoting", tricky, "", tricky},
+		{"TestSubagentStopPreservesBareCR", "sess-bare-cr", "before\rafter", "", "before\rafter"},
+		{"TestSubagentStopPreservesLFAndBareCR", "sess-mixed", "first\nsecond\rthird", "", "first\nsecond\rthird"},
+		{"TestSubagentStopPreservesTrailingLF", "sess-trailing", "first\n", "", "first\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			requireHookBinaries(t)
