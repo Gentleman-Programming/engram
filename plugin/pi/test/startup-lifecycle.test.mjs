@@ -142,7 +142,7 @@ async function withFixture(options, run) {
     }
     const sandbox = await createPluginSandbox(dir);
     const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox });
-    await run({ ...plugin, spawnLog, dir, port });
+    await run({ ...plugin, spawnLog, dir, port, stopServer: () => new Promise((resolve) => readyServer.close(resolve)) });
   } finally {
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
@@ -172,8 +172,15 @@ test("reload shutdown preserves the live session for its same-ID successor", asy
   });
 });
 
-test("reload shutdown does not try terminal delivery while Engram is offline", async () => {
-  await withFixture({ exitCode: 1 }, async ({ hooks, ctx }) => {
+test("reload shutdown does not try terminal delivery after a registered session goes offline", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, exitCode: 1, requests }, async ({ hooks, ctx, stopServer }) => {
+    await hooks.get("session_start")({}, ctx);
+    await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "A prompt long enough to register" }, ctx);
+    assert.equal(requests.filter(({ method, url }) => method === "POST" && url === "/sessions").length, 1,
+      "the session must be registered before the server goes offline");
+    await stopServer();
+
     const originalFetch = globalThis.fetch;
     const attemptedEnds = [];
     globalThis.fetch = (input, init) => {
