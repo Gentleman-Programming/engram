@@ -941,7 +941,7 @@ go mod download
 # Regenerate
 make templ
 # or directly:
-go tool templ generate ./internal/cloud/dashboard/...
+go tool templ generate -path ./internal/cloud/dashboard
 ```
 
 Commit the regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` alongside your `.templ` source changes. `TestTemplGeneratedFilesAreCheckedIn` checks for missing generated files; CI also checks regeneration for drift.

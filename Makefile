@@ -3,7 +3,7 @@
 GOLANGCI_LINT_VERSION := 2.13.2
 
 templ:
-	go tool templ generate ./internal/cloud/dashboard/...
+	go tool templ generate -path ./internal/cloud/dashboard
 
 lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { \

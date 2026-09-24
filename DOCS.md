@@ -1599,7 +1599,7 @@ go mod download
 ```sh
 make templ
 # or directly:
-go tool templ generate ./internal/cloud/dashboard/...
+go tool templ generate -path ./internal/cloud/dashboard
 ```
 
 The regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` must be committed together with the `.templ` source changes. The test `TestTemplGeneratedFilesAreCheckedIn` in `internal/cloud/dashboard/templ_policy_test.go` checks that generated files are present; CI additionally checks regeneration for drift.
