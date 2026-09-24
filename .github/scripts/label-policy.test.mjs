@@ -215,6 +215,39 @@ test('exposes migration as an idempotent dry-run CLI', () => {
   });
 });
 
+test('requires root-cause lifecycle evidence before implementation', () => {
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+  const labels = fs.readFileSync('.github/labels.yml', 'utf8');
+  const issueSkill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
+  const prTemplate = fs.readFileSync('.github/PULL_REQUEST_TEMPLATE.md', 'utf8');
+  const forms = [
+    '.github/ISSUE_TEMPLATE/bug_report.yml',
+    '.github/ISSUE_TEMPLATE/feature_request.yml',
+    '.github/ISSUE_TEMPLATE/docs_improvement.yml',
+    '.github/ISSUE_TEMPLATE/tracked_question.yml',
+  ];
+
+  assert.match(contributing, /Search for a canonical root-cause tracker/);
+  assert.ok(contributing.includes('The investigator records each same-root occurrence on the canonical tracker before duplicate closure;'));
+  assert.ok(issueSkill.includes('A maintainer triages and assigns an investigator, who records each same-root occurrence on the canonical tracker before duplicate closure'));
+  assert.match(labels, /Investigation and design accepted/);
+  assert.match(labels, /current-main reproduction and root-cause evidence/);
+  for (const form of forms) {
+    const source = fs.readFileSync(form, 'utf8');
+    const searchField = source.slice(source.indexOf('id: existing-issue-search'), source.indexOf('\n  - ', source.indexOf('id: existing-issue-search')));
+    assert.match(searchField, /Search for a canonical root-cause tracker/);
+    assert.match(searchField, /required: true/);
+  }
+  for (const prerequisite of [
+    'Canonical closing issue',
+    'Approved investigation and design',
+    'Issue assignee',
+    'Root-level tests',
+    'Non-goals and scope',
+    'Current-main evidence for bugs',
+  ]) assert.match(prTemplate, new RegExp(prerequisite));
+});
+
 test('documents singleton-safe duplicate status transitions', () => {
   const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
   const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');

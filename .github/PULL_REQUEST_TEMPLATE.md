@@ -17,6 +17,15 @@
 
 Closes #
 
+## Lifecycle Prerequisites
+
+- [ ] Canonical closing issue: exactly one approved issue is linked above.
+- [ ] Approved investigation and design: the issue records accepted design and non-goals.
+- [ ] Issue assignee: the approved issue has an owner.
+- [ ] Root-level tests: tests cover the accepted root-level contract.
+- [ ] Non-goals and scope: this PR stays within the approved design.
+- [ ] Current-main evidence for bugs: the issue records reproduction against remote `main` and its SHA.
+
 ---
 
 ## 🏷️ PR Type
@@ -61,20 +70,20 @@ Closes #
 
 ---
 
-## 🤖 Automated Checks
+## 🤖 Required Checks
 
-These run automatically and **all must pass** before merge:
+These six authoritative contexts must pass before merge:
 
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
 | **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
 | **Check Issue Has status:approved** | Linked issue has `status:approved` label | ⏳ |
 | **Check PR Has type:* Label** | Canonical labels, applicability, and cardinality | ⏳ |
-| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
 | **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
-| **Lint** | golangci-lint reports no new findings | ⏳ |
+
+`Check PR Has No Transient Artifacts` and `Lint` are useful non-required PR checks; complete their guidance before requesting review.
 
 ---
 

@@ -20,24 +20,21 @@ Use this skill when:
 
 ## Critical Rules
 
-1. **Every PR MUST link an approved issue** — no exceptions
+1. **Every PR MUST link one canonical issue whose investigation and design are accepted** — no exceptions
 2. **Every PR MUST have exactly one `type:*` label**
 3. **All required automated checks must pass** before merge is possible
-4. **Blank PRs without issue linkage will be blocked** by GitHub Actions
+4. **Invalid PRs fail validation and cannot merge**
 
 ---
 
 ## Workflow
 
 ```
-1. Verify issue has `status:approved` label
-2. Create branch: feat/*, fix/*, docs/*, refactor/*, chore/*
-3. Implement changes
-4. Run tests locally (unit + e2e)
-5. Check every changed path against the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
-6. Open PR using the template
-7. Add exactly one type:* label
-8. Wait for all required automated checks to pass
+1. Verify the canonical issue has `status:approved`, an assignee, accepted design/non-goals, and root-level tests
+2. For bugs, verify the issue records reproduction against current remote `main`, its SHA, and root-cause evidence
+3. Create branch, implement the accepted design, and run focused tests
+4. Check changed paths against the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
+5. Open the linked PR, add one `type:*` label, then wait for checks and review
 ```
 
 ---
@@ -80,7 +77,7 @@ Closes #<issue-number>
 ```
 
 Valid keywords: `Closes #N`, `Fixes #N`, `Resolves #N` (case insensitive).
-The linked issue MUST have the `status:approved` label.
+The linked canonical issue MUST have accepted investigation and design, recorded as `status:approved`.
 
 ### 2. PR Type (REQUIRED)
 
@@ -90,6 +87,7 @@ Check exactly ONE in the template and add the matching label:
 |----------|-------------|
 | Bug fix | `type:bug` |
 | New feature | `type:feature` |
+| Tracked question | `type:question` |
 | Documentation only | `type:docs` |
 | Code refactoring | `type:refactor` |
 | Maintenance/tooling | `type:chore` |
@@ -129,18 +127,18 @@ All boxes must be checked:
 
 ---
 
-## Automated Checks (all required checks must pass)
+## Required Checks (all must pass before merge)
 
-| Check | Job name | What it verifies |
-|-------|----------|-----------------|
-| PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
-| PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
-| PR Validation | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
-| Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
-| CI | `Unit Tests` | `go test ./...` passes |
-| CI | `E2E Tests` | `go test -tags e2e ./internal/server/...` passes |
-| CI | `Plugin Tests` | `npm test` passes in `plugin/pi` |
-| CI | `Lint` | golangci-lint reports no new findings in Go changes |
+| Check | What it verifies |
+|-------|-----------------|
+| `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
+| `Check Issue Has status:approved` | Linked issue has `status:approved` |
+| `Check PR Has type:* Label` | PR has exactly one `type:*` label |
+| `Unit Tests` | `go test ./...` passes |
+| `E2E Tests` | `go test -tags e2e ./internal/server/...` passes |
+| `Plugin Tests` | `npm test` passes in `plugin/pi` |
+
+`Check PR Has No Transient Artifacts` and `Lint` run on PRs but are non-required checks; follow their guidance before requesting review.
 
 ---
 

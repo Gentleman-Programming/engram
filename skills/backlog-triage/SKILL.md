@@ -50,7 +50,7 @@ Assign exactly ONE disposition to each issue or PR:
 | **REQUEST CHANGES** | PR has the right idea but needs specific fixes. List each item. |
 | **CLOSE** | Noise, duplicate, vague, scope-breaking, no approved issue, or stale with no activity. |
 | **NEEDS DESIGN** | Idea is valid but architectural decision required before any PR is welcome. Open discussion or design issue first. |
-| **APPROVE ISSUE** | Issue is valid, clear, reproducible/specific, and in scope. Add `status:approved` label. |
+| **APPROVE ISSUE** | Investigation and proportional design are accepted; bugs also have current-main reproduction, SHA, and root-cause evidence. Add `status:approved`. |
 | **REJECT ISSUE** | Vague, duplicate, scope-breaking, or belongs in Discussions. Close with explanation. |
 
 ---
@@ -82,12 +82,13 @@ gh pr view <number> --repo <owner/repo> --json number,title,body,labels,files,re
 For every issue, answer:
 
 ```
-1. Is it a real bug with reproduction steps? → candidate for APPROVE ISSUE
-2. Is it a clear feature with a problem statement? → candidate for APPROVE ISSUE
-3. Is it vague, a question, or a discussion? → REJECT ISSUE (redirect to Discussions)
-4. Is it a duplicate? → REJECT ISSUE (link original, close)
-5. Does it break zero-config / local-first / single-binary? → REJECT ISSUE
-6. Does it need architectural decision before a PR? → NEEDS DESIGN
+1. Search for a canonical root-cause tracker; use `status:possible-duplicate` only while evaluating
+2. Assign an investigator; for bugs, reproduce against exact current remote `main` and record SHA
+3. Identify the first violated repository-owned invariant; cluster only same-root/contract reports
+4. Accept a proportional design, non-goals, and root-level tests before APPROVE ISSUE
+5. Is it vague, a question, or a discussion? → REJECT ISSUE (redirect to Discussions)
+6. Does it break zero-config / local-first / single-binary? → REJECT ISSUE
+7. Confirmed duplicate? Move useful evidence to canonical, then close not planned with `status:wontfix` + `resolution:duplicate`
 ```
 
 For every PR, answer:
@@ -95,7 +96,7 @@ For every PR, answer:
 ```
 1. Does it link a status:approved issue? → if not → CLOSE (process violation)
 2. Does it have exactly one type:* label? → if not → REQUEST CHANGES
-3. Do all 5 CI checks pass? → if not → REQUEST CHANGES (list failures)
+3. Do all six required contexts pass? → if not → REQUEST CHANGES (list failures)
 4. Is the scope tight (one issue, minimal diff)? → if sprawling → REQUEST CHANGES
 5. Does it follow conventional commits + branch naming? → if not → REQUEST CHANGES
 6. Is the change correct and well-tested? → if yes → MERGE
@@ -185,7 +186,7 @@ Output a structured triage report:
 > - [ ] Rebase on `main` to resolve the failing CI check
 
 #### Issue #N — APPROVE ISSUE
-> This is clear, reproducible, and in scope. Adding `status:approved` — feel free to open a PR linking this issue.
+> Investigation and design are accepted, including the required evidence. Adding `status:approved` — the assigned owner may open a PR linking this issue.
 
 #### Issue #N — REJECT ISSUE
 > Thanks for the report! This looks more like a question/discussion topic than a bug or feature request.
