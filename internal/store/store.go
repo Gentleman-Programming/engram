@@ -10160,8 +10160,9 @@ const relationApplyCleanupSQL = `
 
 // relationEndpointPredicate returns the observation lookup shared by relation
 // apply and dead-letter rearm eligibility. A non-blank outer project requires
-// project-scoped endpoints; otherwise the payload's project retains legacy
-// payload-scoped (or global) endpoint behavior.
+// both endpoints to resolve to that project regardless of observation scope;
+// otherwise the payload's project retains legacy payload-scoped (or global)
+// endpoint behavior.
 func relationEndpointPredicate(sourceID, targetID, payloadProject, outerProject string) (string, []any, int) {
 	effectiveProject := payloadProject
 	if outerProject != "" {
@@ -10177,9 +10178,6 @@ func relationEndpointPredicate(sourceID, targetID, payloadProject, outerProject 
 			WHERE o.sync_id IN (?, ?)
 			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
 		args = append(args, effectiveProject)
-		if outerProject != "" {
-			query += "\n\t\t\t  AND o.scope = 'project'"
-		}
 	}
 	required := 2
 	if sourceID == targetID {
