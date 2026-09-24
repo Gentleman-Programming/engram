@@ -857,9 +857,11 @@ Engram resolves the project at MCP tool call time. The default source is the **s
 | 1    | nearest `.engram/config.json` exists within the enclosing git root, or at cwd outside git | `config`          | `project_name` from config         |
 | 2    | cwd is inside a git repo that currently has an `origin` remote                              | `git_remote`      | if the binding is absent, initialize it from the remote repo name; otherwise reuse the stored binding label |
 | 3    | cwd is inside a git repo that currently has no `origin` remote                               | `git_root`        | if the binding is absent, initialize it from the git-root basename; otherwise reuse the stored binding label |
-| 4    | cwd has exactly one git-repo child                                                        | `git_child`       | child repo name (warning included) |
+| 4    | cwd has exactly one git-repo child                                                        | `git_child`       | child's canonical name: its config first, then existing Git binding or origin remote, then repository-root basename (warning included) |
 | 5    | cwd has multiple git-repo children                                                        | `ambiguous` error | — write tools fail fast            |
 | 6    | no git repo near cwd                                                                      | `dir_basename`    | basename of cwd                    |
+
+A promoted child's project name and path match detection from inside that child; its source remains `git_child` with an advisory warning. Invalid child config or Git binding fails closed instead of promoting a directory basename. An explicit config at the parent takes precedence over child scanning. Historical memories are not migrated by detection.
 
 Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dirs and noise dirs (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `.idea`, `.vscode`).
 
