@@ -67,9 +67,11 @@ func assertExportQueryUsesIndex(t *testing.T, s *Store, queries []exportedQuery,
 			if strings.Contains(detail, index) {
 				usesIndex = true
 			}
-			if strings.HasPrefix(detail, "SCAN "+outerTable+" ") || detail == "SCAN "+outerTable {
-				_ = rows.Close()
-				t.Fatalf("export query %q scans outer table %s: %v", prefix, outerTable, details)
+			for _, table := range []string{outerTable, "s", "o", "p"} {
+				if detail == "SCAN "+table || strings.HasPrefix(detail, "SCAN "+table+" ") {
+					_ = rows.Close()
+					t.Fatalf("export query %q scans table or alias %s: %v", prefix, table, details)
+				}
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -135,6 +137,13 @@ func TestProjectRelationExportsAvoidFullScanTail(t *testing.T) {
 func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 	s, relationID, _ := setupExportRelationsStore(t)
 	_, betaSyncID := addTestObsSession(t, s, "ses-exp-alpha", "Beta-owned in alpha session", "decision", "beta", "project")
+	_, betaLegacySyncID := addTestObsSession(t, s, "ses-exp-beta", "Legacy beta observation", "decision", "beta", "project")
+	if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE sync_id = ?`, betaLegacySyncID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, '')`, "beta-legacy-prompt", "ses-exp-beta", "beta prompt"); err != nil {
+		t.Fatal(err)
+	}
 	var alphaNullSyncID, alphaBlankSyncID string
 	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = ? AND project = ? ORDER BY id LIMIT 1`, "ses-exp-alpha", "alpha").Scan(&alphaNullSyncID); err != nil {
 		t.Fatal(err)
@@ -143,7 +152,7 @@ func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 		t.Fatal(err)
 	}
 	crossRelationID := newSyncID("rel")
-	if _, err := s.db.Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at) VALUES (?, ?, ?, 'related', 'confirmed', datetime('now'), datetime('now'))`, crossRelationID, alphaNullSyncID, betaSyncID); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at) VALUES (?, ?, ?, 'related', 'confirmed', datetime('now'), datetime('now')), (?, ?, ?, 'related', 'confirmed', datetime('now'), datetime('now'))`, crossRelationID, alphaNullSyncID, betaSyncID, "beta-legacy-relation", alphaNullSyncID, betaLegacySyncID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`UPDATE observations SET project = NULL WHERE sync_id = ?`, alphaNullSyncID); err != nil {
@@ -159,22 +168,30 @@ func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(exported.Sessions) != 1 || exported.Sessions[0].ID != "ses-exp-alpha" {
+		t.Fatalf("alpha export sessions = %+v, want only ses-exp-alpha", exported.Sessions)
+	}
 	if len(exported.Observations) != 2 || len(exported.Prompts) != 2 || len(exported.Relations) != 1 {
 		t.Fatalf("legacy export counts = obs:%d prompts:%d relations:%d", len(exported.Observations), len(exported.Prompts), len(exported.Relations))
 	}
 	seenAlpha := make(map[string]bool)
 	for _, obs := range exported.Observations {
-		if obs.SyncID == betaSyncID {
-			t.Fatalf("beta-owned observation exported in alpha: %s", betaSyncID)
+		if obs.SyncID == betaSyncID || obs.SyncID == betaLegacySyncID {
+			t.Fatalf("beta observation exported in alpha: %s", obs.SyncID)
 		}
 		seenAlpha[obs.SyncID] = true
 	}
 	if !seenAlpha[alphaNullSyncID] || !seenAlpha[alphaBlankSyncID] {
 		t.Fatal("legacy alpha observations missing")
 	}
+	for _, prompt := range exported.Prompts {
+		if prompt.SyncID == "beta-legacy-prompt" {
+			t.Fatal("beta legacy prompt exported")
+		}
+	}
 	for _, relation := range exported.Relations {
-		if relation.SyncID == crossRelationID {
-			t.Fatal("cross-project relation exported")
+		if relation.SyncID == crossRelationID || relation.SyncID == "beta-legacy-relation" {
+			t.Fatalf("cross-project relation exported: %s", relation.SyncID)
 		}
 	}
 	againExported, err := s.ExportProject("alpha")
@@ -192,8 +209,8 @@ func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 		t.Fatalf("legacy relation mutations = %+v, %v", mutations, err)
 	}
 	for _, mutation := range mutations {
-		if mutation.EntityKey == crossRelationID {
-			t.Fatal("cross-project relation mutation exported")
+		if mutation.EntityKey == crossRelationID || mutation.EntityKey == "beta-legacy-relation" {
+			t.Fatalf("cross-project relation mutation exported: %s", mutation.EntityKey)
 		}
 	}
 	again, err := s.ExportRelationMutations("alpha")
