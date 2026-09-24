@@ -209,13 +209,18 @@ func TestCodexWindowsBashHookDispatcherRealSessionContext(t *testing.T) {
 	if runtime.GOOS != "windows" || testing.Short() {
 		t.Skip("requires Windows external commands")
 	}
-	if _, ok := codexGitForWindowsBash(); !ok {
+	bashPath, ok := codexGitForWindowsBash()
+	if !ok {
 		t.Skip("Git for Windows Bash unavailable")
 	}
-	for _, name := range []string{"jq.exe", "curl.exe"} {
-		if _, err := exec.LookPath(name); err != nil {
-			t.Skipf("%s unavailable: %v", name, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	probe := exec.CommandContext(ctx, bashPath, "--noprofile", "--norc", "-c", "command -v jq >/dev/null && command -v curl >/dev/null")
+	if err := probe.Run(); err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("Git Bash prerequisite check timed out: %v", ctx.Err())
 		}
+		t.Skipf("jq or curl unavailable in selected Git Bash: %v", err)
 	}
 	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
