@@ -1159,8 +1159,14 @@ func inspectClaudeCodeUserMCP(command string) (claudeCodeMCPState, error) {
 	if err := json.Unmarshal(rawServer, &fields); err != nil || fields == nil {
 		return claudeCodeMCPConflict, nil
 	}
-	_, hasType := fields["type"]
-	if (!hasType || server.Type != nil && *server.Type == "stdio") && server.Command == command && slices.Equal(server.Args, []string{"mcp", "--tools=agent"}) {
+	rawType, hasType := fields["type"]
+	var exactType *string
+	if hasType {
+		if err := json.Unmarshal(rawType, &exactType); err != nil {
+			return claudeCodeMCPConflict, fmt.Errorf("parse Claude Code mcpServers.engram in %s: %w", path, err)
+		}
+	}
+	if (!hasType || exactType != nil && *exactType == "stdio") && server.Command == command && slices.Equal(server.Args, []string{"mcp", "--tools=agent"}) {
 		return claudeCodeMCPExact, nil
 	}
 	return claudeCodeMCPConflict, nil
