@@ -2613,6 +2613,35 @@ func TestDashboardStatsFullPageShowsStatusRibbon(t *testing.T) {
 	}
 }
 
+func TestDashboardActivityFormatsAndEscapesCreatedAt(t *testing.T) {
+	withEngramTimezone(t, "America/Bogota")
+	store := parityStoreStub{observations: []cloudstore.DashboardObservationRow{
+		{Project: "proj", SessionID: "s1", CreatedAt: "2026-05-22T14:00:00+02:00"},
+		{Project: "proj", SessionID: "s2", CreatedAt: `<script>alert("x")</script>`},
+	}}
+	for _, htmx := range []bool{false, true} {
+		t.Run(fmt.Sprintf("htmx=%t", htmx), func(t *testing.T) {
+			mux := newAuthedMux(store, false)
+			req := httptest.NewRequest(http.MethodGet, "/dashboard/activity?auth=ok", nil)
+			if htmx {
+				req.Header.Set("HX-Request", "true")
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "22 May 2026 07:00") || strings.Contains(body, "2026-05-22T14:00:00+02:00") {
+				t.Errorf("created timestamp not localized: %q", body)
+			}
+			if !strings.Contains(body, html.EscapeString(`<script>alert("x")</script>`)) || strings.Contains(body, `<script>alert("x")</script>`) {
+				t.Errorf("malformed timestamp not escaped: %q", body)
+			}
+		})
+	}
+}
+
 // TestDashboardActivityFullPageShowsStatusRibbon (R5-1) asserts the same for /dashboard/activity.
 func TestDashboardActivityFullPageShowsStatusRibbon(t *testing.T) {
 	mux := newAuthedMux(parityStoreStub{}, false)
