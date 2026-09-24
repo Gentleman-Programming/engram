@@ -1,6 +1,6 @@
 # Engram Doctor
 
-`engram doctor` runs read-only operational diagnostics against the local SQLite store. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
+`engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
 ## CLI
 
@@ -20,6 +20,8 @@ Flags:
 - `--project PROJECT` scopes checks to a normalized project name.
 - `--check CODE` runs one registered check and fails loudly for unknown codes.
 - `doctor repair` supports exactly `invalid_session_identity`, `manual_session_name_project_mismatch`, `orphaned_observation_session`, `session_project_directory_mismatch`, `sync_mutation_required_fields`, and `sync_target_closed_space`. It requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`. `sync_mutation_required_fields` may omit `--project` and the mode; an omitted mode defaults to `--dry-run`. Its optional project scopes title repair, supersession, quarantine, and source-title repair. The diagnostic-only checks are `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project`; a rejected repair names the corresponding `engram doctor --check <code>` continuation.
+
+An unfiltered CLI `engram doctor` also reports existing generic adapter Engram MCP entries whose absolute executable command no longer exists. Each finding names the client and recommends `engram setup <slug>` to refresh its registration; doctor never runs the configured executable or edits the config. Missing configs/entries, bare commands, and bespoke integrations are not flagged. This CLI-only inspection is not a registered `--check` or MCP `mem_doctor` check.
 
 ## MCP
 

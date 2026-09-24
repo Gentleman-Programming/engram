@@ -18,6 +18,114 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestDoctorReportsStaleGenericMCP(t *testing.T) {
+	cfg := testConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	path := filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, "missing-engram")
+	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"engram": map[string]any{"command": missing}, "other": map[string]any{"command": "other"}}})
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	withArgs(t, "engram", "doctor", "--json")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatal(stderr)
+	}
+	report := decodeDoctorReport(t, out)
+	if report["status"] != "warning" || !strings.Contains(out, "engram setup windsurf") {
+		t.Fatalf("unexpected report: %s", out)
+	}
+	if report["summary"].(map[string]any)["warnings"].(float64) < 1 {
+		t.Fatalf("summary: %s", out)
+	}
+}
+
+func TestDoctorMultiClientTextAndJSON(t *testing.T) {
+	cfg := testConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	missing := filepath.Join(home, "missing-engram")
+	for _, client := range []struct{ slug, path string }{
+		{"windsurf", filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")},
+		{"qwen", filepath.Join(home, ".qwen", "settings.json")},
+	} {
+		if err := os.MkdirAll(filepath.Dir(client.path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"engram": map[string]any{"command": missing}, "other": map[string]any{"command": "other"}}})
+		if err := os.WriteFile(client.path, raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withArgs(t, "engram", "doctor", "--json")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatal(stderr)
+	}
+	report := decodeDoctorReport(t, out)
+	checks := report["checks"].([]any)
+	last := checks[len(checks)-1].(map[string]any)
+	if last["check_id"] != "stale_mcp_command" || len(last["findings"].([]any)) != 2 || report["summary"].(map[string]any)["warnings"] != float64(1) {
+		t.Fatalf("report: %s", out)
+	}
+	for _, slug := range []string{"windsurf", "qwen"} {
+		if !strings.Contains(out, "engram setup "+slug) {
+			t.Fatalf("missing %s: %s", slug, out)
+		}
+	}
+	withArgs(t, "engram", "doctor")
+	text, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" || !strings.Contains(text, "warnings=1") {
+		t.Fatalf("text=%q stderr=%q", text, stderr)
+	}
+	for _, slug := range []string{"windsurf", "qwen"} {
+		if !strings.Contains(text, "engram setup "+slug) {
+			t.Fatalf("missing %s: %s", slug, text)
+		}
+	}
+}
+
+func TestDoctorMCPInspectionErrorIsReported(t *testing.T) {
+	cfg := testConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	path := filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{invalid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	withArgs(t, "engram", "doctor", "--json")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %q", stderr)
+	}
+	report := decodeDoctorReport(t, out)
+	if report["status"] != "error" || report["summary"].(map[string]any)["errors"] != float64(1) || !strings.Contains(out, "mcp_inspection_error") {
+		t.Fatalf("unexpected report: %s", out)
+	}
+	withArgs(t, "engram", "doctor")
+	text, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" || !strings.Contains(text, "errors=1") || !strings.Contains(text, "mcp_inspection_error") {
+		t.Fatalf("text=%q stderr=%q", text, stderr)
+	}
+}
+
 func seedDoctorSession(t *testing.T, cfg store.Config, id, project, directory string) {
 	t.Helper()
 	s, err := store.New(cfg)

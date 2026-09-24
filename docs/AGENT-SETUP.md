@@ -12,6 +12,8 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > - `engram setup ...` installs MCP/plugin integrations only; it does **not** auto-run `engram cloud config/enroll/upgrade`.
 > - Cloud onboarding contract remains CLI-first until script-level cloud flows are explicitly implemented.
 
+If a generic MCP client retains an absolute Engram executable path after you move or replace the binary, run `engram doctor` to identify the affected client, then run `engram setup <agent>` with the new binary to refresh its Engram registration. Doctor is read-only and does not flag bare custom commands or missing registrations. Setup preserves unrelated MCP server entries.
+
 ## Quick Reference
 
 | Agent         | One-liner                                                                                    | Manual Config                                      |

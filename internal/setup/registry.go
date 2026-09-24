@@ -185,6 +185,71 @@ func injectMCP(path string, format mcpFormat) error {
 	return writeJSONConfig(path, config)
 }
 
+// StaleMCPCommand identifies a generic client registration pointing to a missing binary.
+type StaleMCPCommand struct {
+	Slug    string `json:"slug"`
+	Command string `json:"command"`
+}
+
+// StaleMCPCommands inspects only existing generic Engram registrations without
+// executing the configured command or modifying client configuration.
+func StaleMCPCommands() ([]StaleMCPCommand, error) {
+	if _, err := userHome(); err != nil {
+		return nil, err
+	}
+	findings := []StaleMCPCommand{}
+	for _, adapter := range agentAdapters() {
+		if adapter.custom != nil || adapter.mcpPath == nil {
+			continue
+		}
+		path := adapter.mcpPath()
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		var config map[string]json.RawMessage
+		if err := json.Unmarshal(data, &config); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		raw, ok := config[mcpTopKey(adapter.mcpFormat)]
+		if !ok {
+			continue
+		}
+		var servers map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return nil, fmt.Errorf("parse %s servers: %w", path, err)
+		}
+		var entry struct {
+			Command json.RawMessage `json:"command"`
+		}
+		if err := json.Unmarshal(servers["engram"], &entry); err != nil {
+			continue
+		}
+		var command string
+		if adapter.mcpFormat == opencodeObject {
+			var parts []string
+			if json.Unmarshal(entry.Command, &parts) != nil || len(parts) == 0 {
+				continue
+			}
+			command = parts[0]
+		} else if json.Unmarshal(entry.Command, &command) != nil {
+			continue
+		}
+		if !filepath.IsAbs(command) {
+			continue
+		}
+		if _, err := os.Stat(command); os.IsNotExist(err) {
+			findings = append(findings, StaleMCPCommand{Slug: adapter.slug, Command: command})
+		} else if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", command, err)
+		}
+	}
+	return findings, nil
+}
+
 // upsertMarkerBlock writes body delimited by begin/end markers into the file at
 // path. If the markers already exist the managed block is replaced in place;
 // otherwise it is appended, preserving existing user content. CRLF is normalized
