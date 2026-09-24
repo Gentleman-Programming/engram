@@ -1112,7 +1112,7 @@ const (
 )
 
 type claudeCodeMCPServer struct {
-	Type    string   `json:"type"`
+	Type    *string  `json:"type"`
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
 }
@@ -1155,7 +1155,12 @@ func inspectClaudeCodeUserMCP(command string) (claudeCodeMCPState, error) {
 	if err := json.Unmarshal(rawServer, &server); err != nil {
 		return claudeCodeMCPConflict, fmt.Errorf("parse Claude Code mcpServers.engram in %s: %w", path, err)
 	}
-	if server.Type == "stdio" && server.Command == command && slices.Equal(server.Args, []string{"mcp", "--tools=agent"}) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawServer, &fields); err != nil || fields == nil {
+		return claudeCodeMCPConflict, nil
+	}
+	_, hasType := fields["type"]
+	if (!hasType || server.Type != nil && *server.Type == "stdio") && server.Command == command && slices.Equal(server.Args, []string{"mcp", "--tools=agent"}) {
 		return claudeCodeMCPExact, nil
 	}
 	return claudeCodeMCPConflict, nil
