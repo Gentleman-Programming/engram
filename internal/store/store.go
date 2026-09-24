@@ -69,8 +69,8 @@ var (
 	// ErrProjectOwnershipAmbiguous is returned when an unowned session cannot
 	// adopt a write's project because it already parents records owned by a
 	// different one. Guessing there would split a record from its session.
-	ErrProjectOwnershipAmbiguous   = errors.New("session project ownership is ambiguous")
-	ErrObservationProjectImmutable = errors.New("observation project cannot be reassigned")
+	ErrProjectOwnershipAmbiguous                = errors.New("session project ownership is ambiguous")
+	ErrObservationProjectImmutable              = errors.New("observation project cannot be reassigned")
 	ErrObservationTitleRequired                 = errors.New("observation title is required")
 	ErrObservationContentRequired               = errors.New("observation content is required")
 	ErrObservationFindReplacePairRequired       = errors.New("find and replace must be provided together")
@@ -2875,12 +2875,60 @@ func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode strin
 		return ErrProjectRequired
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	claimed := false
+	err := s.withTx(func(tx *sql.Tx) error {
+		// withTx may retry its callback. Only the outcome of a committed
+		// attempt may become the terminal response.
+		claimed = false
 		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
 		if err != nil {
 			return err
 		}
 		identityRepaired := !found
+		if found && mode == SessionOwnershipProjectOwned && existingProject == "" {
+			var endedAt *string
+			if err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, id).Scan(&endedAt); err != nil {
+				return err
+			}
+			if endedAt != nil {
+				// Preserve the same child-ownership invariant as write adoption.
+				_, foreignOwner, err := foreignRecordOwnerTx(tx, id, project)
+				if err != nil {
+					return err
+				}
+				if foreignOwner != "" {
+					return &SessionProjectConflictError{SessionID: id, OwnerProject: foreignOwner, RequestedProject: project}
+				}
+				// This transaction already holds the writer reservation. Commit
+				// ownership and its audit mutation before reporting terminality.
+				res, err := s.execHook(tx, `UPDATE sessions SET project = ?, ownership_mode = ? WHERE id = ? AND ended_at IS NOT NULL AND ifnull(trim(project, ?), '') = ''`, project, mode, id, sqlWhitespaceTrimSet)
+				if err != nil {
+					return err
+				}
+				rows, err := res.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if rows != 1 {
+					return fmt.Errorf("ended legacy session ownership claim lost for %q", id)
+				}
+				var persisted Session
+				if err := tx.QueryRow(`SELECT id, ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id).Scan(
+					&persisted.ID, &persisted.Project, &persisted.OwnershipMode, &persisted.Directory, &persisted.StartedAt, &persisted.EndedAt, &persisted.Summary,
+				); err != nil {
+					return err
+				}
+				if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpUpsert, syncSessionPayload{
+					ID: persisted.ID, Project: persisted.Project, OwnershipMode: persisted.OwnershipMode,
+					Directory: persisted.Directory, StartedAt: persisted.StartedAt,
+					EndedAt: persisted.EndedAt, Summary: persisted.Summary,
+				}); err != nil {
+					return err
+				}
+				claimed = true
+				return nil
+			}
+		}
 		if found {
 			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
 				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
@@ -2919,6 +2967,13 @@ func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode strin
 			Summary:       persisted.Summary,
 		})
 	})
+	if err != nil {
+		return err
+	}
+	if claimed {
+		return ErrSessionAlreadyEnded
+	}
+	return nil
 }
 
 func (s *Store) EndSession(id string, summary string) error {

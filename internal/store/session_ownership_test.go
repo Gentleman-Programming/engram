@@ -1,10 +1,178 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func TestEndedLegacyClaimRefreshesPendingSyncMutation(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "project-a")
+	const id = "ended-journaled"
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '/legacy', '2024-01-01', '2024-01-02')`, id); err != nil {
+		t.Fatal(err)
+	}
+	// An old pending upsert must be replaced rather than duplicated.
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations(target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, id, SyncOpUpsert, `{"id":"ended-journaled","project":"project-a"}`, SyncSourceLocal, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartSessionWithOwnershipMode(id, "project-a", "/new", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("claim = %v", err)
+	}
+	var count int
+	var project, mode string
+	if err := s.DB().QueryRow(`SELECT count(*), max(project), max(json_extract(payload, '$.ownership_mode')) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntitySession, id).Scan(&count, &project, &mode); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || project != "project-a" || mode != SessionOwnershipProjectOwned {
+		t.Fatalf("pending mutation count=%d project=%q mode=%q", count, project, mode)
+	}
+}
+
+func TestEndedLegacyClaimRollsBackOnJournalFailure(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "project-a")
+	const id = "ended-journal-error"
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '/legacy', '2024-01-01', '2024-01-02')`, id); err != nil {
+		t.Fatal(err)
+	}
+	original := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO sync_mutations") {
+			return nil, errors.New("journal unavailable")
+		}
+		return original(db, query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = original })
+	err := s.StartSessionWithOwnershipMode(id, "project-a", "/new", SessionOwnershipProjectOwned)
+	if err == nil || errors.Is(err, ErrSessionAlreadyEnded) || !strings.Contains(err.Error(), "journal unavailable") {
+		t.Fatalf("failed journal claim = %v", err)
+	}
+	var project, mode string
+	if err := s.DB().QueryRow(`SELECT ifnull(project, ''), ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, id).Scan(&project, &mode); err != nil {
+		t.Fatal(err)
+	}
+	if project != "" || mode != "" {
+		t.Fatalf("rolled-back owner project=%q mode=%q", project, mode)
+	}
+}
+
+func TestEndedUnownedSessionCannotClaimForeignChild(t *testing.T) {
+	for _, kind := range []string{"observation", "prompt"} {
+		t.Run(kind, func(t *testing.T) {
+			s := newTestStore(t)
+			const id = "ended-with-child"
+			if _, err := s.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '', '2024-01-01', '2024-01-02')`, id); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if kind == "observation" {
+				_, err = s.DB().Exec(`INSERT INTO observations(sync_id, session_id, type, title, content, project, scope) VALUES ('owned-observation', ?, 'note', 'owned', 'content', 'project-a', 'project')`, id)
+			} else {
+				_, err = s.DB().Exec(`INSERT INTO user_prompts(sync_id, session_id, content, project) VALUES ('owned-prompt', ?, 'content', 'project-a')`, id)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before, after int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			err = s.StartSessionWithOwnershipMode(id, "project-b", "/tmp", SessionOwnershipProjectOwned)
+			var conflict *SessionProjectConflictError
+			if !errors.As(err, &conflict) || conflict.OwnerProject != "project-a" || conflict.RequestedProject != "project-b" {
+				t.Fatalf("foreign claim = %v", err)
+			}
+			var project string
+			if err := s.DB().QueryRow(`SELECT ifnull(project, '') FROM sessions WHERE id = ?`, id).Scan(&project); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if project != "" || after != before {
+				t.Fatalf("foreign claim project=%q mutations=%d before=%d", project, after, before)
+			}
+			if err := s.StartSessionWithOwnershipMode(id, "project-a", "/tmp", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionAlreadyEnded) {
+				t.Fatalf("matching claim = %v", err)
+			}
+		})
+	}
+}
+
+func TestEndedUnownedSessionConcurrentProjectClaim(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	a, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	const id = "ended-legacy"
+	const ended = "2024-01-02 03:04:05"
+	if _, err := a.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '', ?, ?)`, id, ended, ended); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]error, 2)
+	for i, st := range []*Store{a, b} {
+		wg.Add(1)
+		go func(i int, st *Store) {
+			defer wg.Done()
+			<-start
+			results[i] = st.StartSessionWithOwnershipMode(id, []string{"project-a", "project-b"}[i], "/tmp", SessionOwnershipProjectOwned)
+		}(i, st)
+	}
+	close(start)
+	wg.Wait()
+	owner := ""
+	for i, err := range results {
+		if errors.Is(err, ErrSessionAlreadyEnded) {
+			owner = []string{"project-a", "project-b"}[i]
+		}
+	}
+	if owner == "" {
+		t.Fatalf("no terminal winner: %v", results)
+	}
+	loser := "project-a"
+	if owner == loser {
+		loser = "project-b"
+	}
+	for i, project := range []string{"project-a", "project-b"} {
+		if project == owner {
+			continue
+		}
+		var conflict *SessionProjectConflictError
+		if !errors.As(results[i], &conflict) || conflict.OwnerProject != owner || conflict.RequestedProject != loser {
+			t.Fatalf("loser error = %v, owner %q", results[i], owner)
+		}
+	}
+	var project, mode, gotEnded string
+	if err := b.DB().QueryRow(`SELECT project, ownership_mode, ended_at FROM sessions WHERE id = ?`, id).Scan(&project, &mode, &gotEnded); err != nil {
+		t.Fatal(err)
+	}
+	if project != owner || mode != SessionOwnershipProjectOwned || gotEnded != ended {
+		t.Fatalf("persisted: project=%q mode=%q ended=%q", project, mode, gotEnded)
+	}
+	if err := b.StartSessionWithOwnershipMode(id, loser, "/tmp", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("repeated loser = %v", err)
+	}
+	if _, err := b.AddObservation(AddObservationParams{SessionID: id, Project: loser, Type: "manual", Title: "blocked", Content: "blocked", Scope: "project"}); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("loser observation = %v", err)
+	}
+	if _, err := b.AddPrompt(AddPromptParams{SessionID: id, Project: loser, Content: "blocked"}); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("loser prompt = %v", err)
+	}
+}
 
 func TestSessionOwnershipModeCreationAndMigration(t *testing.T) {
 	s := newTestStore(t)
