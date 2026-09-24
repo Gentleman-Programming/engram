@@ -7,6 +7,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -213,6 +214,7 @@ interface SessionContext {
   cwd: string;
   sessionManager: {
     getSessionId(): string | undefined;
+    getBranch?(): Array<{ type?: string; customType?: string; data?: unknown }>;
   };
 }
 
@@ -976,6 +978,53 @@ function warnSessionProjectConflictOnce(error: unknown): void {
   warnEngramFailure("/sessions", error);
 }
 
+const EFFECTIVE_SESSION_ENTRY = "engram-effective-session";
+const effectiveSessionRegistrations = new Map<string, Promise<string>>();
+
+function effectiveSessionID(ctx: SessionContext, runtimeID: string): string {
+  const branch = ctx.sessionManager.getBranch?.() || [];
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== "custom" || entry.customType !== EFFECTIVE_SESSION_ENTRY) continue;
+    const data = entry.data as { runtimeID?: string; effectiveID?: string } | undefined;
+    if (data?.runtimeID === runtimeID && typeof data.effectiveID === "string" && data.effectiveID !== runtimeID) return data.effectiveID;
+  }
+  return runtimeID;
+}
+
+async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
+  const runtimeID = requireRuntimeSessionID(ctx);
+  if (knownSessions.has(`\u0000closing:${runtimeID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
+  const registrationKey = `${sessionProject}\u0000${runtimeID}`;
+  const existing = effectiveSessionRegistrations.get(registrationKey);
+  if (existing) {
+    const effectiveID = await existing;
+    if (knownSessions.has(`\u0000closing:${runtimeID}`) || knownSessions.has(`\u0000closing:${effectiveID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
+    return effectiveID;
+  }
+  const registration = (async () => {
+    const effectiveID = effectiveSessionID(ctx, runtimeID);
+    try {
+      await ensureSession(effectiveID, sessionProject, fetch, true);
+      return effectiveID;
+    } catch (error) {
+      if (!(error instanceof EngramHttpError) || error.status !== 409
+        || (error.data as { code?: string } | null)?.code !== "session_already_ended") throw error;
+      if (!appendEntry || !ctx.sessionManager.getBranch) throw error;
+      const freshID = `${runtimeID}:resume:${randomUUID()}`;
+      await ensureSession(freshID, sessionProject, fetch, true);
+      appendEntry(EFFECTIVE_SESSION_ENTRY, { runtimeID, effectiveID: freshID });
+      return freshID;
+    }
+  })();
+  effectiveSessionRegistrations.set(registrationKey, registration);
+  try {
+    const effectiveID = await registration;
+    if (knownSessions.has(`\u0000closing:${runtimeID}`) || knownSessions.has(`\u0000closing:${effectiveID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
+    return effectiveID;
+  } finally { if (effectiveSessionRegistrations.get(registrationKey) === registration) effectiveSessionRegistrations.delete(registrationKey); }
+}
+
 async function ensureSession(sessionId: string, sessionProject = project, fetch: EngramFetcher = engramFetch, renew = false): Promise<void> {
   const key = `${sessionProject}:${sessionId}`;
   if (!sessionId) return;
@@ -998,7 +1047,6 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
     if (acknowledgement === null) {
       throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${sessionId}`);
     }
-    if (knownSessions.has(`\u0000closing:${sessionId}`)) throw new Error(`Pi runtime session ${sessionId} is closing`);
     registeredSessionProjects.set(sessionId, sessionProject);
     knownSessions.add(key);
   })();
@@ -1177,6 +1225,7 @@ function requireRuntimeSessionID(ctx: SessionContext): string {
 
 // Compaction may arrive with a stale context after Pi has rebuilt its lifecycle objects. Retain
 // every observed opaque ID and permanently reject compaction once identity is uncertain.
+const observedSessionContexts = new Map<string, SessionContext>();
 function observeRuntimeSessionID(ctx: SessionContext): string | undefined {
   try {
     const sessionId = getSessionId(ctx);
@@ -1188,6 +1237,7 @@ function observeRuntimeSessionID(ctx: SessionContext): string | undefined {
       runtimeSessionIdentityAmbiguous = true;
     }
     observedRuntimeSessionIDs.add(sessionId);
+    observedSessionContexts.set(sessionId, ctx);
     return sessionId;
   } catch {
     runtimeSessionIdentityAmbiguous = true;
@@ -1383,11 +1433,12 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
-async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch): Promise<unknown> {
+async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"]): Promise<unknown> {
   const sessionId = getSessionId(ctx);
   const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
   const activeProject = requestedProject || project;
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
+  const registeredSessionForWrite = async (sessionProject: string) => registerEffectiveSession(ctx, sessionProject, appendEntry, fetch);
 
   switch (toolName) {
     case "mem_search":
@@ -1413,8 +1464,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch(`/observations/${encodeURIComponent(String(params.id))}`);
     case "mem_save": {
       if (!requestedProject) requireResolvedProject();
-      const activeSessionId = runtimeSessionForWrite();
-      await ensureSession(activeSessionId, activeProject, fetch, true);
+      const activeSessionId = await registeredSessionForWrite(activeProject);
       return fetch("/observations", {
         method: "POST",
         body: {
@@ -1445,8 +1495,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return { topic_key: slugifyTopicKey(params) };
     case "mem_save_prompt": {
       if (!requestedProject) requireResolvedProject();
-      const promptSessionId = runtimeSessionForWrite();
-      await ensureSession(promptSessionId, activeProject, fetch, true);
+      const promptSessionId = await registeredSessionForWrite(activeProject);
       const response = await fetch<{ id: number }>("/prompts", {
         method: "POST",
         body: { session_id: promptSessionId, content: params.content, project: activeProject },
@@ -1455,8 +1504,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     }
     case "mem_session_summary": {
       if (!requestedProject) requireResolvedProject();
-      const summarySessionId = runtimeSessionForWrite();
-      await ensureSession(summarySessionId, activeProject, fetch, true);
+      const summarySessionId = await registeredSessionForWrite(activeProject);
       return fetch("/observations", {
         method: "POST",
         body: {
@@ -1503,8 +1551,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
     case "mem_capture_passive": {
       requireResolvedProject();
-      const passiveSessionId = runtimeSessionForWrite();
-      await ensureSession(passiveSessionId, project, fetch, true);
+      const passiveSessionId = await registeredSessionForWrite(project);
       return fetch("/observations/passive", {
         method: "POST",
         body: {
@@ -1577,7 +1624,7 @@ function unreachableMessage(failure: EngramTransportFailure | undefined): string
   return `gentle-engram could not reach the Engram HTTP server at ${ENGRAM_URL}. The Pi-native mem_* tools are registered, but the native memory provider is not currently responding. Run mem_doctor or restart Engram.`;
 }
 
-async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: MemoryToolContext, signal?: AbortSignal) {
+async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: MemoryToolContext, signal?: AbortSignal, appendEntry?: ExtensionAPI["appendEntry"]) {
   const action = humanToolName(toolName);
   const transport = createMemoryToolTransport(signal);
 
@@ -1587,7 +1634,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     await awaitWithAbort(initOnce(ctx.cwd), signal);
     await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
-    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch), signal);
+    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry), signal);
     const failure = transport.transportFailure();
     if (failure) throw new Error(unreachableMessage(failure));
 
@@ -1622,7 +1669,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
       parameters: MEMORY_TOOL_SCHEMAS[toolName],
       renderShell: "self",
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal);
+        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal, pi.appendEntry?.bind(pi));
       },
       renderCall(args) {
         return new Text(renderCallText(toolName, args), 0, 0);
@@ -1638,7 +1685,10 @@ export default function registerEngram(pi: ExtensionAPI) {
   registerMemoryTools(pi);
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
-    if (sessionId) knownSessions.delete(`\u0000closing:${sessionId}`);
+    if (sessionId) {
+      knownSessions.delete(`\u0000closing:${sessionId}`);
+      knownSessions.delete(`\u0000closing:${effectiveSessionID(ctx, sessionId)}`);
+    }
     const ready = await initOnceForHook(ctx.cwd);
     try {
       (ctx as MemoryToolContext).ui?.setStatus?.("engram", `🧠 ${project} · ${ready ? "ready" : "offline"}`);
@@ -1648,8 +1698,14 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (event: { reason?: string }, ctx: SessionContext) => {
     // Pi reload replaces the extension runner but keeps its runtime session ID alive.
     if (event.reason === "reload") return;
-    const sessionId = observeRuntimeSessionID(ctx);
-    if (!sessionId) return;
+    const runtimeID = observeRuntimeSessionID(ctx);
+    if (!runtimeID) return;
+    knownSessions.add(`\u0000closing:${runtimeID}`);
+    const pending = [...effectiveSessionRegistrations.entries()]
+      .filter(([key]) => key.endsWith(`\u0000${runtimeID}`))
+      .map(([, registration]) => registration.catch(() => undefined));
+    await Promise.all(pending);
+    const sessionId = effectiveSessionID(ctx, runtimeID);
     knownSessions.add(`\u0000closing:${sessionId}`);
     try {
       await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
@@ -1661,7 +1717,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     }
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
-    forgetSelfHealContext(sessionId);
+    forgetSelfHealContext(runtimeID);
   });
 
   pi.on("session_compact", async (event: unknown) => {
@@ -1681,17 +1737,18 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (projectDetectionPending || projectResolutionError) return;
     if (!sessionId || soleActiveRuntimeSessionID() !== sessionId) return;
 
+    let effectiveID: string;
     try {
-      await ensureSession(sessionId, project, engramFetch, true);
+      effectiveID = await registerEffectiveSession(observedSessionContexts.get(sessionId) || { cwd: directory, sessionManager: { getSessionId: () => sessionId } }, project, pi.appendEntry?.bind(pi));
     } catch (error) {
       warnEngramFailure("/sessions", error);
       return;
     }
-    if (soleActiveRuntimeSessionID() !== sessionId || knownSessions.has(`\u0000closing:${sessionId}`)) return;
+    if (soleActiveRuntimeSessionID() !== sessionId || knownSessions.has(`\u0000closing:${effectiveID}`)) return;
 
-    const outcome = await archiveCompactionSummary(sessionId, summary);
-    const context = !knownSessions.has(`\u0000closing:${sessionId}`) && soleActiveRuntimeSessionID() === sessionId
-      ? await loadCompactionRecoveryContext(sessionId)
+    const outcome = await archiveCompactionSummary(effectiveID, summary);
+    const context = !knownSessions.has(`\u0000closing:${effectiveID}`) && soleActiveRuntimeSessionID() === sessionId
+      ? await loadCompactionRecoveryContext(effectiveID)
       : undefined;
     pendingRecoveryNotice = { sessionId, content: buildRecoveryNotice(project, context, outcome) };
   });
@@ -1713,9 +1770,12 @@ export default function registerEngram(pi: ExtensionAPI) {
       return { systemPrompt };
     }
     if (sessionId && finalContent && finalContent.length > 10) {
-      if (!(await ensureSessionBestEffort(sessionId, project, true)) || knownSessions.has(`\u0000closing:${sessionId}`)) return { systemPrompt };
+      let effectiveID: string;
+      try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
+      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error); else warnEngramFailure("/sessions", error); return { systemPrompt }; }
+      if (knownSessions.has(`\u0000closing:${effectiveID}`)) return { systemPrompt };
       const body: PromptBody = {
-        session_id: sessionId,
+        session_id: effectiveID,
         content: stripPrivateTags(truncate(finalContent, 2000)),
         project,
       };
@@ -1734,8 +1794,11 @@ export default function registerEngram(pi: ExtensionAPI) {
     await refreshProjectDetection(ctx.cwd);
     if (!sessionId || projectDetectionPending || projectResolutionError) return;
 
-    if (!(await ensureSessionBestEffort(sessionId, project, true)) || knownSessions.has(`\u0000closing:${sessionId}`)) return;
-    toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1);
+    let effectiveID: string;
+    try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
+    catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error); else warnEngramFailure("/sessions", error); return; }
+    if (knownSessions.has(`\u0000closing:${effectiveID}`)) return;
+    toolCounts.set(effectiveID, (toolCounts.get(effectiveID) ?? 0) + 1);
 
     if (event.result === undefined) return;
     let content: string | undefined;
@@ -1744,10 +1807,10 @@ export default function registerEngram(pi: ExtensionAPI) {
     } catch {
       return;
     }
-    if (!content || content.length <= 50 || knownSessions.has(`\u0000closing:${sessionId}`)) return;
+    if (!content || content.length <= 50 || knownSessions.has(`\u0000closing:${effectiveID}`)) return;
 
     const body: PassiveCaptureBody = {
-      session_id: sessionId,
+      session_id: effectiveID,
       content: stripPrivateTags(content),
       project,
       source: toolName,

@@ -17,7 +17,7 @@ function deferred() {
 
 // Each sandbox lives at its own path, so every call already loads a fresh module graph and no
 // cache-busting query string is needed.
-async function loadPluginHarness(sandbox) {
+async function loadPluginHarness(sandbox, appendEntry) {
   const registeredTools = new Map();
   const eventHandlers = new Map();
   const registerEngram = await importPluginFromSandbox(sandbox);
@@ -25,6 +25,7 @@ async function loadPluginHarness(sandbox) {
     registerTool(tool) {
       registeredTools.set(tool.name, tool);
     },
+    appendEntry,
     on(event, handler) {
       eventHandlers.set(event, handler);
     },
@@ -763,6 +764,51 @@ test("parallel first-use writes share one acknowledged registration and keep it 
   }
 });
 
+test("concurrent explicit projects cannot share an in-flight effective registration", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const gate = deferred();
+  const registrations = [];
+  const writes = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
+    if (path === "/sessions") {
+      registrations.push(JSON.parse(init.body));
+      if (registrations.length === 1) await gate.promise;
+      return new Response(JSON.stringify({ status: "created" }), { status: 201 });
+    }
+    if (path === "/observations") {
+      writes.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ id: writes.length }), { status: 201 });
+    }
+    return new Response("{}");
+  };
+  try {
+    await withPluginSandbox("engram-pi-project-race-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const save = registeredTools.get("mem_save");
+      const ctx = runtimeContext("project-race");
+      const first = save.execute("first", { title: "a", content: "a", project: "project-a" }, undefined, undefined, ctx);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(registrations.length, 1);
+      const second = save.execute("second", { title: "b", content: "b", project: "project-b" }, undefined, undefined, ctx);
+      gate.resolve();
+      const [a, b] = await Promise.all([first, second]);
+      assert.equal(a.isError, undefined);
+      assert.equal(b.isError, true, "the second project must not inherit the first registration");
+      assert.deepEqual(writes.map(({ project }) => project), ["project-a"]);
+      assert.ok(registrations.every(({ project }) => project === "project-a"));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("shared registration failure rejects parallel writes and a later call retries", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -929,6 +975,151 @@ test("an opaque runtime session ID stays byte-identical through registration, co
       const afterTimedOutShutdown = await memSave.execute("exact-5", { title: "fifth", content: "five" }, undefined, undefined, ctx);
       assert.equal(afterTimedOutShutdown.isError, undefined, "a timed-out shutdown must still clear the registration cache");
       assert.equal(sessionBodies.length, 6, "writes after a timed-out shutdown must re-register");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("resumed ended conversation registers a distinct persistent identity before writes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  const ended = new Set();
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }), { status: 200 });
+    if (path === "/sessions" && ended.has(body.id)) {
+      return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    }
+    if (path.startsWith("/sessions/") && path.endsWith("/end")) ended.add(decodeURIComponent(path.slice(10, -4)));
+    return new Response(JSON.stringify({ status: "created" }), { status: 200 });
+  };
+  const entries = [];
+  const ctx = runtimeContext("resumed");
+  ctx.sessionManager.getBranch = () => entries;
+  const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-resume-", async ({ sandbox }) => {
+      const first = await loadPluginHarness(sandbox, appendEntry);
+      await first.registeredTools.get("mem_save").execute("first", { title: "first", content: "first" }, undefined, undefined, ctx);
+      await first.eventHandlers.get("session_shutdown")({}, ctx);
+      const second = await loadPluginHarness(sandbox, appendEntry);
+      await second.eventHandlers.get("session_start")({}, ctx);
+      const result = await second.registeredTools.get("mem_save").execute("second", { title: "second", content: "second" }, undefined, undefined, ctx);
+      assert.equal(result.isError, undefined, JSON.stringify(result));
+      const identities = calls.filter((call) => call.path === "/sessions").map((call) => call.body.id);
+      assert.equal(identities[0], "resumed");
+      assert.notEqual(identities.at(-1), "resumed");
+      assert.equal(calls.filter((call) => call.path === "/observations").at(-1).body.session_id, identities.at(-1));
+      assert.ok(entries.length);
+      const third = await loadPluginHarness(sandbox, appendEntry);
+      await third.eventHandlers.get("session_start")({ reason: "reload" }, ctx);
+      await third.registeredTools.get("mem_save_prompt").execute("reload", { content: "after reload" }, undefined, undefined, ctx);
+      assert.equal(calls.filter((call) => call.path === "/prompts").at(-1).body.session_id, identities.at(-1));
+      const fork = runtimeContext("forked");
+      fork.sessionManager.getBranch = () => entries;
+      await third.registeredTools.get("mem_save").execute("fork", { title: "fork", content: "fork" }, undefined, undefined, fork);
+      assert.equal(calls.filter((call) => call.path === "/observations").at(-1).body.session_id, "forked");
+      await third.eventHandlers.get("session_shutdown")({}, ctx);
+      assert.ok(calls.some((call) => call.path === `/sessions/${encodeURIComponent(identities.at(-1))}/end`));
+      const fourth = await loadPluginHarness(sandbox, appendEntry);
+      await fourth.eventHandlers.get("session_start")({}, ctx);
+      const afterSecondQuit = await fourth.registeredTools.get("mem_save").execute("third-save", { title: "third", content: "third" }, undefined, undefined, ctx);
+      assert.equal(afterSecondQuit.isError, undefined, JSON.stringify(afterSecondQuit));
+      const latestID = calls.filter((call) => call.path === "/sessions").at(-1).body.id;
+      assert.notEqual(latestID, identities.at(-1), "another resume needs a new effective identity");
+      assert.notEqual(latestID, "resumed");
+      assert.equal(calls.filter((call) => call.path === "/observations").at(-1).body.session_id, latestID);
+      assert.equal(entries.at(-1).data.effectiveID, latestID);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("shutdown waits for resumed registration and rejects attributed writes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const gate = deferred();
+  const started = deferred();
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "overlap") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions" && body.id.startsWith("overlap:resume:")) {
+      started.resolve();
+      await gate.promise;
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [];
+  const ctx = runtimeContext("overlap");
+  ctx.sessionManager.getBranch = () => entries;
+  try {
+    await withPluginSandbox("engram-pi-resume-shutdown-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      const save = registeredTools.get("mem_save");
+      const pending = save.execute("pending", { title: "pending", content: "pending" }, undefined, undefined, ctx);
+      await started.promise;
+      const joined = registeredTools.get("mem_save_prompt").execute("joined", { content: "joined" }, undefined, undefined, ctx);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls.filter(({ path }) => path === "/sessions").length, 2, "both callers share the pending resume registration");
+      const shutdown = eventHandlers.get("session_shutdown")({}, ctx);
+      gate.resolve();
+      const [first, second] = await Promise.all([pending, joined, shutdown]);
+      assert.equal(first.isError, true);
+      assert.equal(second.isError, true);
+      const effectiveID = entries.at(-1)?.data.effectiveID;
+      assert.ok(effectiveID);
+      assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`));
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      await save.execute("later", { title: "later", content: "later" }, undefined, undefined, ctx);
+      await registeredTools.get("mem_save_prompt").execute("prompt", { content: "later" }, undefined, undefined, ctx);
+      await registeredTools.get("mem_capture_passive").execute("passive", { content: "later" }, undefined, undefined, ctx);
+      assert.equal(calls.filter(({ path }) => ["/observations", "/prompts", "/observations/passive"].includes(path)).length, 0);
+    });
+  } finally {
+    gate.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("ended session fails closed when Pi entry persistence is unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-no-entry-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("ended-without-entry");
+      ctx.sessionManager.getBranch = () => [];
+      const result = await registeredTools.get("mem_save").execute("no-entry", { title: "blocked", content: "blocked" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.equal(result.details.http_status, 409);
+      assert.equal(calls.filter((path) => path === "/sessions").length, 1);
+      assert.equal(calls.includes("/observations"), false);
     });
   } finally {
     globalThis.fetch = originalFetch;

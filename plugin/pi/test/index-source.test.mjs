@@ -47,7 +47,7 @@ function buildAwaitWithAbortForTest() {
   `)();
 }
 
-function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal }) {
+function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal, appendEntry = () => {} }) {
   const body = extractFunctionBody("executeMemoryTool", "{\n  const action")
     .replaceAll('type: "text" as const', 'type: "text"');
   const factory = new Function(
@@ -56,6 +56,7 @@ function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjec
     "refreshProjectDetection",
     "callMemoryTool",
     "scheduleEngramSelfHeal",
+    "appendEntry",
     `
     let project = "engram";
     class EngramHttpError extends Error {}
@@ -75,7 +76,7 @@ function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjec
     return executeMemoryTool;
     `,
   );
-  return factory(awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal);
+  return factory(awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal, appendEntry);
 }
 
 function buildEngramFetchForTest({
@@ -511,7 +512,9 @@ test("optional Engram environment values treat blank strings as unset without re
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch, true\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)[\s\S]*session_id: summarySessionId[\s\S]*project: activeProject/);
+  assert.match(source, /const registeredSessionForWrite = async \(sessionProject: string\) => registerEffectiveSession\(ctx, sessionProject, appendEntry, fetch\)/);
+  assert.match(source, /async function registerEffectiveSession[\s\S]*await ensureSession\(effectiveID, sessionProject, fetch, true\)/);
 });
 
 test("mem_save_prompt returns a prompt-scoped identity", () => {
@@ -540,9 +543,14 @@ test("project detection 404 falls back to local config or diagnostic", () => {
 });
 
 test("unsafe detected projects do not reach session or memory writes", () => {
-  assert.match(source, /case "mem_save":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
-  assert.match(source, /case "mem_save_prompt":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  for (const tool of ["mem_save", "mem_save_prompt", "mem_session_summary"]) {
+    const start = source.indexOf(`case "${tool}":`);
+    const next = source.indexOf('\n    case "', start + 1);
+    const block = source.slice(start, next);
+    assert.match(block, /if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)/);
+    assert.ok(block.indexOf("requireResolvedProject()") < block.indexOf("await registeredSessionForWrite"), `${tool} must resolve project before registration`);
+  }
+  assert.match(source, /async function registerEffectiveSession[\s\S]*await ensureSession\(effectiveID, sessionProject, fetch, true\)/);
 
   for (const detected of [
     undefined,
@@ -1384,7 +1392,7 @@ test("Pi tool cancellation composes with the native request timeout", async () =
     assert.equal(timeoutMs, 10000, "the production read timeout remains active");
     assert.deepEqual(composedSignals, [timeoutSignal, callbackSignal]);
     assert.deepEqual(requestSignal, { kind: "combined" });
-    assert.match(source, /async execute\(_toolCallId, params, signal, _onUpdate, ctx\)[\s\S]*executeMemoryTool\(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal\)/);
+    assert.match(source, /async execute\(_toolCallId, params, signal, _onUpdate, ctx\)[\s\S]*executeMemoryTool\(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal, pi\.appendEntry\?\.bind\(pi\)\)/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1555,7 +1563,7 @@ test("already-cancelled preflight observes a later shared initialization rejecti
   await flush();
 
   assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
-  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch\), signal\);/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry\), signal\);/);
 });
 
 test("transport policies bound read, doctor and registration retries independently of writes", () => {
@@ -1865,12 +1873,13 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(compactEnd, -1, "session_compact handler end not found");
   const compactHandler = source.slice(compactStart, compactEnd);
 
-  const registration = compactHandler.indexOf("await ensureSession(sessionId, project, engramFetch, true);");
-  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(sessionId, summary);");
+  const registration = compactHandler.indexOf("await registerEffectiveSession(");
+  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(effectiveID, summary);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
+  assert.match(source, /async function registerEffectiveSession[\s\S]*await ensureSession\(effectiveID, sessionProject, fetch, true\)/);
   assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
 });
 

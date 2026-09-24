@@ -162,7 +162,7 @@ This is a lightweight convenience convention, not a full secret-scanning system.
 
 When Pi emits a compaction lifecycle event, `gentle-engram` reads the current payload field `compactionEntry.summary` first, then falls back to supported legacy fields when that value is absent or blank. It uses the opaque Pi runtime session identity captured from a fresh lifecycle event; it never accepts a model-supplied session ID for compaction recovery.
 
-Before archiving, the extension requires Engram to acknowledge registration for that exact runtime session. It saves a `session_summary` observation with topic key `session/compaction-recovery`, then requests `/context/compaction?session_id=...` for recovery guidance scoped to the same session.
+Before archiving, the extension requires Engram to acknowledge registration for the effective session identity. Whenever a resumed Pi conversation's effective Engram session has already ended, the extension registers another distinct Engram session before writing; every ended row remains closed. Pi session entries retain the mapping for extension reloads, while a fork uses its own runtime conversation ID and cannot inherit the parent's mapping. Unknown registration failures and project ownership conflicts still prevent attributed writes. It saves a `session_summary` observation with topic key `session/compaction-recovery`, then requests `/context/compaction?session_id=...` for recovery guidance scoped to the same session.
 After a second distinct or blank/missing runtime identity, compaction recovery permanently fails closed until the plugin process restarts.
 
 The next turn receives outcome-specific guidance:
