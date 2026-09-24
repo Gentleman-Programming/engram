@@ -31,6 +31,8 @@ func declarativeAgents() []declarativeAgent {
 		{"cursor", cursorMCPPath, "mcpServers", mcpServersObject, cursorMemoryProtocolPath, wholeFile},
 		{"vscode-copilot", vscodeMCPPath, "servers", serversObject, vscodePromptPath, wholeFile},
 		{"kilocode", kilocodeConfigPath, "mcp", opencodeObject, kilocodeAgentsPath, markerBlock},
+		{"commandcode", commandcodeMCPPath, "mcpServers", commandCodeObject, commandcodeAgentsPath, markerBlock},
+		{"kimi", kimiMCPPath, "mcpServers", mcpServersObject, kimiAgentsPath, markerBlock},
 	}
 }
 
@@ -44,6 +46,7 @@ func stubRegistryEnv(t *testing.T) string {
 	osExecutable = func() (string, error) { return testEngramBin, nil }
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
+	t.Setenv("KIMI_CODE_HOME", "")
 	return home
 }
 
@@ -58,7 +61,7 @@ func TestSupportedAgentsIncludesAllRegistryAgents(t *testing.T) {
 	want := []string{
 		"opencode", "pi", "claude-code", "gemini-cli", "codex",
 		"antigravity-cli", "windsurf", "qwen", "kiro", "cursor",
-		"vscode-copilot", "kilocode",
+		"vscode-copilot", "kilocode", "commandcode", "kimi",
 	}
 	for _, slug := range want {
 		if !got[slug] {
@@ -133,6 +136,14 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 				}
 				if agent.mcpFormat == serversObject && entry["type"] != "stdio" {
 					t.Errorf("%s: expected type stdio, got %#v", agent.slug, entry["type"])
+				}
+				if agent.mcpFormat == commandCodeObject {
+					if entry["transport"] != "stdio" {
+						t.Errorf("%s: expected transport stdio, got %#v", agent.slug, entry["transport"])
+					}
+					if entry["enabled"] != true {
+						t.Errorf("%s: expected enabled true, got %#v", agent.slug, entry["enabled"])
+					}
 				}
 			}
 
@@ -276,6 +287,71 @@ func TestInjectMCPPreservesExistingServersAndKeys(t *testing.T) {
 	}
 	if _, ok := servers["engram"]; !ok {
 		t.Errorf("expected engram server added")
+	}
+}
+
+func TestInstallCommandCodePreservesExistingUserConfig(t *testing.T) {
+	stubRegistryEnv(t)
+	mcpPath := commandcodeMCPPath()
+	agentsPath := commandcodeAgentsPath()
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0755); err != nil {
+		t.Fatalf("create CommandCode directory: %v", err)
+	}
+	const existingMCP = `{"theme":"dark","mcpServers":{"other":{"command":"other-server","args":["serve"]}}}`
+	if err := os.WriteFile(mcpPath, []byte(existingMCP), 0644); err != nil {
+		t.Fatalf("seed MCP config: %v", err)
+	}
+	const userInstructions = "# My preferences\n\nKeep this instruction.\n"
+	if err := os.WriteFile(agentsPath, []byte(userInstructions), 0644); err != nil {
+		t.Fatalf("seed user instructions: %v", err)
+	}
+
+	for range 2 {
+		if _, err := Install("commandcode"); err != nil {
+			t.Fatalf("Install(commandcode): %v", err)
+		}
+	}
+
+	raw, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("parse MCP config: %v", err)
+	}
+	if string(config["theme"]) != `"dark"` {
+		t.Errorf("existing top-level setting changed: %s", config["theme"])
+	}
+	var servers map[string]json.RawMessage
+	if err := json.Unmarshal(config["mcpServers"], &servers); err != nil {
+		t.Fatalf("parse MCP servers: %v", err)
+	}
+	var other struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	if err := json.Unmarshal(servers["other"], &other); err != nil {
+		t.Fatalf("parse existing MCP server: %v", err)
+	}
+	if other.Command != "other-server" || len(other.Args) != 1 || other.Args[0] != "serve" {
+		t.Errorf("existing MCP server changed: %#v", other)
+	}
+	entry := readEngramEntry(t, mcpPath, "mcpServers")
+	if entry["transport"] != "stdio" || entry["enabled"] != true {
+		t.Errorf("CommandCode entry missing stdio transport or enabled flag: %#v", entry)
+	}
+
+	instructions, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read user instructions: %v", err)
+	}
+	text := string(instructions)
+	if !strings.HasPrefix(text, userInstructions) {
+		t.Errorf("existing user instructions changed: %q", text)
+	}
+	if strings.Count(text, engramMarkerBegin) != 1 || strings.Count(text, engramMarkerEnd) != 1 {
+		t.Errorf("expected one managed protocol block after two installs: %q", text)
 	}
 }
 
@@ -450,4 +526,70 @@ func TestConfigDirsIgnoreRelativeConfigHome(t *testing.T) {
 			t.Errorf("vscodeUserDir with relative APPDATA = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("relative KIMI_CODE_HOME ignored", func(t *testing.T) {
+		t.Setenv("KIMI_CODE_HOME", "relative/kimi")
+		if got, want := kimiCodeHome(), filepath.Join(home, ".kimi-code"); got != want {
+			t.Errorf("kimiCodeHome with relative KIMI_CODE_HOME = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestKimiCodeHomeHonorsAbsoluteEnv verifies an absolute KIMI_CODE_HOME
+// relocates both the MCP config and the AGENTS.md instruction surface, that a
+// real Install writes both files under the override (and nothing under the
+// default root), and that the post-install steps name those same files.
+func TestKimiCodeHomeHonorsAbsoluteEnv(t *testing.T) {
+	home := stubRegistryEnv(t)
+
+	custom := filepath.Join(t.TempDir(), "kimi-home")
+	t.Setenv("KIMI_CODE_HOME", custom)
+
+	if got := kimiCodeHome(); got != custom {
+		t.Errorf("kimiCodeHome = %q, want %q", got, custom)
+	}
+	mcpPath := filepath.Join(custom, "mcp.json")
+	agentsPath := filepath.Join(custom, "AGENTS.md")
+	if got := kimiMCPPath(); got != mcpPath {
+		t.Errorf("kimiMCPPath = %q, want %q", got, mcpPath)
+	}
+	if got := kimiAgentsPath(); got != agentsPath {
+		t.Errorf("kimiAgentsPath = %q, want %q", got, agentsPath)
+	}
+
+	result, err := Install("kimi")
+	if err != nil {
+		t.Fatalf("Install(kimi): %v", err)
+	}
+	if result.Files != 2 {
+		t.Fatalf("expected 2 files, got %d", result.Files)
+	}
+
+	entry := readEngramEntry(t, mcpPath, "mcpServers")
+	if entry["command"] != testEngramBin {
+		t.Errorf("expected command %q under the override, got %#v", testEngramBin, entry["command"])
+	}
+
+	instr, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", agentsPath, err)
+	}
+	if !strings.Contains(string(instr), engramMarkerBegin) {
+		t.Errorf("AGENTS.md under the override is missing the Memory Protocol marker block")
+	}
+
+	// The default root stays untouched: an honored override must not also seed
+	// ~/.kimi-code with a half-written config the user would never read.
+	if _, err := os.Stat(filepath.Join(home, ".kimi-code")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("default root ~/.kimi-code should not exist when KIMI_CODE_HOME is honored (stat error = %v)", err)
+	}
+
+	// Post-install guidance points at the files that were actually written.
+	steps := strings.Join(PostInstallSteps("kimi"), "\n")
+	if !strings.Contains(steps, mcpPath) {
+		t.Errorf("post-install steps missing %q: %q", mcpPath, steps)
+	}
+	if !strings.Contains(steps, agentsPath) {
+		t.Errorf("post-install steps missing %q: %q", agentsPath, steps)
+	}
 }

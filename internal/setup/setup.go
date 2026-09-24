@@ -97,11 +97,12 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage         = "npm:gentle-engram@0.1.14"
-	piLegacyGentleEngramPackage   = "npm:gentle-engram@0.1.8"
-	piPreviousGentleEngramPackage = "npm:gentle-engram@0.1.11"
-	piPriorGentleEngramPackage    = "npm:gentle-engram@0.1.12"
-	piMCPAdapterPackage           = "npm:pi-mcp-adapter"
+	piGentleEngramPackage            = "npm:gentle-engram@0.1.15"
+	piLegacyGentleEngramPackage      = "npm:gentle-engram@0.1.8"
+	piPreviousGentleEngramPackage    = "npm:gentle-engram@0.1.11"
+	piPriorGentleEngramPackage       = "npm:gentle-engram@0.1.12"
+	piPredecessorGentleEngramPackage = "npm:gentle-engram@0.1.14"
+	piMCPAdapterPackage              = "npm:pi-mcp-adapter"
 )
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -132,19 +133,18 @@ func claudeCodePermissionTools(agentTools map[string]bool) []string {
 	return permissions
 }
 
-// codexEngramBlock is the canonical Codex TOML MCP block.
-// Command is always the bare "engram" name in this constant because
-// upsertCodexEngramBlock generates the actual content via codexEngramBlockStr()
-// which uses resolveEngramCommand() at runtime. This constant is kept for tests
-// that verify idempotency against the already-written string when os.Executable
-// returns "engram" (fallback path).
+// codexEngramBlock is retained for non-Windows fallback compatibility tests.
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
 
-// codexEngramBlockStr returns the Codex TOML block for the engram MCP server,
-// using the resolved absolute binary path from os.Executable().
-func codexEngramBlockStr() string {
-	cmd := resolveEngramCommand()
-	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", cmd) + "\nargs = [\"mcp\", \"--tools=agent\"]"
+// windowsHookCommandMarkerPrefix identifies the first-line command pin consumed
+// by the Windows hook. Its value is JSON so PowerShell can decode it losslessly.
+const windowsHookCommandMarkerPrefix = "# engram-windows-hook-command-v1: "
+
+// codexEngramBlockStr returns the Codex TOML block for the supplied canonical
+// Engram command. installCodex resolves the command before it writes any setup
+// state so Windows cannot persist a PATH-dependent fallback.
+func codexEngramBlockStr(command string) string {
+	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", command) + "\nargs = [\"mcp\", \"--tools=agent\"]"
 }
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
@@ -366,7 +366,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage:
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage:
 				changed = true
 				continue
 			case piGentleEngramPackage:
@@ -550,20 +550,20 @@ func rawArrayContainsString(values []json.RawMessage, target string) bool {
 //
 // Original line in source:
 //
-//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
+//	const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
 //
 // Patched line in installed copy:
 //
-//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/abs/path/engram"
+//	const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/abs/path/engram"
 //
 // Priority (left to right, first defined wins):
-//  1. ENGRAM_BIN env var — explicit user override, always respected.
+//  1. Nonblank ENGRAM_BIN env var — explicit user override, always respected.
 //  2. Absolute baked-in path — works in headless/systemd where PATH is stripped.
 //
 // If absBin is already bare "engram" (os.Executable fallback), retain the
 // source fallback so the installed Node plugin has no Bun runtime dependency.
 func patchEngramBINLine(src []byte, absBin string) []byte {
-	const marker = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`
+	const marker = `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"`
 
 	var replacement string
 	if absBin == "engram" {
@@ -571,7 +571,7 @@ func patchEngramBINLine(src []byte, absBin string) []byte {
 		replacement = marker
 	} else {
 		// Normal case: bake in the absolute path as the final fallback.
-		replacement = fmt.Sprintf(`const ENGRAM_BIN = process.env.ENGRAM_BIN ?? %q`, absBin)
+		replacement = fmt.Sprintf(`const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? %q`, absBin)
 	}
 
 	return []byte(strings.Replace(string(src), marker, replacement, 1))
@@ -1485,6 +1485,40 @@ func stableHomebrewEngramCommand(exe string) (string, bool) {
 	return "engram", true
 }
 
+// codexEngramCommand is the caller-specific executable policy for the sole
+// Codex MCP authority. Windows requires a rooted .exe path derived from the
+// os.Executable/canonical symlink authority; it never falls back to PATH.
+func codexEngramCommand() (string, error) {
+	exe, err := osExecutable()
+	if err != nil {
+		if runtimeGOOS == "windows" {
+			return "", fmt.Errorf("resolve rooted absolute .exe Codex command: %w", err)
+		}
+		return "engram", nil
+	}
+
+	canonical := canonicalEngramCommand(exe)
+	if !isAbsoluteCodexCommand(canonical) && isAbsoluteCodexCommand(exe) {
+		canonical = exe
+	}
+	if runtimeGOOS == "windows" {
+		if !isAbsoluteCodexCommand(canonical) || !strings.EqualFold(filepath.Ext(canonical), ".exe") {
+			return "", fmt.Errorf("resolve rooted absolute .exe Codex command from executable path %q", exe)
+		}
+	}
+	return canonical, nil
+}
+
+func isAbsoluteCodexCommand(path string) bool {
+	if filepath.IsAbs(path) {
+		return true
+	}
+	if runtimeGOOS != "windows" {
+		return false
+	}
+	return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' && (path[2] == '\\' || path[2] == '/') || strings.HasPrefix(path, `\\`)
+}
+
 func writeGeminiSystemPrompt() error {
 	systemPath := geminiSystemPromptPath()
 	if err := os.MkdirAll(filepath.Dir(systemPath), 0755); err != nil {
@@ -1532,14 +1566,18 @@ func removeGeminiEnvOverride() {
 // ─── Codex ───────────────────────────────────────────────────────────────────
 
 func installCodex() (*Result, error) {
-	path := codexConfigPath()
+	command, err := codexEngramCommand()
+	if err != nil {
+		return nil, err
+	}
 
+	path := codexConfigPath()
 	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := injectCodexMCPFn(path); err != nil {
+	if err := injectCodexMCPFn(path, command); err != nil {
 		return nil, err
 	}
 
@@ -1587,7 +1625,7 @@ func installCodex() (*Result, error) {
 	}, nil
 }
 
-func injectCodexMCP(configPath string) error {
+func injectCodexMCP(configPath, command string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
@@ -1597,7 +1635,10 @@ func injectCodexMCP(configPath string) error {
 		return fmt.Errorf("read config: %w", err)
 	}
 
-	updated := upsertCodexEngramBlock(string(data))
+	bom, content := splitCodexBOM(string(data))
+	updated := upsertCodexEngramBlock(content, command)
+	updated = upsertCodexWindowsHookMarker(updated, command, runtimeGOOS == "windows")
+	updated = bom + updated
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
@@ -1633,18 +1674,27 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 		}
 	}
 
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	bom, content := splitCodexBOM(string(data))
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = upsertTopLevelTOMLString(content, "model_instructions_file", instructionsPath)
 	content = upsertTopLevelTOMLString(content, "experimental_compact_prompt_file", compactPromptPath)
 
-	if err := writeFileFn(configPath, []byte(content), 0644); err != nil {
+	if err := writeFileFn(configPath, []byte(bom+content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
 	return nil
 }
 
-func upsertCodexEngramBlock(content string) string {
+// Keep a leading BOM outside the line-oriented upserts so it stays at byte zero.
+func splitCodexBOM(content string) (string, string) {
+	if strings.HasPrefix(content, "\ufeff") {
+		return "\ufeff", strings.TrimPrefix(content, "\ufeff")
+	}
+	return "", content
+}
+
+func upsertCodexEngramBlock(content, command string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 
@@ -1668,12 +1718,40 @@ func upsertCodexEngramBlock(content string) string {
 	}
 
 	base := strings.TrimSpace(strings.Join(kept, "\n"))
-	block := codexEngramBlockStr()
+	block := codexEngramBlockStr(command)
 	if base == "" {
 		return block + "\n"
 	}
 
 	return base + "\n\n" + block + "\n"
+}
+
+// upsertCodexWindowsHookMarker replaces setup-owned markers only while they
+// are the first physical lines in the file. Later lookalikes are opaque TOML or
+// user content: the Windows hook reads only line 1 and must ignore them.
+func upsertCodexWindowsHookMarker(content, command string, enabled bool) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+	for len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+		lines = lines[1:]
+	}
+	body := strings.Join(lines, "\n")
+
+	if !enabled {
+		return body
+	}
+
+	encodedCommand, err := json.Marshal(command)
+	if err != nil {
+		// json.Marshal cannot fail for a string; retain a fail-closed invariant if
+		// that ever changes rather than emitting an undecodable hook command.
+		panic(fmt.Sprintf("marshal Windows hook command: %v", err))
+	}
+	marker := windowsHookCommandMarkerPrefix + string(encodedCommand)
+	if body == "" {
+		return marker + "\n"
+	}
+	return marker + "\n" + body
 }
 
 func upsertTopLevelTOMLString(content, key, value string) string {

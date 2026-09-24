@@ -767,7 +767,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if body.Type == nil && body.Title == nil && body.Content == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
+	if body.Type == nil && body.Title == nil && body.Content == nil && body.Find == nil && body.Replace == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
 		jsonError(w, http.StatusBadRequest, "at least one field is required")
 		return
 	}
@@ -776,7 +776,12 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationTitleRequired),
-			errors.Is(err, store.ErrObservationContentRequired):
+			errors.Is(err, store.ErrObservationContentRequired),
+			errors.Is(err, store.ErrObservationFindReplacePairRequired),
+			errors.Is(err, store.ErrObservationFindReplaceContentConflict),
+			errors.Is(err, store.ErrObservationFindReplaceInputTooLarge),
+			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
+			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())

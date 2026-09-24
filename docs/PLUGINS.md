@@ -24,6 +24,11 @@
 
 Pi and OpenCode activity renews the local runtime lease through their existing session registration paths. This is local SQLite liveness only: it has no timer, cloud synchronization, or cross-machine coordination.
 
+### Codex on Windows
+- The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
+- The adapter reads the setup-owned absolute pin and invokes its native hook command.
+- This path needs no Git Bash, `jq`, or `curl`.
+
 ---
 
 ## OpenCode Plugin
@@ -104,7 +109,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 
 | Feature | Bare MCP | Plugin + setup |
 |---------|----------|----------------|
-| MCP tools available | 22 default (`engram mcp`) | 18 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 23 default (`engram mcp`) | 19 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
@@ -116,7 +121,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 ```
 plugin/claude-code/
 ├── .claude-plugin/plugin.json     # Plugin manifest
-├── hooks/hooks.json               # SessionStart + SubagentStop + SessionEnd lifecycle hooks
+├── hooks/hooks.json               # PreToolUse binding + SessionStart/SubagentStop/SessionEnd lifecycle hooks
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
@@ -128,6 +133,13 @@ plugin/claude-code/
 ```
 
 ### How It Works
+
+**Before Engram write/session MCP tools** (`PreToolUse`):
+1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
+2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
+3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
+
+Session binding is best-effort if the host times out the PreToolUse hook: normal permission flow can continue without the rewrite, so an explicit wrong same-project session ID might be persisted. This limitation was reproduced with an induced one-second hook timeout in a scratch test; it has not been observed with the production hook timeout.
 
 **On session start** (`startup`):
 1. Ensures the engram HTTP server is running
@@ -311,7 +323,7 @@ For the full HTTP API reference and CLI flag details, see [DOCS.md](../DOCS.md).
 
 ### HTTP endpoints
 
-All six `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
+All eight `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
 
 | Route | Purpose |
 |-------|---------|
@@ -319,6 +331,8 @@ All six `/conflicts/*` endpoints are served by `engram serve` on the local runti
 | `GET /conflicts/{relation_id}` | Single relation detail |
 | `GET /conflicts/stats` | Aggregate counts |
 | `POST /conflicts/scan` | Run scan (dry-run or apply) |
+| `POST /conflicts/judge` | Record a verdict on an existing relation (including a previously judged one) |
+| `POST /conflicts/compare` | Persist an agent-supplied semantic verdict for two observation IDs |
 | `GET /conflicts/deferred` | List deferred queue |
 | `POST /conflicts/deferred/replay` | Trigger ReplayDeferred cycle |
 

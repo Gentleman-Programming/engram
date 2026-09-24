@@ -703,6 +703,21 @@ func main() {
 		return
 	}
 
+	// Help for backup commands must not resolve configuration or open a store.
+	if os.Args[1] == "export" || os.Args[1] == "import" {
+		for _, arg := range os.Args[2:] {
+			if arg != "--help" {
+				continue
+			}
+			if os.Args[1] == "export" {
+				fmt.Println("Usage: engram export [file.json] [--project NAME | --all]\n\nOptions:\n  --project NAME  Export one project (default: current project)\n  --all           Export every project\n  --help          Show this help")
+			} else {
+				fmt.Println("Usage: engram import <file.json>\n\nOptions:\n  --help          Show this help")
+			}
+			return
+		}
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
@@ -723,8 +738,8 @@ func main() {
 		}
 	}
 
-	// Allow overriding data dir via env
-	if dir := os.Getenv("ENGRAM_DATA_DIR"); dir != "" {
+	// Allow overriding data dir via env. Blank values retain the resolved default.
+	if dir := os.Getenv("ENGRAM_DATA_DIR"); strings.TrimSpace(dir) != "" {
 		cfg.DataDir = dir
 	}
 
@@ -798,7 +813,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init":
+	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -827,6 +842,9 @@ func handleConfigFreeCommand(args []string) bool {
 		}
 	case "init":
 		cmdInit()
+		return true
+	case "hook":
+		cmdHook(args[1:])
 		return true
 	}
 	return false
@@ -3627,7 +3645,7 @@ Commands:
                        --paths-only  Limit pruning to project names containing / or \
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
-                     cursor, vscode-copilot, kilocode)
+                     cursor, vscode-copilot, kilocode, kimi, commandcode)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
@@ -3655,7 +3673,8 @@ Commands:
   help               Show this help
 
 Environment:
-  ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
+  ENGRAM_DATA_DIR    Engram CLI data directory. Empty or whitespace-only values use the
+                     platform default; nonblank values are used as provided (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Process-level default project override, applied by every entry point
                      with one precedence rule: explicit request project (engram save --project,

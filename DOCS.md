@@ -13,6 +13,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | Section                                                   | What you'll find                                             |
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
+| [Documentation Authority](#documentation-authority)       | Which doc owns each contract and what must change together   |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
 | [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
@@ -38,6 +39,25 @@ For other docs:
 
 ---
 
+## Documentation Authority
+
+When documentation and code disagree, this table says which doc surface is canonical for each contract, where the code-level authority lives, and which sibling docs must change together with it.
+
+| Contract                               | Canonical doc surface               | Code authority                                                               | Must change together                                                                                                                       |
+| -------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| MCP tool inventory                     | DOCS.md "MCP Tools"                 | `internal/mcp/mcp.go` registrations + `ProfileAgent`/`ProfileAdmin`          | `docs/ARCHITECTURE.md` tool table; `docs/AGENT-SETUP.md` setup claims; `docs/PLUGINS.md` comparison table; README.md intent table (subset) |
+| Tool input schemas                     | DOCS.md per-tool sections           | `internal/mcp/mcp.go` (live schemas); `internal/mcp/testdata/tool-contract-v1.json` (test-enforced v1 compatibility baseline; change only when intentionally changed) | (none)                                                                                                                                     |
+| SQLite schema                          | DOCS.md "Database Schema"           | `internal/store/store.go` `Store.migrate`                                    | (none)                                                                                                                                     |
+| Memory Protocol                        | `DOCS.md#memory-protocol-full-text` | (none; prose contract)                                                       | `skills/memory-protocol/SKILL.md`; `memoryProtocolMarkdown` embedded in `internal/setup`; `plugin/*/skills/memory/SKILL.md`                |
+| Setup instructions and per-agent paths | docs/AGENT-SETUP.md                 | `internal/setup/agents.go` + `setup.go`                                      | README.md setup table                                                                                                                      |
+| Plugin contracts                       | docs/PLUGINS.md                     | `plugin/*` assets, `internal/setup/plugins/`                                 | `docs/AGENT-SETUP.md` per-agent sections                                                                                                   |
+| HTTP API and CLI                       | DOCS.md HTTP API / CLI sections     | `internal/server/server.go` (local routes); `internal/cloud/cloudserver/cloudserver.go` (cloud routes); `cmd/engram` | `docs/PLUGINS.md` conflicts table (subset)                                                                                                 |
+| Package ownership boundaries           | docs/CODEBASE-GUIDE.md              | (none; prose contract)                                                       | (none)                                                                                                                                     |
+
+Code and tests beat docs: `internal/mcp` owns agent-facing tool schemas, `internal/store` owns the durable schema, `internal/setup` owns install surfaces, and `plugin/*` translates host events without duplicating durable policy.
+
+---
+
 ## Database Schema
 
 ### Tables
@@ -51,6 +71,8 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
 - **sync_state** — one row per `target_key`, with lifecycle, sequence, retry/backoff, lease, error, success, and update metadata; **sync_mutations** — ordered mutation queue with target, project, entity, operation, payload, source, acknowledgement, and disposition metadata
+- **sync_delete_tombstones** — one row per deleted entity (PK `entity`, `entity_key`) with `session_id`, `project`, `deleted_at`, `hard_delete`, `active`, `last_mutation_seq`, and `last_remote_mutation_seq` metadata. `last_mutation_seq` retains the highest historical local delete-mutation sequence; backfill emits missing delete intent for active tombstones without a recorded remote delete sequence or matching unacknowledged delete mutation, without advancing that field. `last_remote_mutation_seq` records the default cloud target's remote delete floor. Pulled session and observation upserts first pass a tombstone guard: local sync compares a known payload generation with the hard-delete time, while cloud sync checks the applicable remote delete sequence floor. Without its own floor, an active tombstone blocks the default target; for non-default targets, it blocks only when no non-default target has a remote floor. Only permitted upserts can deactivate the tombstone.
+- **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
 - **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
@@ -61,6 +83,24 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - Busy timeout 5000ms
 - Synchronous NORMAL
 - Foreign keys ON
+
+### Data-directory filesystem safety
+
+Persistent SQLite WAL is unsafe on network filesystems. Engram rejects known NFS and SMB/CIFS data directories before it opens, migrates, or changes the database files. An unknown filesystem remains compatible, but is not a proof that the directory is local.
+
+If startup reports a network filesystem, stop **all** Engram processes, then copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet together to local storage. Set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected), start Engram, and run `engram doctor`. Then run the integrity check for your shell:
+
+```bash
+# POSIX shell or Git Bash
+sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"
+```
+
+```powershell
+# PowerShell
+sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
+```
+
+Engram does not auto-repair, quarantine, checkpoint, or fall back to rollback journaling for this condition.
 
 ---
 
@@ -157,8 +197,9 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
 - `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
-  - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
+- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, find?, replace?, type?, project?, scope?, topic_key?}`
+  - `find` and `replace` must be supplied together and cannot be combined with `content`. They perform a literal, case-sensitive, global replacement inside the existing observation; empty `find`, no match, or normalized-identical output leaves content unchanged.
+  - Each replacement input and the transformed result are bounded by the configured observation content limit. `400` is returned for invalid pairs, content conflicts, bounds failures, or title/content validation failures; missing observations return `404`.
 - `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
 - `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
   - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
@@ -218,7 +259,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - Optional `?project=<name>` selects a known project; `?all_projects=true` exports every project
   - Current format `0.2.0` preserves observations (including local pin state), prompts, and complete memory-relation judgment and supersession metadata.
   - `400` for blank, malformed, or conflicting selectors
-- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Every imported relation must reference observations present in the same resulting store.
+- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Relations normally require both endpoint observations in the resulting store. Audit rows whose normalized `judgment_status` is exactly `orphaned` may retain missing source and/or target observations; their IDs and metadata are preserved. All other dangling relations and missing superseding relations reject and roll back the full import.
 
 ### Stats / Diagnostics
 
@@ -518,7 +559,7 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
+| `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
 | `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
@@ -950,7 +991,7 @@ Save responses include lifecycle metadata for the saved observation: computed `s
 
 ### mem_update
 
-Update an observation by ID. Public schema supports partial updates for `title`, `content`, `type`, `scope`, and `topic_key`. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
+Update an observation by ID. Public schema supports partial updates for `title`, `content`, `find`, `replace`, `type`, `scope`, and `topic_key`. `find` and `replace` are paired literal, case-sensitive global replacement inputs and cannot be combined with `content`; empty finds and replacements with no effective normalized change preserve content. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
 
 ### mem_review
 
@@ -1299,7 +1340,8 @@ Separate table captures what the USER asked (not just tool calls). Gives future 
 Share memories across machines, backup, or migrate:
 
 - `engram export` — Versioned JSON backup of sessions, observations, prompts, local pin state, and memory-relation metadata
-- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation
+- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation. Orphaned relation audit rows may retain missing endpoint observations; other dangling relations or missing superseding relations fail the complete transaction.
+- `engram export --help` and `engram import --help` — Show command-specific usage and options without an update check, configuration lookup, database migration, or store access. Export accepts an optional output filename and `--project NAME` or `--all`; import requires a backup filename for normal operation.
 
 ### Git Sync (Chunked)
 
@@ -1311,6 +1353,7 @@ Share memories through git repositories using compressed chunks with a manifest 
 - `engram sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
 - `engram sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
 - `engram sync --project NAME` — Filters export to a specific project
+- Local sync projects hard deletes as canonical observation, prompt, and session delete mutations; child deletes precede their session and remain replay-safe through manifest history.
 
 ```
 .engram/

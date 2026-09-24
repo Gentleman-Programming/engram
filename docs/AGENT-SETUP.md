@@ -28,6 +28,8 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Cursor          | `engram setup cursor`                                                                        | [Details](#cursor)                                 |
 | VS Code Copilot | `engram setup vscode-copilot`                                                                | [Details](#vs-code-copilot--claude-code-extension) |
 | Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
+| Kimi Code       | `engram setup kimi`                                                                          | [Details](#kimi-code)                              |
+| CommandCode     | `engram setup commandcode`                                                                   | [Details](#commandcode)                            |
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` configures the
@@ -35,6 +37,8 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > exception to direct config writes: its CLI owns user-scope MCP registration. The
 > per-agent sections below describe each integration's authoritative owner and
 > manual equivalent.
+
+> The OpenCode adapter treats optional `ENGRAM_BIN`, `ENGRAM_PORT`, and `ENGRAM_URL` values containing only whitespace as unset and uses their normal defaults.
 
 ### Protocol verbosity
 
@@ -324,7 +328,7 @@ Claude rejects an existing user-scope server with the same name rather than over
 
 With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
 
-> **Windows note:** The Claude Code plugin hooks use bash scripts. On Windows, Claude Code runs hooks through Git Bash (bundled with [Git for Windows](https://gitforwindows.org/)) or WSL. The `UserPromptSubmit` hook automatically switches to a fork-light safe path under Git Bash/MSYS2: the first-prompt ToolSearch still runs, while later save-reminder checks are skipped so prompt submission does not block. If Git Bash itself is blocked by Defender/EDR, the plugin also ships `scripts/user-prompt-submit.ps1` as a native PowerShell fallback for local override/testing. That fallback applies only to `UserPromptSubmit`; the complete plugin setup still requires `jq` and `curl` for its shared Bash hooks. **Option C (Bare MCP)** remains the no-hook fallback and works natively on Windows without any shell dependency. Windows usernames containing spaces (e.g. `C:\Users\John Doe\...`) are supported — all hook commands quote `${CLAUDE_PLUGIN_ROOT}` so the path is passed as a single argument even when it contains spaces.
+> **Windows note:** Claude Code lifecycle adapters use bash scripts. On Windows, Claude Code runs them through Git Bash (bundled with [Git for Windows](https://gitforwindows.org/)) or WSL. The `PreToolUse` hook for Engram write/session MCP tools is different: it invokes the portable native `engram hook claude-pre-tool-use` transformer. The `UserPromptSubmit` hook automatically switches to a fork-light safe path under Git Bash/MSYS2: the first-prompt ToolSearch still runs, while later save-reminder checks are skipped so prompt submission does not block. If Git Bash itself is blocked by Defender/EDR, the plugin also ships `scripts/user-prompt-submit.ps1` as a native PowerShell fallback for local override/testing. That fallback applies only to `UserPromptSubmit`; the complete plugin setup still requires `jq` and `curl` for its shared Bash hooks. **Option C (Bare MCP)** remains the no-hook fallback and works natively on Windows without any shell dependency. Windows usernames containing spaces (e.g. `C:\Users\John Doe\...`) are supported — all hook commands quote `${CLAUDE_PLUGIN_ROOT}` so the path is passed as a single argument even when it contains spaces.
 
 PowerShell fallback test and local override example:
 
@@ -430,16 +434,18 @@ engram setup codex
 
 `engram setup codex` now does four things:
 
-- Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`)
+- Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`) and pins the current absolute executable path
 - Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
 - Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
 - Best-effort installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`
 
 > `engram setup codex` automatically writes the full Memory Protocol to `~/.codex/engram-instructions.md` and a compaction recovery prompt to `~/.codex/engram-compact-prompt.md`. No additional configuration needed.
 
-The Codex plugin passes the exact runtime `session_id` into model context only after the server confirms registration. Startup, resume, clear, and post-compaction hooks instruct the model to reuse that binding for memory writes and retain it across compaction. Missing or failed registration never supplies an authoritative ID; the model must omit `session_id` rather than invent one. Post-compaction uses the same explicit `ENGRAM_URL` (or local `ENGRAM_PORT`) as startup.
+On Windows, setup also writes an executable marker at the first line of `config.toml`, but the current Windows hook runtime does not consume it. If `engram.exe` moves, rerun `engram setup codex` before restarting Codex to refresh the MCP executable pin. Do not rely on the marker for hook enforcement.
 
-Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`):
+The Codex plugin passes the exact runtime `session_id` into model context only after the server confirms registration. Startup, resume, clear, and post-compaction hooks instruct the model to reuse that binding for memory writes and retain it across compaction. Its `PreToolUse` hook also rewrites supported Engram MCP write/session-tool arguments to the host-provided session ID (`id` for session start/end), preserving other arguments; malformed calls are denied when the hook runs. Codex requires `permissionDecision: "allow"` with `updatedInput` for successful MCP rewrites. This hook is best-effort: Codex may skip hooks when untrusted or timed out, and specialized tool paths may bypass it. It does not protect bare MCP or other agents. If SessionStart registration fails, its model instructions do not supply a confirmed ID; the model must not invent one. When PreToolUse does run, it still binds supported writes to the host's runtime ID, but the server rejects that explicit ID if it has not been registered. A skipped hook does not provide this binding. Post-compaction uses the same explicit `ENGRAM_URL` (or local `ENGRAM_PORT`) as startup.
+
+Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`). On Windows, run `engram setup codex` to pin the MCP executable to its current absolute path; the setup-written hook marker is not yet enforced by the Windows hook runtime:
 
 ```toml
 model_instructions_file = "~/.codex/engram-instructions.md"
@@ -468,11 +474,11 @@ Transport closed
 
 **Prevention**
 
-- After replacing `engram.exe` / the `engram` binary, always start a new Codex chat before using memory tools.
+- After replacing `engram.exe` / the `engram` binary, rerun `engram setup codex` on Windows, then start a new Codex chat before using memory tools.
 - After editing `~/.codex/config.toml`, `engram-instructions.md`, or `engram-compact-prompt.md`, restart Codex to pick up the new config.
 - Avoid force-killing `engram` while a Codex session is active; prefer closing the chat first so Codex can shut down the MCP process cleanly.
 
-> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, confirm that the new `engram.exe` is in `PATH` and that no older copy is shadowing it.
+> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, rerun `engram setup codex` so the MCP pin points to the current executable. The hook marker is written by setup but is not yet consumed by the Windows hook runtime.
 
 ---
 
@@ -631,7 +637,7 @@ Then add the Memory Protocol as a global rule in `~/.gemini/GEMINI.md`. See [DOC
 engram setup cursor
 ```
 
-This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes an always-applied rule to `~/.cursor/rules/engram.mdc` (with the `alwaysApply: true` frontmatter Cursor needs).
+This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes the Memory Protocol to `~/.cursor/engram-memory-protocol.md` as an informational file for you to paste into User Rules (see the note below).
 
 **Manual** — add to your `.cursor/mcp.json` (global: `~/.cursor/mcp.json`; or project-relative `.cursor/mcp.json`):
 
@@ -648,14 +654,11 @@ This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes
 
 > **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
-> **Memory Protocol:** Cursor uses `.mdc` rule files stored in `.cursor/rules/` (Cursor 0.43+). Create an `engram.mdc` file (any name works — the `.mdc` extension is what matters) and place it in one of:
->
-> - **Project-specific:** `.cursor/rules/engram.mdc` — commit to git so your whole team gets it
-> - **Global (all projects):** `~/.cursor/rules/engram.mdc` (Windows: `%USERPROFILE%\.cursor\rules\engram.mdc`) — create the directory if it doesn't exist
+> **Memory Protocol:** Setup writes the protocol to `~/.cursor/engram-memory-protocol.md` as an informational file — Cursor does not load it automatically. Open it, copy the contents, and paste them into Cursor's **Customize → Rules → User Rules**.
 >
 > See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
 >
-> **Note:** The legacy `.cursorrules` file at the project root is still recognized by Cursor but is deprecated. Prefer `.cursor/rules/` for all new setups.
+> **Note:** To share the protocol with a team, commit an in-repo `.cursor/rules/*.mdc` file; project rules must use the `.mdc` extension with frontmatter — a plain `.md` file there is ignored. The legacy `.cursorrules` file at the project root is still recognized but deprecated.
 
 ---
 
@@ -722,6 +725,32 @@ Registers the engram server under the OpenCode-style `mcp` object in `~/.config/
 
 ---
 
+## Kimi Code
+
+**Automated:**
+
+```bash
+engram setup kimi
+```
+
+Registers `mcpServers.engram` in `~/.kimi-code/mcp.json` and writes the Memory Protocol as a marker block in `~/.kimi-code/AGENTS.md`. Both files live under the Kimi Code data root, so when `KIMI_CODE_HOME` is set the setup honors it and writes there instead.
+
+**`KIMI_CODE_HOME` is only honored when it is an absolute path.** A relative value (for example `KIMI_CODE_HOME=.kimi-code`) is ignored and setup falls back to the default `~/.kimi-code` root, so config never lands in whatever directory you happened to run `engram` from. The `Next steps` printed after setup name the files that were actually written, so they follow the override.
+
+---
+
+## CommandCode
+
+**Automated:**
+
+```bash
+engram setup commandcode
+```
+
+Registers `mcpServers.engram` in the user-scope `~/.commandcode/mcp.json` (private, available across all projects) and writes the Memory Protocol as a marker block in the user-tier `~/.commandcode/AGENTS.md`. Memory is re-read every request, so `AGENTS.md` edits apply on the next turn with no restart; restart the session so the MCP server is picked up. On Windows the CLI binary is `cmdc` instead of `cmd`, but the config paths are the same.
+
+---
+
 ## Any other MCP agent
 
 The pattern is always the same — point your agent's MCP config to `engram mcp` via stdio transport.
@@ -785,15 +814,9 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 - After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
-**For Cursor** (`.cursor/rules/engram.mdc` or `~/.cursor/rules/engram.mdc`):
-
-The `alwaysApply: true` frontmatter tells Cursor to load this rule in every conversation, regardless of which files are open.
+**For Cursor** (Customize → Rules → User Rules; the generated `~/.cursor/engram-memory-protocol.md` is informational and is not loaded automatically):
 
 ```text
----
-alwaysApply: true
----
-
 You have access to Engram persistent memory (mem_save, mem_search, mem_context, mem_session_summary).
 Save proactively after significant work. After context resets, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 ```

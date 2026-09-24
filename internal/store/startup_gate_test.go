@@ -13,16 +13,108 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestSQLiteRuntimeVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+		wantErr bool
+	}{
+		{name: "minimum", version: "3.51.3", want: true},
+		{name: "later patch", version: "3.51.4", want: true},
+		{name: "later minor", version: "3.52.0", want: true},
+		{name: "later major", version: "4.0.0", want: true},
+		{name: "earlier patch", version: "3.51.2", want: false},
+		{name: "earlier minor", version: "3.50.99", want: false},
+		{name: "missing patch", version: "3.51", wantErr: true},
+		{name: "empty minor", version: "3..3", wantErr: true},
+		{name: "non-numeric patch", version: "3.51.x", wantErr: true},
+		{name: "suffix", version: "3.51.3-beta", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := sqliteRuntimeAtLeast(tt.version, [3]int{3, 51, 3})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("sqliteRuntimeAtLeast(%q) error = %v, wantErr %t", tt.version, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("sqliteRuntimeAtLeast(%q) = %t, want %t", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func sqliteRuntimeAtLeast(version string, minimum [3]int) (bool, error) {
+	parts := strings.Split(version, ".")
+	if len(parts) != len(minimum) {
+		return false, fmt.Errorf("expected major.minor.patch")
+	}
+
+	var got [3]int
+	for i, part := range parts {
+		if part == "" {
+			return false, fmt.Errorf("version component %d is empty", i+1)
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false, fmt.Errorf("version component %d is not numeric", i+1)
+			}
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return false, fmt.Errorf("parse version component %d: %w", i+1, err)
+		}
+		got[i] = parsed
+	}
+
+	for i := range got {
+		if got[i] != minimum[i] {
+			return got[i] > minimum[i], nil
+		}
+	}
+	return true, nil
+}
+
+func TestSQLiteRuntimeIncludesWALResetIntegrityFix(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	var version string
+	if err := s.db.QueryRow("SELECT sqlite_version()").Scan(&version); err != nil {
+		t.Fatalf("query SQLite runtime version: %v", err)
+	}
+	t.Logf("embedded SQLite runtime version: %s", version)
+	includesFix, err := sqliteRuntimeAtLeast(version, [3]int{3, 51, 3})
+	if err != nil {
+		t.Fatalf("parse embedded SQLite version %q: %v", version, err)
+	}
+	if !includesFix {
+		t.Fatalf("embedded SQLite version = %s, want at least 3.51.3 with the WAL-reset integrity fix", version)
+	}
+}
 
 func TestPersistentWALSurvivesClose(t *testing.T) {
 	cfg := mustDefaultConfig(t)
@@ -47,6 +139,74 @@ func TestPersistentWALSurvivesClose(t *testing.T) {
 
 	if _, err := os.Stat(walPath); err != nil {
 		t.Fatalf("-wal file was unlinked on close — persistent WAL is not active: %v", err)
+	}
+}
+
+func TestNewRejectsRemoteFilesystemBeforeSQLiteMutation(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "remote-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("create data directory: %v", err)
+	}
+
+	triplet := map[string][]byte{
+		"engram.db":     []byte("database bytes"),
+		"engram.db-wal": []byte("wal bytes"),
+		"engram.db-shm": []byte("shm bytes"),
+	}
+	for name, contents := range triplet {
+		if err := os.WriteFile(filepath.Join(dataDir, name), contents, 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	setFilesystemInspector(t, func(string) (filesystemInfo, error) {
+		return filesystemInfo{Type: "CIFS", Support: filesystemRemote}, nil
+	})
+	_, err := New(FallbackConfig(dataDir))
+	var rejection *NetworkFilesystemError
+	if !errors.As(err, &rejection) {
+		t.Fatalf("New error = %v, want NetworkFilesystemError", err)
+	}
+	if rejection.Filesystem != "CIFS" {
+		t.Errorf("rejection filesystem = %q, want CIFS", rejection.Filesystem)
+	}
+
+	for name, want := range triplet {
+		got, readErr := os.ReadFile(filepath.Join(dataDir, name))
+		if readErr != nil {
+			t.Errorf("read %s after rejected startup: %v", name, readErr)
+			continue
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s changed during rejected startup: got %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{".instance-id", ".instance-id.lock", ".migrate.lock"} {
+		if _, statErr := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(statErr) {
+			t.Errorf("rejected startup created %s: %v", name, statErr)
+		}
+	}
+}
+
+func TestNewRejectsRemoteFilesystemBeforeCreatingDataDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "absent-data")
+	setFilesystemInspector(t, func(path string) (filesystemInfo, error) {
+		if path != parent {
+			t.Errorf("inspected %q, want existing parent %q", path, parent)
+		}
+		return filesystemInfo{Type: "NFS", Support: filesystemRemote}, nil
+	})
+	_, err := New(FallbackConfig(dataDir))
+	var rejection *NetworkFilesystemError
+	if !errors.As(err, &rejection) {
+		t.Fatalf("New error = %v, want NetworkFilesystemError", err)
+	}
+	if rejection.DataDir != dataDir || rejection.Filesystem != "NFS" {
+		t.Errorf("rejection = %+v, want data dir %q on NFS", rejection, dataDir)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Errorf("rejected startup created data directory: %v", err)
 	}
 }
 

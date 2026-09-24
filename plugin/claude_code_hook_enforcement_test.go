@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -99,6 +100,71 @@ func assertExactPowerShellToolSearchNames(t *testing.T, listed map[string]bool) 
 // Defect 4: the SessionStart matcher must cover resumed and forked sessions.
 // A resumed/forked session receives no engram context injection when the
 // matcher is only "startup|clear".
+func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("cannot read hooks.json: %v", err)
+	}
+
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("cannot parse hooks.json: %v", err)
+	}
+
+	for _, group := range manifest.Hooks["PreToolUse"] {
+		for _, hook := range group.Hooks {
+			if hook.Command != "engram hook claude-pre-tool-use" {
+				continue
+			}
+			// This matcher uses only anchors, groups and literal alternatives: Go's
+			// regexp and Claude's JavaScript RegExp agree on these constructs.
+			if !strings.HasPrefix(group.Matcher, "^") || !strings.HasSuffix(group.Matcher, "$") {
+				t.Fatalf("PreToolUse matcher must be anchored: %q", group.Matcher)
+			}
+			matcher, err := regexp.Compile(group.Matcher)
+			if err != nil {
+				t.Fatalf("invalid PreToolUse matcher %q: %v", group.Matcher, err)
+			}
+			tools := []string{"mem_save", "mem_update", "mem_review", "mem_delete", "mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary", "mem_session_start", "mem_session_end", "mem_capture_passive", "mem_merge_projects", "mem_judge", "mem_compare"}
+			for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+				for _, tool := range tools {
+					if !matcher.MatchString(prefix + tool) {
+						t.Errorf("PreToolUse matcher %q misses %s%s", group.Matcher, prefix, tool)
+					}
+					for _, suffix := range []string{"_extra", "x"} {
+						if matcher.MatchString(prefix + tool + suffix) {
+							t.Errorf("PreToolUse matcher %q accepts near-match %s%s%s", group.Matcher, prefix, tool, suffix)
+						}
+					}
+				}
+				for _, tool := range []string{"mem_search", "mem_context", "mem_get_observation", "mem_current_project", "mem_suggest_topic_key", "mem_doctor", "mem_save_promp"} {
+					if matcher.MatchString(prefix + tool) {
+						t.Errorf("PreToolUse matcher %q accepts non-write tool %s%s", group.Matcher, prefix, tool)
+					}
+				}
+			}
+			for _, name := range []string{"mcp__other__mem_save", "mcp__engram_extra__mem_save", "other_mcp__engram__mem_save", "mem_save"} {
+				if matcher.MatchString(name) {
+					t.Errorf("PreToolUse matcher %q accepts unrelated name %q", group.Matcher, name)
+				}
+			}
+			if strings.Contains(strings.ToLower(hook.Command), "bash") || strings.Contains(hook.Command, ".sh") {
+				t.Fatalf("PreToolUse command %q is not portable to Windows", hook.Command)
+			}
+			return
+		}
+	}
+	t.Fatal("no portable PreToolUse hook delegates to engram hook claude-pre-tool-use")
+}
+
 func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "hooks", "hooks.json"))
