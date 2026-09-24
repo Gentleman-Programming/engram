@@ -46,7 +46,7 @@ func TestTemplRuntimePolicyIsDeterministic(t *testing.T) {
 			directives = append(directives, strings.TrimSpace(directive))
 		}
 	}
-	if len(directives) != 1 || directives[0] != "//go:generate go tool -C ../../.. templ generate ./internal/cloud/dashboard/..." {
+	if len(directives) != 1 || directives[0] != "//go:generate go -C ../../.. tool templ generate ./internal/cloud/dashboard/..." {
 		t.Fatalf("expected one root-relative module tool generation directive, got %q", directives)
 	}
 }
