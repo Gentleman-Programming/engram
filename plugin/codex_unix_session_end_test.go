@@ -139,11 +139,19 @@ func codexTestBash(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("find Git for Windows: %v", err)
 	}
-	bashPath := filepath.Clean(filepath.Join(filepath.Dir(gitPath), "..", "bin", "bash.exe"))
-	if _, err := os.Stat(bashPath); err != nil {
-		t.Fatalf("find Git Bash at %s: %v", bashPath, err)
+	gitDir := filepath.Dir(gitPath)
+	// git.exe can live in cmd, bin, or mingw64/bin depending on installation.
+	for _, candidate := range []string{
+		filepath.Join(gitDir, "bash.exe"),
+		filepath.Join(gitDir, "..", "bin", "bash.exe"),
+		filepath.Join(gitDir, "..", "..", "bin", "bash.exe"),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return filepath.Clean(candidate)
+		}
 	}
-	return bashPath
+	t.Fatalf("find Git Bash near git.exe at %s", gitPath)
+	return ""
 }
 
 func requireCodexUnixTools(t *testing.T, bashPath string) {

@@ -1,7 +1,7 @@
 package plugin_test
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,33 +58,54 @@ func requireHookBinaries(t *testing.T) {
 	_ = bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh"))
 }
 
-// user-prompt-submit.sh hardcodes /tmp for its session markers (line 188 uses
-// /tmp, not TMPDIR), so tests clean up by absolute path rather than t.TempDir.
+// Git Bash /tmp is not necessarily Go's /tmp on Windows. Ask the same Bash
+// used by the hooks to translate its default temp directory to a native path.
+func hookStateDir() string {
+	if runtime.GOOS != "windows" {
+		if dir := os.Getenv("TMPDIR"); dir != "" {
+			return dir
+		}
+		return "/tmp"
+	}
+	output, err := exec.Command("bash", "-c", `cygpath -w "${TMPDIR:-/tmp}"`).Output()
+	if err != nil {
+		panic(fmt.Sprintf("resolve Git Bash marker directory: %v", err))
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func stateFilePath(sessionID string) string {
-	return filepath.Join("/tmp", "engram-claude-"+sessionID+"-tools-loaded")
+	return filepath.Join(hookStateDir(), "engram-claude-"+sessionID+"-tools-loaded")
 }
 
 func nudgeFilePath(sessionID string) string {
-	return filepath.Join("/tmp", "engram-claude-"+sessionID+"-last-nudge")
+	return filepath.Join(hookStateDir(), "engram-claude-"+sessionID+"-last-nudge")
 }
 
-// newSessionID derives a unique, deterministic UUID from the test name. This
-// matches the hook's unencoded session-key contract. It clears state left by an
-// interrupted earlier run so the first-message path is reachable, and registers
-// the same cleanup on exit.
+// newSessionID creates an unpredictable per-run UUID. Cleanup only removes
+// markers belonging to this invocation, never markers from an earlier run.
 func newSessionID(t *testing.T) string {
 	t.Helper()
-	hash := sha256.Sum256([]byte(t.Name()))
-	id := hex.EncodeToString(hash[:16])
-	id = id[:12] + "4" + id[13:16] + "8" + id[17:]
-	id = id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
-
-	clean := func() {
-		os.Remove(stateFilePath(id))
-		os.Remove(nudgeFilePath(id))
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		t.Fatalf("generate session ID: %v", err)
 	}
-	clean()
-	t.Cleanup(clean)
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	id := hex.EncodeToString(bytes[:])
+	id = id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
+	for _, path := range []string{stateFilePath(id), nudgeFilePath(id)} {
+		if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
+			t.Fatalf("refuse to reuse existing session marker %q: %v", path, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, path := range []string{stateFilePath(id), nudgeFilePath(id)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Errorf("remove session marker %q: %v", path, err)
+			}
+		}
+	})
 	return id
 }
 
