@@ -979,7 +979,33 @@ function warnSessionProjectConflictOnce(error: unknown): void {
 }
 
 const EFFECTIVE_SESSION_ENTRY = "engram-effective-session";
+const REJECTED_SESSION_ENTRY = "engram-rejected-effective-session";
 const effectiveSessionRegistrations = new Map<string, Promise<string>>();
+const submittedEffectiveSessions = new Set<string>();
+
+function pendingEffectiveSession(ctx: SessionContext, runtimeID: string, effectiveID: string): boolean {
+  const branch = ctx.sessionManager.getBranch?.() || [];
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== "custom") continue;
+    const data = entry.data as { runtimeID?: string; effectiveID?: string; pending?: boolean } | undefined;
+    if (data?.runtimeID !== runtimeID || data.effectiveID !== effectiveID) continue;
+    if (entry.customType === REJECTED_SESSION_ENTRY) return false;
+    if (entry.customType === EFFECTIVE_SESSION_ENTRY) return data.pending === true;
+  }
+  return false;
+}
+
+function pendingEffectiveSessionProject(ctx: SessionContext, runtimeID: string, effectiveID: string): string | undefined {
+  const branch = ctx.sessionManager.getBranch?.() || [];
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== "custom" || entry.customType !== EFFECTIVE_SESSION_ENTRY) continue;
+    const data = entry.data as { runtimeID?: string; effectiveID?: string; project?: string } | undefined;
+    if (data?.runtimeID === runtimeID && data.effectiveID === effectiveID) return data.project;
+  }
+  return undefined;
+}
 
 function effectiveSessionID(ctx: SessionContext, runtimeID: string): string {
   const branch = ctx.sessionManager.getBranch?.() || [];
@@ -1005,15 +1031,35 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
   const registration = (async () => {
     const effectiveID = effectiveSessionID(ctx, runtimeID);
     try {
+      if (pendingEffectiveSession(ctx, runtimeID, effectiveID)) {
+        const pendingProject = pendingEffectiveSessionProject(ctx, runtimeID, effectiveID);
+        if (pendingProject && pendingProject !== sessionProject) {
+          throw new SessionProjectConflictError(effectiveID, pendingProject, sessionProject);
+        }
+      }
       await ensureSession(effectiveID, sessionProject, fetch, true);
       return effectiveID;
     } catch (error) {
+      if (error instanceof SessionProjectConflictError && effectiveID !== runtimeID && appendEntry
+        && error.ownerProject !== pendingEffectiveSessionProject(ctx, runtimeID, effectiveID)) {
+        appendEntry(REJECTED_SESSION_ENTRY, { runtimeID, effectiveID });
+        submittedEffectiveSessions.delete(effectiveID);
+      }
       if (!(error instanceof EngramHttpError) || error.status !== 409
         || (error.data as { code?: string } | null)?.code !== "session_already_ended") throw error;
       if (!appendEntry || !ctx.sessionManager.getBranch) throw error;
       const freshID = `${runtimeID}:resume:${randomUUID()}`;
-      await ensureSession(freshID, sessionProject, fetch, true);
-      appendEntry(EFFECTIVE_SESSION_ENTRY, { runtimeID, effectiveID: freshID });
+      appendEntry(EFFECTIVE_SESSION_ENTRY, { runtimeID, effectiveID: freshID, pending: true, project: sessionProject });
+      submittedEffectiveSessions.add(freshID);
+      try {
+        await ensureSession(freshID, sessionProject, fetch, true);
+      } catch (registrationError) {
+        if (registrationError instanceof SessionProjectConflictError) {
+          appendEntry(REJECTED_SESSION_ENTRY, { runtimeID, effectiveID: freshID });
+          submittedEffectiveSessions.delete(freshID);
+        }
+        throw registrationError;
+      }
       return freshID;
     }
   })();
@@ -1139,18 +1185,19 @@ async function waitForSessionRegistration(sessionId: string): Promise<void> {
   await Promise.all(registrations);
 }
 
-async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>): Promise<unknown> {
+async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>, persistedPending = false): Promise<unknown> {
   const existing = sessionEndingsInFlight.get(sessionId);
   if (existing) return existing;
 
   const registrationWasInFlight = hasSessionRegistrationInFlight(sessionId);
   const ending = (async () => {
     await waitForSessionRegistration(sessionId);
-    if (!registrationWasInFlight && !hasKnownSession(sessionId)) return null;
+    if (!registrationWasInFlight && !hasKnownSession(sessionId) && !submittedEffectiveSessions.has(sessionId) && !persistedPending) return null;
     try {
       return await end();
     } finally {
       forgetKnownSession(sessionId);
+      submittedEffectiveSessions.delete(sessionId);
     }
   })();
   sessionEndingsInFlight.set(sessionId, ending);
@@ -1708,10 +1755,19 @@ export default function registerEngram(pi: ExtensionAPI) {
     const sessionId = effectiveSessionID(ctx, runtimeID);
     knownSessions.add(`\u0000closing:${sessionId}`);
     try {
-      await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
-        `/sessions/${encodeURIComponent(sessionId)}/end`,
-        { method: "POST", body: { summary: "" } },
-      ));
+      const persistedPending = pendingEffectiveSession(ctx, runtimeID, sessionId);
+      if (persistedPending || hasKnownSession(sessionId) || hasSessionRegistrationInFlight(sessionId)) {
+        const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
+          `/sessions/${encodeURIComponent(sessionId)}/end`,
+          { method: "POST", body: { summary: "" } },
+        ), persistedPending);
+        if (persistedPending && ended !== null && ended !== undefined) {
+          pi.appendEntry?.(EFFECTIVE_SESSION_ENTRY, {
+            runtimeID, effectiveID: sessionId, pending: false,
+            project: pendingEffectiveSessionProject(ctx, runtimeID, sessionId),
+          });
+        }
+      }
     } catch (error) {
       warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error);
     }

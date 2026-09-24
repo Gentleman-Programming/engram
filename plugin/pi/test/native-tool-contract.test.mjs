@@ -1045,6 +1045,356 @@ test("resumed ended conversation registers a distinct persistent identity before
   }
 });
 
+test("ambiguous fresh registration reuses its submitted identity and ends it on shutdown", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  const attempts = new Map();
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "ambiguous") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions") {
+      const count = (attempts.get(body.id) || 0) + 1;
+      attempts.set(body.id, count);
+      if (count <= 4) throw new Error("response lost after server created session");
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-ambiguous-resume-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("ambiguous");
+      ctx.sessionManager.getBranch = () => entries;
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      const save = () => registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx);
+      assert.equal((await save()).isError, true);
+      const freshID = calls.filter(({ path }) => path === "/sessions").at(-1).body.id;
+      assert.match(freshID, /^ambiguous:resume:/);
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      assert.equal((await save()).isError, true);
+      assert.deepEqual([...attempts.keys()], [freshID], "retry must not generate another UUID");
+      assert.equal((await save()).isError, undefined);
+      assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.session_id, freshID);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(freshID)}/end`));
+      assert.equal(calls.some(({ path }) => path === "/sessions/ambiguous/end"), false);
+    });
+    await withPluginSandbox("engram-pi-ambiguous-end-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("ambiguous");
+      ctx.sessionManager.getBranch = () => entries;
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      assert.equal((await registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx)).isError, true);
+      const submitted = entries.at(-1)?.data.effectiveID;
+      assert.ok(submitted);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(submitted)}/end`), "submitted but unconfirmed session must be ended");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a reserved pending replacement cannot be claimed by another project after pre-dispatch failure", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  let failedReplacementAttempts = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
+    if (path === "/sessions" && body.id === "reserved") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions" && failedReplacementAttempts < 2) {
+      failedReplacementAttempts++;
+      const failure = new Error("request did not reach server");
+      failure.code = "ENETUNREACH";
+      throw failure;
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-reserved-project-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("reserved");
+      ctx.sessionManager.getBranch = () => entries;
+      const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, appendEntry);
+      const save = (project) => registeredTools.get("mem_save").execute(project, { title: project, content: project, project }, undefined, undefined, ctx);
+      assert.equal((await save("project-a")).isError, true);
+      const effectiveID = entries.at(-1).data.effectiveID;
+      const registrationCount = calls.filter(({ path }) => path === "/sessions").length;
+      assert.equal((await save("project-b")).isError, true);
+      assert.equal(calls.filter(({ path }) => path === "/sessions").length, registrationCount, "B must not POST the reserved ID");
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      assert.equal((await save("project-a")).isError, undefined);
+      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), [effectiveID]);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("confirmed replacement end clears pending state across repeated shutdown and reload", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "repeat-end") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-repeat-end-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("repeat-end");
+      ctx.sessionManager.getBranch = () => entries;
+      const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, appendEntry);
+      assert.equal((await registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx)).isError, undefined);
+      const effectiveID = entries.at(-1).data.effectiveID;
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      await withPluginSandbox("engram-pi-repeat-end-next-", async ({ sandbox: nextSandbox }) => {
+        const next = await loadPluginHarness(nextSandbox, appendEntry);
+        await next.eventHandlers.get("session_shutdown")({}, ctx);
+      });
+      assert.equal(calls.filter(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`).length, 1);
+      assert.equal(entries.at(-1).data.pending, false);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("an unconfirmed replacement end retains pending state for a later shutdown", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "uncertain-end") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path.endsWith("/end") && calls.filter(({ path: requested }) => requested.endsWith("/end")).length === 1) throw new Error("end response lost");
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-uncertain-end-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("uncertain-end");
+      ctx.sessionManager.getBranch = () => entries;
+      const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, appendEntry);
+      assert.equal((await registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx)).isError, undefined);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(entries.at(-1).data.pending, true);
+      await withPluginSandbox("engram-pi-uncertain-end-next-", async ({ sandbox: nextSandbox }) => {
+        const next = await loadPluginHarness(nextSandbox, appendEntry);
+        await next.eventHandlers.get("session_shutdown")({}, ctx);
+      });
+      assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 2);
+      assert.equal(entries.at(-1).data.pending, false);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a concurrent foreign-project caller cannot revoke the pending owner's shutdown", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const started = deferred();
+  const gate = deferred();
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
+    if (path === "/sessions" && body.id === "owner-race") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions" && body.project === "project-a") {
+      started.resolve();
+      await gate.promise;
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-owner-race-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("owner-race");
+      ctx.sessionManager.getBranch = () => entries;
+      const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+      const { registeredTools } = await loadPluginHarness(sandbox, appendEntry);
+      const save = registeredTools.get("mem_save");
+      const owner = save.execute("a", { title: "a", content: "a", project: "project-a" }, undefined, undefined, ctx);
+      await started.promise;
+      const effectiveID = entries.at(-1).data.effectiveID;
+      const foreign = await save.execute("b", { title: "b", content: "b", project: "project-b" }, undefined, undefined, ctx);
+      assert.equal(foreign.isError, true);
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      gate.resolve();
+      assert.equal((await owner).isError, undefined);
+      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), [effectiveID]);
+      await withPluginSandbox("engram-pi-owner-race-next-", async ({ sandbox: nextSandbox }) => {
+        const next = await loadPluginHarness(nextSandbox, appendEntry);
+        await next.eventHandlers.get("session_shutdown")({}, ctx);
+      });
+      assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`));
+      assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => body.project === "project-a" || body.id === "owner-race"));
+    });
+  } finally {
+    gate.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a later ownership conflict on an uncertain replacement revokes shutdown end across reload", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  let replacementAttempts = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "late-conflict") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions") {
+      replacementAttempts++;
+      if (replacementAttempts <= 2) throw new Error("registration response lost");
+      return new Response(JSON.stringify({ code: "session_project_conflict", session_id: body.id, requested_project: body.project, owner_project: "other-project" }), { status: 409 });
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-late-conflict-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("late-conflict");
+      ctx.sessionManager.getBranch = () => entries;
+      const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, appendEntry);
+      const save = () => registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx);
+      assert.equal((await save()).isError, true);
+      const submitted = entries.at(-1).data.effectiveID;
+      assert.equal((await save()).isError, true);
+      assert.deepEqual([...new Set(calls.filter(({ path, body }) => path === "/sessions" && body.id !== "late-conflict").map(({ body }) => body.id))], [submitted]);
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      await withPluginSandbox("engram-pi-late-conflict-next-", async ({ sandbox: nextSandbox }) => {
+        const next = await loadPluginHarness(nextSandbox, appendEntry);
+        await next.eventHandlers.get("session_shutdown")({}, ctx);
+      });
+      assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 0, "the conflicted replacement cannot be ended by either module");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a rejected replacement ownership never authorizes shutdown end", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "conflicted") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions") return new Response(JSON.stringify({ code: "session_project_conflict", session_id: body.id, requested_project: body.project, owner_project: "other-project" }), { status: 409 });
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-conflict-end-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("conflicted");
+      ctx.sessionManager.getBranch = () => entries;
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      const result = await registeredTools.get("mem_save").execute("conflict", { title: "conflict", content: "conflict" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      await withPluginSandbox("engram-pi-conflict-end-next-", async ({ sandbox: nextSandbox }) => {
+        const next = await loadPluginHarness(nextSandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+        await next.eventHandlers.get("session_shutdown")({}, ctx);
+      });
+      assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 0, "ownership conflict forbids end across reload");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a persisted uncertain replacement ends after extension reload without another registration", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "uncertain-reload") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path === "/sessions") throw new Error("response lost after registration");
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-uncertain-reload-", async ({ sandbox }) => {
+      const entries = [];
+      const ctx = runtimeContext("uncertain-reload");
+      ctx.sessionManager.getBranch = () => entries;
+      const appendEntry = (customType, data) => entries.push({ type: "custom", customType, data });
+      const first = await loadPluginHarness(sandbox, appendEntry);
+      assert.equal((await first.registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx)).isError, true);
+      const submitted = entries.at(-1)?.data.effectiveID;
+      assert.ok(submitted);
+      await withPluginSandbox("engram-pi-uncertain-reload-next-", async ({ sandbox: nextSandbox }) => {
+        const second = await loadPluginHarness(nextSandbox, appendEntry);
+        await second.eventHandlers.get("session_shutdown")({}, ctx);
+      });
+      assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(submitted)}/end`));
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("shutdown waits for resumed registration and rejects attributed writes", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
