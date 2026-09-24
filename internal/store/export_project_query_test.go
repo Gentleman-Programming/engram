@@ -52,24 +52,42 @@ func assertExportQueryUsesIndex(t *testing.T, s *Store, queries []exportedQuery,
 		if err != nil {
 			t.Fatalf("explain %s: %v", index, err)
 		}
-		defer func() { _ = rows.Close() }()
+		outerTable := map[string]string{
+			"idx_sessions_project": "sessions",
+			"idx_obs_project":      "observations",
+			"idx_prompts_project":  "user_prompts",
+		}[index]
+		usesIndex := false
 		for rows.Next() {
 			var selectID, order, from int
 			var detail string
 			if err := rows.Scan(&selectID, &order, &from, &detail); err != nil {
+				_ = rows.Close()
 				t.Fatal(err)
 			}
 			details = append(details, detail)
 			if strings.Contains(detail, index) {
-				return
+				usesIndex = true
+			}
+			// An indexed inner lookup must not mask a full scan of the outer table.
+			if strings.HasPrefix(detail, "SCAN "+outerTable+" ") || detail == "SCAN "+outerTable {
+				_ = rows.Close()
+				t.Fatalf("export query %q scans outer table %s: %v", prefix, outerTable, details)
 			}
 		}
 		if err := rows.Err(); err != nil {
+			_ = rows.Close()
 			t.Fatal(err)
 		}
-		break
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !usesIndex {
+			t.Fatalf("export query %q did not use %s: %v", prefix, index, details)
+		}
+		return
 	}
-	t.Fatalf("export query %q did not use %s: %v", prefix, index, details)
+	t.Fatalf("export query %q not captured (want %s)", prefix, index)
 }
 
 func TestProjectRelationExportsAvoidFullScanTail(t *testing.T) {
@@ -122,7 +140,25 @@ func TestProjectRelationExportsAvoidFullScanTail(t *testing.T) {
 
 func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 	s, relationID, _ := setupExportRelationsStore(t)
-	if _, err := s.db.Exec(`UPDATE observations SET project = CASE id % 2 WHEN 0 THEN NULL ELSE '' END WHERE session_id = ?`, "ses-exp-alpha"); err != nil {
+	// A beta-owned observation in the alpha session must not inherit alpha ownership.
+	_, betaSyncID := addTestObsSession(t, s, "ses-exp-alpha", "Beta-owned in alpha session", "decision", "beta", "project")
+	var alphaNullSyncID, alphaBlankSyncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = ? AND project = ? ORDER BY id LIMIT 1`, "ses-exp-alpha", "alpha").Scan(&alphaNullSyncID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = ? AND project = ? AND sync_id != ?`, "ses-exp-alpha", "alpha", alphaNullSyncID).Scan(&alphaBlankSyncID); err != nil {
+		t.Fatal(err)
+	}
+	crossRelationID := newSyncID("rel")
+	// SaveRelation rejects cross-project endpoints, so seed this historical edge directly.
+	if _, err := s.db.Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, ?, 'related', 'confirmed', datetime('now'), datetime('now'))`, crossRelationID, alphaNullSyncID, betaSyncID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET project = NULL WHERE sync_id = ?`, alphaNullSyncID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE sync_id = ?`, alphaBlankSyncID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, NULL), (?, ?, ?, '')`, "legacy-null", "ses-exp-alpha", "null prompt", "legacy-blank", "ses-exp-alpha", "blank prompt"); err != nil {
@@ -135,6 +171,21 @@ func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 	}
 	if len(exported.Observations) != 2 || len(exported.Prompts) != 2 || len(exported.Relations) != 1 {
 		t.Fatalf("legacy export counts = obs:%d prompts:%d relations:%d", len(exported.Observations), len(exported.Prompts), len(exported.Relations))
+	}
+	seenAlpha := make(map[string]bool)
+	for _, obs := range exported.Observations {
+		if obs.SyncID == betaSyncID {
+			t.Fatalf("beta-owned observation exported in alpha: %s", betaSyncID)
+		}
+		seenAlpha[obs.SyncID] = true
+	}
+	if !seenAlpha[alphaNullSyncID] || !seenAlpha[alphaBlankSyncID] {
+		t.Fatalf("legacy alpha observations missing: null=%t blank=%t", seenAlpha[alphaNullSyncID], seenAlpha[alphaBlankSyncID])
+	}
+	for _, relation := range exported.Relations {
+		if relation.SyncID == crossRelationID {
+			t.Fatalf("alpha-to-beta relation exported in alpha: %s", crossRelationID)
+		}
 	}
 	againExported, err := s.ExportProject("alpha")
 	if err != nil {
@@ -149,6 +200,11 @@ func TestExportProjectRetainsLegacySessionOwnedRowsAndRelations(t *testing.T) {
 	mutations, err := s.ExportRelationMutations("alpha")
 	if err != nil || len(mutations) != 1 || mutations[0].EntityKey != relationID {
 		t.Fatalf("legacy relation mutations = %+v, %v", mutations, err)
+	}
+	for _, mutation := range mutations {
+		if mutation.EntityKey == crossRelationID {
+			t.Fatalf("alpha-to-beta relation mutation exported in alpha: %s", crossRelationID)
+		}
 	}
 	again, err := s.ExportRelationMutations("alpha")
 	if err != nil {
