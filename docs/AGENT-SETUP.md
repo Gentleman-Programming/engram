@@ -935,7 +935,7 @@ For `engram mcp`, autosync runs for the lifetime of the stdio MCP process and is
 If you are contributing to the cloud dashboard (`internal/cloud/dashboard/`), the HTML components are rendered via [templ](https://templ.guide/). Before committing changes to any `.templ` file, regenerate the Go output:
 
 ```sh
-# Download pinned version (first time only)
+# Download module dependencies ahead of time (optional; no global templ install needed)
 go mod download
 
 # Regenerate
@@ -944,4 +944,4 @@ make templ
 go tool templ generate ./internal/cloud/dashboard/...
 ```
 
-Commit the regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` alongside your `.templ` source changes. CI will fail if they are missing or outdated (`TestTemplGeneratedFilesAreCheckedIn`).
+Commit the regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` alongside your `.templ` source changes. `TestTemplGeneratedFilesAreCheckedIn` checks for missing generated files; CI also checks regeneration for drift.

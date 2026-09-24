@@ -1588,7 +1588,7 @@ The cloud dashboard uses [templ](https://templ.guide/) for server-side HTML comp
 
 ### Prerequisite
 
-Download the pinned templ binary:
+The templ CLI is registered as a module tool at v0.3.1001; no global PATH install is required. To download module dependencies ahead of time:
 
 ```sh
 go mod download
@@ -1602,7 +1602,7 @@ make templ
 go tool templ generate ./internal/cloud/dashboard/...
 ```
 
-The regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` must be committed together with the `.templ` source changes. The test `TestTemplGeneratedFilesAreCheckedIn` in `internal/cloud/dashboard/templ_policy_test.go` will fail in CI if generated files are missing or outdated.
+The regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` must be committed together with the `.templ` source changes. The test `TestTemplGeneratedFilesAreCheckedIn` in `internal/cloud/dashboard/templ_policy_test.go` checks that generated files are present; CI additionally checks regeneration for drift.
 
 **Important**: Always use the pinned version `github.com/a-h/templ v0.3.1001` (already in `go.mod`). Regenerating with a different version produces diff churn in generated output.
 
