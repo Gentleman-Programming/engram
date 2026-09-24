@@ -1645,7 +1645,9 @@ export default function registerEngram(pi: ExtensionAPI) {
     } catch {}
   });
 
-  pi.on("session_shutdown", async (_event: unknown, ctx: SessionContext) => {
+  pi.on("session_shutdown", async (event: { reason?: string }, ctx: SessionContext) => {
+    // Pi reload replaces the extension runner but keeps its runtime session ID alive.
+    if (event.reason === "reload") return;
     const sessionId = observeRuntimeSessionID(ctx);
     if (!sessionId) return;
     knownSessions.add(`\u0000closing:${sessionId}`);

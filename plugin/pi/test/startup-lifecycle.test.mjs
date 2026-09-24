@@ -123,6 +123,7 @@ async function withFixture(options, run) {
     await writeFile(spawnLog, "", "utf8");
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
+      options.requests?.push({ method: request.method, url: request.url });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : (options.healthBody ?? { instance_id: "00000000000000000000000000000000" })));
     });
@@ -156,6 +157,38 @@ async function countSpawns(spawnLog) {
   const log = await readFile(spawnLog, "utf8");
   return log.split("\n").filter((line) => line === "serve").length;
 }
+
+test("reload shutdown preserves the live session for its same-ID successor", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, requests }, async ({ hooks, ctx }) => {
+    await hooks.get("session_start")({}, ctx);
+    await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "A prompt long enough to register" }, ctx);
+    await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+    await hooks.get("session_start")({ reason: "reload" }, ctx);
+    await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "A second prompt long enough to register" }, ctx);
+    assert.equal(requests.filter(({ url }) => url === "/sessions/session-startup/end").length, 0);
+    await hooks.get("session_shutdown")({ reason: "quit" }, ctx);
+    assert.equal(requests.filter(({ url }) => url === "/sessions/session-startup/end").length, 1);
+  });
+});
+
+test("reload shutdown does not try terminal delivery while Engram is offline", async () => {
+  await withFixture({ exitCode: 1 }, async ({ hooks, ctx }) => {
+    const originalFetch = globalThis.fetch;
+    const attemptedEnds = [];
+    globalThis.fetch = (input, init) => {
+      if (String(input).endsWith("/sessions/session-startup/end")) attemptedEnds.push(init);
+      return originalFetch(input, init);
+    };
+    try {
+      await assert.doesNotReject(hooks.get("session_shutdown")({ reason: "reload" }, ctx));
+      assert.equal(attemptedEnds.length, 0);
+      await assert.doesNotReject(hooks.get("session_start")({ reason: "reload" }, ctx));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
 
 test("an initially healthy Engram provider publishes ready status", async () => {
   await withFixture({ readyServer: true }, async ({ hooks, ctx, statusCalls }) => {
