@@ -290,6 +290,71 @@ func TestInjectMCPPreservesExistingServersAndKeys(t *testing.T) {
 	}
 }
 
+func TestInstallCommandCodePreservesExistingUserConfig(t *testing.T) {
+	stubRegistryEnv(t)
+	mcpPath := commandcodeMCPPath()
+	agentsPath := commandcodeAgentsPath()
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0755); err != nil {
+		t.Fatalf("create CommandCode directory: %v", err)
+	}
+	const existingMCP = `{"theme":"dark","mcpServers":{"other":{"command":"other-server","args":["serve"]}}}`
+	if err := os.WriteFile(mcpPath, []byte(existingMCP), 0644); err != nil {
+		t.Fatalf("seed MCP config: %v", err)
+	}
+	const userInstructions = "# My preferences\n\nKeep this instruction.\n"
+	if err := os.WriteFile(agentsPath, []byte(userInstructions), 0644); err != nil {
+		t.Fatalf("seed user instructions: %v", err)
+	}
+
+	for range 2 {
+		if _, err := Install("commandcode"); err != nil {
+			t.Fatalf("Install(commandcode): %v", err)
+		}
+	}
+
+	raw, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("parse MCP config: %v", err)
+	}
+	if string(config["theme"]) != `"dark"` {
+		t.Errorf("existing top-level setting changed: %s", config["theme"])
+	}
+	var servers map[string]json.RawMessage
+	if err := json.Unmarshal(config["mcpServers"], &servers); err != nil {
+		t.Fatalf("parse MCP servers: %v", err)
+	}
+	var other struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	if err := json.Unmarshal(servers["other"], &other); err != nil {
+		t.Fatalf("parse existing MCP server: %v", err)
+	}
+	if other.Command != "other-server" || len(other.Args) != 1 || other.Args[0] != "serve" {
+		t.Errorf("existing MCP server changed: %#v", other)
+	}
+	entry := readEngramEntry(t, mcpPath, "mcpServers")
+	if entry["transport"] != "stdio" || entry["enabled"] != true {
+		t.Errorf("CommandCode entry missing stdio transport or enabled flag: %#v", entry)
+	}
+
+	instructions, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read user instructions: %v", err)
+	}
+	text := string(instructions)
+	if !strings.HasPrefix(text, userInstructions) {
+		t.Errorf("existing user instructions changed: %q", text)
+	}
+	if strings.Count(text, engramMarkerBegin) != 1 || strings.Count(text, engramMarkerEnd) != 1 {
+		t.Errorf("expected one managed protocol block after two installs: %q", text)
+	}
+}
+
 func TestUpsertMarkerBlockPreservesUserContentAndReplaces(t *testing.T) {
 	resetSetupSeams(t)
 	home := useTestHome(t)
