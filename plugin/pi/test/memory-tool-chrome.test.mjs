@@ -104,3 +104,121 @@ test("renderResultText shows running and error states compactly", () => {
   assert.equal(renderResultText("mem_search", {}, { isPartial: true }), "↳ search…");
   assert.equal(renderResultText("mem_save", { content: [{ type: "text", text: "server down" }] }, { isError: true }), "↳ ✗ server down");
 });
+
+// ---------------------------------------------------------------------------
+// Box chrome (opt-in via ENGRAM_CHROME=box in index.ts; renderCallText and
+// renderResultText themselves only ever act on an explicit `width` argument).
+
+// Local, test-only helpers, kept independent of memory-tool-chrome.js's own
+// (unexported) stripAnsi/visibleWidth so the assertions below don't just
+// restate the implementation under test. hasAnsi uses a fresh non-global
+// regex literal per call rather than reusing one with the "g" flag, since a
+// shared global regex's .test() carries lastIndex state across calls.
+function stripAnsiOf(text) {
+  return text.replaceAll(/\x1b\[[0-9;]*m/g, "");
+}
+function hasAnsi(text) {
+  return /\x1b\[[0-9;]*m/.test(text);
+}
+const wideGraphemeRe = /\p{Extended_Pictographic}|\p{Emoji_Presentation}/u;
+const segmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+function visibleWidthOf(text) {
+  let width = 0;
+  for (const { segment } of segmenter.segment(stripAnsiOf(text))) width += wideGraphemeRe.test(segment) ? 2 : 1;
+  return width;
+}
+
+const searchResult = { details: { data: [{ id: 1 }, { id: 2 }] } };
+const PINK_ESCAPE = "\x1b[38;5;205m";
+
+test("with no width argument, box chrome functions still return today's exact compact strings", () => {
+  assert.equal(renderCallText("mem_search", { query: "auth model" }), '🧠 search “auth model” …');
+  assert.equal(renderResultText("mem_search", searchResult, {}), "↳ ✓ 2 results");
+});
+
+test("a numeric width draws a closed four-sided box split across call and result", () => {
+  const callLines = renderCallText("mem_search", { query: "auth model" }, 60).split("\n");
+  const resultLines = renderResultText("mem_search", searchResult, {}, 60).split("\n");
+
+  assert.equal(callLines.length, 2);
+  assert.equal(resultLines.length, 2);
+
+  const [top, callText] = callLines.map(stripAnsiOf);
+  const [resultText, bottom] = resultLines.map(stripAnsiOf);
+
+  assert.ok(top.startsWith("╔") && top.endsWith("╗"), top);
+  assert.ok(callText.startsWith("║") && callText.endsWith("║"), callText);
+  assert.ok(resultText.startsWith("║") && resultText.endsWith("║"), resultText);
+  assert.ok(bottom.startsWith("╚") && bottom.endsWith("╝"), bottom);
+  assert.match(callText, /🧠/);
+});
+
+test("every box line measures exactly the requested width (ANSI-stripped), including the emoji line", () => {
+  const width = 60;
+  const lines = [
+    ...renderCallText("mem_search", { query: "auth model" }, width).split("\n"),
+    ...renderResultText("mem_search", searchResult, {}, width).split("\n"),
+  ];
+  for (const line of lines) assert.equal(visibleWidthOf(line), width, line);
+});
+
+test("top and bottom borders have the same codepoint count as each other once ANSI is stripped", () => {
+  const width = 60;
+  const top = renderCallText("mem_search", { query: "auth model" }, width).split("\n")[0];
+  const bottom = renderResultText("mem_search", searchResult, {}, width).split("\n")[1];
+  // Raw codepoint counts differ here because the call border is bold (a
+  // longer escape sequence) and the result border isn't -- escapes carry no
+  // visible width, so the comparison that matters is on the stripped string.
+  assert.equal([...stripAnsiOf(top)].length, [...stripAnsiOf(bottom)].length);
+});
+
+test("box lines carry the pink 205 escape while the default compact path carries none", () => {
+  const width = 60;
+  const boxedCall = renderCallText("mem_search", { query: "auth model" }, width);
+  const boxedResult = renderResultText("mem_search", searchResult, {}, width);
+  assert.ok(boxedCall.includes(PINK_ESCAPE), boxedCall);
+  assert.ok(boxedResult.includes(PINK_ESCAPE), boxedResult);
+  assert.ok(hasAnsi(boxedCall));
+  assert.ok(hasAnsi(boxedResult));
+
+  const compactCall = renderCallText("mem_search", { query: "auth model" });
+  const compactResult = renderResultText("mem_search", searchResult, {});
+  assert.equal(hasAnsi(compactCall), false);
+  assert.equal(hasAnsi(compactResult), false);
+});
+
+test("too-small or absent width falls back to the compact single-line form without throwing", () => {
+  const compactCall = '🧠 search “auth model” …';
+  const compactResult = "↳ ✓ 2 results";
+
+  assert.equal(renderCallText("mem_search", { query: "auth model" }), compactCall);
+  assert.equal(renderCallText("mem_search", { query: "auth model" }, 2), compactCall);
+  assert.equal(renderResultText("mem_search", searchResult, {}), compactResult);
+  assert.equal(renderResultText("mem_search", searchResult, {}, 2), compactResult);
+
+  assert.doesNotThrow(() => renderCallText("mem_search", { query: "auth model" }, 0));
+  assert.doesNotThrow(() => renderResultText("mem_search", searchResult, {}, -5));
+});
+
+test("box chrome preserves expanded and partial result behavior", () => {
+  const expandedResult = {
+    content: [{ type: "text", text: "full details\nwith more content" }],
+    details: { data: [{ id: 1 }] },
+  };
+  const width = 60;
+
+  const framedExpanded = renderResultText("mem_search", expandedResult, { expanded: true }, width);
+  assert.ok(framedExpanded.endsWith("\n\nfull details\nwith more content"));
+  const framedLines = framedExpanded.split("\n").slice(0, 2).map(stripAnsiOf);
+  assert.ok(framedLines[1].startsWith("╚") && framedLines[1].endsWith("╝"));
+
+  // isPartial keeps its exact status wording ("search…"); the box itself
+  // still closes because a result component is mounted -- only a call with
+  // no result component at all stays open at the bottom (see the box-chrome
+  // comment above renderCallText).
+  const framedPartial = renderResultText("mem_search", {}, { isPartial: true }, width).split("\n").map(stripAnsiOf);
+  assert.equal(framedPartial.length, 2);
+  assert.match(framedPartial[0], /search…/);
+  assert.ok(framedPartial[1].startsWith("╚") && framedPartial[1].endsWith("╝"));
+  assert.equal(renderResultText("mem_search", {}, { isPartial: true }), "↳ search…");
+});

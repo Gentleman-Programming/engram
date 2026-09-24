@@ -25,6 +25,15 @@ const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 
+// Opt-in alternative chrome for mem_* tool calls: a closed, full-width box
+// instead of the default compact one-line-per-call/result form (see
+// memory-tool-chrome.js for the box-drawing itself). Unset by default so
+// this stays byte-identical to today's output -- this is a PR to a repo we
+// don't own, so it must not change anyone's look without them asking for
+// it. Named ENGRAM_CHROME to match the existing ENGRAM_URL/ENGRAM_BIN/
+// ENGRAM_PORT convention above rather than introducing a new prefix.
+const ENGRAM_CHROME_BOX = optionalEnvironmentValue(process.env.ENGRAM_CHROME) === "box";
+
 // Writes are single-attempt: once dispatched, their server-side outcome may be unknown.
 const ENGRAM_WRITE_TIMEOUT_MS = 3000;
 const ENGRAM_READ_TIMEOUT_MS = 10000;
@@ -1625,10 +1634,19 @@ function registerMemoryTools(pi: ExtensionAPI): void {
         return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal);
       },
       renderCall(args) {
-        return new Text(renderCallText(toolName, args), 0, 0);
+        if (!ENGRAM_CHROME_BOX) return new Text(renderCallText(toolName, args), 0, 0);
+        // Text() has fixed content and never learns the terminal width, so
+        // the box chrome needs a width-aware component instead. Pi accepts
+        // any plain duck-typed { render(width), invalidate() } object here.
+        return { render: (width: number) => renderCallText(toolName, args, width).split("\n"), invalidate() {} };
       },
       renderResult(result, options, _theme, context) {
-        return new Text(renderResultText(toolName, result, { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError }), 0, 0);
+        const renderOptions = { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError };
+        if (!ENGRAM_CHROME_BOX) return new Text(renderResultText(toolName, result, renderOptions), 0, 0);
+        return {
+          render: (width: number) => renderResultText(toolName, result, renderOptions, width).split("\n"),
+          invalidate() {},
+        };
       },
     });
   }
