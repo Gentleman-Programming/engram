@@ -1309,18 +1309,34 @@ func TestCmdSyncHonorsProcessProjectOverride(t *testing.T) {
 
 func TestMainExportImportHelp(t *testing.T) {
 	for _, tc := range []struct {
-		command string
-		present bool
-		want    []string
+		command  string
+		trailing bool
+		extra    bool
+		present  bool
+		want     []string
 	}{
 		{command: "export", want: []string{"Usage: engram export", "--project", "--all"}},
 		{command: "export", present: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, present: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, extra: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, extra: true, present: true, want: []string{"Usage: engram export", "--project", "--all"}},
 		{command: "import", want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
 		{command: "import", present: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, present: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, extra: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, extra: true, present: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
 	} {
 		name := tc.command + "/absent"
 		if tc.present {
 			name = tc.command + "/present"
+		}
+		if tc.trailing {
+			name += "/trailing"
+		}
+		if tc.extra {
+			name += "/extra"
 		}
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1329,6 +1345,12 @@ func TestMainExportImportHelp(t *testing.T) {
 			db := filepath.Join(dir, "engram.db")
 			if tc.present {
 				if err := os.WriteFile(db, []byte("untouched database"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			file := filepath.Join(dir, "backup.json")
+			if tc.trailing && tc.present {
+				if err := os.WriteFile(file, []byte("untouched file"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1355,7 +1377,18 @@ func TestMainExportImportHelp(t *testing.T) {
 			t.Cleanup(func() {
 				checkForUpdates, storeDefaultConfig, migrateOrphanedDatabase, storeNew, exitFunc = oldUpdate, oldConfig, oldMigration, oldStore, oldExit
 			})
-			withArgs(t, "engram", tc.command, "--help")
+			args := []string{"engram", tc.command, "--help"}
+			if tc.trailing {
+				args = []string{"engram", tc.command, file, "--help"}
+				if tc.extra {
+					extra := "--all"
+					if tc.command == "import" {
+						extra = "extra"
+					}
+					args = []string{"engram", tc.command, file, extra, "--help"}
+				}
+			}
+			withArgs(t, args...)
 			stdout, stderr := captureOutput(t, main)
 			if stderr != "" {
 				t.Errorf("stderr = %q", stderr)
@@ -1375,6 +1408,9 @@ func TestMainExportImportHelp(t *testing.T) {
 			wantCount := 0
 			if tc.present {
 				wantCount = 1
+				if tc.trailing {
+					wantCount++
+				}
 			}
 			if len(entries) != wantCount {
 				t.Errorf("directory entries = %v, want %d", entries, wantCount)
@@ -1386,6 +1422,16 @@ func TestMainExportImportHelp(t *testing.T) {
 				}
 				if string(content) != "untouched database" {
 					t.Errorf("database content = %q, want untouched database", content)
+				}
+			}
+			if tc.trailing {
+				content, err := os.ReadFile(file)
+				if tc.present {
+					if err != nil || string(content) != "untouched file" {
+						t.Errorf("file content = %q, error = %v; want untouched file", content, err)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("absent file read error = %v, want os.ErrNotExist", err)
 				}
 			}
 		})
