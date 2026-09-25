@@ -495,7 +495,7 @@ func (s *Server) routes() {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.Stats(); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, http.StatusInternalServerError, "health check failed")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
@@ -1319,6 +1319,23 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
+		var unknown *projectpkg.UnknownProjectError
+		if errors.As(err, &unknown) {
+			// The available-project lookup can fail independently of resolution.
+			available, listErr := s.store.ListProjectNames()
+			if listErr != nil {
+				jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
+				return
+			}
+			jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", unknown.Name), map[string]any{
+				"code": "unknown_project", "available_projects": available,
+			})
+			return
+		}
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
+			return
+		}
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
@@ -1329,7 +1346,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats, err = loadServerStats(s.store)
 	}
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, http.StatusInternalServerError, "stats unavailable")
 		return
 	}
 

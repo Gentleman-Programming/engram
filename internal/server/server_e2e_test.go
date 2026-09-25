@@ -1223,7 +1223,10 @@ func TestServerHandlersReturn500WhenStoreClosed(t *testing.T) {
 	if healthResp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("expected 500 health with closed store, got %d", healthResp.StatusCode)
 	}
-	healthResp.Body.Close()
+	healthBody := decodeJSON[map[string]any](t, healthResp)
+	if healthBody["error"] != "health check failed" {
+		t.Fatalf("closed store health body = %v", healthBody)
+	}
 
 	statsResp, err := client.Get(ts.URL + "/stats")
 	if err != nil {
@@ -1232,7 +1235,22 @@ func TestServerHandlersReturn500WhenStoreClosed(t *testing.T) {
 	if statsResp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("expected 500 stats with closed store, got %d", statsResp.StatusCode)
 	}
-	statsResp.Body.Close()
+	statsBody := decodeJSON[map[string]any](t, statsResp)
+	if statsBody["error"] != "stats unavailable" {
+		t.Fatalf("closed store stats body = %v", statsBody)
+	}
+
+	projectResp, err := client.Get(ts.URL + "/stats?project=alpha")
+	if err != nil {
+		t.Fatalf("project stats closed store: %v", err)
+	}
+	if projectResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("closed store project stats = %d, want 500", projectResp.StatusCode)
+	}
+	projectBody := decodeJSON[map[string]any](t, projectResp)
+	if projectBody["error"] != "project resolution failed" || projectBody["code"] != "project_resolution_failed" {
+		t.Fatalf("closed store project stats body = %v", projectBody)
+	}
 }
 
 func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
