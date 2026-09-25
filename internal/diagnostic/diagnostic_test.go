@@ -728,6 +728,45 @@ func TestInvalidSessionIdentityCheckReportsSourceReferencesAndJournal(t *testing
 	}
 }
 
+func TestInvalidSessionIdentityReplacementPreservesOtherFindings(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work'),(' ','engram','/other')`); err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Store: s, Project: "engram"}
+	report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: ReasonQuarantinedPulledSessionIdentity, Message: "remote evidence remains"})
+	planned := PlanSessionIdentityReplacement(scope, report, plan, "", true, "canonical")
+	if planned.IdentityRepair == nil || len(planned.Skipped) != 2 || planned.Skipped[0].SessionID != " " || planned.Skipped[1].ReasonCode != ReasonQuarantinedPulledSessionIdentity {
+		t.Fatalf("plan=%+v", planned)
+	}
+}
+
+func TestInvalidSessionIdentityRepairPlanNoReplacementPreservesGuidance(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work')`); err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Store: s, Project: "engram"}
+	report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
+		plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, mode)
+		if err != nil || plan.Status != "noop" || plan.IdentityRepair != nil || len(plan.Blockers) != 0 || len(plan.Skipped) != 1 || !strings.Contains(plan.Skipped[0].Message, "--replacement-id") {
+			t.Fatalf("mode=%s plan=%+v err=%v", mode, plan, err)
+		}
+	}
+}
+
 func TestInvalidSessionIdentityEvidenceAttributesOnlyMatchingJournalMutations(t *testing.T) {
 	s := newDiagnosticTestStore(t)
 	if _, err := s.DB().Exec(`

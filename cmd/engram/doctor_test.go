@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -547,6 +548,217 @@ func TestCmdDoctorRepairCleansForeignSyncTargetsWithoutDroppingJournal(t *testin
 	}
 	if target != store.DefaultSyncTargetKey || payload != `{"sync_id":"foreign-journal","project":"valid"}` {
 		t.Fatalf("journal changed target=%q payload=%q", target, payload)
+	}
+}
+
+func TestCmdDoctorRepairInvalidSessionIdentityLegacyJournal(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','alpha','/work'); INSERT INTO sync_enrolled_projects(project) VALUES ('alpha')`); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(entity, key, payload string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud',?,?,'upsert',?,'local','alpha')`, entity, key, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("session", "", `{"id":"","project":"alpha","directory":"/work"}`)
+	for i := 0; i < 7; i++ {
+		key := fmt.Sprintf("obs-%d", i)
+		if _, err := db.Exec(`INSERT INTO observations(sync_id,session_id,type,title,content,project) VALUES (?,'','note','title','body','alpha')`, key); err != nil {
+			t.Fatal(err)
+		}
+		insert("observation", key, fmt.Sprintf(`{"sync_id":%q,"session_id":"","project":"alpha","scope":"project","type":"note","title":"title","content":"body"}`, key))
+	}
+	for i := 0; i < 4; i++ {
+		key := fmt.Sprintf("prompt-%d", i)
+		if _, err := db.Exec(`INSERT INTO user_prompts(sync_id,session_id,content,project) VALUES (?,'','hello','alpha')`, key); err != nil {
+			t.Fatal(err)
+		}
+		insert("prompt", key, fmt.Sprintf(`{"sync_id":%q,"session_id":"","project":"alpha","content":"hello"}`, key))
+	}
+	run := func(mode string) map[string]any {
+		t.Helper()
+		withArgs(t, "engram", "doctor", "repair", "--project", "alpha", "--check", "invalid_session_identity", "--replacement-id", "canonical", mode)
+		out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatal(stderr)
+		}
+		return decodeRepairPlan(t, out)
+	}
+	for _, mode := range []string{"--plan", "--dry-run"} {
+		plan := run(mode)
+		identity := plan["identity_repair"].(map[string]any)
+		if identity["retired_mutations"] != float64(12) || identity["observations"] != float64(7) || identity["prompts"] != float64(4) || identity["enrolled"] != true {
+			t.Fatalf("%s: %v", mode, plan)
+		}
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM sessions WHERE id=''`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("plan mutated source: %d %v", count, err)
+		}
+	}
+	applied := run("--apply")
+	if applied["status"] != "applied" {
+		t.Fatal(applied)
+	}
+	var retired, published, children int
+	for _, q := range []struct {
+		query string
+		dest  *int
+	}{{`SELECT count(*) FROM sync_mutations WHERE disposition_reason='session_identity_migrated'`, &retired}, {`SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND project='alpha'`, &published}, {`SELECT count(*) FROM observations WHERE session_id='canonical'`, &children}} {
+		if err := db.QueryRow(q.query).Scan(q.dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if retired != 12 || published != 12 || children != 7 {
+		t.Fatalf("retired=%d published=%d observations=%d", retired, published, children)
+	}
+}
+
+func TestCmdDoctorRepairInvalidSessionIdentityBlockers(t *testing.T) {
+	tests := []struct {
+		name                  string
+		sources               []string
+		replacement, selector string
+		selectSource          bool
+		want                  string
+	}{
+		{name: "ambiguous", sources: []string{"", " "}, replacement: "canonical", want: "ambiguous_or_missing_source"},
+		{name: "exact empty source", sources: []string{"", " "}, replacement: "canonical", selector: "", selectSource: true, want: "planned"},
+		{name: "collision", sources: []string{"", "canonical"}, replacement: "canonical", want: "identity_repair_blocked"},
+		{name: "invalid replacement", sources: []string{""}, replacement: "  ", want: "identity_repair_blocked"},
+		{name: "missing source", sources: []string{" "}, replacement: "canonical", selector: "", selectSource: true, want: "ambiguous_or_missing_source"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			initDoctorStore(t, cfg)
+			db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range tc.sources {
+				if _, err := db.Exec(`INSERT INTO sessions(id,project,directory) VALUES (?,'alpha','/work')`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = db.Close()
+			args := []string{"engram", "doctor", "repair", "--project", "alpha", "--check", "invalid_session_identity", "--replacement-id", tc.replacement, "--plan"}
+			if tc.selectSource {
+				args = append(args, "--source-id", tc.selector)
+			}
+			withArgs(t, args...)
+			out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+			if stderr != "" {
+				t.Fatal(stderr)
+			}
+			plan := decodeRepairPlan(t, out)
+			if tc.want == "planned" {
+				if plan["status"] != "planned" || plan["identity_repair"].(map[string]any)["source_id"] != "" {
+					t.Fatal(plan)
+				}
+			} else if plan["status"] != "blocked" || plan["blockers"].([]any)[0].(map[string]any)["reason_code"] != tc.want {
+				t.Fatal(plan)
+			}
+		})
+	}
+}
+
+func TestCmdDoctorRepairInvalidSessionIdentityPreservesUnrepairedFindings(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','alpha','/work'),(' ','alpha','/other')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	for _, mode := range []string{"--plan", "--apply"} {
+		withArgs(t, "engram", "doctor", "repair", "--project", "alpha", "--check", "invalid_session_identity", "--source-id", "", "--replacement-id", "canonical", mode)
+		out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatal(stderr)
+		}
+		plan := decodeRepairPlan(t, out)
+		if mode == "--apply" {
+			if plan["status"] != "partial" {
+				t.Fatalf("apply=%v", plan)
+			}
+		} else if plan["status"] != "planned" {
+			t.Fatalf("plan=%v", plan)
+		}
+		skipped, ok := plan["skipped"].([]any)
+		if !ok || len(skipped) != 1 || skipped[0].(map[string]any)["session_id"] != " " {
+			t.Fatalf("unrepaired source lost: %v", plan)
+		}
+	}
+	withArgs(t, "engram", "doctor", "--json", "--project", "alpha", "--check", "invalid_session_identity")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" || decodeDoctorReport(t, out)["status"] != "blocked" {
+		t.Fatalf("doctor=%s stderr=%s", out, stderr)
+	}
+}
+
+func TestCmdDoctorRepairInvalidSessionIdentityRejectsIrrelevantFlags(t *testing.T) {
+	for _, flag := range []string{"--replacement-id", "--source-id"} {
+		t.Run(flag, func(t *testing.T) {
+			cfg := testConfig(t)
+			old := exitFunc
+			exited := false
+			exitFunc = func(int) { exited = true }
+			t.Cleanup(func() { exitFunc = old })
+			withArgs(t, "engram", "doctor", "repair", "--project", "alpha", "--check", "orphaned_observation_session", "--plan", flag, "value")
+			_, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+			if !exited || !strings.Contains(stderr, "identity flags require") {
+				t.Fatalf("stderr=%q exited=%v", stderr, exited)
+			}
+		})
+	}
+}
+
+func TestCmdDoctorRepairInvalidSessionIdentityPlanApply(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/tmp/engram'); INSERT INTO observations(sync_id,session_id,type,title,content,project,scope,normalized_hash,revision_count,duplicate_count,created_at,updated_at) VALUES ('legacy','','bugfix','title','content','engram','project','legacy',1,1,datetime('now'),datetime('now'));`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	for _, mode := range []string{"--plan", "--dry-run"} {
+		withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "invalid_session_identity", "--replacement-id", "canonical-1", mode)
+		out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatal(stderr)
+		}
+		plan := decodeRepairPlan(t, out)
+		identity, ok := plan["identity_repair"].(map[string]any)
+		if !ok || identity["source_id"] != "" || identity["replacement_id"] != "canonical-1" || identity["observations"] != float64(1) {
+			t.Fatalf("plan=%v", plan)
+		}
+	}
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "invalid_session_identity", "--replacement-id", "canonical-1", "--apply")
+	out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatal(stderr)
+	}
+	if plan := decodeRepairPlan(t, out); plan["status"] != "applied" || plan["backup_path"] == nil {
+		t.Fatalf("apply=%v", plan)
+	}
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "invalid_session_identity")
+	out, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" || decodeDoctorReport(t, out)["status"] != "ok" {
+		t.Fatalf("doctor=%s stderr=%s", out, stderr)
 	}
 }
 

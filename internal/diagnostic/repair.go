@@ -90,6 +90,8 @@ type RepairPlan struct {
 	Actions             []ProjectReclassifyAction          `json:"actions"`
 	TargetActions       []SyncTargetCleanupAction          `json:"target_actions,omitempty"`
 	PlaceholderSessions []store.OrphanedSessionPlaceholder `json:"placeholder_sessions,omitempty"`
+	IdentityRepair      *store.SessionIdentityRepairPlan   `json:"identity_repair,omitempty"`
+	Blockers            []RepairSkip                       `json:"blockers,omitempty"`
 	Skipped             []RepairSkip                       `json:"skipped,omitempty"`
 	Counts              RepairCounts                       `json:"counts"`
 	BackupPath          string                             `json:"backup_path,omitempty"`
@@ -195,9 +197,15 @@ func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {
 		for _, finding := range check.Findings {
 			switch finding.ReasonCode {
 			case CheckInvalidSessionIdentity:
+				var evidence store.InvalidSessionIdentityEvidence
+				if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+					plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+					continue
+				}
 				plan.Skipped = append(plan.Skipped, RepairSkip{
+					SessionID:  evidence.SessionID,
 					ReasonCode: "cannot_repair_without_explicit_canonical_session_id",
-					Message:    "cannot repair without explicit canonical session ID; no supported repair input exists",
+					Message:    "supply --replacement-id with a valid unused canonical session ID to plan this local repair",
 				})
 			case ReasonQuarantinedPulledSessionIdentity:
 				// The pull already skipped this mutation and advanced its
@@ -210,6 +218,55 @@ func planInvalidSessionIdentityRepair(plan *RepairPlan, report Report) {
 			}
 		}
 	}
+}
+
+// PlanSessionIdentityReplacement selects exactly one diagnostic source and
+// delegates collision and journal safety checks to the store's read-only plan.
+// An explicit source selector distinguishes the empty ID from no selection.
+func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan, sourceID string, sourceSelected bool, replacementID string) RepairPlan {
+	var sources []string
+	for _, check := range report.Checks {
+		for _, finding := range check.Findings {
+			if finding.ReasonCode != CheckInvalidSessionIdentity {
+				continue
+			}
+			var evidence store.InvalidSessionIdentityEvidence
+			if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+				plan.Status = "blocked"
+				plan.Blockers = append(plan.Blockers, RepairSkip{ReasonCode: "invalid_doctor_evidence", Message: err.Error()})
+				return plan
+			}
+			if !sourceSelected || evidence.SessionID == sourceID {
+				sources = append(sources, evidence.SessionID)
+			}
+		}
+	}
+	if len(sources) != 1 {
+		plan.Status = "blocked"
+		plan.Blockers = append(plan.Blockers, RepairSkip{ReasonCode: "ambiguous_or_missing_source", Message: "select one exact source with --source-id (use --source-id '' for the empty identity)"})
+		return plan
+	}
+	identity, err := scope.Store.PlanSessionIdentityRepair(sources[0], replacementID)
+	if err != nil {
+		plan.Status = "blocked"
+		plan.Blockers = append(plan.Blockers, RepairSkip{SessionID: sources[0], ReasonCode: "identity_repair_blocked", Message: err.Error()})
+		return plan
+	}
+	plan.IdentityRepair = &identity
+	remaining := plan.Skipped[:0]
+	removed := false
+	for _, skipped := range plan.Skipped {
+		if !removed && skipped.ReasonCode == "cannot_repair_without_explicit_canonical_session_id" && skipped.SessionID == sources[0] {
+			removed = true
+			continue
+		}
+		remaining = append(remaining, skipped)
+	}
+	plan.Skipped = remaining
+	plan.Counts.SessionsPlanned = 1
+	plan.Counts.ObservationsPlanned = identity.Observations
+	plan.Counts.PromptsPlanned = identity.Prompts
+	return plan
 }
 
 func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {
