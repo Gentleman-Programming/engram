@@ -147,7 +147,9 @@ For `sync_mutation_required_fields`, `repairs` lists title-only observation upse
     "prompts_planned": 1,
     "sessions_applied": 0,
     "observations_applied": 0,
-    "prompts_applied": 0
+    "prompts_applied": 0,
+    "corrected_mutations_planned": 0,
+    "corrected_mutations_applied": 0
   },
   "backup_path": ""
 }
