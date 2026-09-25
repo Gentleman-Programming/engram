@@ -730,10 +730,22 @@ This path requires exactly one enabled managed human admin and exactly one activ
 
 #### Managed admin API response JSON
 
-The managed-admin API returns snake_case JSON keys for user and grant objects:
+These JSON routes require a managed-token admin principal; legacy admins and managed members cannot use them. Successful response shapes are:
 
-- `POST /admin/users` returns one user object and `GET /admin/users` returns an array of user objects. Each object contains `principal_id`, `username`, `email`, `display_name`, `role`, `enabled`, and `created_at`.
-- `POST /admin/users/{principalID}/grants` returns one grant object and `GET /admin/users/{principalID}/grants` returns an array of grant objects. Each object contains `principal_id`, `project`, `granted_by_principal_id`, and `created_at`.
+| Method | Path | Success JSON |
+| --- | --- | --- |
+| `GET` | `/admin/users` | Array of users |
+| `POST` | `/admin/users` | User object |
+| `POST` | `/admin/users/{principalID}/enable` | `{"status":"ok","principal_id":...,"enabled":true}` |
+| `POST` | `/admin/users/{principalID}/disable` | `{"status":"ok","principal_id":...,"enabled":false}` |
+| `GET` | `/admin/users/{principalID}/tokens` | Array of token metadata; no raw token or token hash |
+| `POST` | `/admin/users/{principalID}/tokens` | `{"raw_token":...,"token":...}`; raw token is returned only on creation, alongside token metadata (never the hash) |
+| `POST` | `/admin/tokens/{tokenID}/revoke` | `{"status":"ok","token_id":...}` |
+| `GET` | `/admin/users/{principalID}/grants` | Array of grants |
+| `POST` | `/admin/users/{principalID}/grants` | Grant object |
+| `POST` | `/admin/users/{principalID}/grants/{project}/revoke` | `{"status":"ok","principal_id":...,"project":...}` |
+
+User objects contain `principal_id`, `username`, `email`, `display_name`, `role`, `enabled`, and `created_at`; grant objects contain `principal_id`, `project`, `granted_by_principal_id`, and `created_at`. Token metadata contains `id`, `principal_id`, `token_prefix`, `name`, `created_by_principal_id`, and `created_at`, with optional usage/revocation fields. The `POST` payloads are JSON: user creation accepts `username`, `email`, `display_name`, `role`; token creation accepts `name`; token revocation accepts `reason`; grant creation accepts `project`. Enable, disable, and grant revocation use path parameters without a request payload.
 
 Cloud sync is still local-first and explicit:
 
