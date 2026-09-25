@@ -62,7 +62,7 @@ Closes #
 
 ## 🤖 Automated Checks
 
-After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applicable platform checks. These automated statuses remain pending until the actual checks run; do not claim a pass from local evidence. All required checks must pass before merge:
+After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applicable platform checks. These automated statuses remain pending until the actual checks run; do not claim a pass from local evidence. Windows checks run for PRs but not merge groups, and are not among the six required contexts. All required checks must pass before merge:
 
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
@@ -74,6 +74,8 @@ After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applica
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
 | **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
 | **Lint** | golangci-lint reports no new findings | ⏳ |
+| **Windows Setup Test** | Windows setup preserves absolute paths and MCP job-object parent-lifetime tests pass | ⏳ |
+| **Cloud Sync Wrapper Tests (Windows)** | Cloud sync wrapper and missing-PowerShell-Engram tests pass on Windows | ⏳ |
 
 ---
 

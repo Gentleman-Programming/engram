@@ -133,7 +133,7 @@ All boxes must be checked:
 
 ## Automated Checks
 
-The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#step-4-automated-pr-checks); all six must pass before merge. Lint and transient-artifact checks also run on PRs but are not required merge-group contexts. Report their actual outcomes without treating pending checks as passed.
+The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#step-4-automated-pr-checks); all six must pass before merge. Lint, transient-artifact checks, `Windows Setup Test`, and `Cloud Sync Wrapper Tests (Windows)` run for PRs but not merge groups, and are not among the six required contexts. Report their actual outcomes without treating pending checks as passed.
 
 | Check | Job name | What it verifies |
 |-------|----------|-----------------|
@@ -145,6 +145,8 @@ The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#
 | CI | `E2E Tests` | `go test -tags e2e ./internal/server/...` passes |
 | CI | `Plugin Tests` | `npm test` passes in `plugin/pi` |
 | CI | `Lint` | golangci-lint reports no new findings in Go changes |
+| CI | `Windows Setup Test` | Windows setup preserves absolute paths and MCP job-object parent-lifetime tests pass |
+| CI | `Cloud Sync Wrapper Tests (Windows)` | Cloud sync wrapper and missing-PowerShell-Engram tests pass on Windows |
 
 ---
 
