@@ -577,6 +577,7 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 		{"TestSubagentStopSkipsEmptyPayload", "sess-empty", "", "", ""},
 		{"TestSubagentStopPreservesShellMetacharacters", "sess-quoting", tricky, "", tricky},
 		{"TestSubagentStopPreservesBareCR", "sess-bare-cr", "before\rafter", "", "before\rafter"},
+		{"TestSubagentStopPreservesOriginalCRLF", "sess-crlf", "first\r\nsecond", "", "first\r\nsecond"},
 		{"TestSubagentStopPreservesLFAndBareCR", "sess-mixed", "first\nsecond\rthird", "", "first\nsecond\rthird"},
 		{"TestSubagentStopPreservesTrailingLF", "sess-trailing", "first\n", "", "first\n"},
 	} {
