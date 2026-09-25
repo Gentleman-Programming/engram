@@ -82,6 +82,27 @@ func nudgeFilePath(sessionID string) string {
 	return filepath.Join(hookStateDir(), "engram-claude-"+sessionID+"-last-nudge")
 }
 
+func TestNewSessionIDPreservesUnrelatedMarker(t *testing.T) {
+	requireHookBinaries(t)
+	outerID := newSessionID(t)
+	outerMarker := stateFilePath(outerID)
+	file, err := os.OpenFile(outerMarker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("create outer marker exclusively: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close outer marker: %v", err)
+	}
+
+	t.Run("inner cleanup", func(t *testing.T) {
+		innerID := newSessionID(t)
+		markSessionBootstrapped(t, innerID)
+	})
+	if _, err := os.Stat(outerMarker); err != nil {
+		t.Fatalf("outer marker must survive inner cleanup: %v", err)
+	}
+}
+
 // newSessionID creates an unpredictable per-run UUID. Cleanup only removes
 // markers belonging to this invocation, never markers from an earlier run.
 func newSessionID(t *testing.T) string {

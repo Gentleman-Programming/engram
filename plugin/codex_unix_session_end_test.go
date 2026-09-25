@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -139,6 +140,14 @@ func codexTestBash(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("find Git for Windows: %v", err)
 	}
+	path, err := codexTestBashCandidate(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func codexTestBashCandidate(gitPath string) (string, error) {
 	gitDir := filepath.Dir(gitPath)
 	// git.exe can live in cmd, bin, or mingw64/bin depending on installation.
 	for _, candidate := range []string{
@@ -147,11 +156,52 @@ func codexTestBash(t *testing.T) string {
 		filepath.Join(gitDir, "..", "..", "bin", "bash.exe"),
 	} {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return filepath.Clean(candidate)
+			return filepath.Clean(candidate), nil
 		}
 	}
-	t.Fatalf("find Git Bash near git.exe at %s", gitPath)
-	return ""
+	return "", fmt.Errorf("find Git Bash near git.exe at %s", gitPath)
+}
+
+func TestCodexTestBashCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name, gitDir, bashPath string
+		directory, missing bool
+	}{
+		{name: "cmd sibling bin", gitDir: "cmd", bashPath: "bin/bash.exe"},
+		{name: "bin colocated", gitDir: "bin", bashPath: "bin/bash.exe"},
+		{name: "mingw64 sibling bin", gitDir: "mingw64/bin", bashPath: "bin/bash.exe"},
+		{name: "reject directory", gitDir: "cmd", bashPath: "bin/bash.exe", directory: true, missing: true},
+		{name: "no candidate", gitDir: "cmd", missing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			gitPath := filepath.Join(root, filepath.FromSlash(tc.gitDir), "git.exe")
+			if tc.bashPath != "" {
+				candidate := filepath.Join(root, filepath.FromSlash(tc.bashPath))
+				if err := os.MkdirAll(filepath.Dir(candidate), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if tc.directory {
+					if err := os.Mkdir(candidate, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(candidate, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := codexTestBashCandidate(gitPath)
+			if tc.missing {
+				if got != "" || err == nil || err.Error() != "find Git Bash near git.exe at "+gitPath {
+					t.Fatalf("expected no-candidate contract, got %q, %v", got, err)
+				}
+				return
+			}
+			want := filepath.Join(root, filepath.FromSlash(tc.bashPath))
+			if err != nil || got != want {
+				t.Fatalf("candidate = %q, %v; want %q", got, err, want)
+			}
+		})
+	}
 }
 
 func requireCodexUnixTools(t *testing.T, bashPath string) {
