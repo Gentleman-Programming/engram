@@ -22,7 +22,7 @@ const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8"
 
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.15"];
+const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RELEASE_CONTRACT_PATH = fileURLToPath(new URL("./release-contract.mjs", import.meta.url));

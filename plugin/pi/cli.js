@@ -9,6 +9,7 @@ const LEGACY_PACKAGE_NAMES = new Set([
   "npm:gentle-engram@0.1.8",
   "npm:gentle-engram@0.1.11",
   "npm:gentle-engram@0.1.12",
+  "npm:gentle-engram@0.1.14",
   "npm:gentle-engram@0.1.15",
 ]);
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
