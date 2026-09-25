@@ -471,8 +471,42 @@ func ensurePiMCPConfig(mcpPath string) (bool, error) {
 			return false, fmt.Errorf("parse Pi mcpServers: %w", err)
 		}
 	}
-	if _, exists := servers["engram"]; exists {
-		return false, nil
+	if raw, exists := servers["engram"]; exists {
+		// Revalidate instead of blindly preserving: a previously persisted
+		// absolute command can point at a mise install version directory that
+		// `mise up` plus `mise prune` removed, leaving a dead path that fails
+		// to spawn (ENOENT). Only a dead absolute command is repaired, and only
+		// its "command" value is rewritten; missing or relative commands, live
+		// absolute paths, and every other entry key are preserved untouched.
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return false, fmt.Errorf("parse Pi engram MCP server entry: %w", err)
+		}
+		var command string
+		if rawCommand, ok := fields["command"]; ok {
+			if err := json.Unmarshal(rawCommand, &command); err != nil {
+				command = ""
+			}
+		}
+		if command == "" || !filepath.IsAbs(command) {
+			return false, nil
+		}
+		if _, err := statFn(command); err == nil {
+			return false, nil
+		}
+		fields["command"], err = jsonMarshalFn(resolveEngramCommand())
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi Engram MCP command: %w", err)
+		}
+		servers["engram"], err = jsonMarshalFn(fields)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
+		}
+		config["mcpServers"], err = jsonMarshalFn(servers)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
+		}
+		return true, writeJSONConfig(mcpPath, config)
 	}
 	server := map[string]any{
 		"command":     resolveEngramCommand(),
@@ -1439,14 +1473,19 @@ func resolveEngramCommand() string {
 // canonical engram command: it resolves symlinks via filepath.EvalSymlinks and
 // maps a versioned Homebrew/Linuxbrew Cellar path to the stable
 // <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
-// version (see stableHomebrewEngramCommand). Non-Homebrew installs keep their
-// resolved absolute path. It does not call osExecutable() — the caller is
-// responsible for obtaining exe and for any PATH-based fallback on failure.
+// version (see stableHomebrewEngramCommand), and a mise install path to the
+// stable <mise-data-dir>/shims/engram shim that keeps resolving to the active
+// version (see stableMiseEngramCommand). Other installs keep their resolved
+// absolute path. It does not call osExecutable() — the caller is responsible
+// for obtaining exe and for any PATH-based fallback on failure.
 func canonicalEngramCommand(exe string) string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
 	if stable, ok := stableHomebrewEngramCommand(exe); ok {
+		return stable
+	}
+	if stable, ok := stableMiseEngramCommand(exe); ok {
 		return stable
 	}
 	return exe
@@ -1490,6 +1529,45 @@ func stableHomebrewEngramCommand(exe string) (string, bool) {
 	// Everything before "/Cellar/" is the brew prefix, e.g. /opt/homebrew or
 	// /home/linuxbrew/.linuxbrew. The bin symlink lives directly under it.
 	stable := clean[:idx] + "/bin/engram"
+	if _, err := statFn(stable); err == nil {
+		return filepath.FromSlash(stable), true
+	}
+	return "engram", true
+}
+
+// stableMiseEngramCommand maps a mise install path to the stable mise shim
+// "<mise-data-dir>/shims/engram". mise installs live under
+// <mise-data-dir>/installs/engram/<version>/engram and `mise up` plus
+// `mise prune` removes superseded version directories, so baking the resolved
+// path into MCP client configs leaves a stale command that fails to spawn
+// (ENOENT) after an upgrade. The shim is mise's documented launcher entry
+// point and keeps resolving to the active version, so registrations survive
+// upgrades. Unlike the <data-dir>/installs/engram/latest/engram alias it does
+// not depend on which version the user pinned. On Windows the shim carries an
+// .exe extension (<data-dir>/shims/engram.exe), mirrored from the executable
+// base. It returns ("", false) when exe is not a mise install path, so other
+// installs keep their resolved absolute path. When the derived shim does not
+// exist on disk it falls back to the bare "engram" name so the command still
+// resolves via PATH.
+func stableMiseEngramCommand(exe string) (string, bool) {
+	const marker = "/installs/engram/"
+	clean := filepath.ToSlash(filepath.Clean(exe))
+	idx := strings.Index(clean, marker)
+	if idx < 0 {
+		return "", false
+	}
+	base := strings.ToLower(filepath.Base(clean))
+	if base != "engram" && base != "engram.exe" {
+		return "", false
+	}
+	// Everything before "/installs/" is the mise data directory, e.g.
+	// ~/.local/share/mise, ~/.mise, or a custom $MISE_DATA_DIR. The shims
+	// directory lives directly under it.
+	shimName := "engram"
+	if base == "engram.exe" {
+		shimName = "engram.exe"
+	}
+	stable := clean[:idx] + "/shims/" + shimName
 	if _, err := statFn(stable); err == nil {
 		return filepath.FromSlash(stable), true
 	}

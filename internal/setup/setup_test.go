@@ -859,6 +859,196 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	}
 }
 
+// TestEnsurePiMCPConfigRepairsDeadEngramCommand covers the narrow
+// revalidation of a pre-existing mcpServers.engram entry (issue #1423): only a
+// dead absolute command is repaired; live absolute commands and missing or
+// relative commands are preserved untouched, and a missing entry keeps the
+// current creation behavior.
+func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
+	writeExe := func(t *testing.T, dir string) string {
+		t.Helper()
+		exe := filepath.Join(dir, "engram-bin")
+		if err := os.WriteFile(exe, []byte("engram"), 0755); err != nil {
+			t.Fatalf("write executable: %v", err)
+		}
+		return exe
+	}
+
+	t.Run("dead absolute command is repaired", func(t *testing.T) {
+		resetSetupSeams(t)
+		agentDir := t.TempDir()
+		mcpPath := filepath.Join(agentDir, "mcp.json")
+
+		deadCommand := filepath.Join(agentDir, "installs", "engram", "2.1.0", "engram")
+		exe := writeExe(t, agentDir)
+		osExecutable = func() (string, error) { return exe, nil }
+		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp","--tools=agent"],"lifecycle":"lazy","directTools":false},"other":{"command":"other"}}}`, deadCommand)
+		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
+			t.Fatalf("write mcp: %v", err)
+		}
+
+		changed, err := ensurePiMCPConfig(mcpPath)
+		if err != nil {
+			t.Fatalf("ensurePiMCPConfig failed: %v", err)
+		}
+		if !changed {
+			t.Fatalf("expected ensurePiMCPConfig to repair the dead engram command")
+		}
+
+		data, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp after repair: %v", err)
+		}
+		var cfg struct {
+			MCPServers map[string]struct {
+				Command     string   `json:"command"`
+				Args        []string `json:"args"`
+				Lifecycle   string   `json:"lifecycle"`
+				DirectTools bool     `json:"directTools"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parse mcp after repair: %v", err)
+		}
+		entry, ok := cfg.MCPServers["engram"]
+		if !ok {
+			t.Fatalf("expected engram entry after repair, got %s", data)
+		}
+		if entry.Command != exe {
+			t.Fatalf("expected repaired command %q, got %q", exe, entry.Command)
+		}
+		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
+			t.Fatalf("expected args/lifecycle/directTools to be preserved, got %#v", entry)
+		}
+		other, ok := cfg.MCPServers["other"]
+		if !ok || other.Command != "other" {
+			t.Fatalf("expected unrelated server to be preserved, got %#v", cfg.MCPServers["other"])
+		}
+	})
+
+	t.Run("live absolute command is preserved byte-for-byte", func(t *testing.T) {
+		resetSetupSeams(t)
+		agentDir := t.TempDir()
+		mcpPath := filepath.Join(agentDir, "mcp.json")
+
+		exe := writeExe(t, agentDir)
+		osExecutable = func() (string, error) { return exe, nil }
+		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp"],"lifecycle":"eager"},"other":{"command":"other"}}}`, exe)
+		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
+			t.Fatalf("write mcp: %v", err)
+		}
+
+		changed, err := ensurePiMCPConfig(mcpPath)
+		if err != nil {
+			t.Fatalf("ensurePiMCPConfig failed: %v", err)
+		}
+		if changed {
+			t.Fatalf("expected ensurePiMCPConfig to leave a live engram command untouched")
+		}
+		data, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp after no-op: %v", err)
+		}
+		if string(data) != original {
+			t.Fatalf("expected config to stay byte-identical, got %s", data)
+		}
+	})
+
+	t.Run("relative command is never modified", func(t *testing.T) {
+		resetSetupSeams(t)
+		agentDir := t.TempDir()
+		mcpPath := filepath.Join(agentDir, "mcp.json")
+
+		original := `{"mcpServers":{"engram":{"command":"engram","args":["mcp"]}}}`
+		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
+			t.Fatalf("write mcp: %v", err)
+		}
+
+		changed, err := ensurePiMCPConfig(mcpPath)
+		if err != nil {
+			t.Fatalf("ensurePiMCPConfig failed: %v", err)
+		}
+		if changed {
+			t.Fatalf("expected ensurePiMCPConfig to leave a relative command untouched")
+		}
+		data, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp after no-op: %v", err)
+		}
+		if string(data) != original {
+			t.Fatalf("expected config to stay byte-identical, got %s", data)
+		}
+	})
+
+	t.Run("missing command field is never modified", func(t *testing.T) {
+		resetSetupSeams(t)
+		agentDir := t.TempDir()
+		mcpPath := filepath.Join(agentDir, "mcp.json")
+
+		original := `{"mcpServers":{"engram":{"args":["mcp"]}}}`
+		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
+			t.Fatalf("write mcp: %v", err)
+		}
+
+		changed, err := ensurePiMCPConfig(mcpPath)
+		if err != nil {
+			t.Fatalf("ensurePiMCPConfig failed: %v", err)
+		}
+		if changed {
+			t.Fatalf("expected ensurePiMCPConfig to leave an entry without command untouched")
+		}
+		data, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp after no-op: %v", err)
+		}
+		if string(data) != original {
+			t.Fatalf("expected config to stay byte-identical, got %s", data)
+		}
+	})
+
+	t.Run("missing entry keeps creation behavior", func(t *testing.T) {
+		resetSetupSeams(t)
+		agentDir := t.TempDir()
+		mcpPath := filepath.Join(agentDir, "mcp.json")
+
+		exe := writeExe(t, agentDir)
+		osExecutable = func() (string, error) { return exe, nil }
+
+		changed, err := ensurePiMCPConfig(mcpPath)
+		if err != nil {
+			t.Fatalf("ensurePiMCPConfig failed: %v", err)
+		}
+		if !changed {
+			t.Fatalf("expected ensurePiMCPConfig to create the engram entry")
+		}
+		data, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp after creation: %v", err)
+		}
+		var cfg struct {
+			MCPServers map[string]struct {
+				Command     string   `json:"command"`
+				Args        []string `json:"args"`
+				Lifecycle   string   `json:"lifecycle"`
+				DirectTools bool     `json:"directTools"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parse mcp after creation: %v", err)
+		}
+		entry, ok := cfg.MCPServers["engram"]
+		if !ok {
+			t.Fatalf("expected engram entry after creation, got %s", data)
+		}
+		if entry.Command != exe {
+			t.Fatalf("expected created command %q, got %q", exe, entry.Command)
+		}
+		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
+			t.Fatalf("expected default args/lifecycle/directTools, got %#v", entry)
+		}
+	})
+}
+
 func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) {
 	resetSetupSeams(t)
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
@@ -1998,6 +2188,93 @@ func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 	})
 }
 
+// TestResolveEngramCommandMiseInstall guards against baking a versioned mise
+// install path (<mise-data-dir>/installs/engram/<version>/engram) into MCP
+// client configs. `mise up` plus `mise prune` removes superseded version
+// directories, leaving a stale command that fails to spawn (ENOENT). The
+// command must resolve to the stable <mise-data-dir>/shims/engram shim when
+// present. When that launcher is absent but os.Executable() supplied an
+// absolute executable, resolveEngramCommand preserves that original path to
+// avoid a PATH-dependent command; canonicalEngramCommand retains its bare
+// "engram" fallback, asserted in TestCanonicalEngramCommand.
+func TestResolveEngramCommandMiseInstall(t *testing.T) {
+	cases := []struct {
+		name       string
+		exe        string
+		shimOnDisk string // stable shim present on disk; "" means none
+		want       string
+	}{
+		{
+			name:       "default mise data dir maps to stable shim",
+			exe:        "/home/u/.local/share/mise/installs/engram/2.1.0/engram",
+			shimOnDisk: "/home/u/.local/share/mise/shims/engram",
+			want:       "/home/u/.local/share/mise/shims/engram",
+		},
+		{
+			name:       "custom mise data dir maps to stable shim",
+			exe:        "/opt/mise-data/installs/engram/2.1.0/engram",
+			shimOnDisk: "/opt/mise-data/shims/engram",
+			want:       "/opt/mise-data/shims/engram",
+		},
+		{
+			name:       "legacy home mise dir maps to stable shim",
+			exe:        "/home/u/.mise/installs/engram/2.1.0/engram",
+			shimOnDisk: "/home/u/.mise/shims/engram",
+			want:       "/home/u/.mise/shims/engram",
+		},
+		{
+			name:       "windows install keeps exe shim extension",
+			exe:        "/C/Users/u/AppData/Local/mise/installs/engram/2.1.0/engram.exe",
+			shimOnDisk: "/C/Users/u/AppData/Local/mise/shims/engram.exe",
+			want:       "/C/Users/u/AppData/Local/mise/shims/engram.exe",
+		},
+		{
+			name:       "non-mise absolute path is preserved",
+			exe:        "/opt/engram/bin/engram",
+			shimOnDisk: "",
+			want:       "/opt/engram/bin/engram",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			osExecutable = func() (string, error) { return tc.exe, nil }
+			statFn = func(name string) (os.FileInfo, error) {
+				if tc.shimOnDisk != "" && filepath.ToSlash(name) == tc.shimOnDisk {
+					return nil, nil // exists
+				}
+				return nil, os.ErrNotExist
+			}
+
+			// Normalize separators so the comparison holds on Windows runners,
+			// where resolveEngramCommand returns OS-native separators via
+			// filepath.FromSlash while tc.want is written with forward slashes.
+			if got := filepath.ToSlash(resolveEngramCommand()); got != tc.want {
+				t.Fatalf("resolveEngramCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("mise install with absent shim preserves absolute executable", func(t *testing.T) {
+		resetSetupSeams(t)
+
+		prefix := t.TempDir()
+		exe := filepath.Join(prefix, "installs", "engram", "2.1.0", "engram")
+		if err := os.MkdirAll(filepath.Dir(exe), 0755); err != nil {
+			t.Fatalf("create mise install directory: %v", err)
+		}
+		if err := os.WriteFile(exe, []byte("engram"), 0755); err != nil {
+			t.Fatalf("write mise install executable: %v", err)
+		}
+		osExecutable = func() (string, error) { return exe, nil }
+
+		if got := resolveEngramCommand(); got != exe {
+			t.Fatalf("resolveEngramCommand() = %q, want original absolute executable %q", got, exe)
+		}
+	})
+}
+
 // TestCanonicalEngramCommand proves the canonicalization helper derives the
 // command from an already-resolved executable path (no second osExecutable()
 // call) and keeps Homebrew mapping behavior identical to resolveEngramCommand.
@@ -2021,6 +2298,30 @@ func TestCanonicalEngramCommand(t *testing.T) {
 			exe:          "/opt/homebrew/Cellar/engram/1.20.0/bin/engram",
 			stableOnDisk: "/opt/homebrew/bin/engram",
 			want:         "/opt/homebrew/bin/engram",
+		},
+		{
+			name:         "mise install maps to stable shim",
+			exe:          "/home/u/.local/share/mise/installs/engram/2.1.0/engram",
+			stableOnDisk: "/home/u/.local/share/mise/shims/engram",
+			want:         "/home/u/.local/share/mise/shims/engram",
+		},
+		{
+			name:         "custom mise data dir maps to stable shim",
+			exe:          "/opt/mise-data/installs/engram/2.1.0/engram",
+			stableOnDisk: "/opt/mise-data/shims/engram",
+			want:         "/opt/mise-data/shims/engram",
+		},
+		{
+			name:         "windows mise install maps to exe shim",
+			exe:          "/C/Users/u/AppData/Local/mise/installs/engram/2.1.0/engram.exe",
+			stableOnDisk: "/C/Users/u/AppData/Local/mise/shims/engram.exe",
+			want:         "/C/Users/u/AppData/Local/mise/shims/engram.exe",
+		},
+		{
+			name:         "mise install with missing shim falls back to bare name",
+			exe:          "/home/u/.local/share/mise/installs/engram/2.1.0/engram",
+			stableOnDisk: "",
+			want:         "engram",
 		},
 		{
 			name:         "cellar with missing stable symlink falls back to bare name",
