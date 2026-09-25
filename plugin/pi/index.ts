@@ -1861,8 +1861,8 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_compact", async (event: unknown) => {
     const summary = extractCompactedSummary(event);
     const sessionId = soleObservedRuntimeSessionID();
-    const observed = sessionId && observedSessionContexts.get(sessionId);
-    const state = observed && lifecycle(observed, sessionId);
+    const observed = sessionId ? observedSessionContexts.get(sessionId) : undefined;
+    const state = sessionId && observed ? lifecycle(observed, sessionId) : undefined;
     const epoch = state?.epoch;
     const open = () => { if (state) assertOpen(state, epoch!); };
 
@@ -1900,7 +1900,7 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const sessionId = observeRuntimeSessionID(ctx);
-    const state = sessionId && lifecycle(ctx, sessionId);
+    const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     const epoch = state?.epoch;
     if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
       systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
@@ -1934,7 +1934,7 @@ export default function registerEngram(pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", async (event: ToolEndEvent, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
-    const state = sessionId && lifecycle(ctx, sessionId);
+    const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     const epoch = state?.epoch;
     const toolName = event.toolName ?? "";
     if (ENGRAM_TOOL_NAMES.has(toolName.toLowerCase())) return;
