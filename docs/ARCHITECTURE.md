@@ -44,8 +44,10 @@ Session starts → Agent works → Agent saves memories proactively
                                     ↓
 Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Next Steps/Files)
                                     ↓
-Next session starts → Previous session context is injected automatically
+Next session starts → Agent may retrieve prior context; a host plugin may inject it
 ```
+
+Context injection depends on the integration and available context: Claude Code with plugin setup can inject prior context at startup when available, while bare MCP does not inject it. Agents can request it with `mem_context`; see [plugin behavior](PLUGINS.md#what-the-plugin-provides-with-setup-vs-bare-mcp) and [adapter boundaries](codebase/integrations.md#runtime-session-identity).
 
 ---
 
