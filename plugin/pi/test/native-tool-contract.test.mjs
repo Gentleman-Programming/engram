@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 import { importPluginFromSandbox, PLUGIN_ROOT, withPluginSandbox } from "./plugin-sandbox.mjs";
 
@@ -1117,6 +1119,51 @@ test("simultaneous foreign projects cannot each reserve a replacement", async ()
     });
   } finally {
     release.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("shutdown bounds project lookup for an owned pending replacement in a fresh graph", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const runtimeID = "shutdown-stalled-project";
+  const effectiveID = `${runtimeID}:resume:owned`;
+  const entries = [{ type: "custom", customType: "engram-effective-session", data: {
+    runtimeID, effectiveID, pending: true, project: "owner",
+  } }];
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path !== "/project/current") throw new Error(`Unexpected shutdown request: ${path}`);
+    if (!init.signal) return null; // RED: the old lookup repeats five times without a shutdown signal.
+    return new Promise((_, reject) => {
+      if (init.signal.aborted) return reject(init.signal.reason);
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    });
+  };
+  const ctx = runtimeContext(runtimeID);
+  ctx.sessionManager.getBranch = () => entries;
+  try {
+    await withPluginSandbox("engram-pi-shutdown-project-timeout-", async ({ sandbox }) => {
+      // Only shorten the copied module's timeout; production constants and the checkout stay intact.
+      const sourcePath = join(sandbox, "index.ts");
+      const source = await readFile(sourcePath, "utf8");
+      const shortened = source.replace("const ENGRAM_READ_TIMEOUT_MS = 10000;", "const ENGRAM_READ_TIMEOUT_MS = 30;");
+      assert.notEqual(shortened, source, "the sandbox must retain the expected read timeout seam");
+      await writeFile(sourcePath, shortened);
+      const { eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(calls.filter((path) => path === "/project/current").length, 1,
+        "shutdown must attempt project detection once, then stop at its deadline");
+      assert.equal(calls.filter((path) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`).length, 0);
+      assert.equal(entries.at(-1).data.pending, true, "unconfirmed ownership must remain retryable");
+      await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+    });
+  } finally {
     globalThis.fetch = originalFetch;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL;
     else process.env.ENGRAM_URL = originalUrl;

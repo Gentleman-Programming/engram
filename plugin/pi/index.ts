@@ -1794,7 +1794,7 @@ export default function registerEngram(pi: ExtensionAPI) {
       const localOwner = registeredSessionProjects.get(sessionId) || sessionRegistrationProjects.get(sessionId);
       // A freshly loaded graph has not necessarily detected its project yet.
       const detectedResponse = owner && !localOwner && project === "unknown"
-        ? await detectServerProject(ctx.cwd) : undefined;
+        ? await detectServerProject(ctx.cwd, engramFetch, AbortSignal.timeout(ENGRAM_READ_TIMEOUT_MS)) : undefined;
       const detected = detectedResponse ? isSafeDetectedProject(detectedResponse) : undefined;
       const persistedPending = pendingEffectiveSession(ctx, runtimeID, sessionId)
         && !!owner && (owner === localOwner || owner === (detected || (project !== "unknown" ? project : undefined)));
