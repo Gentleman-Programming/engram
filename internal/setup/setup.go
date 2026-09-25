@@ -1832,7 +1832,7 @@ func codexConfigPath() string {
 		return filepath.Join(codexHome, "config.toml")
 	}
 	home, err := userHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	if err != nil || strings.TrimSpace(home) == "" || !filepath.IsAbs(home) {
 		return ""
 	}
 	return filepath.Join(home, ".codex", "config.toml")

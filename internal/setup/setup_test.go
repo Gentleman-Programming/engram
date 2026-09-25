@@ -101,8 +101,20 @@ func resetSetupSeams(t *testing.T) {
 func useTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
 	userHomeDir = func() (string, error) { return home, nil }
 	return home
+}
+
+func TestUseTestHomeIgnoresAmbientCodexHome(t *testing.T) {
+	ambient := t.TempDir()
+	t.Setenv("CODEX_HOME", ambient)
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	want := filepath.Join(home, ".codex", "config.toml")
+	if got := codexConfigPath(); got != want {
+		t.Fatalf("codexConfigPath() = %q, want isolated %q instead of %q", got, want, ambient)
+	}
 }
 
 // useIsolatedProfile keeps platform-resolved setup paths inside one disposable
@@ -2270,6 +2282,10 @@ func TestCodexBlockUsesAbsolutePath(t *testing.T) {
 func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	resetSetupSeams(t)
 	userHomeDir = func() (string, error) { return "/home/tester", nil }
+	codexWant := ""
+	if filepath.IsAbs("/home/tester") {
+		codexWant = filepath.Join("/home/tester", ".codex", "config.toml")
+	}
 
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
@@ -2288,7 +2304,7 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	if got := geminiConfigPath(); got != filepath.Join("/home/tester", ".gemini", "settings.json") {
 		t.Fatalf("unexpected linux geminiConfigPath: %s", got)
 	}
-	if got := codexConfigPath(); got != filepath.Join("/home/tester", ".codex", "config.toml") {
+	if got := codexConfigPath(); got != codexWant {
 		t.Fatalf("unexpected linux codexConfigPath: %s", got)
 	}
 
@@ -2319,7 +2335,7 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	if got := geminiConfigPath(); got != filepath.Join("C:/AppData/Roaming", "gemini", "settings.json") {
 		t.Fatalf("unexpected windows geminiConfigPath: %s", got)
 	}
-	if got := codexConfigPath(); got != filepath.Join("/home/tester", ".codex", "config.toml") {
+	if got := codexConfigPath(); got != codexWant {
 		t.Fatalf("unexpected windows codexConfigPath: %s", got)
 	}
 
@@ -2337,7 +2353,7 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	if got := geminiConfigPath(); got != filepath.Join("/home/tester", "AppData", "Roaming", "gemini", "settings.json") {
 		t.Fatalf("unexpected windows fallback geminiConfigPath: %s", got)
 	}
-	if got := codexConfigPath(); got != filepath.Join("/home/tester", ".codex", "config.toml") {
+	if got := codexConfigPath(); got != codexWant {
 		t.Fatalf("unexpected windows fallback codexConfigPath: %s", got)
 	}
 

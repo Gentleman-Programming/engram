@@ -146,12 +146,18 @@ func TestInstallCodexRejectsMissingUserHomeBeforeWrites(t *testing.T) {
 	}{
 		{"home lookup fails without CODEX_HOME", "", "", errors.New("home unavailable")},
 		{"home empty with relative CODEX_HOME", "relative-home", "", nil},
+		{"relative home without CODEX_HOME", "", "relative-home", nil},
+		{"drive-relative home without CODEX_HOME", "", `C:relative-home`, nil},
+		{"root-relative home without CODEX_HOME", "", `\relative-home`, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			resetSetupSeams(t)
 			useIsolatedProfile(t)
 			t.Setenv("CODEX_HOME", tt.codexHome)
 			userHomeDir = func() (string, error) { return tt.home, tt.err }
+			if got := codexConfigPath(); got != "" {
+				t.Fatalf("codexConfigPath() = %q, want no writable path", got)
+			}
 			osExecutable = func() (string, error) { return filepath.Join(t.TempDir(), "engram.exe"), nil }
 			writeCodexMemoryInstructionFilesFn = func() (string, error) {
 				t.Fatal("setup wrote instructions without an absolute config path")
