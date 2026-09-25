@@ -366,7 +366,6 @@ func inspectIdentityBlockers(tx *sql.Tx, source, replacement, project string, ev
 			}
 			continue
 		}
-		*evidence = append(*evidence, []any{syncID, owner, raw})
 		if sessionRaw, carriesSession := payload["session_id"]; carriesSession {
 			var sessionID string
 			if err := json.Unmarshal(sessionRaw, &sessionID); err != nil || owner == project || sessionID == source {
@@ -405,8 +404,6 @@ func inspectIdentityMutations(tx *sql.Tx, source, project string, snapshot *iden
 			&origin, &owner, &ack, &disposition, &target, &occurred, &reason, &dispositionEvidence, &dispositionAt); err != nil {
 			return err
 		}
-		*evidence = append(*evidence, []any{mutation.seq, mutation.entity, mutation.key, op,
-			mutation.payload, origin, owner, ack, disposition, target, occurred, reason, dispositionEvidence, dispositionAt})
 		linked := false
 		valid := false
 		switch mutation.entity {
@@ -462,6 +459,8 @@ func inspectIdentityMutations(tx *sql.Tx, source, project string, snapshot *iden
 		if !linked {
 			continue
 		}
+		*evidence = append(*evidence, []any{mutation.seq, mutation.entity, mutation.key, op,
+			mutation.payload, origin, owner, ack, disposition, target, occurred, reason, dispositionEvidence, dispositionAt})
 		if target != DefaultSyncTargetKey || owner != project || origin != SyncSourceLocal ||
 			op != SyncOpUpsert || ack.Valid || disposition != SyncMutationDispositionPending ||
 			reason.Valid || dispositionEvidence.Valid || dispositionAt.Valid || !valid {

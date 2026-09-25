@@ -126,6 +126,53 @@ func TestSessionIdentityRepairTwelveLinkedJournalRows(t *testing.T) {
 	}
 }
 
+func TestSessionIdentityRepairRejectsUnplannedAndChangedJournal(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionIdentityRepair(t, s, true)
+	if _, err := s.ApplySessionIdentityRepair(SessionIdentityRepairPlan{SourceID: "", ReplacementID: "canonical"}); err == nil {
+		t.Fatal("accepted plan without fingerprint")
+	}
+	plan, err := s.PlanSessionIdentityRepair("", "canonical")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sync_mutations SET payload='{"id":"","project":"alpha","directory":"/changed"}' WHERE entity='session'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplySessionIdentityRepair(plan); err == nil || !strings.Contains(err.Error(), "evidence changed since plan") {
+		t.Fatalf("linked journal change not rejected as stale: %v", err)
+	}
+}
+
+func TestSessionIdentityRepairIgnoresUnrelatedActivity(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionIdentityRepair(t, s, true)
+	plan, err := s.PlanSessionIdentityRepair("", "canonical")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','session','other','upsert','{"id":"other","project":"beta"}','local','beta')`,
+		`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','observation','other','upsert','{"session_id":"other-session","project":"beta"}','local','beta')`,
+		`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','prompt','other','upsert','{"session_id":"other-session"}','local','beta')`,
+		`INSERT INTO sync_apply_deferred(sync_id,entity,payload,entity_key,project) VALUES ('other','relation','{"sync_id":"other"}','other','alpha')`,
+		`INSERT INTO sync_apply_deferred(sync_id,entity,payload,entity_key,project) VALUES ('other-project','relation','{"sync_id":"other-project","session_id":"other-session"}','other-project','beta')`,
+	} {
+		if _, err := s.DB().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.ApplySessionIdentityRepair(plan); err != nil {
+		t.Fatalf("unrelated activity rejected: %v", err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity_key='other' AND disposition='pending'`); got != 3 {
+		t.Fatalf("unrelated journal changed: %d", got)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM sync_apply_deferred WHERE sync_id IN ('other','other-project')`); got != 2 {
+		t.Fatalf("unrelated deferred changed: %d", got)
+	}
+}
+
 func TestSessionIdentityRepairCountsOnlyCommittedRetry(t *testing.T) {
 	s := newTestStore(t)
 	seedSessionIdentityRepair(t, s, true)
@@ -195,6 +242,8 @@ func TestSessionIdentityRepairRejectsAndRollsBack(t *testing.T) {
 		{"unscoped string encoded relation", `INSERT INTO sync_apply_deferred(sync_id,entity,payload,entity_key,project) VALUES ('unscoped','relation','"{\"session_id\":\"\",\"sync_id\":\"relation-3\"}"','relation-3','')`},
 		{"malformed same-project deferred", `INSERT INTO sync_apply_deferred(sync_id,entity,payload,entity_key,project) VALUES ('malformed','relation','not-json','other','alpha')`},
 		{"mismatched payload", `UPDATE sync_mutations SET payload='{"sync_id":"other","session_id":"","project":"alpha"}' WHERE entity='prompt'`},
+		{"relation reference", `INSERT INTO memory_relations(sync_id,session_id) VALUES ('relation-1','')`},
+		{"linked relation mutation", `INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','relation','relation-1','upsert','{"session_id":""}','local','alpha')`},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			s := newTestStore(t)
