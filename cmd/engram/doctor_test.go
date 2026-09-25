@@ -605,8 +605,16 @@ func TestCmdDoctorRepairInvalidSessionIdentityLegacyJournal(t *testing.T) {
 				}
 				return decodeRepairPlan(t, out)
 			}
+			wantPublished := 0
+			if tc.enrolled {
+				wantPublished = 12
+			}
 			for _, mode := range []string{"--plan", "--dry-run"} {
 				plan := run(mode)
+				counts := plan["counts"].(map[string]any)
+				if counts["corrected_mutations_planned"] != float64(wantPublished) || counts["corrected_mutations_applied"] != float64(0) {
+					t.Fatalf("%s counts: %v", mode, counts)
+				}
 				identity := plan["identity_repair"].(map[string]any)
 				if identity["retired_mutations"] != float64(12) || identity["observations"] != float64(7) || identity["prompts"] != float64(4) || identity["enrolled"] != tc.enrolled {
 					t.Fatalf("%s: %v", mode, plan)
@@ -629,6 +637,10 @@ func TestCmdDoctorRepairInvalidSessionIdentityLegacyJournal(t *testing.T) {
 			if applied["status"] != "applied" {
 				t.Fatal(applied)
 			}
+			counts := applied["counts"].(map[string]any)
+			if counts["corrected_mutations_planned"] != float64(wantPublished) || counts["corrected_mutations_applied"] != float64(wantPublished) {
+				t.Fatalf("apply counts: %v", counts)
+			}
 			var retired, published, children int
 			for _, q := range []struct {
 				query string
@@ -637,10 +649,6 @@ func TestCmdDoctorRepairInvalidSessionIdentityLegacyJournal(t *testing.T) {
 				if err := db.QueryRow(q.query).Scan(q.dest); err != nil {
 					t.Fatal(err)
 				}
-			}
-			wantPublished := 0
-			if tc.enrolled {
-				wantPublished = 12
 			}
 			if retired != 12 || published != wantPublished || children != 7 {
 				t.Fatalf("retired=%d published=%d observations=%d", retired, published, children)
@@ -713,6 +721,14 @@ func TestCmdDoctorRepairInvalidSessionIdentityBlockers(t *testing.T) {
 				}
 			} else if plan["status"] != "blocked" || plan["blockers"].([]any)[0].(map[string]any)["reason_code"] != tc.want {
 				t.Fatal(plan)
+			}
+			if tc.name == "collision" {
+				counts := plan["counts"].(map[string]any)
+				for _, field := range []string{"corrected_mutations_planned", "corrected_mutations_applied"} {
+					if value, present := counts[field]; !present || value != float64(0) {
+						t.Fatalf("blocked %s: value=%v present=%v", field, value, present)
+					}
+				}
 			}
 		})
 	}
@@ -842,6 +858,12 @@ func TestCmdDoctorRepairInvalidSessionIdentityReportsExplicitImpossibility(t *te
 			plan := decodeRepairPlan(t, stdout)
 			if plan["status"] != "noop" || len(plan["actions"].([]any)) != 0 {
 				t.Fatalf("plan=%v", plan)
+			}
+			counts := plan["counts"].(map[string]any)
+			for _, field := range []string{"corrected_mutations_planned", "corrected_mutations_applied"} {
+				if value, present := counts[field]; !present || value != float64(0) {
+					t.Fatalf("noop %s: value=%v present=%v", field, value, present)
+				}
 			}
 			skipped := plan["skipped"].([]any)
 			if len(skipped) != 1 || skipped[0].(map[string]any)["reason_code"] != "cannot_repair_without_explicit_canonical_session_id" {

@@ -65,12 +65,14 @@ type RepairSkip struct {
 }
 
 type RepairCounts struct {
-	SessionsPlanned     int64 `json:"sessions_planned"`
-	ObservationsPlanned int64 `json:"observations_planned"`
-	PromptsPlanned      int64 `json:"prompts_planned"`
-	SessionsApplied     int64 `json:"sessions_applied"`
-	ObservationsApplied int64 `json:"observations_applied"`
-	PromptsApplied      int64 `json:"prompts_applied"`
+	SessionsPlanned           int64 `json:"sessions_planned"`
+	ObservationsPlanned       int64 `json:"observations_planned"`
+	PromptsPlanned            int64 `json:"prompts_planned"`
+	SessionsApplied           int64 `json:"sessions_applied"`
+	ObservationsApplied       int64 `json:"observations_applied"`
+	PromptsApplied            int64 `json:"prompts_applied"`
+	CorrectedMutationsPlanned int64 `json:"corrected_mutations_planned"`
+	CorrectedMutationsApplied int64 `json:"corrected_mutations_applied"`
 }
 
 // SyncTargetCleanupAction identifies one sync target doctor can remove without
@@ -266,6 +268,11 @@ func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan,
 	plan.Counts.SessionsPlanned = 1
 	plan.Counts.ObservationsPlanned = identity.Observations
 	plan.Counts.PromptsPlanned = identity.Prompts
+	// Current state publishes one session mutation and one per surviving child.
+	// Retired historical journal rows are separate from corrected publications.
+	if identity.Enrolled {
+		plan.Counts.CorrectedMutationsPlanned = 1 + identity.Observations + identity.Prompts
+	}
 	return plan
 }
 

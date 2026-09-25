@@ -332,6 +332,7 @@ func cmdDoctorRepair(cfg store.Config) {
 			plan.Counts.SessionsApplied = 1
 			plan.Counts.ObservationsApplied = plan.IdentityRepair.Observations
 			plan.Counts.PromptsApplied = plan.IdentityRepair.Prompts
+			plan.Counts.CorrectedMutationsApplied = result.PublishedMutations
 		case diagnostic.RepairModePlan:
 			plan.Status = "planned"
 		default:
