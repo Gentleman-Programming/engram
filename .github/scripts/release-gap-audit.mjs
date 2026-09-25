@@ -22,7 +22,7 @@ async function fetchJSON(url) {
 }
 async function git(...args) {
   const { stdout } = await exec('git', args, { maxBuffer: 10 * 1024 * 1024 });
-  return stdout.trim();
+  return args[0] === 'diff' ? stdout : stdout.trim();
 }
 
 export async function audit({ fetchJSON: get = fetchJSON, git: run = git } = {}) {
@@ -42,11 +42,11 @@ export async function audit({ fetchJSON: get = fetchJSON, git: run = git } = {})
       if (!new RegExp(channel.kind === 'pi' ? '^pi-v\\d+\\.\\d+\\.\\d+$' : '^v\\d+\\.\\d+\\.\\d+$').test(tag)) throw new Error('missing or malformed stable version/tag');
       await run('rev-parse', '--verify', `refs/tags/${tag}`);
       await run('merge-base', '--is-ancestor', tag, 'HEAD');
-      const paths = (await run('diff', '--name-only', `${tag}..HEAD`)).split('\n').filter(Boolean);
+      const paths = (await run('diff', '--name-only', '-z', `${tag}..HEAD`)).split('\0').filter(Boolean);
       const relevant = paths.filter(path => relevantPath(channel.kind, path));
       if (relevant.length) {
         failed = true;
-        lines.push(`- **${channel.name}: gap after ${tag}.** ${relevant.length} relevant path(s) changed on main: ${relevant.slice(0, 8).map(path => `\`${path}\``).join(', ')}${relevant.length > 8 ? ', …' : ''}. Review changes since ${tag}, decide whether a stable release is warranted, then publish through the existing release process.`);
+        lines.push(`- **${channel.name}: gap after ${tag}.** ${relevant.length} relevant path(s) changed on main: ${relevant.slice(0, 8).map(path => `\`${JSON.stringify(path).replaceAll('`', '\\u0060')}\``).join(', ')}${relevant.length > 8 ? ', …' : ''}. Review changes since ${tag}, decide whether a stable release is warranted, then publish through the existing release process.`);
       } else lines.push(`- **${channel.name}:** No relevant changes on main since ${tag}.`);
     } catch (error) {
       failed = true;

@@ -17,7 +17,12 @@ function harness({ files = [], metadata = fixtures, tags = ['pi-v0.1.15', 'v2.1.
       if (args[0] === 'symbolic-ref') return branch;
       if (args[0] === 'rev-parse') return tags.includes(args[2]?.replace('refs/tags/', '')) ? 'abc' : (() => { throw new Error('tag missing'); })();
       if (args[0] === 'merge-base') return '';
-      if (args[0] === 'diff') return files.join('\n');
+      if (args[0] === 'diff') {
+        if (args.includes('-z')) return files.join('\0') + (files.length ? '\0' : '');
+        return files.map(file => /[^\x20-\x7e]/.test(file)
+          ? `"${[...Buffer.from(file)].map(byte => byte > 127 ? `\\${byte.toString(8).padStart(3, '0')}` : String.fromCharCode(byte)).join('')}"`
+          : file).join('\n') + (files.length ? '\n' : '');
+      }
       throw new Error('unexpected git invocation');
     },
   };
@@ -45,9 +50,24 @@ test('Pi and Go relevant changes report actionable gaps without claiming fixes',
     ['merge-base', '--is-ancestor', 'v2.1.0', 'HEAD'],
   ]);
   assert.deepEqual(fixture.calls.filter(([command]) => command === 'diff'), [
-    ['diff', '--name-only', 'pi-v0.1.15..HEAD'],
-    ['diff', '--name-only', 'v2.1.0..HEAD'],
+    ['diff', '--name-only', '-z', 'pi-v0.1.15..HEAD'],
+    ['diff', '--name-only', '-z', 'v2.1.0..HEAD'],
   ]);
+});
+test('Git-quoted non-ASCII relevant filename still reports a release gap', async () => {
+  const fixture = harness({ files: ['plugin/pi/café.ts'] });
+  const result = await audit(fixture);
+  assert.equal(result.failed, true);
+  assert.match(result.summary, /Pi npm latest: gap/);
+  assert.match(result.summary, /plugin\/pi\/café\.ts/);
+});
+test('filename controls cannot inject summary bullets or close inline code', async () => {
+  const result = await audit(harness({ files: ['plugin/pi/line\n- fake`bullet.ts'] }));
+  assert.equal(result.failed, true);
+  assert.match(result.summary, /Pi npm latest: gap/);
+  assert.equal(result.summary.split('\n').filter(line => line.startsWith('- ')).length, 2);
+  assert.match(result.summary, /plugin\/pi\/line\\n- fake\\u0060bullet\.ts/);
+  assert.doesNotMatch(result.summary, /\n- fake/);
 });
 test('non-main checkout fails closed before comparing release tags', async () => {
   const fixture = harness({ branch: 'feature', files: ['internal/store/store.go'] });
