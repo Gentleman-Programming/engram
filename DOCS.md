@@ -185,6 +185,13 @@ Dashboard route tree (`engram cloud serve`):
   - `GET /dashboard/observations/{project}/{sessionID}/{syncID}` — observation detail
   - `GET /dashboard/prompts/{project}/{sessionID}/{syncID}` — prompt detail
 
+Dashboard bootstrap/recovery (separate from Public and Protected routes):
+
+- `GET /dashboard/bootstrap` — show the first managed-admin creation form.
+- `POST /dashboard/bootstrap` — create the first managed admin; rejects creation when an active admin already exists.
+
+Both routes require legacy dashboard recovery access. In authenticated mode, this means a valid dashboard session for the configured legacy `ENGRAM_CLOUD_ADMIN` principal; managed admins and members cannot use these routes. In insecure mode, bypassing the dashboard session check does not supply a `LegacyEnvAdmin` principal, so the bootstrap handlers are not generally open.
+
 Engram is local-first: local SQLite is authoritative; cloud features are optional replication/shared access and enrollment controls.
 
 ### Mutation materialization attribution
