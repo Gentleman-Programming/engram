@@ -110,12 +110,12 @@ func TestEndedUnownedSessionConcurrentProjectClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer func() { _ = a.Close() }()
 	b, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	const id = "ended-legacy"
 	const ended = "2024-01-02 03:04:05"
 	if _, err := a.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '', ?, ?)`, id, ended, ended); err != nil {
