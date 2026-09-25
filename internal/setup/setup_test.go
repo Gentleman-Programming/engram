@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -923,6 +924,38 @@ func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
 		other, ok := cfg.MCPServers["other"]
 		if !ok || other.Command != "other" {
 			t.Fatalf("expected unrelated server to be preserved, got %#v", cfg.MCPServers["other"])
+		}
+	})
+
+	t.Run("non-not-exist stat error leaves the entry untouched", func(t *testing.T) {
+		resetSetupSeams(t)
+		agentDir := t.TempDir()
+		mcpPath := filepath.Join(agentDir, "mcp.json")
+
+		recordedCommand := filepath.Join(agentDir, "installs", "engram", "2.1.0", "engram")
+		exe := writeExe(t, agentDir)
+		osExecutable = func() (string, error) { return exe, nil }
+		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp"],"lifecycle":"lazy","directTools":false}}}`, recordedCommand)
+		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
+			t.Fatalf("write mcp: %v", err)
+		}
+		statFn = func(name string) (os.FileInfo, error) {
+			return nil, &os.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+		}
+
+		changed, err := ensurePiMCPConfig(mcpPath)
+		if err != nil {
+			t.Fatalf("ensurePiMCPConfig failed: %v", err)
+		}
+		if changed {
+			t.Fatalf("expected ensurePiMCPConfig to leave the engram command untouched on a non-not-exist stat error")
+		}
+		data, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp after no-op: %v", err)
+		}
+		if string(data) != original {
+			t.Fatalf("expected config to stay byte-identical, got %s", data)
 		}
 	})
 

@@ -17,7 +17,9 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -478,6 +480,11 @@ func ensurePiMCPConfig(mcpPath string) (bool, error) {
 		// to spawn (ENOENT). Only a dead absolute command is repaired, and only
 		// its "command" value is rewritten; missing or relative commands, live
 		// absolute paths, and every other entry key are preserved untouched.
+		// The repair happens only when the recorded path does not exist
+		// (fs.ErrNotExist); any other stat error (EACCES, EIO, ...) leaves the
+		// entry untouched: this is a repair path, so a transient filesystem
+		// error must not rewrite a possibly valid custom command, and it must
+		// not fail the whole `engram setup` run either.
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &fields); err != nil {
 			return false, fmt.Errorf("parse Pi engram MCP server entry: %w", err)
@@ -491,7 +498,9 @@ func ensurePiMCPConfig(mcpPath string) (bool, error) {
 		if command == "" || !filepath.IsAbs(command) {
 			return false, nil
 		}
-		if _, err := statFn(command); err == nil {
+		if _, statErr := statFn(command); statErr == nil {
+			return false, nil
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
 			return false, nil
 		}
 		fields["command"], err = jsonMarshalFn(resolveEngramCommand())
