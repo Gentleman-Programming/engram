@@ -23,6 +23,7 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 ### Memory core
 
+- **feat(mcp):** add an optional validated `project` argument to `mem_get_observation` for response context. Observation lookup remains ID-based and is not filtered by project ownership.
 - **fix(store):** upgrade the embedded SQLite runtime to 3.51.3, which includes SQLite's upstream WAL-reset integrity fix. Engram's WAL and network-filesystem policies are unchanged.
 
 - **fix(project):** make project-scoped reads consistent across CLI and local HTTP. Omitted selectors now resolve the canonical current project; use `--all` or `all_projects=true` for an intentional global read. Search, timeline, stats, export, Obsidian export, conflict inspection, recent lists, review, prompts, and sync status now validate explicit selectors through the shared resolver. Sync status rejects `all_projects=true` because it has no aggregate provider. This is a compatibility change for callers that relied on omitted reads being global.
@@ -110,7 +111,7 @@ uses its normal process override and cwd-detection precedence.
 - When no explicit project override is supplied, use `mem_current_project` to inspect which project Engram will use before writing; it reports cwd-based detection.
 - An explicit project override takes precedence over process and cwd detection. Invalid or unbacked explicit names fail without fallback.
 - If the cwd is ambiguous (multiple git repos), Engram returns a structured error with `available_projects`. Navigate to one of the repos before writing.
-- Read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats`) still accept an optional `project` override — validated against the store.
+- Read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`) accept an optional `project` override validated against the store. `mem_get_observation` also accepts one for response context only; lookup remains by ID and is not filtered by ownership.
 
 ### New tool: `mem_current_project`
 

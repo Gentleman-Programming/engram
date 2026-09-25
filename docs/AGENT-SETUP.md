@@ -227,7 +227,7 @@ If validation returns `project_name_collision`, do not guess. Ask the user to di
 
 Alternatives: `cd` into the target repo before starting the MCP server, or add repo `.engram/config.json`.
 
-**Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`) accept an optional `project` override validated against the store. Omit it to auto-detect. `mem_get_observation` is ID-based and does not accept a `project` override.
+**Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`, `mem_get_observation`) accept an optional `project` override validated against known projects. Omit it to use the process override or cwd detection. For `mem_get_observation`, `project` selects response-envelope context only; the observation is still retrieved by ID without ownership filtering.
 
 ---
 

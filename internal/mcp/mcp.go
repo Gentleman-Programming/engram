@@ -810,6 +810,9 @@ Examples:
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
 				),
+				mcp.WithString("project",
+					mcp.Description("Optional project for response context, validated against known projects. Omit to use the process override or cwd detection. ID-based lookup is not filtered by project ownership."),
+				),
 			),
 			handleGetObservation(s, cfg, activity),
 		)
@@ -2250,9 +2253,11 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
 		}
 
-		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
-		// override is possible for get-by-ID.
-		detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+		// Resolve project context from an optional per-call override, then the
+		// process override or cwd (REQ-310, REQ-314). The project does not filter
+		// this ID-based lookup.
+		projectOverride, _ := req.GetArguments()["project"].(string)
+		detRes, detErr := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 
 		obsProject := ""
 		if obs.Project != nil {

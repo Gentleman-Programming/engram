@@ -1056,7 +1056,7 @@ For monorepos, detection now honors the **nearest** `.engram/config.json` at or 
 
 ### Read tools (optional project override)
 
-`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor` — `project` is an optional argument. If supplied, it is validated against the store via `ProjectExists`. Unknown project names return a structured error with `available_projects`. `mem_get_observation` resolves project from cwd for envelope metadata and does not accept a project override.
+`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`, and `mem_get_observation` accept an optional `project` argument validated against known projects. Unknown explicit project names return a structured error with `available_projects`. When `project` is omitted, the process override takes precedence over cwd detection. For `mem_get_observation`, the resolved project selects response-envelope context only; retrieval remains ID-based and does not filter by observation ownership.
 
 ### Admin tools
 
@@ -1194,7 +1194,12 @@ The optional project filter is enforced: an observation owned by another project
 
 ### mem_get_observation
 
-Get full untruncated content of a specific observation by ID.
+Get full untruncated content of a specific observation by ID. The optional `project` argument is validated against known projects and selects the project context in the response envelope; it does not filter the ID-based lookup by observation ownership. When omitted, the tool uses the process project override or cwd detection.
+
+Parameters:
+
+- **id** (required): int — observation ID to retrieve
+- **project** (optional): string — explicit project context; unknown names return a structured error with `available_projects`
 
 ### mem_session_summary
 

@@ -7883,6 +7883,114 @@ func TestHandleGetObservation_ResponseEnvelopeIncludesProject(t *testing.T) {
 	}
 }
 
+func TestHandleGetObservationProjectResolution(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		dir := filepath.Join(parent, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, dir)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	for _, projectName := range []string{"observation-owner", "explicit-project", "process-project"} {
+		if err := s.CreateSession("session-"+projectName, projectName, "/tmp/"+projectName); err != nil {
+			t.Fatalf("create session for %q: %v", projectName, err)
+		}
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "session-observation-owner",
+		Type:      "manual",
+		Title:     "Observation owned by another project",
+		Content:   "ID-based retrieval must not filter by the resolved project.",
+		Project:   "observation-owner",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	arguments := func(projectName string) map[string]any {
+		args := map[string]any{"id": float64(id)}
+		if projectName != "" {
+			args["project"] = projectName
+		}
+		return args
+	}
+	call := func(cfg MCPConfig, projectName string) (*mcppkg.CallToolResult, error) {
+		return handleGetObservation(s, cfg)(context.Background(), mcppkg.CallToolRequest{
+			Params: mcppkg.CallToolParams{Arguments: arguments(projectName)},
+		})
+	}
+
+	t.Run("explicit known project wins and keeps ID lookup", func(t *testing.T) {
+		result, err := call(MCPConfig{DefaultProject: "process-project"}, "explicit-project")
+		if err != nil || result.IsError {
+			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["project"] != "explicit-project" || body["project_source"] != project.SourceExplicitOverride {
+			t.Fatalf("project envelope = %v, want explicit-project from explicit override", body)
+		}
+		content, _ := body["result"].(string)
+		if !strings.Contains(content, "ID-based retrieval must not filter by the resolved project.") {
+			t.Fatalf("ID-based lookup did not return observation from another project: %q", content)
+		}
+	})
+
+	t.Run("unknown explicit project returns structured error", func(t *testing.T) {
+		result, err := call(MCPConfig{DefaultProject: "process-project"}, "missing-project")
+		if err != nil || !result.IsError {
+			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["error_code"] != "unknown_project" {
+			t.Fatalf("error_code = %v, want unknown_project; body=%v", body["error_code"], body)
+		}
+		available, ok := body["available_projects"].([]any)
+		if !ok || len(available) == 0 {
+			t.Fatalf("available_projects = %#v, want known projects", body["available_projects"])
+		}
+	})
+
+	t.Run("omitted project retains process override", func(t *testing.T) {
+		result, err := call(MCPConfig{DefaultProject: "process-project"}, "")
+		if err != nil || result.IsError {
+			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["project"] != "process-project" || body["project_source"] != project.SourceProcessOverride {
+			t.Fatalf("project envelope = %v, want process-project from process override", body)
+		}
+	})
+
+	t.Run("omitted project falls back to cwd detection", func(t *testing.T) {
+		dir := t.TempDir()
+		initTestGitRepo(t, dir)
+		detected := project.DetectProjectFull(dir)
+		if detected.Error != nil || detected.Project == "" {
+			t.Fatalf("detect test project: %#v", detected)
+		}
+		if err := s.CreateSession("session-cwd-project", detected.Project, dir); err != nil {
+			t.Fatalf("create cwd project session: %v", err)
+		}
+		t.Chdir(dir)
+
+		result, err := call(MCPConfig{}, "")
+		if err != nil || result.IsError {
+			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["project"] != detected.Project {
+			t.Fatalf("project = %v, want cwd-detected project %q", body["project"], detected.Project)
+		}
+		if body["project_source"] == project.SourceExplicitOverride || body["project_source"] == project.SourceProcessOverride {
+			t.Fatalf("project_source = %v, want cwd detection source", body["project_source"])
+		}
+	})
+}
+
 // TestHandleStats_WithoutProjectUsesAllProjects: no-project stats use all-project scope.
 func TestHandleStats_WithoutProjectUsesAllProjects(t *testing.T) {
 	dir := t.TempDir()
