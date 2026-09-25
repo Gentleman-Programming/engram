@@ -1374,6 +1374,155 @@ test("a reserved pending replacement cannot be claimed by another project after 
   }
 });
 
+test("two module graphs coalesce concurrent pending replacement shutdown", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const entered = deferred();
+  const release = deferred();
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
+    if (path === "/sessions" && body.id === "parallel") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (path.endsWith("/end")) { entered.resolve(); await release.promise; }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [];
+  const secondBranchRead = deferred();
+  let watchingSecond = false;
+  const ctx = runtimeContext("parallel");
+  ctx.sessionManager.getBranch = () => {
+    if (watchingSecond) secondBranchRead.resolve();
+    return entries;
+  };
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-parallel-a-", async ({ sandbox }) => {
+      await withPluginSandbox("engram-pi-parallel-b-", async ({ sandbox: peer }) => {
+        const a = await loadPluginHarness(sandbox, append);
+        const b = await loadPluginHarness(peer, append);
+        assert.equal((await a.registeredTools.get("mem_save").execute("save", { title: "save", content: "save" }, undefined, undefined, ctx)).isError, undefined);
+        const id = entries.at(-1).data.effectiveID;
+        await b.eventHandlers.get("session_start")({}, ctx);
+        const first = a.eventHandlers.get("session_shutdown")({}, ctx);
+        await waitFor(entered.promise, "first end did not start");
+        watchingSecond = true;
+        const second = b.eventHandlers.get("session_shutdown")({}, ctx);
+        await waitFor(secondBranchRead.promise, "second graph did not read the shared branch before release");
+        watchingSecond = false;
+        assert.equal(calls.filter(({ path }) => path === `/sessions/${encodeURIComponent(id)}/end`).length, 1);
+        release.resolve();
+        await waitFor(Promise.all([first, second]), "shutdowns did not settle");
+        assert.equal(calls.filter(({ path }) => path === `/sessions/${encodeURIComponent(id)}/end`).length, 1);
+        assert.equal(entries.filter(({ customType, data }) => customType === "engram-effective-session" && data.effectiveID === id && data.pending === false).length, 1);
+      });
+    });
+  } finally {
+    release.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("concurrent uncertain replacement end stays pending and a fresh graph retries", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const entered = deferred();
+  const release = deferred();
+  const calls = [];
+  const runtimeID = "parallel-uncertain";
+  const effectiveID = `${runtimeID}:resume:reserved`;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
+    if (path === `/sessions/${encodeURIComponent(effectiveID)}/end`) {
+      if (calls.filter((requested) => requested === path).length === 1) {
+        entered.resolve();
+        await release.promise;
+        return new Response("null");
+      }
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [{ type: "custom", customType: "engram-effective-session", data: { runtimeID, effectiveID, project: "owner", pending: true } }];
+  const secondBranchRead = deferred();
+  let watchingSecond = false;
+  const ctx = runtimeContext(runtimeID);
+  ctx.sessionManager.getBranch = () => {
+    if (watchingSecond) secondBranchRead.resolve();
+    return entries;
+  };
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-uncertain-parallel-a-", async ({ sandbox }) => {
+      await withPluginSandbox("engram-pi-uncertain-parallel-b-", async ({ sandbox: peer }) => {
+        const a = await loadPluginHarness(sandbox, append);
+        const b = await loadPluginHarness(peer, append);
+        await Promise.all([a.eventHandlers.get("session_start")({}, ctx), b.eventHandlers.get("session_start")({}, ctx)]);
+        const first = a.eventHandlers.get("session_shutdown")({}, ctx);
+        await waitFor(entered.promise, "first uncertain end did not start");
+        watchingSecond = true;
+        const second = b.eventHandlers.get("session_shutdown")({}, ctx);
+        await waitFor(secondBranchRead.promise, "second graph did not read the branch before release");
+        watchingSecond = false;
+        release.resolve();
+        await waitFor(Promise.all([first, second]), "uncertain shutdowns did not settle");
+        assert.equal(calls.filter((path) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`).length, 1);
+        assert.equal(entries.at(-1).data.pending, true);
+        assert.equal(entries.filter(({ data }) => data.pending === false).length, 0);
+        await withPluginSandbox("engram-pi-uncertain-parallel-next-", async ({ sandbox: nextSandbox }) => {
+          const next = await loadPluginHarness(nextSandbox, append);
+          await next.eventHandlers.get("session_shutdown")({}, ctx);
+        });
+        assert.equal(calls.filter((path) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`).length, 2);
+        assert.equal(entries.filter(({ data }) => data.pending === false).length, 1);
+      });
+    });
+  } finally {
+    release.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("foreign resolved graph cannot end an explicitly owned pending replacement", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "foreign" }));
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const runtimeID = "foreign-owned";
+  const effectiveID = `${runtimeID}:resume:owner`;
+  const entries = [{ type: "custom", customType: "engram-effective-session", data: { runtimeID, effectiveID, project: "owner", pending: true } }];
+  const ctx = runtimeContext(runtimeID);
+  ctx.sessionManager.getBranch = () => entries;
+  try {
+    await withPluginSandbox("engram-pi-foreign-owned-", async ({ sandbox }) => {
+      const graph = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      await graph.eventHandlers.get("session_start")({}, ctx);
+      await graph.eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(calls.filter((path) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`).length, 0);
+      assert.equal(entries.at(-1).data.pending, true);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("confirmed replacement end clears pending state across repeated shutdown and reload", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

@@ -960,6 +960,28 @@ const registeredSessionProjects = new Map<string, string>();
 const sessionRegistrationsInFlight = new Map<string, Promise<void>>();
 const sessionRegistrationProjects = new Map<string, string>();
 const sessionEndingsInFlight = new Map<string, Promise<unknown>>();
+// Module graphs loaded by the same Pi realm share only active shutdown deliveries.
+// Session-manager identity scopes opaque IDs; no outcome is cached after settlement.
+const shutdownFlightsKey = Symbol.for("engram.pi.shutdown-flights");
+const realm = globalThis as typeof globalThis & { [shutdownFlightsKey]?: WeakMap<object, Map<string, Promise<void>>> };
+const shutdownFlights = realm[shutdownFlightsKey] ??= new WeakMap<object, Map<string, Promise<void>>>();
+
+function sharedShutdown(manager: object, id: string, deliver: () => Promise<void>): Promise<void> {
+  let flights = shutdownFlights.get(manager);
+  if (!flights) {
+    flights = new Map();
+    shutdownFlights.set(manager, flights);
+  }
+  const existing = flights.get(id);
+  if (existing) return existing;
+  const active = flights;
+  const flight = Promise.resolve().then(deliver).finally(() => {
+    if (active.get(id) === flight) active.delete(id);
+    if (active.size === 0) shutdownFlights.delete(manager);
+  });
+  active.set(id, flight);
+  return flight;
+}
 const warnedSessionProjectConflicts = new Set<string>();
 const toolCounts = new Map<string, number>();
 
@@ -1768,19 +1790,29 @@ export default function registerEngram(pi: ExtensionAPI) {
     knownSessions.add(`\u0000closing:${sessionId}`);
     try {
       // An ownerless legacy reservation alone does not authorize ending this session.
+      const owner = pendingEffectiveSessionProject(ctx, runtimeID, sessionId);
+      const localOwner = registeredSessionProjects.get(sessionId) || sessionRegistrationProjects.get(sessionId);
+      // A freshly loaded graph has not necessarily detected its project yet.
+      const detectedResponse = owner && !localOwner && project === "unknown"
+        ? await detectServerProject(ctx.cwd) : undefined;
+      const detected = detectedResponse ? isSafeDetectedProject(detectedResponse) : undefined;
       const persistedPending = pendingEffectiveSession(ctx, runtimeID, sessionId)
-        && !!pendingEffectiveSessionProject(ctx, runtimeID, sessionId);
-      if (persistedPending || hasKnownSession(sessionId) || hasSessionRegistrationInFlight(sessionId)) {
-        const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
-          `/sessions/${encodeURIComponent(sessionId)}/end`,
-          { method: "POST", body: { summary: "" } },
-        ), persistedPending);
-        if (persistedPending && ended !== null && ended !== undefined) {
-          pi.appendEntry?.(EFFECTIVE_SESSION_ENTRY, {
-            runtimeID, effectiveID: sessionId, pending: false,
-            project: pendingEffectiveSessionProject(ctx, runtimeID, sessionId),
-          });
-        }
+        && !!owner && (owner === localOwner || owner === (detected || (project !== "unknown" ? project : undefined)));
+      // A foreign graph may observe a reservation but never owns its shutdown;
+      // still fall through to the common module-local cleanup below.
+      if (!(pendingEffectiveSession(ctx, runtimeID, sessionId) && !persistedPending)
+        && (persistedPending || hasKnownSession(sessionId) || hasSessionRegistrationInFlight(sessionId))) {
+        await sharedShutdown(ctx.sessionManager, sessionId, async () => {
+          const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
+            `/sessions/${encodeURIComponent(sessionId)}/end`,
+            { method: "POST", body: { summary: "" } },
+          ), persistedPending);
+          if (persistedPending && ended !== null && ended !== undefined) {
+            pi.appendEntry?.(EFFECTIVE_SESSION_ENTRY, {
+              runtimeID, effectiveID: sessionId, pending: false, project: owner,
+            });
+          }
+        });
       }
     } catch (error) {
       warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error);
