@@ -508,6 +508,75 @@ test("a timed-out Pi request cannot make a concurrent JSON-null request unavaila
   }
 });
 
+test("registered Pi-native mem_context forwards optional bounds and compact mode only when supplied", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/project/current", body: { project: "detected-project" } },
+    { method: "GET", path: "/context", body: { context: "model-visible context" } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-context-bounds-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const memContext = registeredTools.get("mem_context");
+      assert.ok(memContext, "mem_context tool should be registered");
+      const ctx = runtimeContext("context-bounds-session");
+      const executeContext = (id, params) => memContext.execute(id, params, undefined, undefined, ctx);
+
+      const explicit = await executeContext(
+        "context-explicit-options",
+        { project: "selected-project", scope: "global", max_bytes: 2048, compact: true },
+      );
+      const withoutCompact = await executeContext(
+        "context-max-bytes-only",
+        { project: "selected-project", scope: "project", max_bytes: 1024 },
+      );
+      const withoutMaxBytes = await executeContext(
+        "context-compact-only",
+        { project: "selected-project", scope: "personal", compact: false },
+      );
+      const omitted = await executeContext("context-no-options", { scope: "personal" });
+      for (const result of [explicit, withoutCompact, withoutMaxBytes, omitted]) {
+        assert.notEqual(result.isError, true, "mem_context should preserve successful HTTP responses");
+      }
+
+      const contextCalls = calls.filter((call) => call.method === "GET" && call.path.startsWith("/context?"));
+      assert.equal(contextCalls.length, 4, "each invocation must make one GET /context request");
+      const queries = contextCalls.map((call) => new URL(`http://test${call.path}`).searchParams);
+
+      assert.equal(queries[0].get("project"), "selected-project");
+      assert.equal(queries[0].get("scope"), "global");
+      assert.equal(queries[0].get("max_bytes"), "2048");
+      assert.equal(queries[0].get("compact"), "true");
+
+      assert.equal(queries[1].get("max_bytes"), "1024");
+      assert.equal(queries[1].has("compact"), false, "omitted compact must not be sent");
+
+      assert.equal(queries[2].has("max_bytes"), false, "omitted max_bytes must not be sent");
+      assert.equal(queries[2].get("compact"), "false", "an explicit false must remain distinguishable from omission");
+
+      assert.equal(queries[3].get("project"), "detected-project");
+      assert.equal(queries[3].get("scope"), "personal");
+      assert.equal(queries[3].has("max_bytes"), false, "omitted bounds must preserve the existing HTTP request");
+      assert.equal(queries[3].has("compact"), false, "omitted compact mode must preserve the existing HTTP request");
+
+      const contextProperties = memContext.parameters.args[0];
+      assert.equal(contextProperties.max_bytes.kind, "Optional", "max_bytes must be optional in the registered schema");
+      assert.equal(contextProperties.max_bytes.args[0].kind, "Number", "max_bytes must be a number");
+      assert.equal(contextProperties.compact.kind, "Optional", "compact must be optional in the registered schema");
+      assert.equal(contextProperties.compact.args[0].kind, "Boolean", "compact must be a boolean");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("Pi forwards its resolved project for review mutations while preserving global review and stats contracts", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
