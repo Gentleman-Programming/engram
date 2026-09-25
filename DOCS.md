@@ -115,7 +115,7 @@ This catalog covers the 60 tracked Markdown files. **Owner `GP`** means CODEOWNE
 | [skills/catalog.md](skills/catalog.md) | Contributor agents | Instruction: skill index | Living | GP |
 | [skills/*/SKILL.md](skills/) | Contributor agents | Instruction: domain skills | Living | GP |
 
-The memory protocol's canonical prose is [here](#memory-protocol-full-text); `internal/setup/setup.go` independently maintains `memoryProtocolMarkdown` for installed generated instructions. Claude and Codex plugin skill files above are manually maintained. OpenCode's source `plugin/opencode/engram.ts` has a verified generated embedded copy at `internal/setup/plugins/opencode/engram.ts`; neither is a separate Markdown catalog entry. Historical OpenSpec/SDD changes are transient, non-shipped records, not evidence of current behavior.
+The memory protocol's canonical prose is [Memory Protocol](#memory-protocol-full-text); `internal/setup/setup.go` independently maintains `memoryProtocolMarkdown` for installed generated instructions. Claude and Codex plugin skill files above are manually maintained. OpenCode's source `plugin/opencode/engram.ts` has a verified generated embedded copy at `internal/setup/plugins/opencode/engram.ts`; neither is a separate Markdown catalog entry. Historical OpenSpec/SDD changes are transient, non-shipped records, not evidence of current behavior.
 
 ---
 
