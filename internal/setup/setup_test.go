@@ -874,6 +874,16 @@ func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
 		}
 		return exe
 	}
+	assertCanonicalCommand := func(t *testing.T, got, exe string) {
+		t.Helper()
+		want, err := filepath.EvalSymlinks(exe)
+		if err != nil {
+			t.Fatalf("canonicalize expected executable: %v", err)
+		}
+		if got != want {
+			t.Fatalf("expected canonical command %q, got %q", want, got)
+		}
+	}
 
 	t.Run("dead absolute command is repaired", func(t *testing.T) {
 		resetSetupSeams(t)
@@ -915,9 +925,7 @@ func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected engram entry after repair, got %s", data)
 		}
-		if entry.Command != exe {
-			t.Fatalf("expected repaired command %q, got %q", exe, entry.Command)
-		}
+		assertCanonicalCommand(t, entry.Command, exe)
 		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
 			t.Fatalf("expected args/lifecycle/directTools to be preserved, got %#v", entry)
 		}
@@ -1073,9 +1081,7 @@ func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected engram entry after creation, got %s", data)
 		}
-		if entry.Command != exe {
-			t.Fatalf("expected created command %q, got %q", exe, entry.Command)
-		}
+		assertCanonicalCommand(t, entry.Command, exe)
 		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
 			t.Fatalf("expected default args/lifecycle/directTools, got %#v", entry)
 		}
