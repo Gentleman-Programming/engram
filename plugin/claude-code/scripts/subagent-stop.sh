@@ -11,28 +11,23 @@ source "${SCRIPT_DIR}/_helpers.sh"
 
 # Read hook input from stdin
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-# Claude Code's SubagentStop payload carries the subagent's final text in
-# last_assistant_message; there is no .stdout field, so reading .stdout captured
-# nothing and every subagent run no-op'd. Keep .stdout as a fallback for other
-# harnesses that reuse this script (parity with plugin/codex/scripts).
-OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
+# Claude Code uses last_assistant_message; retain stdout as a fallback for
+# other harnesses. Keep content inside JSON so shell and platform text-mode
+# conversions cannot alter its newlines.
+PROJECT=$(resolve_project "$CWD") || exit 0
+BODY=$(printf '%s' "$INPUT" | jq -c --arg project "$PROJECT" '
+  {session_id: (.session_id // ""), content: (.last_assistant_message // .stdout // ""),
+   project: $project, source: "subagent-stop"} | select(.content != "")')
 
 # Nothing to capture if no output
-[ -z "$OUTPUT" ] && exit 0
-PROJECT=$(resolve_project "$CWD") || exit 0
+[ -z "$BODY" ] && exit 0
 
 # Fire and forget — server handles extraction, dedup, and storage
 engram_curl -sf "${ENGRAM_URL}/observations/passive" \
   -X POST \
   -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg sid "$SESSION_ID" \
-    --arg content "$OUTPUT" \
-    --arg project "$PROJECT" \
-    --arg source "subagent-stop" \
-    '{session_id: $sid, content: $content, project: $project, source: $source}')" \
+  -d "$BODY" \
   > /dev/null
 
 exit 0
