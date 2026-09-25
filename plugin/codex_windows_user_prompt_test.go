@@ -186,7 +186,8 @@ func TestCodexWindowsNativeUserPromptRejectsPartialProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct{ name, profile string }{
-		{"root-relative", `\\partial-profile`},
+		{"root-relative", `\partial-profile`},
+		{"incomplete UNC", `\\partial-profile`},
 		{"drive-relative", `C:partial-profile`},
 		{"relative", `partial-profile`},
 		{"blank", "   "},
