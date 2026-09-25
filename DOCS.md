@@ -151,6 +151,15 @@ Dashboard route tree (`engram cloud serve`):
   - `GET /dashboard/admin/projects`
   - `GET /dashboard/admin/users` (admin-gated)
   - `GET /dashboard/admin/users/list` (admin-gated; HTMX partial)
+  - `GET /dashboard/admin/users/{principalID}` (admin-gated; managed-user detail)
+  - `POST /dashboard/admin/users` — create managed user
+  - `POST /dashboard/admin/users/{principalID}/enable` — enable managed user
+  - `POST /dashboard/admin/users/{principalID}/disable` — disable managed user
+  - `POST /dashboard/admin/users/{principalID}/tokens` — create managed token
+  - `POST /dashboard/admin/tokens/{tokenID}/revoke` — revoke managed token
+  - `POST /dashboard/admin/users/{principalID}/grants` — create project grant
+  - `POST /dashboard/admin/users/{principalID}/grants/{project}/revoke` — revoke project grant
+  - Managed-user detail and form routes use the dashboard session, unlike the JSON `/admin/*` API. Viewing detail allows dashboard admin sessions; mutations require managed-admin permission. Successful form mutations redirect (303, or `HX-Redirect` for HTMX), except token creation, which renders the show-once token directly without redirecting.
   - `GET /dashboard/admin/health` (admin-gated)
   - `POST /dashboard/admin/projects/{name}/sync` (admin-gated; toggle sync enabled/disabled)
   - `GET /dashboard/admin/projects/{name}/sync/form` (admin-gated; HTMX partial)
