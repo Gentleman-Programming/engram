@@ -14,6 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [Documentation Authority](#documentation-authority)       | Which doc owns each contract and what must change together   |
+| [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
 | [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
 | [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
@@ -72,6 +73,49 @@ For maintainers, distinguish these ownership paths:
 - `internal/setup/setup.go` maintains `memoryProtocolMarkdown` independently. Setup uses that embedded text for installed agent instructions; it is not generated from DOCS.md. Compare behavior when editing either prose surface.
 - `skills/memory-protocol/SKILL.md` is a manually maintained contributor skill. `plugin/claude-code/skills/memory/SKILL.md` and `plugin/codex/skills/memory/SKILL.md` are host-adapted, manually maintained skills. Consider their relevant instructions alongside the canonical prose rather than assuming byte identity or automatic sync.
 - `plugin/opencode/engram.ts` contains OpenCode's agent instructions. Its verified generated copy is `internal/setup/plugins/opencode/engram.ts`: `go generate ./internal/setup/` copies source to embedded destination, and `TestEmbeddedOpenCodePluginMatchesSourceByteForByte` checks equality. This generation direction applies to the OpenCode plugin copy, not the other prose and skill surfaces above.
+
+### Documentation surface catalog
+
+This catalog covers the 60 tracked Markdown files. **Owner `GP`** means CODEOWNERS review routing to `@Gentleman-Programming`, not an individual author or content owner. **Canonical** identifies a contract named in the matrix above; **guide** explains or operates alongside contracts; **instruction** directs agents; **policy/template** governs contribution or reuse. **Living** means maintained against current behavior, not a guarantee that every described optional feature is enabled. Beta material describes experimental paths, not universally shipped behavior.
+
+| Surface | Audience | Authority | Status | Owner |
+| --- | --- | --- | --- | --- |
+| [README.md](README.md) | New users | Guide: overview | Living | GP |
+| [DOCS.md](DOCS.md) | Users, maintainers | Canonical: technical contracts above | Living | GP |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributors | Policy: contribution workflow | Living | GP |
+| [SECURITY.md](SECURITY.md) | Security reporters | Policy: disclosure | Living | GP |
+| [TRADEMARKS.md](TRADEMARKS.md) | Reusers | Policy: marks | Living | GP |
+| [AGENTS.md](AGENTS.md) | Repository agents | Instruction: skill index | Living | GP |
+| [CHANGELOG.md](CHANGELOG.md) | Upgraders | Guide: release record | Historical | GP |
+| [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) | Contributors | Template: PR review | Living | GP |
+| [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) | Agent users | Canonical: setup paths | Living | GP |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Maintainers | Guide: architecture | Living | GP |
+| [docs/BETA_TESTING.md](docs/BETA_TESTING.md) | Beta testers | Guide: testing | Beta | GP |
+| [docs/CODEBASE-GUIDE.md](docs/CODEBASE-GUIDE.md) | Contributors | Canonical: package boundaries | Living | GP |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | Evaluators | Guide: comparison | Living | GP |
+| [docs/DOCTOR.md](docs/DOCTOR.md) | Operators | Guide: diagnostics | Living | GP |
+| [docs/ENGRAM-CLOUD-BRANDING.md](docs/ENGRAM-CLOUD-BRANDING.md) | Cloud readers | Guide: moved-page pointer | Compatibility redirect | GP |
+| [docs/ENGRAM-CLOUD.md](docs/ENGRAM-CLOUD.md) | Cloud readers | Guide: moved-page pointer | Compatibility redirect | GP |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installers | Guide: installation | Living | GP |
+| [docs/PLUGINS.md](docs/PLUGINS.md) | Plugin users | Canonical: plugin contracts | Living | GP |
+| [docs/RELEASE-POLICY.md](docs/RELEASE-POLICY.md) | Maintainers | Policy: releases | Living | GP |
+| [docs/SELF-TESTING.md](docs/SELF-TESTING.md) | Maintainers | Guide: self-tests | Living | GP |
+| [docs/TEAM-USAGE.md](docs/TEAM-USAGE.md) | Teams | Guide: collaboration | Living | GP |
+| [docs/beta/obsidian-brain.md](docs/beta/obsidian-brain.md) | Beta users | Guide: Obsidian export | Beta | GP |
+| [docs/codebase/*.md](docs/codebase/) | Maintainers | Guide: codebase maps and operations | Living | GP |
+| [docs/engram-cloud/README.md](docs/engram-cloud/README.md) | Cloud readers | Guide: cloud entry point | Living | GP |
+| [docs/engram-cloud/branding.md](docs/engram-cloud/branding.md) | Cloud maintainers | Guide: branding | Living | GP |
+| [docs/engram-cloud/production-checklist.md](docs/engram-cloud/production-checklist.md) | Cloud operators | Guide: production checks | Living | GP |
+| [docs/engram-cloud/quickstart.md](docs/engram-cloud/quickstart.md) | Cloud users | Guide: quickstart | Living | GP |
+| [docs/engram-cloud/troubleshooting.md](docs/engram-cloud/troubleshooting.md) | Cloud operators | Guide: troubleshooting | Living | GP |
+| [docs/intended-usage.md](docs/intended-usage.md) | Users | Guide: intended use | Living | GP |
+| [plugin/claude-code/skills/memory/SKILL.md](plugin/claude-code/skills/memory/SKILL.md) | Claude agents | Instruction: host-adapted memory skill | Living | GP |
+| [plugin/codex/skills/memory/SKILL.md](plugin/codex/skills/memory/SKILL.md) | Codex agents | Instruction: host-adapted memory skill | Living | GP |
+| [plugin/pi/README.md](plugin/pi/README.md) | Pi users | Guide: integration | Living | GP |
+| [skills/catalog.md](skills/catalog.md) | Contributor agents | Instruction: skill index | Living | GP |
+| [skills/*/SKILL.md](skills/) | Contributor agents | Instruction: domain skills | Living | GP |
+
+The memory protocol's canonical prose is [here](#memory-protocol-full-text); `internal/setup/setup.go` independently maintains `memoryProtocolMarkdown` for installed generated instructions. Claude and Codex plugin skill files above are manually maintained. OpenCode's source `plugin/opencode/engram.ts` has a verified generated embedded copy at `internal/setup/plugins/opencode/engram.ts`; neither is a separate Markdown catalog entry. Historical OpenSpec/SDD changes are transient, non-shipped records, not evidence of current behavior.
 
 ---
 
