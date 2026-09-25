@@ -376,14 +376,18 @@ func inspectIdentityBlockers(tx *sql.Tx, source, replacement, project string, ev
 	return rows.Err()
 }
 
-func inspectIdentityMutations(tx *sql.Tx, source, project string, snapshot *identitySnapshot, evidence *[]any) error {
+func inspectIdentityMutations(tx *sql.Tx, source, project string, snapshot *identitySnapshot, evidence *[]any) (retErr error) {
 	rows, err := tx.Query(`SELECT seq,entity,entity_key,op,payload,source,project,acked_at,disposition,target_key,
 		occurred_at,disposition_reason,disposition_evidence,disposition_at
 		FROM sync_mutations ORDER BY seq`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
 	observations := make(map[string]bool, len(snapshot.observations))
 	prompts := make(map[string]bool, len(snapshot.prompts))
 	for _, observation := range snapshot.observations {
