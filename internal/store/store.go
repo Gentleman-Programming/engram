@@ -8146,7 +8146,10 @@ func (s *Store) mergeProjects(sources []string, canonical string, explicit bool)
 			}
 			seenSources[srcInput] = struct{}{}
 
-			sourceVariants := projectMergeSourceVariantsEligible(srcInput, srcNormalized, canonical, explicit)
+			sourceVariants := projectMergeSourceVariants(srcInput, srcNormalized, canonical)
+			if explicit {
+				sourceVariants = projectMergeSourceVariantsEligible(srcInput, srcNormalized, canonical, true)
+			}
 			// Canonical input is a no-op only when its identity exists. Use the
 			// same explicit existence check for canonical and variant sources.
 			sourceName := strings.TrimSpace(srcInput)
