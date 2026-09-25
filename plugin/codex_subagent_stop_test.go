@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -131,10 +132,13 @@ func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 	}{
 		{"primary wins", "primary", "fallback", "primary"},
 		{"empty primary falls back", "", "fallback", "fallback"},
+		{"empty primary preserves trailing newline", "", "first\n", "first\n"},
+		{"empty primary preserves CRLF", "", "first\r\n", "first\r\n"},
 		{"both empty skip capture", "", "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var captures []passiveCapture
+			var capturesMu sync.Mutex
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -151,7 +155,9 @@ func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&capture); err != nil {
 						t.Errorf("decode POST: %v", err)
 					}
+					capturesMu.Lock()
 					captures = append(captures, capture)
+					capturesMu.Unlock()
 				default:
 					http.NotFound(w, r)
 				}
@@ -174,6 +180,8 @@ func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 			if err != nil || string(output) != "{}\n" {
 				t.Fatalf("hook output = %q, err = %v", output, err)
 			}
+			capturesMu.Lock()
+			defer capturesMu.Unlock()
 			if tt.want == "" {
 				if len(captures) != 0 {
 					t.Fatalf("unexpected passive POSTs: %+v", captures)

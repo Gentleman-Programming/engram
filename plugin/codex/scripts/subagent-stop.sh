@@ -25,7 +25,14 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-OUTPUT=$(echo "$INPUT" | jq -r 'if .last_assistant_message == "" then (.stdout // empty) else (.last_assistant_message // .stdout // empty) end')
+# Keep the original extraction for other cases. A byte appended after jq
+# prevents command substitution from stripping fallback stdout's trailing LF.
+if [ "$(echo "$INPUT" | jq -r '.last_assistant_message == ""')" = true ]; then
+  OUTPUT="$(echo "$INPUT" | jq -bj '.stdout // empty'; printf 'x')"
+  OUTPUT="${OUTPUT%x}"
+else
+  OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
+fi
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && { emit_hook_result; exit 0; }
