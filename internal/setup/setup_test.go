@@ -2231,6 +2231,7 @@ func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 // avoid a PATH-dependent command; canonicalEngramCommand retains its bare
 // "engram" fallback, asserted in TestCanonicalEngramCommand.
 func TestResolveEngramCommandMiseInstall(t *testing.T) {
+	t.Setenv("MISE_SHIMS_DIR", "")
 	cases := []struct {
 		name       string
 		exe        string
@@ -2256,12 +2257,6 @@ func TestResolveEngramCommandMiseInstall(t *testing.T) {
 			want:       "/home/u/.mise/shims/engram",
 		},
 		{
-			name:       "windows install keeps exe shim extension",
-			exe:        "/C/Users/u/AppData/Local/mise/installs/engram/2.1.0/engram.exe",
-			shimOnDisk: "/C/Users/u/AppData/Local/mise/shims/engram.exe",
-			want:       "/C/Users/u/AppData/Local/mise/shims/engram.exe",
-		},
-		{
 			name:       "non-mise absolute path is preserved",
 			exe:        "/opt/engram/bin/engram",
 			shimOnDisk: "",
@@ -2272,6 +2267,9 @@ func TestResolveEngramCommandMiseInstall(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetSetupSeams(t)
+			if runtime.GOOS == "windows" {
+				t.Skip("POSIX fixture; native Windows cases run separately")
+			}
 			osExecutable = func() (string, error) { return tc.exe, nil }
 			statFn = func(name string) (os.FileInfo, error) {
 				if tc.shimOnDisk != "" && filepath.ToSlash(name) == tc.shimOnDisk {
@@ -2288,6 +2286,82 @@ func TestResolveEngramCommandMiseInstall(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("configured shim and invalid settings", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, output string
+			err          error
+			override     bool
+			wantCustom   bool
+		}{
+			{"global setting", "custom", nil, false, true},
+			{"relative setting", "relative/shims\n", nil, false, false},
+			{"warning output", "warning\ncustom\n", nil, false, false},
+			{"failed query", "custom", os.ErrNotExist, false, false},
+			{"environment wins", "custom", nil, true, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetSetupSeams(t)
+				root := t.TempDir()
+				exe := filepath.Join(root, "installs", "engram", "2.1.0", "engram")
+				custom := filepath.Join(t.TempDir(), "shims")
+				fallback := filepath.Join(root, "shims", "engram")
+				if tc.override {
+					t.Setenv("MISE_SHIMS_DIR", filepath.Join(t.TempDir(), "override"))
+				}
+				runCommand = func(name string, args ...string) ([]byte, error) {
+					if name != "mise" || !reflect.DeepEqual(args, []string{"settings", "get", "shims_dir"}) {
+						t.Fatalf("unexpected command: %s %v", name, args)
+					}
+					if tc.output == "custom" {
+						return []byte(custom + "\n"), tc.err
+					}
+					if tc.output == "warning\ncustom\n" {
+						return []byte("warning\n" + custom + "\n"), tc.err
+					}
+					return []byte(tc.output), tc.err
+				}
+				statFn = func(name string) (os.FileInfo, error) {
+					if name == fallback || name == filepath.Join(custom, "engram") || name == filepath.Join(os.Getenv("MISE_SHIMS_DIR"), "engram") {
+						return nil, nil
+					}
+					return nil, os.ErrNotExist
+				}
+				want := fallback
+				if tc.wantCustom {
+					want = filepath.Join(custom, "engram")
+				}
+				if tc.override {
+					want = filepath.Join(os.Getenv("MISE_SHIMS_DIR"), "engram")
+					runCommand = func(string, ...string) ([]byte, error) {
+						t.Fatal("environment must bypass mise query")
+						return nil, nil
+					}
+				}
+				if got := canonicalEngramCommand(exe); got != want {
+					t.Fatalf("canonicalEngramCommand() = %q, want %q", got, want)
+				}
+			})
+		}
+	})
+
+	t.Run("absolute override selects relocated shim", func(t *testing.T) {
+		resetSetupSeams(t)
+		root := t.TempDir()
+		exe := filepath.Join(root, "installs", "engram", "2.1.0", "engram")
+		shim := filepath.Join(t.TempDir(), "engram")
+		t.Setenv("MISE_SHIMS_DIR", filepath.Dir(shim))
+		osExecutable = func() (string, error) { return exe, nil }
+		statFn = func(name string) (os.FileInfo, error) {
+			if name == shim {
+				return nil, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		if got := resolveEngramCommand(); got != shim {
+			t.Fatalf("resolveEngramCommand() = %q, want %q", got, shim)
+		}
+	})
 
 	t.Run("mise install with absent shim preserves absolute executable", func(t *testing.T) {
 		resetSetupSeams(t)
@@ -2314,6 +2388,42 @@ func TestResolveEngramCommandMiseInstall(t *testing.T) {
 // This guards the atomic single-executable-result contract shared by
 // writeClaudeCodeUserMCP after the issue #461 refactor.
 func TestCanonicalEngramCommand(t *testing.T) {
+	t.Setenv("MISE_SHIMS_DIR", "")
+	t.Run("windows drive-rooted mise shim", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("requires native Windows paths")
+		}
+		resetSetupSeams(t)
+		root := filepath.Join(t.TempDir(), "mise")
+		exe := filepath.Join(root, "installs", "engram", "2.1.0", "engram.exe")
+		shim := filepath.Join(root, "shims", "engram.exe")
+		statFn = func(name string) (os.FileInfo, error) {
+			if name == shim {
+				return nil, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		if got := canonicalEngramCommand(exe); got != shim {
+			t.Fatalf("canonicalEngramCommand(%q) = %q, want %q", exe, got, shim)
+		}
+		osExecutable = func() (string, error) { return exe, nil }
+		if got := resolveEngramCommand(); got != shim {
+			t.Fatalf("resolveEngramCommand() = %q, want %q", got, shim)
+		}
+		override := filepath.Join(t.TempDir(), "relocated")
+		t.Setenv("MISE_SHIMS_DIR", override)
+		custom := filepath.Join(override, "engram.exe")
+		statFn = func(name string) (os.FileInfo, error) {
+			if name == custom {
+				return nil, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		if got := resolveEngramCommand(); got != custom {
+			t.Fatalf("resolveEngramCommand() = %q, want override %q", got, custom)
+		}
+	})
+
 	cases := []struct {
 		name         string
 		exe          string
@@ -2343,12 +2453,6 @@ func TestCanonicalEngramCommand(t *testing.T) {
 			exe:          "/opt/mise-data/installs/engram/2.1.0/engram",
 			stableOnDisk: "/opt/mise-data/shims/engram",
 			want:         "/opt/mise-data/shims/engram",
-		},
-		{
-			name:         "windows mise install maps to exe shim",
-			exe:          "/C/Users/u/AppData/Local/mise/installs/engram/2.1.0/engram.exe",
-			stableOnDisk: "/C/Users/u/AppData/Local/mise/shims/engram.exe",
-			want:         "/C/Users/u/AppData/Local/mise/shims/engram.exe",
 		},
 		{
 			name:         "mise install with missing shim falls back to bare name",
@@ -2388,6 +2492,9 @@ func TestCanonicalEngramCommand(t *testing.T) {
 				return "", nil
 			}
 
+			if runtime.GOOS == "windows" {
+				t.Skip("POSIX fixture; native Windows cases run separately")
+			}
 			got := canonicalEngramCommand(tc.exe)
 			if filepath.ToSlash(got) != tc.want {
 				t.Fatalf("canonicalEngramCommand(%q) = %q, want %q", tc.exe, got, tc.want)

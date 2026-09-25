@@ -104,7 +104,7 @@ jobs:
           go-version: "1.25.10"
 
       - name: Run Windows-specific setup test
-        run: go test ./internal/setup/ -run TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath -count=1
+        run: go test ./internal/setup/ -run 'TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath|TestResolveEngramCommandMiseInstall|TestCanonicalEngramCommand|TestEnsurePiMCPConfigRepairsDeadEngramCommand' -count=1
 
       - name: Run Windows MCP parent-lifetime tests
         run: go test ./cmd/engram/ -run '^TestMCPJobObject' -count=1

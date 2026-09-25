@@ -1483,7 +1483,7 @@ func resolveEngramCommand() string {
 // maps a versioned Homebrew/Linuxbrew Cellar path to the stable
 // <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
 // version (see stableHomebrewEngramCommand), and a mise install path to the
-// stable <mise-data-dir>/shims/engram shim that keeps resolving to the active
+// existing mise shim (from environment, effective settings, or data dir) that keeps resolving to the active
 // version (see stableMiseEngramCommand). Other installs keep their resolved
 // absolute path. It does not call osExecutable() — the caller is responsible
 // for obtaining exe and for any PATH-based fallback on failure.
@@ -1544,9 +1544,10 @@ func stableHomebrewEngramCommand(exe string) (string, bool) {
 	return "engram", true
 }
 
-// stableMiseEngramCommand maps a mise install path to the stable mise shim
-// "<mise-data-dir>/shims/engram". mise installs live under
-// <mise-data-dir>/installs/engram/<version>/engram and `mise up` plus
+// stableMiseEngramCommand maps a mise install path to the stable mise shim.
+// An absolute MISE_SHIMS_DIR takes precedence over mise's effective shims_dir
+// setting; invalid settings fall back to <mise-data-dir>/shims. Mise installs
+// live under <mise-data-dir>/installs/engram/<version>/engram and `mise up` plus
 // `mise prune` removes superseded version directories, so baking the resolved
 // path into MCP client configs leaves a stale command that fails to spawn
 // (ENOENT) after an upgrade. The shim is mise's documented launcher entry
@@ -1571,14 +1572,25 @@ func stableMiseEngramCommand(exe string) (string, bool) {
 	}
 	// Everything before "/installs/" is the mise data directory, e.g.
 	// ~/.local/share/mise, ~/.mise, or a custom $MISE_DATA_DIR. The shims
-	// directory lives directly under it.
+	// directory lives directly under it unless an absolute override is available.
 	shimName := "engram"
 	if base == "engram.exe" {
 		shimName = "engram.exe"
 	}
-	stable := clean[:idx] + "/shims/" + shimName
+	shimDir := filepath.FromSlash(clean[:idx] + "/shims")
+	if override := os.Getenv("MISE_SHIMS_DIR"); filepath.IsAbs(override) {
+		shimDir = override
+	} else if output, err := runCommand("mise", "settings", "get", "shims_dir"); err == nil {
+		// Reject diagnostics, multiple lines, and relative paths: MCP commands
+		// must be a single existing absolute executable path.
+		configured := strings.TrimSuffix(strings.TrimSuffix(string(output), "\n"), "\r")
+		if configured == strings.TrimSpace(configured) && filepath.IsAbs(configured) && !strings.ContainsAny(configured, "\r\n") {
+			shimDir = configured
+		}
+	}
+	stable := filepath.Join(shimDir, shimName)
 	if _, err := statFn(stable); err == nil {
-		return filepath.FromSlash(stable), true
+		return stable, true
 	}
 	return "engram", true
 }

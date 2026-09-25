@@ -62,7 +62,9 @@ Install Engram's Pi package, the MCP adapter, and Pi MCP config:
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.13` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
+`engram setup pi` runs `pi install npm:gentle-engram@0.1.15` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved unless their absolute command path no longer exists; setup repairs those entries with the current Engram command. Other filesystem errors leave the entry unchanged.
+
+For versioned mise installations, setup selects the shim directory from an absolute `MISE_SHIMS_DIR`, the effective absolute `shims_dir` reported by `mise settings get shims_dir` (including global config), or the mise data directory's default `shims` folder, in that order. Invalid settings output or an unavailable mise CLI leaves the default directory as the fallback. If the shim is missing from the selected directory, the caller uses its existing executable/PATH fallback policy; setup never writes mise warnings as the Engram MCP command.
 
 When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
 
