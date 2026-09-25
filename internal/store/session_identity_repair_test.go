@@ -305,7 +305,11 @@ func TestSessionIdentityRepairRejectsAndRollsBack(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer backup.Close()
+		defer func() {
+			if err := backup.Close(); err != nil {
+				t.Errorf("close backup: %v", err)
+			}
+		}()
 		var originalSession, originalJournal int
 		if err := backup.QueryRow(`SELECT count(*) FROM sessions WHERE id=''`).Scan(&originalSession); err != nil {
 			t.Fatal(err)

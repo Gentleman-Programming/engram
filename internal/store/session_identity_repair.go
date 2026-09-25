@@ -240,14 +240,18 @@ func (s *Store) inspectSessionIdentityTx(tx *sql.Tx, source, replacement string)
 	return snapshot, nil
 }
 
-func inspectIdentityObservations(tx *sql.Tx, source string, snapshot *identitySnapshot, evidence *[]any) error {
+func inspectIdentityObservations(tx *sql.Tx, source string, snapshot *identitySnapshot, evidence *[]any) (retErr error) {
 	rows, err := tx.Query(`SELECT id,ifnull(sync_id,''),session_id,type,title,content,tool_name,project,scope,topic_key,
 		normalized_hash,revision_count,duplicate_count,last_seen_at,pinned,created_at,updated_at,deleted_at
 		FROM observations WHERE session_id=? ORDER BY id`, source)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
 	for rows.Next() {
 		var id, revision, duplicates, pinned int64
 		var syncID, sessionID, kind, title, content, scope, created, updated string
@@ -274,13 +278,17 @@ func inspectIdentityObservations(tx *sql.Tx, source string, snapshot *identitySn
 	return rows.Err()
 }
 
-func inspectIdentityPrompts(tx *sql.Tx, source string, snapshot *identitySnapshot, evidence *[]any) error {
+func inspectIdentityPrompts(tx *sql.Tx, source string, snapshot *identitySnapshot, evidence *[]any) (retErr error) {
 	rows, err := tx.Query(`SELECT id,ifnull(sync_id,''),session_id,content,project,created_at
 		FROM user_prompts WHERE session_id=? ORDER BY id`, source)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
 	for rows.Next() {
 		var id int64
 		var syncID, sessionID, content, created string
@@ -313,7 +321,7 @@ func mustIdentityJSON(value any) string {
 // Unscoped or other-project rows naming the source ID are also blocked. Decode
 // both direct and JSON-string payloads, matching the deferred replay reader.
 // Inactive tombstones carry remote delivery floors and cannot be rewritten here.
-func inspectIdentityBlockers(tx *sql.Tx, source, replacement, project string, evidence *[]any) error {
+func inspectIdentityBlockers(tx *sql.Tx, source, replacement, project string, evidence *[]any) (retErr error) {
 	checks := []struct {
 		name  string
 		query string
@@ -340,7 +348,11 @@ func inspectIdentityBlockers(tx *sql.Tx, source, replacement, project string, ev
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
 	for rows.Next() {
 		var syncID, owner, raw string
 		if err := rows.Scan(&syncID, &owner, &raw); err != nil {
