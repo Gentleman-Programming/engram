@@ -144,6 +144,81 @@ func TestSessionIdentityRepairRejectsUnplannedAndChangedJournal(t *testing.T) {
 	}
 }
 
+func TestSessionIdentityRepairRejectsAmbiguousDuplicateJournalIdentifiers(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionIdentityRepair(t, s, false)
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','session','other','upsert','{"id":"","id":"other","project":"alpha"}','local','alpha')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud','session','unrelated','upsert','{"id":"unrelated","project":"beta"}','local','beta')`); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.PlanSessionIdentityRepair("", "canonical")
+	if err != nil {
+		if got := scalarInt(t, s, `SELECT count(*) FROM sessions WHERE id=''`); got != 1 {
+			t.Fatalf("rejected plan changed source: %d", got)
+		}
+		if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity_key='unrelated' AND disposition='pending'`); got != 1 {
+			t.Fatalf("rejected plan changed unrelated journal: %d", got)
+		}
+		return
+	}
+	result, applyErr := s.ApplySessionIdentityRepair(plan)
+	source := scalarInt(t, s, `SELECT count(*) FROM sessions WHERE id=''`)
+	ambiguous := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity='session' AND entity_key='other' AND disposition='pending'`)
+	unrelated := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity_key='unrelated' AND disposition='pending'`)
+	t.Fatalf("plan accepted ambiguous duplicate journal identifiers: plan=%+v; temporary-store apply result=%+v error=%v; source blank-ID rows=%d, ambiguous historical pending rows=%d, unrelated pending rows=%d", plan, result, applyErr, source, ambiguous, unrelated)
+}
+
+func TestSessionIdentityRepairRejectsShadowedJournalIdentifiers(t *testing.T) {
+	for _, tc := range []struct{ name, entity, key, owner, payload string }{
+		{"session alias", "session", "other", "beta", `{"ID":"","id":"other","project":"alpha"}`},
+		{"observation", "observation", "other", "beta", `{"session_id":"","session_id":"other","sync_id":"other"}`},
+		{"prompt alias", "prompt", "other", "beta", `{"SESSION_ID":"","session_id":"other","sync_id":"other"}`},
+		{"relation", "relation", "other", "beta", `{"session_id":"","session_id":"other","sync_id":"other"}`},
+		{"session source last", "session", "", "alpha", `{"id":"other","id":"","project":"alpha"}`},
+		{"observation source last", "observation", "other", "beta", `{"session_id":"other","session_id":"","sync_id":"other"}`},
+		{"prompt source last", "prompt", "other", "beta", `{"session_id":"other","SESSION_ID":"","sync_id":"other"}`},
+		{"relation source last", "relation", "other", "beta", `{"session_id":"other","session_id":"","sync_id":"other"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			seedSessionIdentityRepair(t, s, false)
+			if _, err := s.DB().Exec(`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud',?,?,'upsert',?,'local',?)`, tc.entity, tc.key, tc.payload, tc.owner); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.PlanSessionIdentityRepair("", "canonical"); err == nil {
+				t.Fatal("accepted shadowed source identity")
+			}
+			if got := scalarInt(t, s, `SELECT count(*) FROM sessions WHERE id=''`); got != 1 {
+				t.Fatalf("plan changed source: %d", got)
+			}
+			if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity=? AND entity_key=? AND payload=? AND disposition='pending'`, tc.entity, tc.key, tc.payload); got != 1 {
+				t.Fatalf("plan changed ambiguous journal: %d", got)
+			}
+		})
+	}
+}
+
+func TestShadowedIdentitySourceOrderAndDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload, identifier string
+		want bool
+	}{
+		{"source first", `{"id":"","id":"other"}`, "id", true},
+		{"source last", `{"id":"other","ID":""}`, "id", true},
+		{"nested only", `{"metadata":{"id":""},"id":"other"}`, "id", false},
+		{"unrelated duplicates", `{"id":"other","ID":"another"}`, "id", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := shadowedIdentitySource(tc.payload, tc.identifier, "")
+			if err != nil || got != tc.want {
+				t.Fatalf("shadowed=%t, err=%v; want %t", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSessionIdentityRepairIgnoresUnrelatedActivity(t *testing.T) {
 	s := newTestStore(t)
 	seedSessionIdentityRepair(t, s, true)

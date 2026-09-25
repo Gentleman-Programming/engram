@@ -406,6 +406,19 @@ func inspectIdentityMutations(tx *sql.Tx, source, project string, snapshot *iden
 		}
 		linked := false
 		valid := false
+		identifier := ""
+		switch mutation.entity {
+		case SyncEntitySession:
+			identifier = "id"
+		case SyncEntityObservation, SyncEntityPrompt, SyncEntityRelation:
+			identifier = "session_id"
+		}
+		if identifier != "" {
+			shadowed, err := shadowedIdentitySource(mutation.payload, identifier, source)
+			if err == nil && shadowed {
+				return fmt.Errorf("ambiguous %s mutation %d: shadowed source identity", mutation.entity, mutation.seq)
+			}
+		}
 		switch mutation.entity {
 		case SyncEntitySession:
 			linked = mutation.key == source
@@ -469,6 +482,38 @@ func inspectIdentityMutations(tx *sql.Tx, source, project string, snapshot *iden
 		snapshot.mutations = append(snapshot.mutations, mutation)
 	}
 	return rows.Err()
+}
+
+// Scan only top-level keys: struct decoding accepts case-insensitive aliases
+// and later keys can overwrite an earlier source identity.
+func shadowedIdentitySource(raw, identifier, source string) (bool, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return false, err
+	}
+	seenSource := false
+	identifiers := 0
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return false, err
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false, err
+		}
+		if !strings.EqualFold(key.(string), identifier) {
+			continue
+		}
+		identifiers++
+		var id string
+		if json.Unmarshal(value, &id) == nil && id == source {
+			seenSource = true
+		}
+	}
+	_, err = decoder.Token()
+	return identifiers > 1 && seenSource, err
 }
 
 func nullStringPointer(value sql.NullString) *string {
