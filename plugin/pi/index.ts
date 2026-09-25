@@ -1033,7 +1033,8 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
     try {
       if (pendingEffectiveSession(ctx, runtimeID, effectiveID)) {
         const pendingProject = pendingEffectiveSessionProject(ctx, runtimeID, effectiveID);
-        if (pendingProject && pendingProject !== sessionProject) {
+        if (!pendingProject) throw new Error(`Cannot confirm project ownership for pending Pi session ${effectiveID}`);
+        if (pendingProject !== sessionProject) {
           throw new SessionProjectConflictError(effectiveID, pendingProject, sessionProject);
         }
       }
@@ -1048,6 +1049,17 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
       if (!(error instanceof EngramHttpError) || error.status !== 409
         || (error.data as { code?: string } | null)?.code !== "session_already_ended") throw error;
       if (!appendEntry || !ctx.sessionManager.getBranch) throw error;
+      // Another module graph may have reserved the replacement while this POST was in flight.
+      // Read the shared branch before reserving: appendEntry is synchronous, so this check
+      // and the reservation below cannot interleave with another caller's continuation.
+      const reservedID = effectiveSessionID(ctx, runtimeID);
+      if (reservedID !== effectiveID && pendingEffectiveSession(ctx, runtimeID, reservedID)) {
+        const owner = pendingEffectiveSessionProject(ctx, runtimeID, reservedID);
+        if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${reservedID}`);
+        if (owner !== sessionProject) throw new SessionProjectConflictError(reservedID, owner, sessionProject);
+        await ensureSession(reservedID, sessionProject, fetch, true);
+        return reservedID;
+      }
       const freshID = `${runtimeID}:resume:${randomUUID()}`;
       appendEntry(EFFECTIVE_SESSION_ENTRY, { runtimeID, effectiveID: freshID, pending: true, project: sessionProject });
       submittedEffectiveSessions.add(freshID);
@@ -1755,7 +1767,9 @@ export default function registerEngram(pi: ExtensionAPI) {
     const sessionId = effectiveSessionID(ctx, runtimeID);
     knownSessions.add(`\u0000closing:${sessionId}`);
     try {
-      const persistedPending = pendingEffectiveSession(ctx, runtimeID, sessionId);
+      // An ownerless legacy reservation alone does not authorize ending this session.
+      const persistedPending = pendingEffectiveSession(ctx, runtimeID, sessionId)
+        && !!pendingEffectiveSessionProject(ctx, runtimeID, sessionId);
       if (persistedPending || hasKnownSession(sessionId) || hasSessionRegistrationInFlight(sessionId)) {
         const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
           `/sessions/${encodeURIComponent(sessionId)}/end`,

@@ -15,6 +15,18 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function waitFor(promise, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), 3000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Each sandbox lives at its own path, so every call already loads a fresh module graph and no
 // cache-busting query string is needed.
 async function loadPluginHarness(sandbox, appendEntry) {
@@ -975,6 +987,221 @@ test("an opaque runtime session ID stays byte-identical through registration, co
       const afterTimedOutShutdown = await memSave.execute("exact-5", { title: "fifth", content: "five" }, undefined, undefined, ctx);
       assert.equal(afterTimedOutShutdown.isError, undefined, "a timed-out shutdown must still clear the registration cache");
       assert.equal(sessionBodies.length, 6, "writes after a timed-out shutdown must re-register");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("separate plugin graphs converge after simultaneous ended-session responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  const entered = deferred();
+  const release = deferred();
+  const failedRegistration = deferred();
+  let originals = 0;
+  let lostResponses = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "shared" }));
+    if (path === "/sessions" && body.id === "dual") {
+      const ordinal = ++originals;
+      if (ordinal === 2) entered.resolve();
+      await release.promise;
+      if (ordinal === 2) await failedRegistration.promise;
+      return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    }
+    if (path === "/sessions" && lostResponses < 2) {
+      if (++lostResponses === 2) failedRegistration.resolve();
+      throw new Error("registration acknowledgement lost");
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [];
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  const ctx = runtimeContext("dual");
+  ctx.sessionManager.getBranch = () => entries;
+  try {
+    await withPluginSandbox("engram-pi-dual-resume-", async ({ sandbox }) => {
+      await withPluginSandbox("engram-pi-dual-resume-peer-", async ({ sandbox: peer }) => {
+      const first = await loadPluginHarness(sandbox, append);
+      const second = await loadPluginHarness(peer, append);
+      const save = (module, project) => module.registeredTools.get("mem_save").execute("dual", { title: "dual", content: "dual", project }, undefined, undefined, ctx);
+      const a = save(first, "shared");
+      const b = save(second, "shared");
+      await waitFor(entered.promise, "original requests stalled");
+      release.resolve();
+      const results = await waitFor(Promise.all([a, b]), "initial registrations stalled");
+      const failedIndex = results.findIndex((result) => result.isError === true);
+      assert.notEqual(failedIndex, -1, "lost registration acknowledgement must fail its initial caller");
+      assert.equal(results[1 - failedIndex].isError, undefined, "the other initial caller must succeed");
+      assert.equal(lostResponses, 2, "the lost caller must exhaust the bounded registration retry");
+      const replacements = entries.filter((entry) => entry.customType === "engram-effective-session");
+      assert.equal(replacements.length, 1, "only one identity may be reserved");
+      const id = replacements[0].data.effectiveID;
+      assert.deepEqual([...new Set(calls.filter((call) => call.path === "/sessions" && call.body.id !== "dual").map((call) => call.body.id))], [id]);
+      assert.equal(calls.filter((call) => call.path === "/observations").length, 1, "only the initially successful caller may write");
+      const retry = await save([first, second][failedIndex], "shared");
+      assert.equal(retry.isError, undefined, JSON.stringify(retry));
+      assert.equal(calls.filter((call) => call.path === "/observations" && call.body.session_id === id).length, 2,
+        "the failed caller must recover its pending identity and write on retry");
+      assert.ok(calls.indexOf(calls.find((call) => call.path === "/sessions" && call.body.id === id)) < calls.indexOf(calls.find((call) => call.path === "/observations")));
+      const fork = runtimeContext("fork-dual");
+      fork.sessionManager.getBranch = () => entries;
+      await save(second, "shared");
+      await second.registeredTools.get("mem_save").execute("fork", { title: "fork", content: "fork", project: "shared" }, undefined, undefined, fork);
+      assert.equal(calls.filter((call) => call.path === "/observations").at(-1).body.session_id, "fork-dual");
+      });
+    });
+  } finally {
+    release.resolve();
+    failedRegistration.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("simultaneous foreign projects cannot each reserve a replacement", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const entered = deferred();
+  const release = deferred();
+  const calls = [];
+  let originals = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "alpha" }));
+    if (path === "/sessions" && body.id === "foreign-dual") {
+      if (++originals === 2) entered.resolve();
+      await release.promise;
+      return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [];
+  const ctx = runtimeContext("foreign-dual");
+  ctx.sessionManager.getBranch = () => entries;
+  try {
+    await withPluginSandbox("engram-pi-foreign-dual-", async ({ sandbox }) => {
+      await withPluginSandbox("engram-pi-foreign-dual-peer-", async ({ sandbox: peer }) => {
+      const append = (customType, data) => entries.push({ type: "custom", customType, data });
+      const first = await loadPluginHarness(sandbox, append);
+      const second = await loadPluginHarness(peer, append);
+      const save = (module, project) => module.registeredTools.get("mem_save").execute(project, { title: project, content: project, project }, undefined, undefined, ctx);
+      const a = save(first, "alpha");
+      const b = save(second, "beta");
+      await waitFor(entered.promise, "original requests stalled");
+      release.resolve();
+      const results = await Promise.all([a, b]);
+      const writes = calls.filter((call) => call.path === "/observations");
+      const replacements = entries.filter((entry) => entry.customType === "engram-effective-session");
+      assert.equal(replacements.length, 1);
+      assert.equal(writes.length, 1);
+      const owner = replacements[0].data.project;
+      assert.equal(writes[0].body.project, owner);
+      assert.equal(writes[0].body.session_id, replacements[0].data.effectiveID);
+      assert.equal(results[owner === "alpha" ? 0 : 1].isError, undefined, "the reservation owner must succeed");
+      assert.equal(results[owner === "alpha" ? 1 : 0].isError, true);
+      assert.equal(calls.filter((call) => call.path === "/sessions" && call.body.id !== "foreign-dual").length, 1);
+      });
+    });
+  } finally {
+    release.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("an ownerless pending replacement cannot be adopted or ended by a foreign project", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const runtimeID = "legacy-pending";
+  const effectiveID = `${runtimeID}:resume:unowned`;
+  const entered = deferred();
+  const release = deferred();
+  const calls = [];
+  const entries = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
+    if (path === "/sessions" && body.id === runtimeID) {
+      entered.resolve();
+      await release.promise;
+      return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    }
+    // The server would accept the unowned replacement for B; only the plugin can reject it.
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const ctx = runtimeContext(runtimeID);
+  ctx.sessionManager.getBranch = () => entries;
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-ownerless-pending-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, append);
+      const save = registeredTools.get("mem_save").execute("foreign", {
+        title: "foreign", content: "foreign", project: "project-b",
+      }, undefined, undefined, ctx);
+      await waitFor(entered.promise, "original registration stalled");
+      entries.push({ type: "custom", customType: "engram-effective-session", data: { runtimeID, effectiveID, pending: true } });
+      release.resolve();
+      const result = await waitFor(save, "foreign registration stalled");
+      assert.equal(result.isError, true, "unknown ownership must fail closed");
+      assert.equal(calls.filter(({ path, body }) => path === "/sessions" && body.id === effectiveID).length, 0);
+      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      assert.deepEqual(entries.map(({ customType }) => customType), ["engram-effective-session"],
+        "a foreign caller must not reject the existing reservation");
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(calls.filter(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`).length, 0,
+        "a foreign caller must not end an unowned replacement");
+    });
+  } finally {
+    release.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("an ownerless pending replacement is not registered on first use", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const runtimeID = "legacy-first-use";
+  const effectiveID = `${runtimeID}:resume:unowned`;
+  const entries = [{ type: "custom", customType: "engram-effective-session", data: { runtimeID, effectiveID, pending: true } }];
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    calls.push({ path, body: init.body ? JSON.parse(init.body) : undefined });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const ctx = runtimeContext(runtimeID);
+  ctx.sessionManager.getBranch = () => entries;
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-ownerless-first-use-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox, append);
+      const result = await registeredTools.get("mem_save").execute("foreign", {
+        title: "foreign", content: "foreign", project: "project-b",
+      }, undefined, undefined, ctx);
+      assert.equal(result.isError, true, "unknown ownership must fail before registration");
+      assert.equal(calls.filter(({ path }) => path === "/sessions" || path === "/observations").length, 0);
+      assert.equal(entries.length, 1, "the unowned reservation must not be rejected");
     });
   } finally {
     globalThis.fetch = originalFetch;
