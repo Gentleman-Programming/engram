@@ -552,72 +552,114 @@ func TestCmdDoctorRepairCleansForeignSyncTargetsWithoutDroppingJournal(t *testin
 }
 
 func TestCmdDoctorRepairInvalidSessionIdentityLegacyJournal(t *testing.T) {
-	cfg := testConfig(t)
-	initDoctorStore(t, cfg)
-	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	if _, err := db.Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','alpha','/work'); INSERT INTO sync_enrolled_projects(project) VALUES ('alpha')`); err != nil {
-		t.Fatal(err)
-	}
-	insert := func(entity, key, payload string) {
-		t.Helper()
-		if _, err := db.Exec(`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud',?,?,'upsert',?,'local','alpha')`, entity, key, payload); err != nil {
-			t.Fatal(err)
-		}
-	}
-	insert("session", "", `{"id":"","project":"alpha","directory":"/work"}`)
-	for i := 0; i < 7; i++ {
-		key := fmt.Sprintf("obs-%d", i)
-		if _, err := db.Exec(`INSERT INTO observations(sync_id,session_id,type,title,content,project) VALUES (?,'','note','title','body','alpha')`, key); err != nil {
-			t.Fatal(err)
-		}
-		insert("observation", key, fmt.Sprintf(`{"sync_id":%q,"session_id":"","project":"alpha","scope":"project","type":"note","title":"title","content":"body"}`, key))
-	}
-	for i := 0; i < 4; i++ {
-		key := fmt.Sprintf("prompt-%d", i)
-		if _, err := db.Exec(`INSERT INTO user_prompts(sync_id,session_id,content,project) VALUES (?,'','hello','alpha')`, key); err != nil {
-			t.Fatal(err)
-		}
-		insert("prompt", key, fmt.Sprintf(`{"sync_id":%q,"session_id":"","project":"alpha","content":"hello"}`, key))
-	}
-	run := func(mode string) map[string]any {
-		t.Helper()
-		withArgs(t, "engram", "doctor", "repair", "--project", "alpha", "--check", "invalid_session_identity", "--replacement-id", "canonical", mode)
-		out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
-		if stderr != "" {
-			t.Fatal(stderr)
-		}
-		return decodeRepairPlan(t, out)
-	}
-	for _, mode := range []string{"--plan", "--dry-run"} {
-		plan := run(mode)
-		identity := plan["identity_repair"].(map[string]any)
-		if identity["retired_mutations"] != float64(12) || identity["observations"] != float64(7) || identity["prompts"] != float64(4) || identity["enrolled"] != true {
-			t.Fatalf("%s: %v", mode, plan)
-		}
-		var count int
-		if err := db.QueryRow(`SELECT count(*) FROM sessions WHERE id=''`).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("plan mutated source: %d %v", count, err)
-		}
-	}
-	applied := run("--apply")
-	if applied["status"] != "applied" {
-		t.Fatal(applied)
-	}
-	var retired, published, children int
-	for _, q := range []struct {
-		query string
-		dest  *int
-	}{{`SELECT count(*) FROM sync_mutations WHERE disposition_reason='session_identity_migrated'`, &retired}, {`SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND project='alpha'`, &published}, {`SELECT count(*) FROM observations WHERE session_id='canonical'`, &children}} {
-		if err := db.QueryRow(q.query).Scan(q.dest); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if retired != 12 || published != 12 || children != 7 {
-		t.Fatalf("retired=%d published=%d observations=%d", retired, published, children)
+	for _, tc := range []struct {
+		name     string
+		enrolled bool
+	}{
+		{name: "enrolled", enrolled: true},
+		{name: "local only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			initDoctorStore(t, cfg)
+			db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if _, err := db.Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','alpha','/work')`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.enrolled {
+				if _, err := db.Exec(`INSERT INTO sync_enrolled_projects(project) VALUES ('alpha')`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			insert := func(entity, key, payload string) {
+				t.Helper()
+				if _, err := db.Exec(`INSERT INTO sync_mutations(target_key,entity,entity_key,op,payload,source,project) VALUES ('cloud',?,?,'upsert',?,'local','alpha')`, entity, key, payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			insert("session", "", `{"id":"","project":"alpha","directory":"/work"}`)
+			for i := 0; i < 7; i++ {
+				key := fmt.Sprintf("obs-%d", i)
+				if _, err := db.Exec(`INSERT INTO observations(sync_id,session_id,type,title,content,project) VALUES (?,'','note','title','body','alpha')`, key); err != nil {
+					t.Fatal(err)
+				}
+				insert("observation", key, fmt.Sprintf(`{"sync_id":%q,"session_id":"","project":"alpha","scope":"project","type":"note","title":"title","content":"body"}`, key))
+			}
+			for i := 0; i < 4; i++ {
+				key := fmt.Sprintf("prompt-%d", i)
+				if _, err := db.Exec(`INSERT INTO user_prompts(sync_id,session_id,content,project) VALUES (?,'','hello','alpha')`, key); err != nil {
+					t.Fatal(err)
+				}
+				insert("prompt", key, fmt.Sprintf(`{"sync_id":%q,"session_id":"","project":"alpha","content":"hello"}`, key))
+			}
+			run := func(mode string) map[string]any {
+				t.Helper()
+				withArgs(t, "engram", "doctor", "repair", "--project", "alpha", "--check", "invalid_session_identity", "--replacement-id", "canonical", mode)
+				out, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+				if stderr != "" {
+					t.Fatal(stderr)
+				}
+				return decodeRepairPlan(t, out)
+			}
+			for _, mode := range []string{"--plan", "--dry-run"} {
+				plan := run(mode)
+				identity := plan["identity_repair"].(map[string]any)
+				if identity["retired_mutations"] != float64(12) || identity["observations"] != float64(7) || identity["prompts"] != float64(4) || identity["enrolled"] != tc.enrolled {
+					t.Fatalf("%s: %v", mode, plan)
+				}
+				var count int
+				if err := db.QueryRow(`SELECT count(*) FROM sessions WHERE id=''`).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("plan mutated source: %d %v", count, err)
+				}
+				if err := db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND disposition_reason IS NULL`).Scan(&count); err != nil || count != 12 {
+					t.Fatalf("%s mutated journal: %d %v", mode, count, err)
+				}
+			}
+			applied := run("--apply")
+			if applied["status"] != "applied" {
+				t.Fatal(applied)
+			}
+			var retired, published, children int
+			for _, q := range []struct {
+				query string
+				dest  *int
+			}{{`SELECT count(*) FROM sync_mutations WHERE disposition_reason='session_identity_migrated'`, &retired}, {`SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND project='alpha'`, &published}, {`SELECT count(*) FROM observations WHERE session_id='canonical'`, &children}} {
+				if err := db.QueryRow(q.query).Scan(q.dest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantPublished := 0
+			if tc.enrolled {
+				wantPublished = 12
+			}
+			if retired != 12 || published != wantPublished || children != 7 {
+				t.Fatalf("retired=%d published=%d observations=%d", retired, published, children)
+			}
+			if !tc.enrolled {
+				for label, check := range map[string]struct {
+					query string
+					want  int
+				}{
+					"source":             {`SELECT count(*) FROM sessions WHERE id='canonical' AND project='alpha' AND directory='/work'`, 1},
+					"prompts":            {`SELECT count(*) FROM user_prompts WHERE session_id='canonical' AND content='hello' AND project='alpha'`, 4},
+					"observations":       {`SELECT count(*) FROM observations WHERE session_id='canonical' AND title='title' AND content='body' AND project='alpha'`, 7},
+					"historical journal": {`SELECT count(*) FROM sync_mutations WHERE disposition_reason='session_identity_migrated' AND disposition='superseded' AND source='local' AND project='alpha' AND json_extract(payload,'$.session_id')=''`, 11},
+				} {
+					var got int
+					if err := db.QueryRow(check.query).Scan(&got); err != nil || got != check.want {
+						t.Fatalf("%s: got=%d want=%d err=%v", label, got, check.want, err)
+					}
+				}
+				var oldSession int
+				if err := db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity='session' AND entity_key='' AND disposition='superseded' AND payload='{"id":"","project":"alpha","directory":"/work"}'`).Scan(&oldSession); err != nil || oldSession != 1 {
+					t.Fatalf("historical session: got=%d err=%v", oldSession, err)
+				}
+			}
+		})
 	}
 }
 
