@@ -265,6 +265,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		if socketPath == "" && isAddressInUse(err) {
 			if s.instanceOwnsPort() {
+				log.Printf("[engram] HTTP server did not bind on %s: an existing instance owns the port", addr)
 				return nil
 			}
 			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)

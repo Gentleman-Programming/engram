@@ -1450,13 +1450,15 @@ After=network.target
 [Service]
 WorkingDirectory=%h
 ExecStart=%h/.local/bin/engram serve
-Restart=always
+Restart=on-failure
 RestartSec=3
 Environment=ENGRAM_DATA_DIR=%h/.engram
 
 [Install]
 WantedBy=default.target
 ```
+
+`Restart=on-failure` restarts unexpected failures but not a clean exit when the same Engram instance already owns the port. A different or legacy port owner still causes a startup error. Existing installed units are not changed by this example: manually update `~/.config/systemd/user/engram.service` and run `systemctl --user daemon-reload` to apply the policy.
 
 ### Using launchd (macOS)
 
