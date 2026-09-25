@@ -17,7 +17,7 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 # conversions cannot alter its newlines.
 PROJECT=$(resolve_project "$CWD") || exit 0
 BODY=$(printf '%s' "$INPUT" | jq -c --arg project "$PROJECT" '
-  {session_id: (.session_id // ""), content: (.last_assistant_message // .stdout // ""),
+  {session_id: (.session_id // ""), content: (if .last_assistant_message == "" then (.stdout // "") else (.last_assistant_message // .stdout // "") end),
    project: $project, source: "subagent-stop"} | select(.content != "")')
 
 # Nothing to capture if no output

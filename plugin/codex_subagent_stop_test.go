@@ -123,6 +123,70 @@ func TestCodexSubagentStopAlwaysEmitsHookEnvelope(t *testing.T) {
 	}
 }
 
+func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
+	bash := codexTestBash(t)
+	requireCodexUnixTools(t, bash)
+	for _, tt := range []struct {
+		name, primary, stdout, want string
+	}{
+		{"primary wins", "primary", "fallback", "primary"},
+		{"empty primary falls back", "", "fallback", "fallback"},
+		{"both empty skip capture", "", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var captures []passiveCapture
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = w.Write([]byte(`{"project":"codex-test-project","project_source":"git_root"}`))
+				case "/observations/passive":
+					if r.Method != http.MethodPost {
+						t.Errorf("unexpected method %s", r.Method)
+					}
+					var capture passiveCapture
+					if err := json.NewDecoder(r.Body).Decode(&capture); err != nil {
+						t.Errorf("decode POST: %v", err)
+					}
+					captures = append(captures, capture)
+				default:
+					http.NotFound(w, r)
+				}
+			})}
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close() })
+			input, err := json.Marshal(struct {
+				SessionID            string `json:"session_id"`
+				CWD                  string `json:"cwd"`
+				LastAssistantMessage string `json:"last_assistant_message"`
+				Stdout               string `json:"stdout"`
+			}{"explicit-fields", repoRoot(t), tt.primary, tt.stdout})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(bash, repoRoot(t)+"/plugin/codex/scripts/subagent-stop.sh")
+			cmd.Env = appendFilteredCodexPort("ENGRAM_PORT=" + strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))
+			cmd.Stdin = bytes.NewReader(input)
+			output, err := cmd.CombinedOutput()
+			if err != nil || string(output) != "{}\n" {
+				t.Fatalf("hook output = %q, err = %v", output, err)
+			}
+			if tt.want == "" {
+				if len(captures) != 0 {
+					t.Fatalf("unexpected passive POSTs: %+v", captures)
+				}
+				return
+			}
+			if len(captures) != 1 || captures[0].Content != tt.want || captures[0].SessionID != "explicit-fields" || captures[0].Project != "codex-test-project" || captures[0].Source != "subagent-stop" {
+				t.Fatalf("passive POSTs = %+v, want one capture of %q", captures, tt.want)
+			}
+		})
+	}
+}
+
 func appendFilteredCodexPort(port string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, value := range os.Environ() {

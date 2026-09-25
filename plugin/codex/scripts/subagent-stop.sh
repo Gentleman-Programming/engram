@@ -25,7 +25,7 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
+OUTPUT=$(echo "$INPUT" | jq -r 'if .last_assistant_message == "" then (.stdout // empty) else (.last_assistant_message // .stdout // empty) end')
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && { emit_hook_result; exit 0; }

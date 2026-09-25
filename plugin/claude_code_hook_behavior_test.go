@@ -660,6 +660,41 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 	}
 }
 
+func TestSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
+	for _, tt := range []struct {
+		name, primary, stdout, want string
+	}{
+		{"primary wins", "primary", "fallback", "primary"},
+		{"empty primary falls back", "", "fallback", "fallback"},
+		{"both empty skip capture", "", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requireHookBinaries(t)
+			srv, captured := captureServer(t)
+			input, err := json.Marshal(struct {
+				SessionID            string `json:"session_id"`
+				CWD                  string `json:"cwd"`
+				LastAssistantMessage string `json:"last_assistant_message"`
+				Stdout               string `json:"stdout"`
+			}{"explicit-fields", t.TempDir(), tt.primary, tt.stdout})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runHook(t, "subagent-stop.sh", string(input), map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+			got := captured()
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("unexpected passive POSTs: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Content != tt.want || got[0].SessionID != "explicit-fields" || got[0].Source != "subagent-stop" || got[0].Project != "engram" {
+				t.Fatalf("passive POSTs = %+v, want one capture of %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSubagentStopUsesUnixSocketTransport(t *testing.T) {
 	requireHookBinaries(t)
 	requireUnixSocketHooks(t)
