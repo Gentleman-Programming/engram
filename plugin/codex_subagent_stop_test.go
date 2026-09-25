@@ -3,6 +3,7 @@ package plugin_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -127,13 +128,29 @@ func TestCodexSubagentStopAlwaysEmitsHookEnvelope(t *testing.T) {
 func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 	bash := codexTestBash(t)
 	requireCodexUnixTools(t, bash)
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skipf("jq unavailable: %v", err)
+	}
+	// Reject jq 1.7+ binary-mode flags, even when the installed jq accepts them.
+	shimDir := t.TempDir()
+	shim := "#!/usr/bin/env bash\nfor arg in \"$@\"; do\n  case \"$arg\" in -b|-bj|--binary) exit 97;; esac\ndone\nexec " + fmt.Sprintf("'%s'", strings.ReplaceAll(jq, "'", "'\\''")) + " \"$@\"\n"
+	shimPath := filepath.Join(shimDir, "jq")
+	if err := os.WriteFile(shimPath, []byte(shim), 0755); err != nil {
+		t.Fatal(err)
+	}
+	rejected := exec.Command(bash, shimPath, "-bj", ".")
+	if err := rejected.Run(); err == nil || rejected.ProcessState.ExitCode() != 97 {
+		t.Fatalf("jq compatibility shim did not reject -bj: %v", err)
+	}
 	for _, tt := range []struct {
 		name, primary, stdout, want string
 	}{
 		{"primary wins", "primary", "fallback", "primary"},
+		{"primary beginning with dash b", "-bug", "fallback", "-bug"},
 		{"empty primary falls back", "", "fallback", "fallback"},
-		{"empty primary preserves trailing newline", "", "first\n", "first\n"},
-		{"empty primary preserves CRLF", "", "first\r\n", "first\r\n"},
+		{"empty primary preserves trailing newline", "", "first\nsecond\n", "first\nsecond\n"},
+		{"empty primary preserves CRLF", "", "first\r\nsecond\r\n", "first\r\nsecond\r\n"},
 		{"both empty skip capture", "", "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -174,7 +191,7 @@ func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 				t.Fatal(err)
 			}
 			cmd := exec.Command(bash, repoRoot(t)+"/plugin/codex/scripts/subagent-stop.sh")
-			cmd.Env = appendFilteredCodexPort("ENGRAM_PORT=" + strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))
+			cmd.Env = append(appendFilteredCodexPort("ENGRAM_PORT="+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)), "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			cmd.Stdin = bytes.NewReader(input)
 			output, err := cmd.CombinedOutput()
 			if err != nil || string(output) != "{}\n" {
