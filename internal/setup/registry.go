@@ -222,8 +222,37 @@ func StaleMCPCommands() ([]StaleMCPCommand, error) {
 		if err := json.Unmarshal(raw, &servers); err != nil {
 			return nil, fmt.Errorf("parse %s servers: %w", path, err)
 		}
+		// Only the exact entry shape emitted by mcpEntry is setup-owned.
+		// The command value itself remains unconstrained: users can rename the binary.
+		keys := []string{"command", "args"}
+		switch adapter.mcpFormat {
+		case opencodeObject:
+			keys = []string{"command", "type", "enabled"}
+		case serversObject:
+			keys = append(keys, "type")
+		case commandCodeObject:
+			keys = append(keys, "transport", "enabled")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(servers["engram"], &fields); err != nil || len(fields) != len(keys) {
+			continue
+		}
+		matches := true
+		for _, key := range keys {
+			if _, ok := fields[key]; !ok {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
 		var entry struct {
-			Command json.RawMessage `json:"command"`
+			Command   json.RawMessage `json:"command"`
+			Args      []string        `json:"args"`
+			Type      string          `json:"type"`
+			Transport string          `json:"transport"`
+			Enabled   *bool           `json:"enabled"`
 		}
 		if err := json.Unmarshal(servers["engram"], &entry); err != nil {
 			continue
@@ -231,12 +260,20 @@ func StaleMCPCommands() ([]StaleMCPCommand, error) {
 		var command string
 		if adapter.mcpFormat == opencodeObject {
 			var parts []string
-			if json.Unmarshal(entry.Command, &parts) != nil || len(parts) == 0 {
+			if json.Unmarshal(entry.Command, &parts) != nil || len(parts) != 3 || parts[1] != "mcp" || parts[2] != "--tools=agent" || entry.Type != "local" || entry.Enabled == nil || !*entry.Enabled {
 				continue
 			}
 			command = parts[0]
-		} else if json.Unmarshal(entry.Command, &command) != nil {
-			continue
+		} else {
+			if json.Unmarshal(entry.Command, &command) != nil || len(entry.Args) != 2 || entry.Args[0] != "mcp" || entry.Args[1] != "--tools=agent" {
+				continue
+			}
+			if adapter.mcpFormat == serversObject && entry.Type != "stdio" {
+				continue
+			}
+			if adapter.mcpFormat == commandCodeObject && (entry.Transport != "stdio" || entry.Enabled == nil || !*entry.Enabled) {
+				continue
+			}
 		}
 		if !filepath.IsAbs(command) {
 			continue

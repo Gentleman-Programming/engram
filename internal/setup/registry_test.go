@@ -61,9 +61,9 @@ func TestStaleMCPCommands(t *testing.T) {
 			}
 			command := any(missing)
 			if agent.mcpFormat == opencodeObject {
-				command = []string{missing, "mcp"}
+				command = []string{missing, "mcp", "--tools=agent"}
 			}
-			raw, _ := json.Marshal(map[string]any{agent.topKey: map[string]any{"other": map[string]any{"command": missing}, "engram": map[string]any{"command": command}}})
+			raw, _ := json.Marshal(map[string]any{agent.topKey: map[string]any{"other": map[string]any{"command": missing}, "engram": staleTestEntry(agent.mcpFormat, command)}})
 			if err := os.WriteFile(path, raw, 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -92,6 +92,93 @@ func TestStaleMCPCommands(t *testing.T) {
 				if f.Slug == agent.slug {
 					t.Fatalf("bare command reported: %+v", f)
 				}
+			}
+		})
+	}
+}
+
+func staleTestEntry(format mcpFormat, command any) map[string]any {
+	entry := map[string]any{"command": command}
+	if format != opencodeObject {
+		entry["args"] = []string{"mcp", "--tools=agent"}
+	}
+	switch format {
+	case opencodeObject:
+		entry["type"] = "local"
+		entry["enabled"] = true
+	case serversObject:
+		entry["type"] = "stdio"
+	case commandCodeObject:
+		entry["transport"] = "stdio"
+		entry["enabled"] = true
+	}
+	return entry
+}
+
+func TestStaleMCPCommandsRejectsCustomEntries(t *testing.T) {
+	for _, agent := range declarativeAgents() {
+		t.Run(agent.slug, func(t *testing.T) {
+			stubRegistryEnv(t)
+			missing := filepath.Join(t.TempDir(), "bespoke-launcher")
+			entry := staleTestEntry(agent.mcpFormat, missing)
+			if agent.mcpFormat == opencodeObject {
+				entry = staleTestEntry(agent.mcpFormat, []string{missing, "mcp", "--tools=agent"})
+			}
+			cases := []struct {
+				name   string
+				change func(map[string]any)
+			}{
+				{"missing args", func(e map[string]any) {
+					if agent.mcpFormat == opencodeObject {
+						e["command"] = []string{missing}
+					} else {
+						delete(e, "args")
+					}
+				}},
+				{"wrong args", func(e map[string]any) {
+					if agent.mcpFormat == opencodeObject {
+						e["command"] = []string{missing, "serve", "--tools=agent"}
+					} else {
+						e["args"] = []string{"serve", "--tools=agent"}
+					}
+				}},
+				{"contradictory type", func(e map[string]any) { e["type"] = "remote" }},
+				{"disabled", func(e map[string]any) { e["enabled"] = false }},
+				{"unexpected field", func(e map[string]any) { e["url"] = "https://example.invalid/mcp" }},
+				{"wrong marker", func(e map[string]any) {
+					switch agent.mcpFormat {
+					case opencodeObject, serversObject:
+						e["type"] = "remote"
+					case commandCodeObject:
+						e["transport"] = "http"
+					default:
+						e["args"] = []string{"mcp", "--tools=other"}
+					}
+				}},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					copyEntry := make(map[string]any)
+					for k, v := range entry {
+						copyEntry[k] = v
+					}
+					tc.change(copyEntry)
+					path := agent.mcpPath()
+					if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+						t.Fatal(err)
+					}
+					raw, err := json.Marshal(map[string]any{agent.topKey: map[string]any{"engram": copyEntry}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, raw, 0644); err != nil {
+						t.Fatal(err)
+					}
+					findings, err := StaleMCPCommands()
+					if err != nil || len(findings) != 0 {
+						t.Fatalf("findings=%v err=%v", findings, err)
+					}
+				})
 			}
 		})
 	}

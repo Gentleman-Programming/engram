@@ -30,7 +30,7 @@ func TestDoctorReportsStaleGenericMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(home, "missing-engram")
-	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"engram": map[string]any{"command": missing}, "other": map[string]any{"command": "other"}}})
+	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"engram": map[string]any{"command": missing, "args": []string{"mcp", "--tools=agent"}}, "other": map[string]any{"command": "other"}}})
 	if err := os.WriteFile(path, raw, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestDoctorMultiClientTextAndJSON(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(client.path), 0755); err != nil {
 			t.Fatal(err)
 		}
-		raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"engram": map[string]any{"command": missing}, "other": map[string]any{"command": "other"}}})
+		raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"engram": map[string]any{"command": missing, "args": []string{"mcp", "--tools=agent"}}, "other": map[string]any{"command": "other"}}})
 		if err := os.WriteFile(client.path, raw, 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -123,6 +123,16 @@ func TestDoctorMCPInspectionErrorIsReported(t *testing.T) {
 	text, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if stderr != "" || !strings.Contains(text, "errors=1") || !strings.Contains(text, "mcp_inspection_error") {
 		t.Fatalf("text=%q stderr=%q", text, stderr)
+	}
+	withArgs(t, "engram", "doctor", "--json", "--check", "session_project_directory_mismatch")
+	filtered, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("filtered stderr=%q", stderr)
+	}
+	selected := decodeDoctorReport(t, filtered)
+	checks := selected["checks"].([]any)
+	if len(checks) != 1 || checks[0].(map[string]any)["check_id"] != "session_project_directory_mismatch" || strings.Contains(filtered, "mcp_inspection_error") || selected["status"] != "ok" || selected["summary"].(map[string]any)["errors"] != float64(0) {
+		t.Fatalf("filtered report=%s", filtered)
 	}
 }
 
