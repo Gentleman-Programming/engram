@@ -12,6 +12,8 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > - `engram setup ...` installs MCP/plugin integrations only; it does **not** auto-run `engram cloud config/enroll/upgrade`.
 > - Cloud onboarding contract remains CLI-first until script-level cloud flows are explicitly implemented.
 
+If a generic MCP client retains an absolute Engram executable path after you move or replace the binary, run `engram doctor` to identify the affected client, then run `engram setup <agent>` with the new binary to refresh its Engram registration. Doctor is read-only and does not flag bare custom commands or missing registrations. Setup preserves unrelated MCP server entries.
+
 ## Quick Reference
 
 | Agent         | One-liner                                                                                    | Manual Config                                      |
@@ -312,7 +314,7 @@ engram setup claude-code
 
 The supported plugin-and-hook setup requires `jq` and `curl` on `PATH` before installation. On Windows, `curl.exe` satisfies curl detection, but `jq` must also be installed and available to the shell Claude Code uses. If those hook prerequisites are unavailable, use **Option C (Bare MCP)**, the MCP-only fallback; it does not install or run plugin hooks.
 
-`engram setup claude-code` delegates MCP registration to Claude CLI. Claude writes the user-scope top-level `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`); when `CLAUDE_CONFIG_DIR` is set, Claude uses `$CLAUDE_CONFIG_DIR/.claude.json`. Engram reads only that documented entry: an exact stdio command and arguments (`<absolute-engram-path> mcp --tools=agent`) is a no-op, while a missing entry is added with `claude mcp add --transport stdio --scope user engram -- <absolute-engram-path> mcp --tools=agent` and then verified. A mismatched or unreadable entry is reported as a conflict and is never overwritten. If verification fails after a proven-absent add, setup asks Claude to remove that user-scope entry and reports both errors if rollback fails. You'll be asked whether to add Engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
+`engram setup claude-code` delegates MCP registration to Claude CLI. Claude writes the user-scope top-level `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`); when `CLAUDE_CONFIG_DIR` is set, Claude uses `$CLAUDE_CONFIG_DIR/.claude.json`. Engram reads only that documented entry: an omitted `type` or explicit `"stdio"` with the exact absolute command and arguments (`<absolute-engram-path> mcp --tools=agent`) is a no-op; explicit `null`, empty or other types, and mismatched commands or arguments remain conflicts. A missing entry is added with `claude mcp add --transport stdio --scope user engram -- <absolute-engram-path> mcp --tools=agent` and then verified. A mismatched or unreadable entry is reported as a conflict and is never overwritten. If verification fails after a proven-absent add, setup asks Claude to remove that user-scope entry and reports both errors if rollback fails. You'll be asked whether to add Engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
@@ -935,13 +937,13 @@ For `engram mcp`, autosync runs for the lifetime of the stdio MCP process and is
 If you are contributing to the cloud dashboard (`internal/cloud/dashboard/`), the HTML components are rendered via [templ](https://templ.guide/). Before committing changes to any `.templ` file, regenerate the Go output:
 
 ```sh
-# Download pinned version (first time only)
+# Download module dependencies ahead of time (optional; no global templ install needed)
 go mod download
 
 # Regenerate
 make templ
 # or directly:
-go tool templ generate ./internal/cloud/dashboard/...
+go tool templ generate -path ./internal/cloud/dashboard
 ```
 
-Commit the regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` alongside your `.templ` source changes. CI will fail if they are missing or outdated (`TestTemplGeneratedFilesAreCheckedIn`).
+Commit the regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` alongside your `.templ` source changes. `TestTemplGeneratedFilesAreCheckedIn` checks for missing generated files; CI also checks regeneration for drift.

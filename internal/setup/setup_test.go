@@ -4733,6 +4733,50 @@ func TestEnsureClaudeCodeUserMCPConflictAndRecovery(t *testing.T) {
 		}
 	})
 
+	for _, tc := range []struct {
+		name     string
+		typeJSON string
+		entry    string
+		wantOK   bool
+	}{
+		{name: "implicit stdio", wantOK: true},
+		{name: "explicit null", typeJSON: `"type":null,`},
+		{name: "empty type", typeJSON: `"type":"",`},
+		{name: "other type", typeJSON: `"type":"sse",`},
+		{name: "case variant overrides other type", typeJSON: `"type":"sse","Type":"stdio",`},
+		{name: "case variant overrides null type", typeJSON: `"type":null,"Type":"stdio",`},
+		{name: "reverse case variant overrides other type", typeJSON: `"Type":"stdio","type":"sse",`},
+		{name: "exact stdio wins over case variant", typeJSON: `"type":"stdio","Type":"sse",`, wantOK: true},
+		{name: "malformed type", typeJSON: `"type":42,`},
+		{name: "relative command", entry: `"command":%q,"args":["mcp","--tools=agent"]`},
+		{name: "different args", entry: `"command":%q,"args":["mcp"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := tc.entry
+			if entry == "" {
+				entry = `"command":%q,"args":["mcp","--tools=agent"]`
+			}
+			entryCommand := command
+			if tc.name == "relative command" {
+				entryCommand = "engram"
+			}
+			contents := fmt.Sprintf(`{"mcpServers":{"engram":{%s%s}}}`, tc.typeJSON, fmt.Sprintf(entry, entryCommand))
+			path, calls := prepare(t, contents)
+			err := EnsureClaudeCodeUserMCP()
+			wantError := "conflict"
+			if tc.name == "malformed type" {
+				wantError = "parse"
+			}
+			if tc.wantOK && err != nil || !tc.wantOK && (err == nil || !strings.Contains(err.Error(), wantError)) {
+				t.Fatalf("error = %v, want success=%t", err, tc.wantOK)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || string(after) != contents || len(*calls) != 0 {
+				t.Fatalf("read error=%v calls=%#v config changed=%t", readErr, *calls, string(after) != contents)
+			}
+		})
+	}
+
 	t.Run("mismatch is not clobbered", func(t *testing.T) {
 		path, calls := prepare(t, config(`C:\Custom\engram.exe`))
 		before, _ := os.ReadFile(path)

@@ -4142,6 +4142,56 @@ func TestListProjectsEndpointEmptyStore(t *testing.T) {
 	}
 }
 
+func TestHandleCreateSessionClaimsEndedLegacyOwner(t *testing.T) {
+	st := newServerTestStore(t)
+	const id = "ended-unowned-http"
+	const ended = "2024-01-02 03:04:05"
+	if _, err := st.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '', ?, ?)`, id, ended, ended); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, 0).Handler()
+	for _, tc := range []struct{ project, code string }{
+		{"project-a", "session_already_ended"},
+		{"project-b", "session_project_conflict"},
+	} {
+		rec := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"id":%q,"project":%q,"ownership_mode":"project_owned"}`, id, tc.project)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		var response struct {
+			Code         string `json:"code"`
+			OwnerProject string `json:"owner_project"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusConflict || response.Code != tc.code {
+			t.Fatalf("%s response = %d %s", tc.project, rec.Code, rec.Body.String())
+		}
+		if tc.project == "project-b" && response.OwnerProject != "project-a" {
+			t.Fatalf("wrong owner: %s", rec.Body.String())
+		}
+	}
+	var project, mode, gotEnded string
+	if err := st.DB().QueryRow(`SELECT project, ownership_mode, ended_at FROM sessions WHERE id = ?`, id).Scan(&project, &mode, &gotEnded); err != nil {
+		t.Fatal(err)
+	}
+	if project != "project-a" || mode != store.SessionOwnershipProjectOwned || gotEnded != ended {
+		t.Fatalf("session project=%q mode=%q ended=%q", project, mode, gotEnded)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{SessionID: id, Project: "project-b", Type: "manual", Title: "blocked", Content: "blocked", Scope: "project"}); !errors.Is(err, store.ErrSessionOwnershipMismatch) {
+		t.Fatalf("losing observation = %v", err)
+	}
+	if _, err := st.AddPrompt(store.AddPromptParams{SessionID: id, Project: "project-b", Content: "blocked"}); !errors.Is(err, store.ErrSessionOwnershipMismatch) {
+		t.Fatalf("losing prompt = %v", err)
+	}
+	for _, table := range []string{"observations", "user_prompts"} {
+		var count int
+		if err := st.DB().QueryRow(`SELECT count(*) FROM `+table+` WHERE session_id = ?`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s losing writes=%d err=%v", table, count, err)
+		}
+	}
+}
+
 func TestHandleCreateSessionRenewsRuntimeLeaseAndRejectsEndedSession(t *testing.T) {
 	st := newServerTestStore(t)
 	h := New(st, 0).Handler()

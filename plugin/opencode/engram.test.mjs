@@ -119,6 +119,7 @@ async function createRuntime(t, {
   engramBin,
   engramPort,
   healthOK = true,
+  selectLegacyDefault = false,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
     registrationResponse,
     sessionEndResponse,
@@ -237,8 +238,16 @@ async function createRuntime(t, {
 	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
-  const { Engram } = await import(moduleURL.href)
-  const plugin = await Engram({
+  const module = await import(moduleURL.href)
+  let factory = module.Engram
+  if (selectLegacyDefault) {
+    assert.equal(typeof module.default, "object", "V1 loader needs a default entrypoint")
+    assert.equal(module.default.id, "engram")
+    assert.strictEqual(module.default.server, module.Engram)
+    assert.equal(typeof module.shouldNudgeForObservations, "function", "named helper remains exported")
+    factory = module.default.server
+  }
+  const plugin = await factory({
     directory,
     project: { id: PROJECT_ID },
     client: {
@@ -267,6 +276,13 @@ async function createRuntime(t, {
 		startupEvents,
   }
 }
+
+test("V1 default selection initializes only the Engram factory once", async (t) => {
+  const runtime = await createRuntime(t, { selectLegacyDefault: true })
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.equal(runtime.healthURLs.length, 1, "the selected factory runs once")
+  assert.equal(runtime.startupEvents.filter((event) => event === "project-current:response").length, 1)
+})
 
 test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t) => {
   const runtime = await createRuntime(t, { installBun: false })

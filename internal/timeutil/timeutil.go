@@ -31,10 +31,16 @@ func FormatLocalWithLayout(utc, layout string) string {
 		time.RFC3339Nano,
 	} {
 		if t, err := time.Parse(in, utc); err == nil {
-			return toConfiguredLocal(t.UTC()).Format(layout)
+			return FormatTimeWithLayout(t, layout)
 		}
 	}
 	return utc
+}
+
+// FormatTimeWithLayout renders a typed instant in the configured display timezone.
+// Unset or invalid ENGRAM_TIMEZONE falls back to system local time.
+func FormatTimeWithLayout(t time.Time, layout string) string {
+	return toConfiguredLocal(t).Format(layout)
 }
 
 func toConfiguredLocal(t time.Time) time.Time {

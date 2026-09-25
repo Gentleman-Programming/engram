@@ -1,6 +1,6 @@
 # Engram Doctor
 
-`engram doctor` runs read-only operational diagnostics against the local SQLite store. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
+`engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
 ## CLI
 
@@ -20,6 +20,8 @@ Flags:
 - `--project PROJECT` scopes checks to a normalized project name.
 - `--check CODE` runs one registered check and fails loudly for unknown codes.
 - `doctor repair` supports exactly `invalid_session_identity`, `manual_session_name_project_mismatch`, `orphaned_observation_session`, `session_project_directory_mismatch`, `sync_mutation_required_fields`, and `sync_target_closed_space`. It requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`. `sync_mutation_required_fields` may omit `--project` and the mode; an omitted mode defaults to `--dry-run`. Its optional project scopes title repair, supersession, quarantine, and source-title repair. The diagnostic-only checks are `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project`; a rejected repair names the corresponding `engram doctor --check <code>` continuation.
+
+An unfiltered CLI `engram doctor` also reports generic adapter Engram MCP entries whose absolute executable command no longer exists and whose parsed fields match the entry shape written by setup (apart from the executable path). Each finding names the client and recommends `engram setup <slug>` to refresh its registration; doctor never runs the configured executable or edits the config. Missing configs/entries, bare commands, and entries with different or extra fields are skipped. Matching the setup shape cannot prove who created an entry: check for custom launchers before rerunning setup, which replaces the `engram` registration. This CLI-only inspection is not a registered `--check` or MCP `mem_doctor` check.
 
 ## MCP
 
@@ -107,6 +109,8 @@ Repair never deletes or deduplicates rows, never edits sync cursors, never ackno
 Title restoration does not create a SQLite backup.
 
 `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project` are diagnostic-only and are not supported by `engram doctor repair`. SQLite lock contention has no repair.
+
+A strict `project_owned` registration of an ended legacy session with no project may establish its owner only when no live observation or prompt belongs to another project. The session remains ended and the registration still returns `409 session_already_ended`; a later strict `project_owned` registration from a different project returns `409 session_project_conflict`. This is not a general repair for ambiguous legacy ownership. Use `engram projects rescue-ownership` when existing records require an explicit operator decision.
 
 ### Repair JSON envelope
 

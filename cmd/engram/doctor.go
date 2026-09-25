@@ -7,7 +7,9 @@ import (
 	"os"
 	"strings"
 
+	"encoding/json"
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
@@ -81,6 +83,33 @@ func cmdDoctor(cfg store.Config) {
 		return
 	}
 
+	if strings.TrimSpace(project) == "" && strings.TrimSpace(check) == "" {
+		stale, inspectErr := setup.StaleMCPCommands()
+		if inspectErr != nil {
+			report.Checks = append(report.Checks, diagnostic.CheckResult{
+				CheckID: "mcp_inspection_error", Result: "error", Severity: "error",
+				ReasonCode: "mcp_inspection_error", Message: "Could not inspect generic MCP registrations: " + inspectErr.Error(),
+				Why:          "Client configuration could not be read safely.",
+				SafeNextStep: "Review the client configuration and rerun engram doctor.",
+			})
+			report.Summary.Total++
+			report.Summary.Errors++
+			report.Status = "error"
+		} else if len(stale) > 0 {
+			findings := make([]diagnostic.Finding, 0, len(stale))
+			for _, item := range stale {
+				next := "engram setup " + item.Slug
+				evidence, _ := json.Marshal(item)
+				findings = append(findings, diagnostic.Finding{CheckID: "stale_mcp_command", Severity: "warning", ReasonCode: "stale_mcp_command", Message: item.Slug + " Engram MCP executable path is missing", Why: "The configured absolute command no longer exists.", Evidence: evidence, SafeNextStep: next, RequiresConfirmation: false})
+			}
+			report.Checks = append(report.Checks, diagnostic.CheckResult{CheckID: "stale_mcp_command", Result: "warning", Severity: "warning", ReasonCode: "stale_mcp_command", Message: "Generic MCP registrations reference missing Engram binaries.", Why: "A configured absolute command no longer exists.", SafeNextStep: "Run engram setup <slug> for each affected client.", Findings: findings})
+			report.Summary.Total++
+			report.Summary.Warnings++
+			if report.Status == "ok" {
+				report.Status = "warning"
+			}
+		}
+	}
 	if jsonOut {
 		writeDoctorJSON(report)
 		return
@@ -375,6 +404,9 @@ func renderDoctorText(report diagnostic.Report) {
 		}
 		for _, finding := range check.Findings {
 			fmt.Printf("  - %s: %s\n", finding.ReasonCode, finding.Message)
+			if finding.SafeNextStep != "" {
+				fmt.Printf("    next: %s\n", finding.SafeNextStep)
+			}
 			if len(finding.Evidence) > 0 {
 				fmt.Printf("    evidence: %s\n", string(finding.Evidence))
 			}

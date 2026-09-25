@@ -69,8 +69,8 @@ var (
 	// ErrProjectOwnershipAmbiguous is returned when an unowned session cannot
 	// adopt a write's project because it already parents records owned by a
 	// different one. Guessing there would split a record from its session.
-	ErrProjectOwnershipAmbiguous   = errors.New("session project ownership is ambiguous")
-	ErrObservationProjectImmutable = errors.New("observation project cannot be reassigned")
+	ErrProjectOwnershipAmbiguous                = errors.New("session project ownership is ambiguous")
+	ErrObservationProjectImmutable              = errors.New("observation project cannot be reassigned")
 	ErrObservationTitleRequired                 = errors.New("observation title is required")
 	ErrObservationContentRequired               = errors.New("observation content is required")
 	ErrObservationFindReplacePairRequired       = errors.New("find and replace must be provided together")
@@ -1190,6 +1190,7 @@ func (s *Store) migrate() error {
 			summary    TEXT,
 			runtime_lease_expires_at TEXT
 		);
+		CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 
 			CREATE TABLE IF NOT EXISTS observations (
 				id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2874,12 +2875,60 @@ func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode strin
 		return ErrProjectRequired
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	claimed := false
+	err := s.withTx(func(tx *sql.Tx) error {
+		// withTx may retry its callback. Only the outcome of a committed
+		// attempt may become the terminal response.
+		claimed = false
 		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
 		if err != nil {
 			return err
 		}
 		identityRepaired := !found
+		if found && mode == SessionOwnershipProjectOwned && existingProject == "" {
+			var endedAt *string
+			if err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, id).Scan(&endedAt); err != nil {
+				return err
+			}
+			if endedAt != nil {
+				// Preserve the same child-ownership invariant as write adoption.
+				_, foreignOwner, err := foreignRecordOwnerTx(tx, id, project)
+				if err != nil {
+					return err
+				}
+				if foreignOwner != "" {
+					return &SessionProjectConflictError{SessionID: id, OwnerProject: foreignOwner, RequestedProject: project}
+				}
+				// This transaction already holds the writer reservation. Commit
+				// ownership and its audit mutation before reporting terminality.
+				res, err := s.execHook(tx, `UPDATE sessions SET project = ?, ownership_mode = ? WHERE id = ? AND ended_at IS NOT NULL AND ifnull(trim(project, ?), '') = ''`, project, mode, id, sqlWhitespaceTrimSet)
+				if err != nil {
+					return err
+				}
+				rows, err := res.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if rows != 1 {
+					return fmt.Errorf("ended legacy session ownership claim lost for %q", id)
+				}
+				var persisted Session
+				if err := tx.QueryRow(`SELECT id, ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id).Scan(
+					&persisted.ID, &persisted.Project, &persisted.OwnershipMode, &persisted.Directory, &persisted.StartedAt, &persisted.EndedAt, &persisted.Summary,
+				); err != nil {
+					return err
+				}
+				if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpUpsert, syncSessionPayload{
+					ID: persisted.ID, Project: persisted.Project, OwnershipMode: persisted.OwnershipMode,
+					Directory: persisted.Directory, StartedAt: persisted.StartedAt,
+					EndedAt: persisted.EndedAt, Summary: persisted.Summary,
+				}); err != nil {
+					return err
+				}
+				claimed = true
+				return nil
+			}
+		}
 		if found {
 			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
 				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
@@ -2918,6 +2967,13 @@ func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode strin
 			Summary:       persisted.Summary,
 		})
 	})
+	if err != nil {
+		return err
+	}
+	if claimed {
+		return ErrSessionAlreadyEnded
+	}
+	return nil
 }
 
 func (s *Store) EndSession(id string, summary string) error {
@@ -5280,6 +5336,15 @@ func (s *Store) ExportProject(project string) (*ExportData, error) {
 	return s.exportWithProjectScope(normalizedProject)
 }
 
+// projectObservationSet preserves legacy session ownership for blank project rows
+// while allowing direct project lookups to use their indexes.
+const projectObservationSet = `
+	SELECT sync_id FROM observations WHERE project = ?
+	UNION ALL
+	SELECT o.sync_id FROM sessions s
+	JOIN observations o ON o.session_id = s.id
+	WHERE s.project = ? AND (o.project IS NULL OR o.project = '')`
+
 // ExportRelationMutations returns relation upsert mutations for non-orphaned
 // relation rows whose source and target observations are available locally.
 func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) {
@@ -5298,9 +5363,17 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 		WHERE r.judgment_status != ?`
 	args := []any{JudgmentStatusOrphaned}
 	if normalizedProject != "" {
-		query += ` AND coalesce(nullif(src.project, ''), src_s.project, '') = ?
-			AND coalesce(nullif(tgt.project, ''), tgt_s.project, '') = ?`
-		args = append(args, normalizedProject, normalizedProject)
+		query = `WITH project_observations AS (` + projectObservationSet + `)
+			SELECT r.sync_id, r.source_id, r.target_id, r.relation, r.reason, r.evidence, r.confidence,
+			       r.judgment_status, r.marked_by_actor, r.marked_by_kind, r.marked_by_model,
+			       r.session_id, ?, r.created_at, r.updated_at
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+			JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+			WHERE r.judgment_status != ?
+			  AND r.source_id IN (SELECT sync_id FROM project_observations)
+			  AND r.target_id IN (SELECT sync_id FROM project_observations)`
+		args = []any{normalizedProject, normalizedProject, normalizedProject, JudgmentStatusOrphaned}
 	}
 	query += ` ORDER BY r.created_at, r.sync_id`
 
@@ -5432,18 +5505,14 @@ func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error
 	sessionQuery := "SELECT id, ifnull(project, ''), directory, ifnull(ownership_mode, ''), started_at, ended_at, summary FROM sessions"
 	sessionArgs := []any{}
 	if project != "" {
-		sessionQuery += `
-			WHERE project = ?
-			   OR id IN (
-				SELECT session_id FROM observations
-				 WHERE ifnull(project, '') = ?
-				    OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
-				UNION
-				SELECT session_id FROM user_prompts
-				 WHERE ifnull(project, '') = ?
-				    OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
-			)`
-		sessionArgs = append(sessionArgs, project, project, project, project, project)
+		sessionQuery += ` WHERE id IN (
+			SELECT id FROM sessions WHERE project = ?
+			UNION
+			SELECT session_id FROM observations WHERE project = ?
+			UNION
+			SELECT session_id FROM user_prompts WHERE project = ?
+		)`
+		sessionArgs = append(sessionArgs, project, project, project)
 	}
 	sessionQuery += " ORDER BY started_at"
 
@@ -5472,9 +5541,10 @@ func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error
 	 FROM observations`
 	obsArgs := []any{}
 	if project != "" {
-		obsQuery += `
-			WHERE ifnull(project, '') = ?
-			   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))`
+		obsQuery += ` WHERE id IN (SELECT id FROM observations WHERE project = ?
+			UNION ALL
+			SELECT o.id FROM sessions s JOIN observations o ON o.session_id = s.id
+			WHERE s.project = ? AND (o.project IS NULL OR o.project = ''))`
 		obsArgs = append(obsArgs, project, project)
 	}
 	obsQuery += " ORDER BY id"
@@ -5498,9 +5568,10 @@ func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error
 	promptQuery := "SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts"
 	promptArgs := []any{}
 	if project != "" {
-		promptQuery += `
-			WHERE ifnull(project, '') = ?
-			   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))`
+		promptQuery += ` WHERE id IN (SELECT id FROM user_prompts WHERE project = ?
+			UNION ALL
+			SELECT p.id FROM sessions s JOIN user_prompts p ON p.session_id = s.id
+			WHERE s.project = ? AND (p.project IS NULL OR p.project = ''))`
 		promptArgs = append(promptArgs, project, project)
 	}
 	promptQuery += " ORDER BY id"
@@ -5531,18 +5602,16 @@ func (s *Store) exportWithProjectScope(project string) (_ *ExportData, err error
 		LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id`
 	relationArgs := []any{}
 	if project != "" {
-		relationQuery += `
-			WHERE r.source_id IN (
-				SELECT sync_id FROM observations
-				WHERE ifnull(project, '') = ?
-				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
-			)
-			  AND r.target_id IN (
-				SELECT sync_id FROM observations
-				WHERE ifnull(project, '') = ?
-				   OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = ?))
-			)`
-		relationArgs = append(relationArgs, project, project, project, project)
+		relationQuery = `WITH project_observations AS (` + projectObservationSet + `)
+			SELECT r.sync_id, ifnull(r.source_id, ''), ifnull(r.target_id, ''), r.relation,
+			       r.reason, r.evidence, r.confidence, r.judgment_status,
+			       r.marked_by_actor, r.marked_by_kind, r.marked_by_model, r.session_id,
+			       r.superseded_at, superseding.sync_id, r.created_at, r.updated_at
+			FROM memory_relations r
+			LEFT JOIN memory_relations superseding ON superseding.id = r.superseded_by_relation_id
+			WHERE r.source_id IN (SELECT sync_id FROM project_observations)
+			  AND r.target_id IN (SELECT sync_id FROM project_observations)`
+		relationArgs = append(relationArgs, project, project)
 	}
 	relationQuery += " ORDER BY r.created_at, r.sync_id"
 	relationRows, err := s.queryItHook(s.db, relationQuery, relationArgs...)

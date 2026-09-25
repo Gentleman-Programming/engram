@@ -1,6 +1,6 @@
 package dashboard
 
-//go:generate go tool templ generate
+//go:generate go -C ../../.. tool templ generate -path ./internal/cloud/dashboard
 
 import (
 	"context"
@@ -382,7 +382,7 @@ func (h *handlers) handleDashboardActivity(w http.ResponseWriter, r *http.Reques
 	} else {
 		b.WriteString(`<table class="data-table"><thead><tr><th>Project</th><th>Type</th><th>Title</th><th>Session</th><th>Created</th></tr></thead><tbody>`)
 		for _, row := range rows {
-			b.WriteString(fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td>%s</td><td><a href="%s">%s</a></td><td>%s</td></tr>`, html.EscapeString(row.Project), html.EscapeString(row.Type), html.EscapeString(row.Title), safeQuery("/dashboard/browser/sessions/"+url.PathEscape(row.SessionID), preserveQuery(r.URL.RawQuery, "project", row.Project)), html.EscapeString(row.SessionID), html.EscapeString(row.CreatedAt)))
+			fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%s</td><td><a href="%s">%s</a></td><td>%s</td></tr>`, html.EscapeString(row.Project), html.EscapeString(row.Type), html.EscapeString(row.Title), safeQuery("/dashboard/browser/sessions/"+url.PathEscape(row.SessionID), preserveQuery(r.URL.RawQuery, "project", row.Project)), html.EscapeString(row.SessionID), html.EscapeString(formatTimestamp(row.CreatedAt)))
 		}
 		b.WriteString(`</tbody></table>`)
 	}

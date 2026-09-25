@@ -2,6 +2,8 @@ module github.com/Gentleman-Programming/engram/v2
 
 go 1.25.10
 
+tool github.com/a-h/templ/cmd/templ
+
 require (
 	github.com/a-h/templ v0.3.1001
 	github.com/charmbracelet/bubbles v1.0.0

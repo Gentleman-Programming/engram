@@ -50,6 +50,202 @@ func stubRegistryEnv(t *testing.T) string {
 	return home
 }
 
+func TestStaleMCPCommands(t *testing.T) {
+	stubRegistryEnv(t)
+	missing := filepath.Join(t.TempDir(), "missing-engram")
+	for _, agent := range declarativeAgents() {
+		t.Run(agent.slug, func(t *testing.T) {
+			path := agent.mcpPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			command := any(missing)
+			if agent.mcpFormat == opencodeObject {
+				command = []string{missing, "mcp", "--tools=agent"}
+			}
+			raw, _ := json.Marshal(map[string]any{agent.topKey: map[string]any{"other": map[string]any{"command": missing}, "engram": staleTestEntry(agent.mcpFormat, command)}})
+			if err := os.WriteFile(path, raw, 0644); err != nil {
+				t.Fatal(err)
+			}
+			found, err := StaleMCPCommands()
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := false
+			for _, f := range found {
+				if f.Slug == agent.slug && f.Command == missing {
+					seen = true
+				}
+			}
+			if !seen {
+				t.Fatalf("missing finding for %s: %+v", agent.slug, found)
+			}
+			raw, _ = json.Marshal(map[string]any{agent.topKey: map[string]any{"other": map[string]any{"command": missing}, "engram": map[string]any{"command": "engram"}}})
+			if err := os.WriteFile(path, raw, 0644); err != nil {
+				t.Fatal(err)
+			}
+			found, err = StaleMCPCommands()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range found {
+				if f.Slug == agent.slug {
+					t.Fatalf("bare command reported: %+v", f)
+				}
+			}
+		})
+	}
+}
+
+func staleTestEntry(format mcpFormat, command any) map[string]any {
+	entry := map[string]any{"command": command}
+	if format != opencodeObject {
+		entry["args"] = []string{"mcp", "--tools=agent"}
+	}
+	switch format {
+	case opencodeObject:
+		entry["type"] = "local"
+		entry["enabled"] = true
+	case serversObject:
+		entry["type"] = "stdio"
+	case commandCodeObject:
+		entry["transport"] = "stdio"
+		entry["enabled"] = true
+	}
+	return entry
+}
+
+func TestStaleMCPCommandsRejectsCustomEntries(t *testing.T) {
+	for _, agent := range declarativeAgents() {
+		t.Run(agent.slug, func(t *testing.T) {
+			stubRegistryEnv(t)
+			missing := filepath.Join(t.TempDir(), "bespoke-launcher")
+			entry := staleTestEntry(agent.mcpFormat, missing)
+			if agent.mcpFormat == opencodeObject {
+				entry = staleTestEntry(agent.mcpFormat, []string{missing, "mcp", "--tools=agent"})
+			}
+			cases := []struct {
+				name   string
+				change func(map[string]any)
+			}{
+				{"missing args", func(e map[string]any) {
+					if agent.mcpFormat == opencodeObject {
+						e["command"] = []string{missing}
+					} else {
+						delete(e, "args")
+					}
+				}},
+				{"wrong args", func(e map[string]any) {
+					if agent.mcpFormat == opencodeObject {
+						e["command"] = []string{missing, "serve", "--tools=agent"}
+					} else {
+						e["args"] = []string{"serve", "--tools=agent"}
+					}
+				}},
+				{"contradictory type", func(e map[string]any) { e["type"] = "remote" }},
+				{"disabled", func(e map[string]any) { e["enabled"] = false }},
+				{"unexpected field", func(e map[string]any) { e["url"] = "https://example.invalid/mcp" }},
+				{"wrong marker", func(e map[string]any) {
+					switch agent.mcpFormat {
+					case opencodeObject, serversObject:
+						e["type"] = "remote"
+					case commandCodeObject:
+						e["transport"] = "http"
+					default:
+						e["args"] = []string{"mcp", "--tools=other"}
+					}
+				}},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					copyEntry := make(map[string]any)
+					for k, v := range entry {
+						copyEntry[k] = v
+					}
+					tc.change(copyEntry)
+					path := agent.mcpPath()
+					if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+						t.Fatal(err)
+					}
+					raw, err := json.Marshal(map[string]any{agent.topKey: map[string]any{"engram": copyEntry}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, raw, 0644); err != nil {
+						t.Fatal(err)
+					}
+					findings, err := StaleMCPCommands()
+					if err != nil || len(findings) != 0 {
+						t.Fatalf("findings=%v err=%v", findings, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestStaleMCPCommandsRejectsUnresolvedHome(t *testing.T) {
+	stubRegistryEnv(t)
+	for _, tc := range []struct {
+		name string
+		home func() (string, error)
+	}{
+		{"error", func() (string, error) { return "", errors.New("home unavailable") }},
+		{"relative", func() (string, error) { return "relative-home", nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userHomeDir = tc.home
+			found, err := StaleMCPCommands()
+			if err == nil || len(found) != 0 {
+				t.Fatalf("findings=%v err=%v; expected unresolved-home error", found, err)
+			}
+		})
+	}
+}
+
+func TestStaleMCPCommandsIgnoreUnconfiguredAndCustom(t *testing.T) {
+	stubRegistryEnv(t)
+	agent := declarativeAgents()[1]
+	path := agent.mcpPath()
+	checkNone := func() {
+		t.Helper()
+		found, err := StaleMCPCommands()
+		if err != nil || len(found) != 0 {
+			t.Fatalf("findings=%v err=%v", found, err)
+		}
+	}
+	checkNone() // no config
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(entry any) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{agent.topKey: entry})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"unrelated":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	checkNone() // config exists without the MCP servers key
+	write(map[string]any{"other": map[string]any{"command": filepath.Join(t.TempDir(), "missing")}})
+	checkNone() // no Engram entry
+	existing := filepath.Join(t.TempDir(), "engram")
+	if err := os.WriteFile(existing, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	write(map[string]any{"engram": map[string]any{"command": existing}})
+	checkNone() // path exists
+	write(map[string]any{"engram": map[string]any{"command": "custom-engram"}})
+	checkNone() // bare command
+	write(map[string]any{"engram": map[string]any{"command": []string{"custom"}}})
+	checkNone() // custom shape, not the adapter format
+}
+
 func TestSupportedAgentsIncludesAllRegistryAgents(t *testing.T) {
 	stubRegistryEnv(t)
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,27 @@ func assertNoNullScanError(t *testing.T, caller string, err error) {
 		t.Fatalf("%s scanned a legacy NULL sessions.project raw: %v", caller, err)
 	}
 	t.Fatalf("%s on legacy NULL project = %v, want success", caller, err)
+}
+
+func TestEndedLegacyNullProjectClaimsDurableOwner(t *testing.T) {
+	s := newLegacyNullProjectStore(t)
+	const ended = "2024-01-02 03:04:05"
+	if _, err := s.DB().Exec(`UPDATE sessions SET ended_at = ? WHERE id = 'null-session'`, ended); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartSessionWithOwnershipMode("null-session", "project-a", "/tmp", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("first registration = %v", err)
+	}
+	if err := s.StartSessionWithOwnershipMode("null-session", "project-b", "/tmp", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("competing registration = %v", err)
+	}
+	var project, mode, gotEnded string
+	if err := s.DB().QueryRow(`SELECT project, ownership_mode, ended_at FROM sessions WHERE id = 'null-session'`).Scan(&project, &mode, &gotEnded); err != nil {
+		t.Fatal(err)
+	}
+	if project != "project-a" || mode != SessionOwnershipProjectOwned || gotEnded != ended {
+		t.Fatalf("claimed session project=%q mode=%q ended=%q", project, mode, gotEnded)
+	}
 }
 
 // ListDiagnosticSessions is the doctor entry point from issue #841: a raw scan

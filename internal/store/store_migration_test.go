@@ -884,6 +884,17 @@ func TestMigrate_AddsIdxMemrelStatusCreated(t *testing.T) {
 	}
 }
 
+func TestMigrateAddsSessionsProjectIndex(t *testing.T) {
+	s := newTestStore(t)
+	var name string
+	if err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_sessions_project'`).Scan(&name); err != nil {
+		t.Fatalf("sessions project index: %v", err)
+	}
+	if name != "idx_sessions_project" {
+		t.Fatalf("sessions project index = %q", name)
+	}
+}
+
 func TestMigrate_LegacyDeferredRowsRemainAdministrativeOnly(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "engram.db")

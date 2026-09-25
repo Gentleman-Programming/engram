@@ -185,6 +185,108 @@ func injectMCP(path string, format mcpFormat) error {
 	return writeJSONConfig(path, config)
 }
 
+// StaleMCPCommand identifies a generic client registration pointing to a missing binary.
+type StaleMCPCommand struct {
+	Slug    string `json:"slug"`
+	Command string `json:"command"`
+}
+
+// StaleMCPCommands inspects only existing generic Engram registrations without
+// executing the configured command or modifying client configuration.
+func StaleMCPCommands() ([]StaleMCPCommand, error) {
+	if _, err := userHome(); err != nil {
+		return nil, err
+	}
+	findings := []StaleMCPCommand{}
+	for _, adapter := range agentAdapters() {
+		if adapter.custom != nil || adapter.mcpPath == nil {
+			continue
+		}
+		path := adapter.mcpPath()
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		var config map[string]json.RawMessage
+		if err := json.Unmarshal(data, &config); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		raw, ok := config[mcpTopKey(adapter.mcpFormat)]
+		if !ok {
+			continue
+		}
+		var servers map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return nil, fmt.Errorf("parse %s servers: %w", path, err)
+		}
+		// Only the exact entry shape emitted by mcpEntry is setup-owned.
+		// The command value itself remains unconstrained: users can rename the binary.
+		keys := []string{"command", "args"}
+		switch adapter.mcpFormat {
+		case opencodeObject:
+			keys = []string{"command", "type", "enabled"}
+		case serversObject:
+			keys = append(keys, "type")
+		case commandCodeObject:
+			keys = append(keys, "transport", "enabled")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(servers["engram"], &fields); err != nil || len(fields) != len(keys) {
+			continue
+		}
+		matches := true
+		for _, key := range keys {
+			if _, ok := fields[key]; !ok {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		var entry struct {
+			Command   json.RawMessage `json:"command"`
+			Args      []string        `json:"args"`
+			Type      string          `json:"type"`
+			Transport string          `json:"transport"`
+			Enabled   *bool           `json:"enabled"`
+		}
+		if err := json.Unmarshal(servers["engram"], &entry); err != nil {
+			continue
+		}
+		var command string
+		if adapter.mcpFormat == opencodeObject {
+			var parts []string
+			if json.Unmarshal(entry.Command, &parts) != nil || len(parts) != 3 || parts[1] != "mcp" || parts[2] != "--tools=agent" || entry.Type != "local" || entry.Enabled == nil || !*entry.Enabled {
+				continue
+			}
+			command = parts[0]
+		} else {
+			if json.Unmarshal(entry.Command, &command) != nil || len(entry.Args) != 2 || entry.Args[0] != "mcp" || entry.Args[1] != "--tools=agent" {
+				continue
+			}
+			if adapter.mcpFormat == serversObject && entry.Type != "stdio" {
+				continue
+			}
+			if adapter.mcpFormat == commandCodeObject && (entry.Transport != "stdio" || entry.Enabled == nil || !*entry.Enabled) {
+				continue
+			}
+		}
+		if !filepath.IsAbs(command) {
+			continue
+		}
+		if _, err := os.Stat(command); os.IsNotExist(err) {
+			findings = append(findings, StaleMCPCommand{Slug: adapter.slug, Command: command})
+		} else if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", command, err)
+		}
+	}
+	return findings, nil
+}
+
 // upsertMarkerBlock writes body delimited by begin/end markers into the file at
 // path. If the markers already exist the managed block is replaced in place;
 // otherwise it is appended, preserving existing user content. CRLF is normalized
