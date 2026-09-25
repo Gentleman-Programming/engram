@@ -18,6 +18,24 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestDoctorUnfilteredFixturesIgnoreInheritedKimiHome(t *testing.T) {
+	kimiHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(kimiHome, "mcp.json"), []byte("{invalid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KIMI_CODE_HOME", kimiHome)
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"stale generic MCP", TestDoctorReportsStaleGenericMCP},
+		{"multiple clients", TestDoctorMultiClientTextAndJSON},
+		{"inspection error", TestDoctorMCPInspectionErrorIsReported},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
+
 func TestDoctorReportsStaleGenericMCP(t *testing.T) {
 	cfg := testConfig(t)
 	home := t.TempDir()
@@ -25,6 +43,7 @@ func TestDoctorReportsStaleGenericMCP(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
+	t.Setenv("KIMI_CODE_HOME", "")
 	path := filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
@@ -55,6 +74,7 @@ func TestDoctorMultiClientTextAndJSON(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
+	t.Setenv("KIMI_CODE_HOME", "")
 	missing := filepath.Join(home, "missing-engram")
 	for _, client := range []struct{ slug, path string }{
 		{"windsurf", filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")},
@@ -103,6 +123,7 @@ func TestDoctorMCPInspectionErrorIsReported(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
+	t.Setenv("KIMI_CODE_HOME", "")
 	path := filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
