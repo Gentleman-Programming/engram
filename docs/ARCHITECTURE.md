@@ -51,31 +51,7 @@ Next session starts → Previous session context is injected automatically
 
 ## MCP Tools
 
-| Tool | Purpose |
-|------|---------|
-| `mem_save` | Save a structured observation (decision, bugfix, pattern, etc.); best-effort captures process-local current prompt context when available unless `capture_prompt=false` |
-| `mem_update` | Update an existing observation by ID |
-| `mem_delete` | Delete an observation (soft-delete by default, hard-delete optional) |
-| `mem_suggest_topic_key` | Suggest a stable `topic_key` for evolving topics before saving |
-| `mem_search` | Full-text search across all memories |
-| `mem_session_summary` | Save end-of-session summary |
-| `mem_context` | Get recent context from previous sessions |
-| `mem_timeline` | Chronological context around a specific observation |
-| `mem_get_observation` | Get full content of a specific memory |
-| `mem_save_prompt` | Save a user prompt for future context |
-| `mem_stats` | Memory system statistics |
-| `mem_session_start` | Register a session start |
-| `mem_session_end` | Mark a session as completed |
-| `mem_capture_passive` | Extract learnings from text output |
-| `mem_merge_projects` | Merge project name variants into canonical name (admin) |
-| `mem_current_project` | Detect project from cwd — never errors, recommended first call |
-| `mem_list_projects` | List every known project with counts — cross-project discovery when cwd matches nothing |
-| `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
-| `mem_review` | List observations whose `review_after` lifecycle is stale; `mark_reviewed` resets the local review cycle |
-| `mem_pin` | Pin a local observation so it appears before recent memory context; not synced |
-| `mem_unpin` | Remove a local observation pin so normal recency order applies; not synced |
-| `mem_judge` | Record a verdict for a pending memory conflict surfaced by `mem_save` |
-| `mem_compare` | Persist a semantic relation verdict between two existing observations |
+The stdio MCP server exposes memory capture, retrieval, session context, and administration tools to agents; project resolution occurs at tool call time. The canonical inventory and tool contracts are in [DOCS.md MCP Tools](../DOCS.md#mcp-tools-23-tools).
 
 ---
 
@@ -250,54 +226,7 @@ engram/
 
 ## CLI Reference
 
-```
-engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
-engram serve [port]       Start HTTP API server (default: 7437)
-engram mcp                Start MCP server (stdio transport)
-engram tui                Launch interactive terminal UI
-engram search <query>     Search memories [--project P|--all] [--match all|any]
-engram save <title> <msg> Save a memory
-engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
-engram delete session <id>
-                          Delete a session by ID (session must have no observations)
-engram delete prompt <id>
-                          Delete a prompt by ID (permanent)
-engram delete project <name> [--hard]
-                          Cascade-delete a project: soft-deletes observations (or hard-deletes
-                          with --hard, which also removes sessions); always removes prompts
-engram timeline <obs_id>  Chronological context around an observation [--project P|--all]
-engram context [project]  Recent context from previous sessions [--project P|--all]
-engram stats              Memory statistics [--project P|--all]
-engram export [file]      Export current-project memories to JSON [--project P|--all]
-engram import <file>      Import memories from JSON
-engram sync               Export new memories as compressed chunk to .engram/
-engram sync --all         Export ALL projects (ignore directory-based filter)
-engram sync --cloud --project <name>
-                          Sync against configured cloud endpoint (project-scoped)
-engram conflicts <sub>    Inspect and manage memory conflict relations
-                            list, show, stats, scan, deferred
-engram doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-engram cloud status       Show cloud runtime/config status
-engram cloud config --server <url>
-                          Configure cloud server URL
-engram cloud enroll <project>
-                          Enroll a project for cloud sync
-engram cloud serve        Run cloud backend + dashboard
-engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
-                          Guided upgrade workflow for existing projects
-engram cloud bootstrap admin --username <name> [--email <email>]
-                          [--grant-project <project>]... [--issue-token [name]]
-                          Create the first managed admin (see DOCS.md for details
-                          and the current server-side auth wiring limitation)
-engram projects list      Show all projects with obs/session/prompt counts
-engram projects consolidate  Interactive merge of normalization-equivalent project names [--all] [--dry-run]
-engram projects prune     Remove projects with 0 observations [--dry-run]
-engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
-                          Assign explicit ownership to legacy rows that carry none. Reaches the local
-                          store directly, so it needs no server token and works in a zero-config install.
-engram obsidian-export    Export current-project memories to Obsidian vault (beta; --all for every project)
-engram version            Show version
-```
+The CLI offers local memory and project operations alongside optional cloud replication and administration. The canonical command inventory and detailed links are in [DOCS.md CLI Reference](../DOCS.md#cli-reference).
 
 Local server auth:
 

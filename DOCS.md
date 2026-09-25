@@ -14,6 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [Documentation Authority](#documentation-authority)       | Which doc owns each contract and what must change together   |
+| [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
 | [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
@@ -117,6 +118,51 @@ sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
 ```
 
 Engram does not auto-repair, quarantine, checkpoint, or fall back to rollback journaling for this condition.
+
+---
+
+## CLI Reference
+
+The CLI groups local memory operations, project maintenance, conflict audit, and optional cloud replication. Use `engram help` for live usage; the inventory below points to the detailed [conflict](#conflict-audit-cli-admin) and [cloud](#cloud-cli-opt-in) references.
+
+```text
+engram setup [agent]          Install an available agent integration (see Agent Setup)
+engram serve [port]           Start local HTTP API (default: 7437)
+engram mcp                    Start stdio MCP server
+engram tui                    Launch terminal UI
+engram test [suite]            Run isolated self-tests [--quick] [--json]
+engram init [name]             Initialize .engram/config.json [--force]
+engram search <query>         Search memories [--project P|--all] [--match all|any]
+engram save <title> <msg>     Save a memory
+engram delete <obs_id>        Delete an observation [--hard]
+engram delete session <id>    Delete an empty session
+engram delete prompt <id>     Delete a prompt permanently
+engram delete project <name> [--hard]
+                              Remove prompts; soft-delete observations by default; --hard deletes observations and only unreferenced sessions
+engram timeline <obs_id>      Chronological context [--project P|--all]
+engram context [project]      Recent context [--project P|--all]
+engram stats                  Memory statistics [--project P|--all]
+engram export [file]          Export memories to JSON [--project P|--all]
+engram import <file>          Import memories from JSON
+engram sync                   Export new memories to .engram/ [--all: every project]
+engram sync --cloud --project <name>
+                              Sync one project against the configured cloud endpoint
+engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred
+engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
+engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
+engram projects list          List projects with observation/session/prompt counts
+engram projects consolidate [--all] [--dry-run]
+                              Merge similar names interactively; --all --dry-run previews without prompts
+engram projects prune         Prune projects with zero observations [--dry-run] [--paths-only]
+engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
+                              Repair legacy local ownership without a server token
+engram obsidian-export        Export memories to Obsidian (beta; --all for every project)
+engram version                Show version
+```
+
+For `setup [agent]`, see [Agent Setup](docs/AGENT-SETUP.md) for supported integrations rather than treating a fixed agent list as exhaustive. `--all` deliberately selects every project for applicable reads and local sync export (cloud sync still requires a single project); do not combine it with an explicit project. `engram context [project]` accepts the positional project as an alternative to `--project`. `projects prune --paths-only` limits candidates to names containing `/` or `\`.
+
+Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enroll <project>`, `cloud unenroll <project>`, and `cloud serve`. For upgrades, use `cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>`; `remirror` rebuilds cloud state from authoritative local data. Server-side repair uses `cloud repair materialize-mutations --project <project> (--dry-run|--apply)`. Managed-admin setup uses `cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`; stranded-admin token recovery uses `cloud bootstrap recover-token [--name <name>] [--revoke-existing]`. See [Cloud CLI](#cloud-cli-opt-in) and [managed-user bootstrap](#managed-users-tokens-and-cli-bootstrap) for constraints and detailed syntax.
 
 ---
 
