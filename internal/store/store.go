@@ -2057,13 +2057,14 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 			for rows.Next() {
 				var name string
 				if err := rows.Scan(&name); err != nil {
-					rows.Close()
-					return err
+					return errors.Join(err, rows.Close())
 				}
 				projects = append(projects, name)
 			}
 			err = rows.Err()
-			rows.Close()
+			if closeErr := rows.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
 			if err != nil {
 				return err
 			}

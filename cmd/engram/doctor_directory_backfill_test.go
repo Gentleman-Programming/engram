@@ -35,7 +35,11 @@ func TestDoctorDirectoryBackfillWithoutEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close doctor backfill database: %v", err)
+		}
+	})
 	var seq int64
 	var occurredAt, source, target string
 	if err := db.QueryRow(`SELECT seq, occurred_at, source, target_key FROM sync_mutations WHERE entity_key='directory-backfill' ORDER BY seq DESC LIMIT 1`).Scan(&seq, &occurredAt, &source, &target); err != nil {
