@@ -155,7 +155,7 @@ For `sync_mutation_required_fields`, `repairs` lists title-only observation upse
 }
 ```
 
-On `--apply`, `backup_path` contains the backup database path and `*_applied` counts report the rows updated.
+On `--apply`, `backup_path` contains the backup database path. `sessions_applied`, `observations_applied`, and `prompts_applied` count local records addressed by the repair; `corrected_mutations_applied` counts mutations published by the store.
 
 ### Clone-safe verification workflow
 
