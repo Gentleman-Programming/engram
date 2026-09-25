@@ -70,6 +70,7 @@ func (s *Store) ApplySessionIdentityRepair(plan SessionIdentityRepairPlan) (Sess
 	}
 	result := SessionIdentityRepairResult{BackupPath: backup}
 	err = s.withTx(func(tx *sql.Tx) error {
+		result.PublishedMutations = 0
 		current, err := s.inspectSessionIdentityTx(tx, plan.SourceID, plan.ReplacementID)
 		if err != nil {
 			return err

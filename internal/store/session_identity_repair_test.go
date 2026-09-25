@@ -126,6 +126,45 @@ func TestSessionIdentityRepairTwelveLinkedJournalRows(t *testing.T) {
 	}
 }
 
+func TestSessionIdentityRepairCountsOnlyCommittedRetry(t *testing.T) {
+	s := newTestStore(t)
+	seedSessionIdentityRepair(t, s, true)
+	plan, err := s.PlanSessionIdentityRepair("", "canonical")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalCommit := s.hooks.commit
+	attempts := 0
+	s.hooks.commit = func(tx *sql.Tx) error {
+		attempts++
+		if attempts == 1 {
+			var published int
+			if err := tx.QueryRow(`SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND entity_key='canonical'`).Scan(&published); err != nil {
+				t.Fatal(err)
+			}
+			if published != 1 {
+				t.Fatalf("first attempt did not publish session: %d", published)
+			}
+			return errors.New("database is locked")
+		}
+		return originalCommit(tx)
+	}
+	t.Cleanup(func() { s.hooks.commit = originalCommit })
+	result, err := s.ApplySessionIdentityRepair(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || result.PublishedMutations != 3 {
+		t.Fatalf("attempts=%d result=%+v", attempts, result)
+	}
+	if _, err := os.Stat(result.BackupPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND project='alpha'`); got != int(result.PublishedMutations) {
+		t.Fatalf("persisted publications=%d result=%d", got, result.PublishedMutations)
+	}
+}
+
 func TestSessionIdentityRepairRejectsAndRollsBack(t *testing.T) {
 	t.Run("whitespace", func(t *testing.T) {
 		s := newTestStore(t)
@@ -268,14 +307,17 @@ func TestSessionIdentityRepairRejectsAndRollsBack(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.DB().Exec(`UPDATE sync_mutations SET payload='{}' WHERE entity='prompt'`); err != nil {
+		if _, err := s.DB().Exec(`UPDATE observations SET title='changed title' WHERE sync_id='obs-1'`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.ApplySessionIdentityRepair(plan); err == nil {
-			t.Fatal("accepted stale plan")
+		if _, err := s.ApplySessionIdentityRepair(plan); err == nil || !strings.Contains(err.Error(), "evidence changed since plan") {
+			t.Fatalf("expected stale evidence error, got %v", err)
 		}
-		if scalarInt(t, s, `SELECT count(*) FROM sessions WHERE id=''`) != 1 {
+		if scalarInt(t, s, `SELECT count(*) FROM sessions WHERE id=''`) != 1 || scalarInt(t, s, `SELECT count(*) FROM sessions WHERE id='new-id'`) != 0 {
 			t.Fatal("changed source")
+		}
+		if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id='obs-1'`); got != "changed title" {
+			t.Fatalf("source title changed: %q", got)
 		}
 	})
 	t.Run("write failure", func(t *testing.T) {
