@@ -4547,6 +4547,39 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 	}
 }
 
+func TestHandleMergeProjectsExplicitSeparatorAndNoop(t *testing.T) {
+	s, dataDir := newMCPTestStoreWithDataDir(t)
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('explicit-session', 'foo-bar', '')`); err != nil {
+		t.Fatal(err)
+	}
+	h := handleMergeProjects(s)
+	call := func(from string) string {
+		t.Helper()
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"from": from, "to": "foo_bar"}}})
+		if err != nil || res.IsError {
+			t.Fatalf("merge failed: %v, %v", err, res)
+		}
+		return callResultText(t, res)
+	}
+	if text := call("foo-bar"); !strings.Contains(text, `into "foo_bar"`) {
+		t.Fatalf("wrong destination: %q", text)
+	}
+	if text := call("foo_bar"); !strings.Contains(text, "No records moved") {
+		t.Fatalf("ambiguous no-op: %q", text)
+	}
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"from": "missing-name", "to": "missing_name",
+	}}})
+	if err != nil || !res.IsError || !strings.Contains(callResultText(t, res), "does not exist") {
+		t.Fatalf("missing source response: result=%v, err=%v", res, err)
+	}
+}
+
 func TestHandleMergeProjects(t *testing.T) {
 	s, dataDir := newMCPTestStoreWithDataDir(t)
 	rawDB, err := sql.Open("sqlite", filepath.Join(dataDir, "engram.db"))

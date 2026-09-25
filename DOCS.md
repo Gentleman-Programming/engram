@@ -928,7 +928,7 @@ For monorepos, detection now honors the **nearest** `.engram/config.json` at or 
 
 `mem_delete` is ID-based and requires `id`; optional `hard_delete=true` permanently deletes the observation. It does not accept or auto-detect `project`.
 
-`mem_merge_projects` requires `from` (comma-separated source project names) and `to` (canonical target project name). It does not accept or auto-detect `project`.
+`mem_merge_projects` requires `from` (comma-separated, explicitly named source project names) and `to` (canonical target project name). Case/trim variants and matching `-`/`_` separator variants (for example, `foo-bar` to `foo_bar`) are allowed; unrelated names and missing sources are rejected. It does not accept or auto-detect `project`.
 
 ### mem_current_project
 
@@ -1091,7 +1091,7 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 
 ### mem_merge_projects
 
-**Admin tool.** Merge multiple project name variants into a single canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. All observations, sessions, and prompts from the source projects are reassigned to the canonical project.
+**Admin tool.** Merge explicitly named case/trim or corresponding `-`/`_` separator variants into a canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. For example, `foo-bar` may merge into `foo_bar`, but unrelated names are rejected. Sources must exist; the CLI retains its stricter rules. Observations, sessions, prompts, pending sync identity, and enrollment migrate together. A no-op reports that no records moved.
 
 ### mem_current_project
 

@@ -11391,6 +11391,150 @@ func TestMergeProjectsRejectsNonEquivalentSources(t *testing.T) {
 	}
 }
 
+func TestExplicitMergeProjectsSeparatorVariant(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "foo-bar")
+	seedPendingLegacyMutations(t, s, "foo-bar")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('explicit-prompt', 'legacy-session', 'prompt', 'foo-bar')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('foo-bar')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{"foo-bar"}, "foo_bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Canonical != "foo_bar" || result.ObservationsUpdated != 1 || result.SessionsUpdated != 1 || result.PromptsUpdated != 1 {
+		t.Fatalf("unexpected merge: %+v", result)
+	}
+	for _, table := range []string{"sessions", "observations", "user_prompts", "sync_enrolled_projects"} {
+		var sourceCount, canonicalCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'foo-bar'`).Scan(&sourceCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'foo_bar'`).Scan(&canonicalCount); err != nil {
+			t.Fatal(err)
+		}
+		if sourceCount != 0 || canonicalCount != 1 {
+			t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 1", table, sourceCount, canonicalCount)
+		}
+	}
+	for _, key := range []string{"legacy-session", "legacy-obs"} {
+		mutation, ok := pendingMutationsByEntityKey(t, s)[key]
+		if !ok || mutation.Project != "foo_bar" || payloadProject(t, mutation.Payload) != "foo_bar" {
+			t.Fatalf("stale or missing sync mutation %q: %+v", key, mutation)
+		}
+	}
+}
+
+func TestExplicitMergeProjectsRejectsUnrelatedAndMissing(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "foo-bar")
+	for _, source := range []string{"foo-baz", "foo_bar_extra", "bar-foo"} {
+		if _, err := s.MergeExplicitProjectVariants([]string{"foo-bar", source}, "foo_bar"); err == nil {
+			t.Fatalf("source %q accepted", source)
+		}
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"absent-name"}, "absent_name"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing source error = %v", err)
+	}
+	// The second source is eligible but absent; its failure must roll back the first update.
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('atomic-session', 'foo-bar-baz', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"foo-bar-baz", "foo_bar-baz"}, "foo_bar_baz"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("second source error = %v", err)
+	}
+	var atomicCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = 'foo-bar-baz'`).Scan(&atomicCount); err != nil || atomicCount != 1 {
+		t.Fatalf("atomic rollback source count = %d, err %v", atomicCount, err)
+	}
+	for _, table := range []string{"sessions", "observations"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'foo-bar'`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s source after rejection = %d, err %v", table, count, err)
+		}
+	}
+}
+
+func TestExplicitMergeProjectsRejectsDifferentUnicodeWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "café-bar")
+	if _, err := s.MergeExplicitProjectVariants([]string{"café-bar"}, "cafà_bar"); err == nil {
+		t.Fatal("unrelated Unicode names accepted")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'café-bar'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source observations = %d, err %v", count, err)
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"café-bar"}, "café_bar"); err != nil {
+		t.Fatalf("identical Unicode with separator variant rejected: %v", err)
+	}
+}
+
+func TestExplicitMergeProjectsCanonicalRequiresExistingIdentity(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.MergeExplicitProjectVariants([]string{"missing_name"}, "missing_name"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing canonical source error = %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('canonical-session', 'missing_name', '')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{"missing_name"}, "missing_name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.SourcesMerged) != 0 || result.SessionsUpdated != 0 {
+		t.Fatalf("existing canonical identity should be a no-op: %+v", result)
+	}
+}
+
+func TestExplicitMergeProjectsSyncOnlySources(t *testing.T) {
+	for _, tc := range []struct {
+		name, project, payload string
+		enrollment             bool
+	}{
+		{name: "pending journal column", project: "foo-bar", payload: `{"project":"foo-bar"}`},
+		{name: "pending payload only", project: "", payload: `{"project":"foo-bar"}`},
+		{name: "enrollment only", enrollment: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if tc.enrollment {
+				if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('foo-bar')`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, "sync-only", SyncOpUpsert, tc.payload, SyncSourceLocal, tc.project); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := s.MergeExplicitProjectVariants([]string{"foo-bar"}, "foo_bar")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.SourcesMerged) != 1 || result.SourcesMerged[0] != "foo-bar" {
+				t.Fatalf("sync-only source not reported: %+v", result)
+			}
+			if tc.enrollment {
+				var count int
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'foo_bar'`).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("canonical enrollment = %d, err %v", count, err)
+				}
+			} else {
+				var project, payload string
+				if err := s.db.QueryRow(`SELECT project, payload FROM sync_mutations WHERE entity_key = 'sync-only' AND acked_at IS NULL`).Scan(&project, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if project != "foo_bar" || payloadProject(t, payload) != "foo_bar" {
+					t.Fatalf("unmigrated journal row: project=%q payload=%q", project, payload)
+				}
+			}
+		})
+	}
+}
+
 func TestMergeProjectsRejectsSeparatorVariants(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.MergeProjects([]string{"foo-bar"}, "foo_bar"); err == nil || !strings.Contains(err.Error(), "must normalize") {

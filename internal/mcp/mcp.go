@@ -958,7 +958,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 	if shouldRegister("mem_merge_projects", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_merge_projects",
-				mcp.WithDescription("Merge memories from multiple project name variants into one canonical name. Use when you discover project name drift (e.g. 'Engram' and 'engram' should be the same project). DESTRUCTIVE — moves all records from source names to the canonical name."),
+				mcp.WithDescription("Merge explicitly named project variants into one canonical name, including names differing only by '-' versus '_' at matching positions (e.g. 'foo-bar' to 'foo_bar'). Unrelated names are rejected. DESTRUCTIVE — moves all records from source names to the canonical name."),
 				mcp.WithDeferLoading(true),
 				mcp.WithTitleAnnotation("Merge Projects"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -2652,12 +2652,15 @@ func handleMergeProjects(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("at least one source project name is required in 'from'"), nil
 		}
 
-		result, err := s.MergeProjects(sources, to)
+		result, err := s.MergeExplicitProjectVariants(sources, to)
 		if err != nil {
 			return mcp.NewToolResultError("Merge failed: " + err.Error()), nil
 		}
 
 		msg := fmt.Sprintf("Merged %d source(s) into %q:\n", len(result.SourcesMerged), result.Canonical)
+		if len(result.SourcesMerged) == 0 {
+			msg = fmt.Sprintf("No records moved into %q.\n", result.Canonical)
+		}
 		msg += fmt.Sprintf("  Observations moved: %d\n", result.ObservationsUpdated)
 		msg += fmt.Sprintf("  Sessions moved:     %d\n", result.SessionsUpdated)
 		msg += fmt.Sprintf("  Prompts moved:      %d\n", result.PromptsUpdated)

@@ -8087,6 +8087,35 @@ type MergeResult struct {
 // that exactly equal the canonical name or have no records are skipped.
 // All updates are performed inside a single transaction for atomicity.
 func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult, error) {
+	return s.mergeProjects(sources, canonical, false)
+}
+
+// MergeExplicitProjectVariants admits explicitly named separator variants for admin use.
+func (s *Store) MergeExplicitProjectVariants(sources []string, canonical string) (*MergeResult, error) {
+	return s.mergeProjects(sources, canonical, true)
+}
+
+func mergeProjectEligible(source, canonical string, explicit bool) bool {
+	if source == canonical {
+		return true
+	}
+	if !explicit || len(source) != len(canonical) {
+		return false
+	}
+	difference := false
+	for i := 0; i < len(source); i++ {
+		if source[i] == canonical[i] {
+			continue
+		}
+		if (source[i] != '-' || canonical[i] != '_') && (source[i] != '_' || canonical[i] != '-') {
+			return false
+		}
+		difference = true
+	}
+	return difference
+}
+
+func (s *Store) mergeProjects(sources []string, canonical string, explicit bool) (*MergeResult, error) {
 	canonical, _ = NormalizeProject(canonical)
 	if canonical == "" {
 		return nil, fmt.Errorf("canonical project name must not be empty")
@@ -8097,7 +8126,10 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 		if normalizedSource == "" {
 			return nil, fmt.Errorf("source project name must not be empty")
 		}
-		if normalizedSource != canonical {
+		if !mergeProjectEligible(normalizedSource, canonical, explicit) {
+			if explicit {
+				return nil, fmt.Errorf("source project %q must normalize to canonical project %q or differ only by corresponding '-' and '_' separators", source, canonical)
+			}
 			return nil, fmt.Errorf("source project %q must normalize to canonical project %q", source, canonical)
 		}
 		validatedSources[i] = normalizedSource
@@ -8109,16 +8141,43 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 		seenSources := make(map[string]struct{})
 		for i, srcInput := range sources {
 			srcNormalized := validatedSources[i]
-			if srcInput == canonical {
-				continue
-			}
 			if _, seen := seenSources[srcInput]; seen {
 				continue
 			}
 			seenSources[srcInput] = struct{}{}
 
-			sourceVariants := projectMergeSourceVariants(srcInput, srcNormalized, canonical)
-			if len(sourceVariants) == 0 {
+			sourceVariants := projectMergeSourceVariantsEligible(srcInput, srcNormalized, canonical, explicit)
+			// Canonical input is a no-op only when its identity exists. Use the
+			// same explicit existence check for canonical and variant sources.
+			sourceName := strings.TrimSpace(srcInput)
+			syncIdentityPresent := false
+			if explicit {
+				var count int
+				for _, table := range []string{"observations", "sessions", "user_prompts", "sync_enrolled_projects"} {
+					var n int
+					if err := tx.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE project = ?`, sourceName).Scan(&n); err != nil {
+						return fmt.Errorf("check source project %q: %w", sourceName, err)
+					}
+					count += n
+					if table == "sync_enrolled_projects" && n > 0 {
+						syncIdentityPresent = true
+					}
+				}
+				// Match the pending journal rows the migration actually rewrites,
+				// including a source present only in a valid JSON payload.
+				var pending int
+				if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE acked_at IS NULL AND
+					(project = ? OR (json_valid(payload) AND json_extract(payload, '$.project') = ?))`,
+					sourceName, sourceName).Scan(&pending); err != nil {
+					return fmt.Errorf("check source project %q: %w", sourceName, err)
+				}
+				count += pending
+				syncIdentityPresent = syncIdentityPresent || pending > 0
+				if count == 0 {
+					return fmt.Errorf("source project %q does not exist", sourceName)
+				}
+			}
+			if srcInput == canonical || len(sourceVariants) == 0 {
 				continue
 			}
 
@@ -8161,7 +8220,7 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 				return fmt.Errorf("merge sync identity %q → %q: %w", srcNormalized, canonical, err)
 			}
 
-			if sourceUpdated {
+			if sourceUpdated || syncIdentityPresent {
 				result.SourcesMerged = append(result.SourcesMerged, sourceVariants[0])
 			}
 		}
@@ -8184,8 +8243,12 @@ func sqlPlaceholders(count int) string {
 }
 
 func projectMergeSourceVariants(rawSource, normalizedSource, canonical string) []string {
+	return projectMergeSourceVariantsEligible(rawSource, normalizedSource, canonical, false)
+}
+
+func projectMergeSourceVariantsEligible(rawSource, normalizedSource, canonical string, explicit bool) []string {
 	rawSource = strings.TrimSpace(rawSource)
-	if rawSource == "" || rawSource == canonical || normalizedSource != canonical {
+	if rawSource == "" || rawSource == canonical || !mergeProjectEligible(normalizedSource, canonical, explicit) {
 		return nil
 	}
 	return []string{rawSource}
