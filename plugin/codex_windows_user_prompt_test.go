@@ -78,31 +78,47 @@ func TestCodexWindowsNativeUserPromptUsesActiveConfigHome(t *testing.T) {
 		t.Skip("builds and executes a pinned fixture")
 	}
 	root := repoRoot(t)
-	profile, appData, custom := t.TempDir(), t.TempDir(), t.TempDir()
 	pinned := buildCodexWindowsProgram(t, `package main
 import "os"
-func main() { _, _ = os.Stdout.WriteString("active-config") }
+func main() { _, _ = os.Stdout.WriteString("selected"); os.Exit(23) }
+`)
+	competing := buildCodexWindowsProgram(t, `package main
+import "os"
+func main() { _, _ = os.Stdout.WriteString("competing"); os.Exit(24) }
 `)
 	for _, tt := range []struct {
-		name, codexHome, configDir string
+		name, codexHome string
+		customHome      bool
 	}{
-		{"default despite APPDATA", "", filepath.Join(profile, ".codex")},
-		{"explicit CODEX_HOME", custom, custom},
-		{"relative CODEX_HOME", "relative-home", filepath.Join(profile, ".codex")},
-		{"drive-relative CODEX_HOME", `C:relative-home`, filepath.Join(profile, ".codex")},
-		{"root-relative CODEX_HOME", `\relative-home`, filepath.Join(profile, ".codex")},
-		{"whitespace CODEX_HOME", "   ", filepath.Join(profile, ".codex")},
+		{name: "default despite APPDATA"},
+		{name: "explicit CODEX_HOME", customHome: true},
+		{name: "relative CODEX_HOME", codexHome: "relative-home"},
+		{name: "drive-relative CODEX_HOME", codexHome: `C:relative-home`},
+		{name: "root-relative CODEX_HOME", codexHome: `\relative-home`},
+		{name: "whitespace CODEX_HOME", codexHome: "   "},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := os.MkdirAll(tt.configDir, 0o755); err != nil {
-				t.Fatal(err)
+			profile, appData, custom := t.TempDir(), t.TempDir(), t.TempDir()
+			defaultHome := filepath.Join(profile, ".codex")
+			active, other := defaultHome, custom
+			if tt.customHome {
+				active, other = custom, defaultHome
 			}
-			if err := os.WriteFile(filepath.Join(tt.configDir, "config.toml"), []byte(codexWindowsHookMarker(pinned)+"\n"), 0o600); err != nil {
-				t.Fatal(err)
+			for dir, executable := range map[string]string{active: pinned, other: competing, filepath.Join(appData, "codex"): competing} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(codexWindowsHookMarker(executable)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			stdout, stderr, code := runCodexNativeManifestCommand(t, codexNativeAdapter(t, root), "{}", appData, "0", t.TempDir(), t.TempDir(), []string{"USERPROFILE=" + profile, "CODEX_HOME=" + tt.codexHome})
-			if code != 0 || string(stdout) != "active-config" || len(stderr) != 0 {
-				t.Fatalf("exit=%d stdout=%q stderr=%q, want active config execution", code, stdout, stderr)
+			home := tt.codexHome
+			if tt.customHome {
+				home = custom
+			}
+			stdout, stderr, code := runCodexNativeManifestCommand(t, codexNativeAdapter(t, root), "{}", appData, "0", t.TempDir(), t.TempDir(), []string{"USERPROFILE=" + profile, "CODEX_HOME=" + home})
+			if code != 23 || string(stdout) != "selected" || len(stderr) != 0 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q, want selected config execution", code, stdout, stderr)
 			}
 		})
 	}
@@ -124,22 +140,65 @@ func TestCodexWindowsNativeUserPromptAcceptsSlashFormHomes(t *testing.T) {
 		t.Fatal(err)
 	}
 	driveHome := filepath.ToSlash(t.TempDir())
-	for _, tt := range []struct{ name, home string }{
-		{"drive with forward slashes", driveHome},
-		{"UNC with forward slashes", "//example/share/codex"},
+	for _, tt := range []struct{ name, home, profile string }{
+		{"drive with forward slashes", driveHome, ""},
+		{"UNC with forward slashes", "//example/share/codex", ""},
+		{"profile drive with forward slashes", "", driveHome},
+		{"profile UNC with forward slashes", "", "//example/share/profile"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("CODEX_HOME", tt.home)
-			t.Setenv("USERPROFILE", t.TempDir())
+			profile := tt.profile
+			if profile == "" {
+				profile = t.TempDir()
+			}
+			t.Setenv("USERPROFILE", profile)
 			t.Setenv("APPDATA", t.TempDir())
 			command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-File", probe)
+			command.Dir = t.TempDir()
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("path probe failed: %v: %s", err, output)
 			}
 			want := filepath.Join(tt.home, "config.toml")
+			if tt.home == "" {
+				want = filepath.Join(profile, ".codex", "config.toml")
+			}
 			if got := strings.TrimSpace(string(output)); !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
 				t.Fatalf("native config path = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCodexWindowsNativeUserPromptRejectsPartialProfiles(t *testing.T) {
+	root := repoRoot(t)
+	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "run-native-hook.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, _, ok := strings.Cut(string(source), "    if (-not [System.IO.File]::Exists($configPath))")
+	if !ok {
+		t.Fatal("native hook config-path boundary changed")
+	}
+	probe := filepath.Join(t.TempDir(), "profile-probe.ps1")
+	if err := os.WriteFile(probe, []byte(prefix+"    Write-Output $configPath; exit 0\n}\ncatch { exit 1 }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ name, profile string }{
+		{"root-relative", `\\partial-profile`},
+		{"drive-relative", `C:partial-profile`},
+		{"relative", `partial-profile`},
+		{"blank", "   "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", "")
+			t.Setenv("USERPROFILE", tt.profile)
+			command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-File", probe)
+			command.Dir = t.TempDir()
+			output, err := command.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(output)) != "" {
+				t.Fatalf("partial profile selected config: output=%q error=%v", output, err)
 			}
 		})
 	}

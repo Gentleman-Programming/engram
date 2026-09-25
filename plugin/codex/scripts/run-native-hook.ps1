@@ -12,7 +12,9 @@ try {
     if ([string]::IsNullOrWhiteSpace($codexHome) -or
         ($codexHome -notmatch '^[a-zA-Z]:\\' -and $codexHome -notmatch '^\\\\[^\\]+\\[^\\]+')) {
         $userProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
-        if ([string]::IsNullOrWhiteSpace($userProfile) -or -not [System.IO.Path]::IsPathRooted($userProfile)) { exit 0 }
+        if ([string]::IsNullOrWhiteSpace($userProfile)) { exit 0 }
+        $userProfile = $userProfile.Replace('/', '\')
+        if ($userProfile -notmatch '^[a-zA-Z]:\\' -and $userProfile -notmatch '^\\\\[^\\]+\\[^\\]+(?:\\|$)') { exit 0 }
         $codexHome = Join-Path $userProfile '.codex'
     }
 
