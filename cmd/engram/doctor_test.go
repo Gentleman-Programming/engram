@@ -618,6 +618,12 @@ func TestCmdDoctorRepairInvalidSessionIdentityLegacyJournal(t *testing.T) {
 				if err := db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE disposition='pending' AND disposition_reason IS NULL`).Scan(&count); err != nil || count != 12 {
 					t.Fatalf("%s mutated journal: %d %v", mode, count, err)
 				}
+				if err := db.QueryRow(`SELECT count(*) FROM observations WHERE session_id='' AND project='alpha'`).Scan(&count); err != nil || count != 7 {
+					t.Fatalf("%s migrated observations: got=%d want=7 err=%v", mode, count, err)
+				}
+				if err := db.QueryRow(`SELECT count(*) FROM user_prompts WHERE session_id='' AND project='alpha'`).Scan(&count); err != nil || count != 4 {
+					t.Fatalf("%s migrated prompts: got=%d want=4 err=%v", mode, count, err)
+				}
 			}
 			applied := run("--apply")
 			if applied["status"] != "applied" {
