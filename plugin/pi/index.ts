@@ -965,6 +965,20 @@ const sessionEndingsInFlight = new Map<string, Promise<unknown>>();
 const shutdownFlightsKey = Symbol.for("engram.pi.shutdown-flights");
 const realm = globalThis as typeof globalThis & { [shutdownFlightsKey]?: WeakMap<object, Map<string, Promise<void>>> };
 const shutdownFlights = realm[shutdownFlightsKey] ??= new WeakMap<object, Map<string, Promise<void>>>();
+const lifecycleKey = Symbol.for("engram.pi.session-lifecycle");
+type Lifecycle = { epoch: number; closing: boolean };
+const lifecycleRealm = globalThis as typeof globalThis & { [lifecycleKey]?: WeakMap<object, Map<string, Lifecycle>> };
+const lifecycles = lifecycleRealm[lifecycleKey] ??= new WeakMap<object, Map<string, Lifecycle>>();
+function lifecycle(ctx: SessionContext, id: string): Lifecycle {
+  let sessions = lifecycles.get(ctx.sessionManager);
+  if (!sessions) { sessions = new Map(); lifecycles.set(ctx.sessionManager, sessions); }
+  let state = sessions.get(id);
+  if (!state) { state = { epoch: 0, closing: false }; sessions.set(id, state); }
+  return state;
+}
+function assertOpen(state: Lifecycle, epoch: number): void {
+  if (state.closing || state.epoch !== epoch) throw new Error("Pi runtime session is closing");
+}
 
 function sharedShutdown(manager: object, id: string, deliver: () => Promise<void>): Promise<void> {
   let flights = shutdownFlights.get(manager);
@@ -1042,11 +1056,15 @@ function effectiveSessionID(ctx: SessionContext, runtimeID: string): string {
 
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
   const runtimeID = requireRuntimeSessionID(ctx);
+  const state = lifecycle(ctx, runtimeID);
+  const epoch = state.epoch;
+  assertOpen(state, epoch);
   if (knownSessions.has(`\u0000closing:${runtimeID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
   const registrationKey = `${sessionProject}\u0000${runtimeID}`;
   const existing = effectiveSessionRegistrations.get(registrationKey);
   if (existing) {
     const effectiveID = await existing;
+    assertOpen(state, epoch);
     if (knownSessions.has(`\u0000closing:${runtimeID}`) || knownSessions.has(`\u0000closing:${effectiveID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
     return effectiveID;
   }
@@ -1061,6 +1079,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
         }
       }
       await ensureSession(effectiveID, sessionProject, fetch, true);
+      assertOpen(state, epoch);
       return effectiveID;
     } catch (error) {
       if (error instanceof SessionProjectConflictError && effectiveID !== runtimeID && appendEntry
@@ -1074,19 +1093,23 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
       // Another module graph may have reserved the replacement while this POST was in flight.
       // Read the shared branch before reserving: appendEntry is synchronous, so this check
       // and the reservation below cannot interleave with another caller's continuation.
+      assertOpen(state, epoch);
       const reservedID = effectiveSessionID(ctx, runtimeID);
       if (reservedID !== effectiveID && pendingEffectiveSession(ctx, runtimeID, reservedID)) {
         const owner = pendingEffectiveSessionProject(ctx, runtimeID, reservedID);
         if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${reservedID}`);
         if (owner !== sessionProject) throw new SessionProjectConflictError(reservedID, owner, sessionProject);
         await ensureSession(reservedID, sessionProject, fetch, true);
+        assertOpen(state, epoch);
         return reservedID;
       }
+      assertOpen(state, epoch);
       const freshID = `${runtimeID}:resume:${randomUUID()}`;
       appendEntry(EFFECTIVE_SESSION_ENTRY, { runtimeID, effectiveID: freshID, pending: true, project: sessionProject });
       submittedEffectiveSessions.add(freshID);
       try {
         await ensureSession(freshID, sessionProject, fetch, true);
+        assertOpen(state, epoch);
       } catch (registrationError) {
         if (registrationError instanceof SessionProjectConflictError) {
           appendEntry(REJECTED_SESSION_ENTRY, { runtimeID, effectiveID: freshID });
@@ -1100,6 +1123,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
   effectiveSessionRegistrations.set(registrationKey, registration);
   try {
     const effectiveID = await registration;
+    assertOpen(state, epoch);
     if (knownSessions.has(`\u0000closing:${runtimeID}`) || knownSessions.has(`\u0000closing:${effectiveID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
     return effectiveID;
   } finally { if (effectiveSessionRegistrations.get(registrationKey) === registration) effectiveSessionRegistrations.delete(registrationKey); }
@@ -1519,6 +1543,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
   const activeProject = requestedProject || project;
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
+  const writeState = sessionId ? lifecycle(ctx, sessionId) : undefined;
+  const writeEpoch = writeState?.epoch;
   const registeredSessionForWrite = async (sessionProject: string) => registerEffectiveSession(ctx, sessionProject, appendEntry, fetch);
 
   switch (toolName) {
@@ -1545,7 +1571,9 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch(`/observations/${encodeURIComponent(String(params.id))}`);
     case "mem_save": {
       if (!requestedProject) requireResolvedProject();
+      if (writeState) assertOpen(writeState, writeEpoch!);
       const activeSessionId = await registeredSessionForWrite(activeProject);
+      if (writeState) assertOpen(writeState, writeEpoch!);
       return fetch("/observations", {
         method: "POST",
         body: {
@@ -1576,7 +1604,9 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return { topic_key: slugifyTopicKey(params) };
     case "mem_save_prompt": {
       if (!requestedProject) requireResolvedProject();
+      if (writeState) assertOpen(writeState, writeEpoch!);
       const promptSessionId = await registeredSessionForWrite(activeProject);
+      if (writeState) assertOpen(writeState, writeEpoch!);
       const response = await fetch<{ id: number }>("/prompts", {
         method: "POST",
         body: { session_id: promptSessionId, content: params.content, project: activeProject },
@@ -1585,7 +1615,9 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     }
     case "mem_session_summary": {
       if (!requestedProject) requireResolvedProject();
+      if (writeState) assertOpen(writeState, writeEpoch!);
       const summarySessionId = await registeredSessionForWrite(activeProject);
+      if (writeState) assertOpen(writeState, writeEpoch!);
       return fetch("/observations", {
         method: "POST",
         body: {
@@ -1632,16 +1664,14 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return fetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
     case "mem_capture_passive": {
       requireResolvedProject();
+      if (writeState) assertOpen(writeState, writeEpoch!);
       const passiveSessionId = await registeredSessionForWrite(project);
-      return fetch("/observations/passive", {
-        method: "POST",
-        body: {
-          session_id: passiveSessionId,
-          content: params.content,
-          project,
-          source: params.source || "pi-tool",
-        },
-      });
+      if (writeState) assertOpen(writeState, writeEpoch!);
+      const body = {
+        session_id: passiveSessionId, content: params.content, project, source: params.source || "pi-tool",
+      };
+      if (writeState) assertOpen(writeState, writeEpoch!);
+      return fetch("/observations/passive", { method: "POST", body });
     }
     case "mem_review": {
       const action = String(params.action || "").trim();
@@ -1767,6 +1797,9 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
     if (sessionId) {
+      const state = lifecycle(ctx, sessionId);
+      state.epoch++;
+      state.closing = false;
       knownSessions.delete(`\u0000closing:${sessionId}`);
       knownSessions.delete(`\u0000closing:${effectiveSessionID(ctx, sessionId)}`);
     }
@@ -1781,6 +1814,9 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (event.reason === "reload") return;
     const runtimeID = observeRuntimeSessionID(ctx);
     if (!runtimeID) return;
+    const state = lifecycle(ctx, runtimeID);
+    state.epoch++;
+    state.closing = true;
     knownSessions.add(`\u0000closing:${runtimeID}`);
     const pending = [...effectiveSessionRegistrations.entries()]
       .filter(([key]) => key.endsWith(`\u0000${runtimeID}`))
@@ -1825,6 +1861,10 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_compact", async (event: unknown) => {
     const summary = extractCompactedSummary(event);
     const sessionId = soleObservedRuntimeSessionID();
+    const observed = sessionId && observedSessionContexts.get(sessionId);
+    const state = observed && lifecycle(observed, sessionId);
+    const epoch = state?.epoch;
+    const open = () => { if (state) assertOpen(state, epoch!); };
 
     // Queue a session-scoped safe fallback before every early exit. The intended next turn must
     // receive this even when startup, project resolution, or strict registration cannot reach Engram.
@@ -1848,7 +1888,9 @@ export default function registerEngram(pi: ExtensionAPI) {
     }
     if (soleActiveRuntimeSessionID() !== sessionId || knownSessions.has(`\u0000closing:${effectiveID}`)) return;
 
-    const outcome = await archiveCompactionSummary(effectiveID, summary);
+    let outcome: string;
+    try { open(); outcome = await archiveCompactionSummary(effectiveID, summary); }
+    catch { outcome = ArchiveOutcome.Unavailable; }
     const context = !knownSessions.has(`\u0000closing:${effectiveID}`) && soleActiveRuntimeSessionID() === sessionId
       ? await loadCompactionRecoveryContext(effectiveID)
       : undefined;
@@ -1858,6 +1900,8 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const sessionId = observeRuntimeSessionID(ctx);
+    const state = sessionId && lifecycle(ctx, sessionId);
+    const epoch = state?.epoch;
     if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
       systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
       pendingRecoveryNotice = undefined;
@@ -1881,6 +1925,7 @@ export default function registerEngram(pi: ExtensionAPI) {
         content: stripPrivateTags(truncate(finalContent, 2000)),
         project,
       };
+      if (state && (state.closing || state.epoch !== epoch)) return { systemPrompt };
       await bestEffortEngramFetch("/prompts", { method: "POST", body });
     }
 
@@ -1889,6 +1934,8 @@ export default function registerEngram(pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", async (event: ToolEndEvent, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
+    const state = sessionId && lifecycle(ctx, sessionId);
+    const epoch = state?.epoch;
     const toolName = event.toolName ?? "";
     if (ENGRAM_TOOL_NAMES.has(toolName.toLowerCase())) return;
 
@@ -1917,6 +1964,7 @@ export default function registerEngram(pi: ExtensionAPI) {
       project,
       source: toolName,
     };
+    if (state && (state.closing || state.epoch !== epoch)) return;
     await bestEffortEngramFetch("/observations/passive", { method: "POST", body });
   });
 }

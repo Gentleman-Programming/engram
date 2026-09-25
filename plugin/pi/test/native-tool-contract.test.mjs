@@ -1475,6 +1475,114 @@ test("two module graphs coalesce concurrent pending replacement shutdown", async
   }
 });
 
+test("a peer graph cannot revive a closed replacement without explicit session_start", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  const entered = deferred();
+  const release = deferred();
+  let pausePeer = false;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
+    if (path === "/sessions" && body.id === "closed-peer") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    if (pausePeer && path === "/sessions") { entered.resolve(); await release.promise; }
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [];
+  const ctx = runtimeContext("closed-peer");
+  ctx.sessionManager.getBranch = () => entries;
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-closed-a-", async ({ sandbox }) => {
+      await withPluginSandbox("engram-pi-closed-b-", async ({ sandbox: peer }) => {
+        const a = await loadPluginHarness(sandbox, append);
+        const b = await loadPluginHarness(peer, append);
+        assert.equal((await a.registeredTools.get("mem_save").execute("save", { title: "initial", content: "initial" }, undefined, undefined, ctx)).isError, undefined);
+        const id = entries.at(-1).data.effectiveID;
+        await a.eventHandlers.get("session_shutdown")({}, ctx);
+        assert.equal(entries.at(-1).data.pending, false);
+        const before = calls.length;
+        const count = entries.length;
+        const rejected = await b.registeredTools.get("mem_save").execute("save", { title: "late", content: "late" }, undefined, undefined, ctx);
+        assert.equal(rejected.isError, true);
+        assert.equal(entries.length, count, "closed conversation must not reserve another identity");
+        assert.equal(calls.slice(before).filter(({ path }) => path !== "/project/current").length, 0, "closed conversation must not issue any write");
+        await b.eventHandlers.get("session_start")({}, ctx);
+        pausePeer = true;
+        const inFlight = b.registeredTools.get("mem_capture_passive").execute("capture", { content: "## Key Learnings\nPaused passive registration", source: "race" }, undefined, undefined, ctx);
+        await waitFor(entered.promise, "peer registration did not reach server");
+        const shutdown = a.eventHandlers.get("session_shutdown")({}, ctx);
+        release.resolve();
+        const [pausedResult] = await Promise.all([inFlight, shutdown]);
+        assert.equal(pausedResult.isError, true, "passive registration paused across shutdown cannot dispatch an observation");
+        assert.equal(calls.filter(({ path }) => path === "/observations/passive").length, 0);
+        const after = calls.length;
+        const afterEntries = entries.length;
+        const late = await b.registeredTools.get("mem_save").execute("save", { title: "after", content: "after" }, undefined, undefined, ctx);
+        assert.equal(late.isError, true);
+        assert.equal(entries.length, afterEntries);
+        assert.equal(calls.slice(after).filter(({ path }) => path !== "/project/current").length, 0);
+        await b.eventHandlers.get("session_start")({}, ctx);
+        assert.equal((await b.registeredTools.get("mem_save").execute("save", { title: "resumed", content: "resumed" }, undefined, undefined, ctx)).isError, undefined);
+        assert.ok(calls.slice(after).some(({ path }) => path === "/observations"), "explicit resume permits writes again");
+      });
+    });
+  } finally {
+    release.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("passive capture does not dispatch after a peer closes during body construction", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push(path);
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
+    if (path === "/sessions" && body.id === "passive-close") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    return new Response(JSON.stringify({ status: "created" }));
+  };
+  const entries = [];
+  const ctx = runtimeContext("passive-close");
+  ctx.sessionManager.getBranch = () => entries;
+  const append = (customType, data) => entries.push({ type: "custom", customType, data });
+  try {
+    await withPluginSandbox("engram-pi-passive-a-", async ({ sandbox }) => {
+      await withPluginSandbox("engram-pi-passive-b-", async ({ sandbox: peer }) => {
+        const a = await loadPluginHarness(sandbox, append);
+        const b = await loadPluginHarness(peer, append);
+        let shutdown;
+        const params = { content: "## Key Learnings\nA passive capture that must not dispatch" };
+        Object.defineProperty(params, "source", { get() { shutdown = a.eventHandlers.get("session_shutdown")({}, ctx); return "race"; } });
+        const result = await b.registeredTools.get("mem_capture_passive").execute("capture", params, undefined, undefined, ctx);
+        await shutdown;
+        assert.equal(result.isError, true);
+        assert.equal(calls.filter((path) => path === "/observations/passive").length, 0);
+        await b.eventHandlers.get("session_start")({}, ctx);
+        let hookShutdown;
+        const hookResult = { toJSON() { hookShutdown = a.eventHandlers.get("session_shutdown")({}, ctx); return { content: "x".repeat(80) }; } };
+        await b.eventHandlers.get("tool_execution_end")({ toolName: "shell", result: hookResult }, ctx);
+        await hookShutdown;
+        assert.equal(calls.filter((path) => path === "/observations/passive").length, 0, "hook must not dispatch after peer shutdown during serialization");
+      });
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("concurrent uncertain replacement end stays pending and a fresh graph retries", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
