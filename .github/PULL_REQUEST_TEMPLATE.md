@@ -62,7 +62,7 @@ Closes #
 
 ## 🤖 Automated Checks
 
-After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applicable platform checks. These automated statuses remain pending until the actual checks run; do not claim a pass from local evidence. Windows checks run for PRs but not merge groups, and are not among the six required contexts. All required checks must pass before merge:
+After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applicable platform checks. These automated statuses remain pending until the actual checks run; do not claim a pass from local evidence. Windows checks run for PRs but not merge groups, and are not among the six required contexts. Lint and Check PR Has No Transient Artifacts also run for PRs but are not required contexts; Lint also runs on pushes to main. All required checks must pass before merge:
 
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
