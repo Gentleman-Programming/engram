@@ -108,7 +108,7 @@ Title restoration does not create a SQLite backup.
 
 `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project` are diagnostic-only and are not supported by `engram doctor repair`. SQLite lock contention has no repair.
 
-A strict `project_owned` registration of an ended legacy session with no project may establish its owner only when no live observation or prompt belongs to another project. The session remains ended and the registration still returns `409 session_already_ended`; later registration from a different project returns `409 session_project_conflict`. This is not a general repair for ambiguous legacy ownership. Use `engram projects rescue-ownership` when existing records require an explicit operator decision.
+A strict `project_owned` registration of an ended legacy session with no project may establish its owner only when no live observation or prompt belongs to another project. The session remains ended and the registration still returns `409 session_already_ended`; a later strict `project_owned` registration from a different project returns `409 session_project_conflict`. This is not a general repair for ambiguous legacy ownership. Use `engram projects rescue-ownership` when existing records require an explicit operator decision.
 
 ### Repair JSON envelope
 
