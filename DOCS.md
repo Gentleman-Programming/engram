@@ -43,6 +43,12 @@ For other docs:
 
 When documentation and code disagree, this table says which doc surface is canonical for each contract, where the code-level authority lives, and which sibling docs must change together with it.
 
+Reader and status guide:
+
+- [README.md](README.md) is the concise product overview; this living `DOCS.md` is the full technical reference. Maintainer and contributor guides explain how to work with the system rather than replacing the contract-specific authorities below; the [Codebase Guide](docs/CODEBASE-GUIDE.md) covers ownership and guardrails.
+- These living docs are maintained and checked against shipped code and tests, not presumed to be generated copies. A historical record does not supersede shipped behavior or its tests. Generation is claimed only where a source-to-copy path is verified below.
+- [CODEOWNERS](CODEOWNERS) assigns the default reviewer/owner `@Gentleman-Programming` to paths without a more specific match, including these docs; review ownership does not make every document canonical.
+
 | Contract                               | Canonical doc surface               | Code authority                                                               | Must change together                                                                                                                       |
 | -------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | MCP tool inventory                     | DOCS.md "MCP Tools"                 | `internal/mcp/mcp.go` registrations + `ProfileAgent`/`ProfileAdmin`          | `docs/ARCHITECTURE.md` tool table; `docs/AGENT-SETUP.md` setup claims; `docs/PLUGINS.md` comparison table; README.md intent table (subset) |
@@ -55,6 +61,16 @@ When documentation and code disagree, this table says which doc surface is canon
 | Package ownership boundaries           | docs/CODEBASE-GUIDE.md              | (none; prose contract)                                                       | (none)                                                                                                                                     |
 
 Code and tests beat docs: `internal/mcp` owns agent-facing tool schemas, `internal/store` owns the durable schema, `internal/setup` owns install surfaces, and `plugin/*` translates host events without duplicating durable policy.
+
+### Reading and updating the memory protocol
+
+For readers, [Memory Protocol](#memory-protocol-full-text) is the canonical living agent-facing prose contract. The table above names related surfaces to check when that behavior changes; "must change together" means review for behavioral alignment, not copy identical text into every host.
+
+For maintainers, distinguish these ownership paths:
+
+- `internal/setup/setup.go` maintains `memoryProtocolMarkdown` independently. Setup uses that embedded text for installed agent instructions; it is not generated from DOCS.md. Compare behavior when editing either prose surface.
+- `skills/memory-protocol/SKILL.md` is a manually maintained contributor skill. `plugin/claude-code/skills/memory/SKILL.md` and `plugin/codex/skills/memory/SKILL.md` are host-adapted, manually maintained skills. Consider their relevant instructions alongside the canonical prose rather than assuming byte identity or automatic sync.
+- `plugin/opencode/engram.ts` contains OpenCode's agent instructions. Its verified generated copy is `internal/setup/plugins/opencode/engram.ts`: `go generate ./internal/setup/` copies source to embedded destination, and `TestEmbeddedOpenCodePluginMatchesSourceByteForByte` checks equality. This generation direction applies to the OpenCode plugin copy, not the other prose and skill surfaces above.
 
 ---
 
