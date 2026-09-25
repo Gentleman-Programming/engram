@@ -239,7 +239,7 @@ When using `engram setup`, config files are written to platform-appropriate loca
 |-------|---------------|---------|
 | OpenCode | `~/.config/opencode/` | `%APPDATA%\opencode\` |
 | Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
-| Codex | `~/.codex/` | `%APPDATA%\codex\` |
+| Codex | `$CODEX_HOME/` when absolute, else `~/.codex/` | `%CODEX_HOME%\` when absolute, else `%USERPROFILE%\.codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
 | Antigravity CLI | `~/.gemini/config/mcp_config.json` + `~/.gemini/GEMINI.md` | `%APPDATA%\gemini\config\mcp_config.json` + `%APPDATA%\gemini\GEMINI.md` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` + `.../memories/global_rules.md` | `%USERPROFILE%\.codeium\windsurf\...` |

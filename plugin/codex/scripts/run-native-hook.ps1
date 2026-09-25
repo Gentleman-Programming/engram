@@ -5,14 +5,18 @@ $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 
 try {
-    $appData = [Environment]::GetEnvironmentVariable('APPDATA')
-    if ([string]::IsNullOrWhiteSpace($appData) -or -not [System.IO.Path]::IsPathRooted($appData)) {
+    $codexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME')
+    if (-not [string]::IsNullOrWhiteSpace($codexHome)) {
+        $codexHome = $codexHome.Replace('/', '\')
+    }
+    if ([string]::IsNullOrWhiteSpace($codexHome) -or
+        ($codexHome -notmatch '^[a-zA-Z]:\\' -and $codexHome -notmatch '^\\\\[^\\]+\\[^\\]+')) {
         $userProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
         if ([string]::IsNullOrWhiteSpace($userProfile) -or -not [System.IO.Path]::IsPathRooted($userProfile)) { exit 0 }
-        $appData = Join-Path $userProfile 'AppData\Roaming'
+        $codexHome = Join-Path $userProfile '.codex'
     }
 
-    $configPath = Join-Path $appData 'codex\config.toml'
+    $configPath = Join-Path $codexHome 'config.toml'
     if (-not [System.IO.File]::Exists($configPath)) { exit 0 }
     $marker = '# engram-windows-hook-command-v1: '
     $reader = [System.IO.File]::OpenText($configPath)

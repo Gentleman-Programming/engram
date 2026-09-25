@@ -1583,6 +1583,9 @@ func installCodex() (*Result, error) {
 	}
 
 	path := codexConfigPath()
+	if path == "" {
+		return nil, fmt.Errorf("resolve Codex config path: no absolute CODEX_HOME or user home")
+	}
 	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
 		return nil, err
@@ -1825,17 +1828,14 @@ func geminiEnvPath() string {
 }
 
 func codexConfigPath() string {
-	home, _ := userHomeDir()
-
-	switch runtimeGOOS {
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "codex", "config.toml")
-		}
-		return filepath.Join(home, "AppData", "Roaming", "codex", "config.toml")
-	default:
-		return filepath.Join(home, ".codex", "config.toml")
+	if codexHome := os.Getenv("CODEX_HOME"); strings.TrimSpace(codexHome) != "" && filepath.IsAbs(codexHome) {
+		return filepath.Join(codexHome, "config.toml")
 	}
+	home, err := userHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "config.toml")
 }
 
 func codexInstructionsPath() string {

@@ -106,7 +106,7 @@ func useTestHome(t *testing.T) string {
 }
 
 // useIsolatedProfile keeps platform-resolved setup paths inside one disposable
-// profile, including the Windows APPDATA paths used by Gemini and Codex.
+// profile, including the Windows APPDATA path used by Gemini.
 func useIsolatedProfile(t *testing.T) string {
 	t.Helper()
 	profile := t.TempDir()
@@ -114,6 +114,7 @@ func useIsolatedProfile(t *testing.T) string {
 
 	volume := filepath.VolumeName(profile)
 	t.Setenv("APPDATA", filepath.Join(profile, "AppData", "Roaming"))
+	t.Setenv("CODEX_HOME", "")
 	t.Setenv("LOCALAPPDATA", filepath.Join(profile, "AppData", "Local"))
 	t.Setenv("USERPROFILE", profile)
 	t.Setenv("HOMEDRIVE", volume)
@@ -2272,6 +2273,7 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
+	t.Setenv("CODEX_HOME", "")
 
 	runtimeGOOS = "linux"
 	if got := openCodeConfigPath(); got != filepath.Join("/home/tester", ".config", "opencode", "opencode.json") {
@@ -2317,7 +2319,7 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	if got := geminiConfigPath(); got != filepath.Join("C:/AppData/Roaming", "gemini", "settings.json") {
 		t.Fatalf("unexpected windows geminiConfigPath: %s", got)
 	}
-	if got := codexConfigPath(); got != filepath.Join("C:/AppData/Roaming", "codex", "config.toml") {
+	if got := codexConfigPath(); got != filepath.Join("/home/tester", ".codex", "config.toml") {
 		t.Fatalf("unexpected windows codexConfigPath: %s", got)
 	}
 
@@ -2335,7 +2337,7 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	if got := geminiConfigPath(); got != filepath.Join("/home/tester", "AppData", "Roaming", "gemini", "settings.json") {
 		t.Fatalf("unexpected windows fallback geminiConfigPath: %s", got)
 	}
-	if got := codexConfigPath(); got != filepath.Join("/home/tester", "AppData", "Roaming", "codex", "config.toml") {
+	if got := codexConfigPath(); got != filepath.Join("/home/tester", ".codex", "config.toml") {
 		t.Fatalf("unexpected windows fallback codexConfigPath: %s", got)
 	}
 
@@ -2361,6 +2363,33 @@ func TestPathHelpersAcrossOSVariants(t *testing.T) {
 	}
 	if got := codexCompactPromptPath(); got != filepath.Join(filepath.Dir(codexConfigPath()), "engram-compact-prompt.md") {
 		t.Fatalf("unexpected codex compact prompt path: %s", got)
+	}
+}
+
+func TestCodexConfigPathPreservesUnixDefaultsAndOverride(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	t.Setenv("APPDATA", filepath.Join(t.TempDir(), "irrelevant"))
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			runtimeGOOS = goos
+			for _, tt := range []struct{ name, value, want string }{
+				{"default", "", filepath.Join(home, ".codex", "config.toml")},
+				{"absolute override", t.TempDir(), ""},
+				{"relative ignored", "relative-home", filepath.Join(home, ".codex", "config.toml")},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Setenv("CODEX_HOME", tt.value)
+					want := tt.want
+					if want == "" {
+						want = filepath.Join(tt.value, "config.toml")
+					}
+					if got := codexConfigPath(); got != want {
+						t.Fatalf("codexConfigPath() = %q, want %q", got, want)
+					}
+				})
+			}
+		})
 	}
 }
 

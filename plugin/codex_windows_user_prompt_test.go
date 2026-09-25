@@ -61,7 +61,7 @@ func TestCodexWindowsNativeUserPromptAdapterContract(t *testing.T) {
 		t.Fatalf("read native hook adapter: %v", err)
 	}
 	content := string(source)
-	for _, token := range []string{"APPDATA", "USERPROFILE", "config.toml", "ReadLine()", "# engram-windows-hook-command-v1: ", "ConvertFrom-Json", "hook codex-user-prompt-submit", "[System.IO.Path]::IsPathRooted", "[System.IO.File]::Exists", "exit $LASTEXITCODE"} {
+	for _, token := range []string{"CODEX_HOME", "USERPROFILE", "config.toml", "ReadLine()", "# engram-windows-hook-command-v1: ", "ConvertFrom-Json", "hook codex-user-prompt-submit", "[System.IO.Path]::IsPathRooted", "[System.IO.File]::Exists", "exit $LASTEXITCODE"} {
 		if !strings.Contains(content, token) {
 			t.Errorf("native hook adapter must contain %q", token)
 		}
@@ -70,6 +70,78 @@ func TestCodexWindowsNativeUserPromptAdapterContract(t *testing.T) {
 		if strings.Contains(strings.ToLower(content), strings.ToLower(token)) {
 			t.Errorf("native hook adapter must not contain runtime discovery token %q", token)
 		}
+	}
+}
+
+func TestCodexWindowsNativeUserPromptUsesActiveConfigHome(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and executes a pinned fixture")
+	}
+	root := repoRoot(t)
+	profile, appData, custom := t.TempDir(), t.TempDir(), t.TempDir()
+	pinned := buildCodexWindowsProgram(t, `package main
+import "os"
+func main() { _, _ = os.Stdout.WriteString("active-config") }
+`)
+	for _, tt := range []struct {
+		name, codexHome, configDir string
+	}{
+		{"default despite APPDATA", "", filepath.Join(profile, ".codex")},
+		{"explicit CODEX_HOME", custom, custom},
+		{"relative CODEX_HOME", "relative-home", filepath.Join(profile, ".codex")},
+		{"drive-relative CODEX_HOME", `C:relative-home`, filepath.Join(profile, ".codex")},
+		{"root-relative CODEX_HOME", `\relative-home`, filepath.Join(profile, ".codex")},
+		{"whitespace CODEX_HOME", "   ", filepath.Join(profile, ".codex")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.MkdirAll(tt.configDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tt.configDir, "config.toml"), []byte(codexWindowsHookMarker(pinned)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, code := runCodexNativeManifestCommand(t, codexNativeAdapter(t, root), "{}", appData, "0", t.TempDir(), t.TempDir(), []string{"USERPROFILE=" + profile, "CODEX_HOME=" + tt.codexHome})
+			if code != 0 || string(stdout) != "active-config" || len(stderr) != 0 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q, want active config execution", code, stdout, stderr)
+			}
+		})
+	}
+}
+
+func TestCodexWindowsNativeUserPromptAcceptsSlashFormHomes(t *testing.T) {
+	root := repoRoot(t)
+	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "run-native-hook.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, _, ok := strings.Cut(string(source), "    if (-not [System.IO.File]::Exists($configPath))")
+	if !ok {
+		t.Fatal("native hook config-path boundary changed")
+	}
+	// Execute the production path-selection prefix without accessing a UNC share.
+	probe := filepath.Join(t.TempDir(), "path-probe.ps1")
+	if err := os.WriteFile(probe, []byte(prefix+"    Write-Output $configPath; exit 0\n}\ncatch { exit 1 }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	driveHome := filepath.ToSlash(t.TempDir())
+	for _, tt := range []struct{ name, home string }{
+		{"drive with forward slashes", driveHome},
+		{"UNC with forward slashes", "//example/share/codex"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", tt.home)
+			t.Setenv("USERPROFILE", t.TempDir())
+			t.Setenv("APPDATA", t.TempDir())
+			command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-File", probe)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("path probe failed: %v: %s", err, output)
+			}
+			want := filepath.Join(tt.home, "config.toml")
+			if got := strings.TrimSpace(string(output)); !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+				t.Fatalf("native config path = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -84,15 +156,20 @@ func main() { _, _ = io.Copy(os.Stdout, os.Stdin); os.Exit(23) }
 `)
 	input, profile := `{"session_id":"pinned-process"}`, t.TempDir()
 	for _, tt := range []struct {
-		name, configRoot, appData string
-		env                       []string
+		name, configDir string
+		env             []string
 	}{
-		{name: "APPDATA", configRoot: appData, appData: appData},
-		{name: "USERPROFILE fallback", configRoot: filepath.Join(profile, "AppData", "Roaming"), appData: "relative", env: []string{"USERPROFILE=" + profile}},
+		{name: "explicit CODEX_HOME", configDir: filepath.Join(appData, "codex"), env: []string{"CODEX_HOME=" + filepath.Join(appData, "codex")}},
+		{name: "USERPROFILE default", configDir: filepath.Join(profile, ".codex"), env: []string{"USERPROFILE=" + profile, "CODEX_HOME="}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			writeCodexWindowsConfig(t, tt.configRoot, codexWindowsHookMarker(pinned)+"\n[mcp_servers.engram]\ncommand = \"ignored.exe\"")
-			stdout, stderr, code := runCodexNativeManifestCommand(t, codexNativeAdapter(t, root), input, tt.appData, "0", t.TempDir(), t.TempDir(), tt.env)
+			if err := os.MkdirAll(tt.configDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tt.configDir, "config.toml"), []byte(codexWindowsHookMarker(pinned)+"\n[mcp_servers.engram]\ncommand = \"ignored.exe\""), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, code := runCodexNativeManifestCommand(t, codexNativeAdapter(t, root), input, appData, "0", t.TempDir(), t.TempDir(), tt.env)
 			if code != 23 || string(stdout) != input || len(stderr) != 0 {
 				t.Fatalf("exit=%d stdout=%q stderr=%q, want pinned child stdin/stdout and exit", code, stdout, stderr)
 			}
@@ -348,7 +425,7 @@ func runCodexNativeManifestCommand(t *testing.T, command, input, appData, port, 
 	run.WaitDelay = time.Second
 	run.SysProcAttr = &syscall.SysProcAttr{CmdLine: "/D /S /C \"" + command + "\""}
 	run.Dir, run.Env = cwd, append([]string{}, os.Environ()...)
-	for _, override := range append([]string{"APPDATA=" + appData, "ENGRAM_PORT=" + port, "TEMP=" + stateDir, "TMP=" + stateDir}, envOverrides...) {
+	for _, override := range append([]string{"APPDATA=" + appData, "CODEX_HOME=" + filepath.Join(appData, "codex"), "ENGRAM_PORT=" + port, "TEMP=" + stateDir, "TMP=" + stateDir}, envOverrides...) {
 		key, _, _ := strings.Cut(override, "=")
 		prefix := strings.ToUpper(key) + "="
 		filtered := run.Env[:0]
