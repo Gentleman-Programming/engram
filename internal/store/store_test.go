@@ -3346,6 +3346,34 @@ func TestPassiveCaptureReturnsErrorWhenSessionDoesNotExist(t *testing.T) {
 	}
 }
 
+func TestStatsPropagatesCountErrors(t *testing.T) {
+	for _, table := range []string{"sessions", "observations", "user_prompts"} {
+		for _, scope := range []struct {
+			name    string
+			project string
+		}{
+			{name: "global"},
+			{name: "project", project: "alpha"},
+		} {
+			t.Run(table+"/"+scope.name, func(t *testing.T) {
+				s := newTestStore(t)
+				if _, err := s.db.Exec("DROP TABLE " + table); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if scope.project == "" {
+					_, err = s.Stats()
+				} else {
+					_, err = s.StatsProject(scope.project)
+				}
+				if err == nil {
+					t.Fatalf("missing %s table must fail %s stats", table, scope.name)
+				}
+			})
+		}
+	}
+}
+
 func TestStatsProjectsOrderedByMostRecentObservation(t *testing.T) {
 	s := newTestStore(t)
 
@@ -7890,8 +7918,8 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			}
 			return origQueryIt(db, query, args...)
 		}
-		if _, err := s.Stats(); err != nil {
-			t.Fatalf("stats should swallow project query errors: %v", err)
+		if _, err := s.Stats(); err == nil {
+			t.Fatal("stats must propagate project query errors")
 		}
 
 		if err := s.EndSession("s-c", "has summary"); err != nil {

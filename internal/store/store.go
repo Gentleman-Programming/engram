@@ -4962,7 +4962,7 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 		where = " WHERE LOWER(project) = ?"
 		args = append(args, project)
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); errors.Is(err, ErrDatabaseGenerationChanged) {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); err != nil {
 		return nil, err
 	}
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
@@ -4970,10 +4970,10 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 			return ""
 		}
 		return " AND LOWER(project) = ?"
-	}(), args...).Scan(&stats.TotalObservations); errors.Is(err, ErrDatabaseGenerationChanged) {
+	}(), args...).Scan(&stats.TotalObservations); err != nil {
 		return nil, err
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); errors.Is(err, ErrDatabaseGenerationChanged) {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); err != nil {
 		return nil, err
 	}
 
@@ -4984,34 +4984,23 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
 	rows, err := s.queryItHook(s.db, projectsQuery, args...)
 	if err != nil {
-		if errors.Is(err, ErrDatabaseGenerationChanged) {
-			return nil, err
-		}
-		return stats, nil
+		return nil, err
 	}
 
 	for rows.Next() {
 		var projectName string
 		if err := rows.Scan(&projectName); err != nil {
 			_ = rows.Close()
-			if errors.Is(err, ErrDatabaseGenerationChanged) {
-				return nil, err
-			}
-			return stats, nil
+			return nil, err
 		}
 		stats.Projects = append(stats.Projects, projectName)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		if errors.Is(err, ErrDatabaseGenerationChanged) {
-			return nil, err
-		}
-		return stats, nil
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
-		if errors.Is(err, ErrDatabaseGenerationChanged) {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	return stats, nil
