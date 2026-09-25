@@ -2033,6 +2033,91 @@ func (s *Store) DiagnoseCloudUpgradeLegacyMutations(project string) (CloudUpgrad
 	return report, nil
 }
 
+// SyncMutationDirectoryRepairAction identifies a pending session payload repaired from local state.
+type SyncMutationDirectoryRepairAction struct {
+	Seq       int64  `json:"seq"`
+	Project   string `json:"project"`
+	EntityKey string `json:"entity_key"`
+}
+
+// RepairPendingSessionDirectories plans or applies only session directory backfills.
+// It does not require cloud enrollment and leaves journal metadata unchanged.
+func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]SyncMutationDirectoryRepairAction, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	actions := make([]SyncMutationDirectoryRepairAction, 0)
+	run := func(tx *sql.Tx) error {
+		projects := []string{project}
+		if project == "" {
+			projects = nil
+			rows, err := tx.Query(`SELECT DISTINCT project FROM sync_mutations WHERE target_key = ? AND disposition = ? AND acked_at IS NULL AND project != ''`, DefaultSyncTargetKey, SyncMutationDispositionPending)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err != nil {
+					rows.Close()
+					return err
+				}
+				projects = append(projects, name)
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return err
+			}
+		}
+		for _, name := range projects {
+			mutations, err := s.listPendingProjectMutationsTx(tx, name)
+			if err != nil {
+				return err
+			}
+			for _, mutation := range mutations {
+				if mutation.Entity != SyncEntitySession || mutation.Op != SyncOpUpsert {
+					continue
+				}
+				var body syncSessionPayload
+				if decodeSyncPayload([]byte(mutation.Payload), &body) != nil || strings.TrimSpace(body.Directory) != "" || strings.TrimSpace(body.ID) == "" || body.ID != mutation.EntityKey {
+					continue
+				}
+				var localProject string
+				err := tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, body.ID).Scan(&localProject)
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				if localProject != mutation.Project {
+					continue
+				}
+				eval, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
+				if err != nil {
+					return err
+				}
+				if !eval.canRepair || eval.repairedPayload == "" {
+					continue
+				}
+				if apply {
+					if _, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ? WHERE seq = ? AND target_key = ? AND project = ? AND acked_at IS NULL AND disposition = ?`, eval.repairedPayload, mutation.Seq, DefaultSyncTargetKey, name, SyncMutationDispositionPending); err != nil {
+						return err
+					}
+				}
+				actions = append(actions, SyncMutationDirectoryRepairAction{Seq: mutation.Seq, Project: name, EntityKey: mutation.EntityKey})
+			}
+		}
+		return nil
+	}
+	var err error
+	if apply {
+		err = s.withTx(run)
+	} else {
+		err = s.withReadTx(run)
+	}
+	return actions, err
+}
+
 func (s *Store) applyCloudUpgradeLegacyMutationRepairs(project string) error {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)

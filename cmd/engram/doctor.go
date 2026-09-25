@@ -251,6 +251,11 @@ func cmdDoctorRepair(cfg store.Config) {
 	}
 	defer s.Close()
 	if check == diagnostic.CheckSyncMutationRequiredFields {
+		directoryRepairs, err := s.RepairPendingSessionDirectories(project, mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
 		repairs, err := s.RepairObservationMutationTitles(project, mode == diagnostic.RepairModeApply)
 		if err != nil {
 			failDoctorRepair(err.Error())
@@ -267,7 +272,10 @@ func cmdDoctorRepair(cfg store.Config) {
 			return
 		}
 		if mode != diagnostic.RepairModeApply {
-			handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions))
+			handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions)+len(directoryRepairs))
+			for _, action := range directoryRepairs {
+				handledSeqs[action.Seq] = struct{}{}
+			}
 			for _, action := range repairs.Actions {
 				handledSeqs[action.Seq] = struct{}{}
 			}
@@ -288,15 +296,16 @@ func cmdDoctorRepair(cfg store.Config) {
 			return
 		}
 		if mode == diagnostic.RepairModeApply {
-			report.Applied = len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
+			report.Applied = len(directoryRepairs) > 0 || len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
 		}
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
+			DirectoryRepairs       []store.SyncMutationDirectoryRepairAction  `json:"directory_repairs"`
 			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`
 			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-		}{report, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
+		}{report, directoryRepairs, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
 		return
 	}
 
