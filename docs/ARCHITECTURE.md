@@ -315,13 +315,9 @@ Cloud constraints (current behavior):
 
 Cloud route/auth split (current behavior):
 
-- Local runtime (`engram serve`) exposes local JSON APIs and `GET /sync/status` only.
-- Cloud runtime (`engram cloud serve`) exposes `GET /health`, `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, and `/dashboard/*`.
-- Dashboard public routes: `GET /dashboard/health`, `GET/POST /dashboard/login`, `POST /dashboard/logout`, `GET /dashboard/static/*`.
-- Dashboard protected routes: `GET /dashboard`, `/dashboard/stats`, `/dashboard/activity`, `/dashboard/browser` (`/observations`, `/sessions`, `/sessions/{sessionID}`, `/prompts`), `/dashboard/projects`, `/dashboard/projects/list`, `/dashboard/projects/{project}`, `/dashboard/projects/{name}/observations|sessions|prompts`, `/dashboard/contributors`, `/dashboard/contributors/list`, `/dashboard/contributors/{contributor}`, `/dashboard/admin`, `/dashboard/admin/projects`, `/dashboard/admin/users`, `/dashboard/admin/users/list`, `/dashboard/admin/health`, `POST /dashboard/admin/projects/{name}/sync`, `/dashboard/sessions/{project}/{sessionID}`, `/dashboard/observations/{project}/{sessionID}/{syncID}`, `/dashboard/prompts/{project}/{sessionID}/{syncID}`.
-- Note: `/dashboard/admin/contributors` was removed; user/contributor management lives under `/dashboard/admin/users`.
-- In authenticated mode, protected dashboard routes require a signed dashboard cookie (obtained via `/dashboard/login` + bearer token) and do not accept direct bearer headers as a browser session substitute.
-- In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` with no bearer token), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
+`engram serve` and `engram cloud serve` are distinct runtimes: the former serves local APIs, while the latter serves cloud sync and the browser dashboard. In authenticated cloud mode, sync requests use a bearer token in the Authorization header; protected dashboard browser routes instead require a signed cookie obtained through login, not a bearer header as a browser-session substitute. Insecure development mode bypasses dashboard authentication and is distinct from authenticated mode.
+
+For documented methods and paths and the dashboard route tree, see [HTTP API Endpoints](../DOCS.md#http-api-endpoints). For routes not yet documented there, check the [cloud server route registrations](../internal/cloud/cloudserver/cloudserver.go).
 
 ---
 
