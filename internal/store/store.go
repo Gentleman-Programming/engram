@@ -8200,6 +8200,24 @@ func (s *Store) MergeProjectsByName(from, to string) (*MergeResult, error) {
 
 	result := &MergeResult{Canonical: toNormalized}
 	err := s.withTx(func(tx *sql.Tx) error {
+		// Detect sync-identity presence for the exact source spelling BEFORE the
+		// migration below moves those rows onto the target. Mirrors mergeProjects'
+		// explicit check: a source enrollment row, or a pending journal row whose
+		// project column or payload project field carries the source spelling.
+		syncIdentityPresent := false
+		var enrolled int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = ?`, fromName).Scan(&enrolled); err != nil {
+			return fmt.Errorf("check source project %q: %w", fromName, err)
+		}
+		syncIdentityPresent = enrolled > 0
+		var pending int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE acked_at IS NULL AND
+			(project = ? OR (json_valid(payload) AND json_extract(payload, '$.project') = ?))`,
+			fromName, fromName).Scan(&pending); err != nil {
+			return fmt.Errorf("check source project %q: %w", fromName, err)
+		}
+		syncIdentityPresent = syncIdentityPresent || pending > 0
+
 		sourceUpdated, err := s.mergeProjectRecordsTx(tx, fromName, []string{fromName}, toNormalized, result)
 		if err != nil {
 			return err
@@ -8207,7 +8225,12 @@ func (s *Store) MergeProjectsByName(from, to string) (*MergeResult, error) {
 		if sourceUpdated {
 			result.SourcesMerged = append(result.SourcesMerged, fromName)
 		}
-		// Enqueue sync mutations so cloud sync picks up the merged records.
+		// Enqueue sync mutations so cloud sync picks up the merged records, but
+		// only when the merge actually moved something: a missing source stays a
+		// successful no-op that must not backfill the untouched target.
+		if !sourceUpdated && !syncIdentityPresent {
+			return nil
+		}
 		return s.backfillProjectSyncMutationsTx(tx, toNormalized)
 	})
 	if err != nil {
