@@ -7966,6 +7966,7 @@ func TestHandleGetObservationProjectResolution(t *testing.T) {
 	})
 
 	t.Run("omitted project falls back to cwd detection", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "")
 		dir := t.TempDir()
 		initTestGitRepo(t, dir)
 		detected := project.DetectProjectFull(dir)
