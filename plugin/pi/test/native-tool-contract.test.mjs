@@ -548,7 +548,8 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
         { project: "selected-project", scope: "personal", compact: false },
       );
       const omitted = await executeContext("context-no-options", { scope: "personal" });
-      for (const result of [explicit, withoutCompact, withoutMaxBytes, omitted]) {
+      const oversized = await executeContext("context-oversized", { project: "selected-project", max_bytes: 1e20 });
+      for (const result of [explicit, withoutCompact, withoutMaxBytes, omitted, oversized]) {
         assert.notEqual(result.isError, true, "mem_context should preserve successful HTTP responses");
       }
 
@@ -561,7 +562,7 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
       assert.equal(omitted.content[0].text, "# Default context\n- compact omitted");
 
       const contextCalls = calls.filter((call) => call.method === "GET" && call.path.startsWith("/context?"));
-      assert.equal(contextCalls.length, 4, "each invocation must make one GET /context request");
+      assert.equal(contextCalls.length, 5, "each invocation must make one GET /context request");
       const queries = contextCalls.map((call) => new URL(`http://test${call.path}`).searchParams);
 
       assert.equal(queries[0].get("project"), "selected-project");
@@ -579,6 +580,7 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
       assert.equal(queries[3].get("scope"), "personal");
       assert.equal(queries[3].has("max_bytes"), false, "omitted bounds must preserve the existing HTTP request");
       assert.equal(queries[3].has("compact"), false, "omitted compact mode must preserve the existing HTTP request");
+      assert.equal(queries[4].get("max_bytes"), "100000000000000000000", "oversized budget must reach Go unchanged");
 
       const contextProperties = memContext.parameters.args[0];
       assert.equal(contextProperties.max_bytes.kind, "Optional", "max_bytes must be optional in the registered schema");

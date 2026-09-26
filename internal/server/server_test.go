@@ -3809,9 +3809,11 @@ func TestContextMaxBytesQuery(t *testing.T) {
 		t.Fatalf("max_bytes wiring returned %d bytes: %q", len(bounded), bounded)
 	}
 
-	clamped := contextFor(t, "&max_bytes=999999999")
-	if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
-		t.Fatalf("max_bytes clamp returned %d bytes, want %d", len(clamped), contextMaxBytes)
+	for _, query := range []string{"999999999", "100000000000000000000"} {
+		clamped := contextFor(t, "&max_bytes="+query)
+		if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
+			t.Fatalf("max_bytes=%s returned %d bytes (truncated=%t), want %d with truncation", query, len(clamped), strings.HasSuffix(clamped, "\n[truncated]\n"), contextMaxBytes)
+		}
 	}
 }
 
