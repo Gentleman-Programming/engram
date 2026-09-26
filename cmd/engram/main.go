@@ -2514,6 +2514,8 @@ func cmdProjects(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "merge":
+		cmdProjectsMerge(cfg)
 	case "consolidate":
 		cmdProjectsConsolidate(cfg)
 	case "prune":
@@ -2531,9 +2533,74 @@ func cmdProjects(cfg store.Config) {
 
 func printProjectsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
+	fmt.Fprintln(os.Stderr, "       engram projects merge --from <source> --to <canonical> (--dry-run|--apply)")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
 	fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run] [--paths-only]")
 	fmt.Fprintln(os.Stderr, "       engram projects rescue-ownership --project <name> [--session <id>]... [--observation <id>]... [--prompt <id>]...")
+}
+
+func cmdProjectsMerge(cfg store.Config) {
+	var from, to string
+	var dryRun, apply bool
+	seen := map[string]bool{}
+	for i := 3; i < len(os.Args); i++ {
+		flag := os.Args[i]
+		if seen[flag] {
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+		seen[flag] = true
+		switch flag {
+		case "--from", "--to":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "--") {
+				printProjectsUsage()
+				exitFunc(1)
+				return
+			}
+			i++
+			if flag == "--from" {
+				from = os.Args[i]
+			} else {
+				to = os.Args[i]
+			}
+		case "--dry-run":
+			dryRun = true
+		case "--apply":
+			apply = true
+		default:
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" || dryRun == apply {
+		printProjectsUsage()
+		exitFunc(1)
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+	// Preview and apply share store eligibility; apply revalidates transactionally.
+	preview, err := s.PreviewExplicitProjectMerge(from, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if dryRun {
+		fmt.Printf("[dry-run] Source %q -> target %q: observations %d, sessions %d, prompts %d. Sync identity changes: %t. No changes made. Point-in-time preview; apply revalidates and counts may differ.\n", preview.Source, preview.Canonical, preview.ObservationsUpdated, preview.SessionsUpdated, preview.PromptsUpdated, preview.SyncIdentityChanges)
+		return
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{from}, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Merged source %q into target %q: observations %d, sessions %d, prompts %d. Sync identity may also change.\n", preview.Source, result.Canonical, result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
 }
 
 // cmdProjectsRescueOwnership assigns explicit ownership to legacy rows that
@@ -3635,6 +3702,8 @@ Commands:
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
   projects list      List all projects with observation, session, and prompt counts
+  projects merge --from <source> --to <canonical> (--dry-run|--apply)
+                     Preview or apply an explicit separator-variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups

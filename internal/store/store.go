@@ -8174,20 +8174,75 @@ func mergeProjectEligible(source, canonical string, explicit bool) bool {
 	if source == canonical {
 		return true
 	}
-	if !explicit || len(source) != len(canonical) {
+	if !explicit {
 		return false
 	}
-	difference := false
-	for i := 0; i < len(source); i++ {
-		if source[i] == canonical[i] {
-			continue
-		}
-		if (source[i] != '-' || canonical[i] != '_') && (source[i] != '_' || canonical[i] != '-') {
-			return false
-		}
-		difference = true
+	strip := func(name string) string {
+		return strings.Map(func(r rune) rune {
+			if r == '-' || r == '_' {
+				return -1
+			}
+			return r
+		}, name)
 	}
-	return difference
+	return strip(source) == strip(canonical) && source != canonical
+}
+
+// ExplicitProjectMergePreview is a point-in-time estimate of source rows the
+// merge updates. Backfill mutations are intentionally not included: apply may
+// enqueue additional mutations and must revalidate against its own transaction.
+type ExplicitProjectMergePreview struct {
+	Canonical           string
+	Source              string
+	ObservationsUpdated int64
+	SessionsUpdated     int64
+	PromptsUpdated      int64
+	SyncIdentityChanges bool
+}
+
+// PreviewExplicitProjectMerge reads one consistent SQLite transaction without
+// writing. A later apply can observe different data and return different counts.
+func (s *Store) PreviewExplicitProjectMerge(source, canonical string) (*ExplicitProjectMergePreview, error) {
+	canonical, _ = NormalizeProject(canonical)
+	normalizedSource, _ := NormalizeProject(source)
+	if canonical == "" || normalizedSource == "" || normalizedSource == canonical || !mergeProjectEligible(normalizedSource, canonical, true) {
+		return nil, fmt.Errorf("source project %q must be a distinct separator variant of canonical project %q", source, canonical)
+	}
+	name := strings.TrimSpace(source)
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	preview := &ExplicitProjectMergePreview{Canonical: canonical, Source: name}
+	for _, item := range []struct {
+		table string
+		count *int64
+	}{
+		{"observations", &preview.ObservationsUpdated},
+		{"sessions", &preview.SessionsUpdated},
+		{"user_prompts", &preview.PromptsUpdated},
+	} {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM `+item.table+` WHERE project = ?`, name).Scan(item.count); err != nil {
+			return nil, fmt.Errorf("count %s: %w", item.table, err)
+		}
+	}
+	var enrolled, pending int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = ?`, name).Scan(&enrolled); err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE acked_at IS NULL AND
+		(project = ? OR (json_valid(payload) AND json_extract(payload, '$.project') = ?))`, name, name).Scan(&pending); err != nil {
+		return nil, err
+	}
+	preview.SyncIdentityChanges = enrolled > 0 || pending > 0
+	if preview.ObservationsUpdated+preview.SessionsUpdated+preview.PromptsUpdated+enrolled+pending == 0 {
+		return nil, fmt.Errorf("source project %q does not exist", name)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return preview, nil
 }
 
 func (s *Store) mergeProjects(sources []string, canonical string, explicit bool) (*MergeResult, error) {
