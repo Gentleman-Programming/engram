@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer } from "node:http";
 import { createServer } from "node:net";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -41,6 +41,7 @@ const { resolve } = require("node:path");
 
 const syntheticServePath = resolve("serve");
 const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
+if (process.argv.includes("sync") || process.argv.includes("--import")) { appendFileSync(${JSON.stringify(spawnLog)}, "sync --import\\n"); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
@@ -152,6 +153,22 @@ async function withFixture(options, run) {
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+test("manifest presence never triggers import while startup still detects the project", async () => {
+  for (const manifestPresent of [true, false]) {
+    await withFixture({ readyServer: true }, async ({ hooks, ctx, dir, spawnLog, statusCalls }) => {
+      if (manifestPresent) {
+        await mkdir(join(dir, ".engram"));
+        await writeFile(join(dir, ".engram", "manifest.json"), "{}", "utf8");
+      }
+      await hooks.get("session_start")({}, ctx);
+      assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]]);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(await readFile(spawnLog, "utf8"), "",
+        `startup with manifestPresent=${manifestPresent} must not spawn sync --import`);
+    });
+  }
+});
 
 async function countSpawns(spawnLog) {
   const log = await readFile(spawnLog, "utf8");

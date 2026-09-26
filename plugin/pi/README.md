@@ -186,6 +186,16 @@ Engram can grow with your workflow:
 
 Cloud is opt-in and project-scoped. Local SQLite remains the source of truth; cloud replicates and makes memory visible when you explicitly enroll a project.
 
+### Importing Git-synced memories in Pi
+
+Pi connects to Engram (starting a local server when needed) and detects the project without importing memories from a checkout's `.engram/manifest.json`. A manifest's presence does not establish that its chunks are new, valid, or appropriate for your local store. If you want to import Git-synced memories, run this command explicitly from the checkout:
+
+```bash
+engram sync --import
+```
+
+Run it again when new chunks are published and you want to import them. Opening Pi or restarting a session never imports new chunks automatically.
+
 ## Requirements
 
 - Pi coding agent with npm package support.

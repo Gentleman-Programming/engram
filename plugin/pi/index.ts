@@ -1279,11 +1279,6 @@ async function initialize(cwd: string): Promise<void> {
   await initializeEngramServer();
 
   applyDetectedProject(await detectServerProject(cwd));
-
-  const manifestFile = `${cwd}/.engram/manifest.json`;
-  if (existsSync(manifestFile)) {
-    await spawnDetached(ENGRAM_BIN, ["sync", "--import"], cwd);
-  }
 }
 
 // Startup failures reach the agent as prose, so give every one of them the same shape and
