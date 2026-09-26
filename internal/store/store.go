@@ -8170,6 +8170,106 @@ func (s *Store) MergeExplicitProjectVariants(sources []string, canonical string)
 	return s.mergeProjects(sources, canonical, true)
 }
 
+// MergeProjectsByName migrates every record of the explicitly named source
+// project spelling onto the explicitly named target project, as
+// `engram projects merge --from <name> --to <name>` does. Because the
+// operator names both sides, the pair does NOT need to normalize to the same
+// project — that is the point of an explicit rename-merge such as
+// acmeapi → acme-api — but the pair is refused outright when both names
+// normalize to the SAME project, where detection-driven consolidation remains
+// the correct tool. The source is matched by its exact spelling while the
+// target is stored normalized, so the merge never creates a new spelling
+// variant. Missing sources are a successful no-op; callers must report the
+// zero counts honestly. All updates are performed inside a single transaction
+// across observations, sessions, user prompts, and the sync
+// journal/enrollment.
+func (s *Store) MergeProjectsByName(from, to string) (*MergeResult, error) {
+	fromName := strings.TrimSpace(from)
+	toName := strings.TrimSpace(to)
+	fromNormalized, _ := NormalizeProject(fromName)
+	toNormalized, _ := NormalizeProject(toName)
+	if fromNormalized == "" {
+		return nil, fmt.Errorf("source project name must not be empty")
+	}
+	if toNormalized == "" {
+		return nil, fmt.Errorf("target project name must not be empty")
+	}
+	if fromNormalized == toNormalized {
+		return nil, fmt.Errorf("refusing to merge project %q into %q: both normalize to %q; use `engram projects consolidate` for normalization-equivalent variants", from, to, fromNormalized)
+	}
+
+	result := &MergeResult{Canonical: toNormalized}
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Detect sync-identity presence for the exact source spelling BEFORE the
+		// migration below moves those rows onto the target. Mirrors mergeProjects'
+		// explicit check: a source enrollment row, or a pending journal row whose
+		// project column or payload project field carries the source spelling.
+		syncIdentityPresent := false
+		var enrolled int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = ?`, fromName).Scan(&enrolled); err != nil {
+			return fmt.Errorf("check source project %q: %w", fromName, err)
+		}
+		syncIdentityPresent = enrolled > 0
+		var pending int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE acked_at IS NULL AND
+			(project = ? OR (json_valid(payload) AND json_extract(payload, '$.project') = ?))`,
+			fromName, fromName).Scan(&pending); err != nil {
+			return fmt.Errorf("check source project %q: %w", fromName, err)
+		}
+		syncIdentityPresent = syncIdentityPresent || pending > 0
+
+		sourceUpdated, err := s.mergeProjectRecordsTx(tx, fromName, []string{fromName}, toNormalized, result)
+		if err != nil {
+			return err
+		}
+		if sourceUpdated {
+			result.SourcesMerged = append(result.SourcesMerged, fromName)
+		}
+		// Enqueue sync mutations so cloud sync picks up the merged records, but
+		// only when the merge actually moved something: a missing source stays a
+		// successful no-op that must not backfill the untouched target.
+		if !sourceUpdated && !syncIdentityPresent {
+			return nil
+		}
+		return s.backfillProjectSyncMutationsTx(tx, toNormalized)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ProjectRecordCounts holds the row counts stored under one exact project
+// spelling: the shape the dry-run preview of `engram projects merge` prints.
+type ProjectRecordCounts struct {
+	Project      string `json:"project"`
+	Observations int64  `json:"observations"`
+	Sessions     int64  `json:"sessions"`
+	Prompts      int64  `json:"prompts"`
+}
+
+// CountProjectRecords reports the observation, session, and user prompt rows
+// stored under the exact project spelling given. The counts deliberately
+// mirror the merge UPDATE predicate — exact spelling, soft-deleted
+// observations included — so a dry-run preview can neither overstate nor
+// understate what the applied merge would move. It never writes.
+func (s *Store) CountProjectRecords(name string) (*ProjectRecordCounts, error) {
+	counts := &ProjectRecordCounts{Project: strings.TrimSpace(name)}
+	for _, query := range []struct {
+		field *int64
+		sql   string
+	}{
+		{&counts.Observations, `SELECT COUNT(*) FROM observations WHERE project = ?`},
+		{&counts.Sessions, `SELECT COUNT(*) FROM sessions WHERE project = ?`},
+		{&counts.Prompts, `SELECT COUNT(*) FROM user_prompts WHERE project = ?`},
+	} {
+		if err := s.db.QueryRow(query.sql, counts.Project).Scan(query.field); err != nil {
+			return nil, fmt.Errorf("count project %q records: %w", counts.Project, err)
+		}
+	}
+	return counts, nil
+}
+
 func mergeProjectEligible(source, canonical string, explicit bool) bool {
 	if source == canonical {
 		return true
@@ -8259,43 +8359,9 @@ func (s *Store) mergeProjects(sources []string, canonical string, explicit bool)
 				continue
 			}
 
-			placeholders := sqlPlaceholders(len(sourceVariants))
-			args := make([]any, 0, len(sourceVariants)+1)
-			args = append(args, canonical)
-			for _, variant := range sourceVariants {
-				args = append(args, variant)
-			}
-			sourceUpdated := false
-
-			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+			sourceUpdated, err := s.mergeProjectRecordsTx(tx, srcNormalized, sourceVariants, canonical, result)
 			if err != nil {
-				return fmt.Errorf("merge observations %q → %q: %w", srcNormalized, canonical, err)
-			}
-			n, _ := res.RowsAffected()
-			result.ObservationsUpdated += n
-			sourceUpdated = sourceUpdated || n > 0
-
-			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project IN (`+placeholders+`)`, args...)
-			if err != nil {
-				return fmt.Errorf("merge sessions %q → %q: %w", srcNormalized, canonical, err)
-			}
-			n, _ = res.RowsAffected()
-			result.SessionsUpdated += n
-			sourceUpdated = sourceUpdated || n > 0
-
-			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project IN (`+placeholders+`)`, args...)
-			if err != nil {
-				return fmt.Errorf("merge prompts %q → %q: %w", srcNormalized, canonical, err)
-			}
-			n, _ = res.RowsAffected()
-			result.PromptsUpdated += n
-			sourceUpdated = sourceUpdated || n > 0
-
-			// Migrate the source's sync identity — pending journal rows and
-			// enrollment — so no legacy mutation suppresses canonical backfill
-			// or is later skip-acked as belonging to a non-enrolled project.
-			if err := s.migrateProjectSyncIdentityTx(tx, sourceVariants, canonical); err != nil {
-				return fmt.Errorf("merge sync identity %q → %q: %w", srcNormalized, canonical, err)
+				return err
 			}
 
 			if sourceUpdated || syncIdentityPresent {
@@ -8311,6 +8377,52 @@ func (s *Store) mergeProjects(sources []string, canonical string, explicit bool)
 	}
 
 	return result, nil
+}
+
+// mergeProjectRecordsTx migrates the record rows of every source spelling
+// onto the canonical project inside the caller's transaction: the observation,
+// session, and prompt rows first, then the source's sync identity — pending
+// journal rows and enrollment — so no legacy mutation suppresses canonical
+// backfill or is later skip-acked as belonging to a non-enrolled project.
+// It reports whether any record row moved.
+func (s *Store) mergeProjectRecordsTx(tx *sql.Tx, sourceLabel string, sourceVariants []string, canonical string, result *MergeResult) (bool, error) {
+	placeholders := sqlPlaceholders(len(sourceVariants))
+	args := make([]any, 0, len(sourceVariants)+1)
+	args = append(args, canonical)
+	for _, variant := range sourceVariants {
+		args = append(args, variant)
+	}
+	sourceUpdated := false
+
+	res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return false, fmt.Errorf("merge observations %q → %q: %w", sourceLabel, canonical, err)
+	}
+	n, _ := res.RowsAffected()
+	result.ObservationsUpdated += n
+	sourceUpdated = sourceUpdated || n > 0
+
+	res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return false, fmt.Errorf("merge sessions %q → %q: %w", sourceLabel, canonical, err)
+	}
+	n, _ = res.RowsAffected()
+	result.SessionsUpdated += n
+	sourceUpdated = sourceUpdated || n > 0
+
+	res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return false, fmt.Errorf("merge prompts %q → %q: %w", sourceLabel, canonical, err)
+	}
+	n, _ = res.RowsAffected()
+	result.PromptsUpdated += n
+	sourceUpdated = sourceUpdated || n > 0
+
+	if err := s.migrateProjectSyncIdentityTx(tx, sourceVariants, canonical); err != nil {
+		return false, fmt.Errorf("merge sync identity %q → %q: %w", sourceLabel, canonical, err)
+	}
+
+	return sourceUpdated, nil
 }
 
 // sqlPlaceholders returns a comma-separated list of parameter markers only.

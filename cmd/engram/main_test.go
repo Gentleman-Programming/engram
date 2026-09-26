@@ -2315,6 +2315,171 @@ func TestCmdProjectsPruneWithoutPathsOnlyKeepsOrdinaryBehavior(t *testing.T) {
 	}
 }
 
+// seedMergeFixture seeds one session, one observation, and one prompt under
+// the exact project spelling given, the shape `engram projects merge` moves.
+func seedMergeFixture(t *testing.T, cfg store.Config, project string) {
+	t.Helper()
+	mustSeedObservation(t, cfg, "merge-session", project, "decision", "merge fixture", "merge fixture content", "project")
+	mustSeedPrompt(t, cfg, "merge-session", project)
+}
+
+func TestCmdProjectsMergeRequiresFromAndTo(t *testing.T) {
+	cfg := testConfig(t)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no flags", args: []string{"engram", "projects", "merge"}},
+		{name: "missing --to", args: []string{"engram", "projects", "merge", "--from", "acmeapi"}},
+		{name: "missing --from", args: []string{"engram", "projects", "merge", "--to", "acme-api"}},
+		{name: "missing --from value", args: []string{"engram", "projects", "merge", "--from"}},
+		{name: "missing --to value", args: []string{"engram", "projects", "merge", "--from", "acmeapi", "--to"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withArgs(t, tt.args...)
+			_, stderr, code := captureExitPanic(t, func() { cmdProjects(cfg) })
+			if code != 1 {
+				t.Fatalf("expected exit code 1, got %d", code)
+			}
+			if !strings.Contains(stderr, "usage:") {
+				t.Fatalf("expected usage on stderr, got: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestCmdProjectsMergeRejectsUnknownFlag(t *testing.T) {
+	cfg := testConfig(t)
+
+	withArgs(t, "engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", "--force")
+	_, stderr, code := captureExitPanic(t, func() { cmdProjects(cfg) })
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr, "usage:") {
+		t.Fatalf("expected usage on stderr, got: %q", stderr)
+	}
+}
+
+// The default run is a non-mutating preview: it prints what would move and
+// never opens a write path.
+func TestCmdProjectsMergePreviewDoesNotMutate(t *testing.T) {
+	cfg := testConfig(t)
+	seedMergeFixture(t, cfg, "acmeapi")
+
+	withArgs(t, "engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api")
+	stdout, stderr := captureOutput(t, func() { cmdProjects(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "[dry-run]") {
+		t.Fatalf("expected the preview to be marked as a dry run, got: %q", stdout)
+	}
+	for _, want := range []string{"Observations: 1", "Sessions:     1", "Prompts:      1"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("preview missing %q: %q", want, stdout)
+		}
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	for _, tc := range []struct {
+		table, project string
+		want           int
+	}{
+		{"observations", "acmeapi", 1},
+		{"sessions", "acmeapi", 1},
+		{"user_prompts", "acmeapi", 1},
+		{"observations", "acme-api", 0},
+		{"sessions", "acme-api", 0},
+		{"user_prompts", "acme-api", 0},
+	} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT COUNT(*) FROM `+tc.table+` WHERE project = ?`, tc.project).Scan(&count); err != nil {
+			t.Fatalf("count %s/%s: %v", tc.table, tc.project, err)
+		}
+		if count != tc.want {
+			t.Fatalf("%s rows under %q = %d, want %d — the preview must not mutate", tc.table, tc.project, count, tc.want)
+		}
+	}
+}
+
+func TestCmdProjectsMergeApplyMovesRecords(t *testing.T) {
+	cfg := testConfig(t)
+	seedMergeFixture(t, cfg, "acmeapi")
+
+	withArgs(t, "engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", "--apply")
+	stdout, stderr := captureOutput(t, func() { cmdProjects(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "Done! Merged") {
+		t.Fatalf("expected the post-merge report, got: %q", stdout)
+	}
+	for _, want := range []string{"Observations: 1", "Sessions:     1", "Prompts:      1"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("report missing %q: %q", want, stdout)
+		}
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	for _, tc := range []struct {
+		table, project string
+		want           int
+	}{
+		{"observations", "acmeapi", 0},
+		{"sessions", "acmeapi", 0},
+		{"user_prompts", "acmeapi", 0},
+		{"observations", "acme-api", 1},
+		{"sessions", "acme-api", 1},
+		{"user_prompts", "acme-api", 1},
+	} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT COUNT(*) FROM `+tc.table+` WHERE project = ?`, tc.project).Scan(&count); err != nil {
+			t.Fatalf("count %s/%s: %v", tc.table, tc.project, err)
+		}
+		if count != tc.want {
+			t.Fatalf("%s rows under %q = %d, want %d", tc.table, tc.project, count, tc.want)
+		}
+	}
+}
+
+func TestCmdProjectsMergeRefusesSameNormalizedPair(t *testing.T) {
+	cfg := testConfig(t)
+	seedMergeFixture(t, cfg, "acme-api")
+
+	withArgs(t, "engram", "projects", "merge", "--from", "acme-api", "--to", "Acme--API")
+	_, stderr, code := captureExitPanic(t, func() { cmdProjects(cfg) })
+	if code == 0 {
+		t.Fatal("expected a non-zero exit for a same-normalized pair")
+	}
+	if !strings.Contains(stderr, "normalize") {
+		t.Fatalf("expected the same-normalized refusal on stderr, got: %q", stderr)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acme-api'`).Scan(&count); err != nil {
+		t.Fatalf("count source observations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("source observations = %d, want 1 — the refusal must not mutate", count)
+	}
+}
+
 func TestCmdProjectsPruneReportsOnlySuccessfulProjects(t *testing.T) {
 	cfg := testConfig(t)
 	mustSeedSession(t, cfg, "s-success", "success-empty")
