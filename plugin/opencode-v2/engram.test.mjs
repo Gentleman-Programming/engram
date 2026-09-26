@@ -7,18 +7,21 @@ import { pathToFileURL } from 'node:url'
 
 const source = resolve('plugin/opencode-v2/engram.ts')
 
-async function harness(t) {
+async function harness(t, { localIdentity = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'engram-v2-hook-'))
   const previousURL = process.env.ENGRAM_URL
   const previousFetch = globalThis.fetch
-  process.env.ENGRAM_URL = 'http://127.0.0.1:1'
+  const previousTimeout = globalThis.__engramIdentityTimeout
+  if (localIdentity) delete process.env.ENGRAM_URL
+  else process.env.ENGRAM_URL = 'http://127.0.0.1:1'
   const requests = []
   globalThis.fetch = async (url, options = {}) => {
     const path = new URL(url).pathname
     const body = options.body ? JSON.parse(options.body) : undefined
     requests.push({ path, body })
     const old = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-    const value = path === '/project/current' ? { project: 'example' }
+    const value = path === '/health' ? { instance_id: 'a'.repeat(32) }
+      : path === '/project/current' ? { project: 'example' }
       : path.startsWith('/sessions/') ? { started_at: old }
       : path === '/observations' ? [{ created_at: old }]
       : {}
@@ -28,6 +31,8 @@ async function harness(t) {
   t.after(async () => {
     if (cleanup) await cleanup()
     globalThis.fetch = previousFetch
+    if (previousTimeout === undefined) delete globalThis.__engramIdentityTimeout
+    else globalThis.__engramIdentityTimeout = previousTimeout
     if (previousURL === undefined) delete process.env.ENGRAM_URL
     else process.env.ENGRAM_URL = previousURL
     await rm(root, { recursive: true, force: true })
@@ -38,7 +43,14 @@ async function harness(t) {
   await writeFile(join(mod, 'package.json'), '{"name":"@opencode/plugin","type":"module","exports":"./index.js"}')
   await writeFile(join(mod, 'index.js'), 'export const Plugin = { define: value => value }')
   const target = join(root, 'engram.ts')
-  await copyFile(source, target)
+  if (localIdentity) {
+    const { readFile } = await import('node:fs/promises')
+    const code = await readFile(source, 'utf8')
+    await writeFile(target, code.replace(
+      'import { spawn, spawnSync } from "node:child_process"',
+      `import { spawn } from "node:child_process"\nconst spawnSync = (_bin, _args, options) => {\n  globalThis.__engramIdentityTimeout = options.timeout\n  return { status: null, stdout: "", error: new Error("ETIMEDOUT") }\n}`,
+    ))
+  } else await copyFile(source, target)
   const { default: plugin } = await import(pathToFileURL(target).href)
   const hooks = new Map()
   let deliver
@@ -117,4 +129,21 @@ test('V2 strips private spans and truncates admitted text before HTTP', async t 
   assert.ok(prompts[0].body.content.includes('[REDACTED]'))
   assert.ok(!prompts[0].body.content.includes('never send this'))
   assert.ok(prompts[0].body.content.length <= 2003)
+})
+
+test('V2 redacts a private span crossing the prompt limit before HTTP', async t => {
+  const { requests, emit } = await harness(t)
+  await emit(admitted('root', 'crossing', `${'x'.repeat(1980)}<private>secret-crossing-limit${'y'.repeat(50)}</private> public`))
+  const content = requests.find(r => r.path === '/prompts').body.content
+  assert.ok(content.includes('[REDACTED]'))
+  assert.ok(!content.includes('secret-crossing-limit'))
+  assert.ok(content.length <= 2003)
+})
+
+test('V2 bounds local identity lookup and degrades when it times out', async t => {
+  const { requests, emit } = await harness(t, { localIdentity: true })
+  await emit(admitted('root', 'timeout', 'A prompt that must not block on local identity'))
+  assert.equal(requests.filter(r => r.path === '/prompts').length, 0)
+  assert.ok(Number.isFinite(globalThis.__engramIdentityTimeout))
+  assert.ok(globalThis.__engramIdentityTimeout > 0 && globalThis.__engramIdentityTimeout <= 5000)
 })

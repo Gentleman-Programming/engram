@@ -181,7 +181,7 @@ async function engramFetch(
 }
 
 function localInstanceID(): string {
-  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8" })
+  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", timeout: 2000 })
   const id = (result.stdout ?? "").trim()
   if (result.status !== 0 || !/^[a-f0-9]{32}$/.test(id)) {
     throw new Error("gentle-engram could not resolve its local server identity")
@@ -706,7 +706,7 @@ export default Plugin.define({
                     body: {
                       session_id: sessionId,
                       source_inbox_id: inboxID,
-                      content: stripPrivateTags(truncate(finalContent, 2000)),
+                      content: truncate(stripPrivateTags(finalContent), 2000),
                       project,
                     },
                   })
