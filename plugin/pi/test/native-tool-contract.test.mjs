@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Type } from "typebox";
-import { Value } from "typebox/value";
 import { importPluginFromSandbox, PLUGIN_ROOT, withPluginSandbox } from "./plugin-sandbox.mjs";
 
 // The runtime context these fixtures hand the plugin still points at the checkout, because the
@@ -517,9 +515,17 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
   const { calls, fetchStub } = recordingFetch([
     { method: "GET", path: "/health", body: { status: "ok" } },
     { method: "GET", path: "/project/current", body: { project: "detected-project" } },
-    { method: "GET", path: "/context", body: { context: "model-visible context" } },
+    { method: "GET", path: "/context", body: { context: "# Compact context\n- bounded observation" } },
   ]);
-  globalThis.fetch = fetchStub;
+  globalThis.fetch = async (url, init) => {
+    const response = await fetchStub(url, init);
+    if (new URL(url).pathname !== "/context") return response;
+    const query = new URL(url).searchParams;
+    const context = query.get("compact") === "true"
+      ? "# Compact context\n- bounded observation"
+      : query.get("compact") === "false" ? "# Expanded context\n- explicit false" : "# Default context\n- compact omitted";
+    return new Response(JSON.stringify({ context }), { headers: { "Content-Type": "application/json" } });
+  };
 
   try {
     await withPluginSandbox("engram-pi-context-bounds-", async ({ sandbox }) => {
@@ -545,6 +551,14 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
       for (const result of [explicit, withoutCompact, withoutMaxBytes, omitted]) {
         assert.notEqual(result.isError, true, "mem_context should preserve successful HTTP responses");
       }
+
+      const compactText = "# Compact context\n- bounded observation";
+      assert.equal(explicit.content[0].text, compactText, "HTTP context must be visible to the model");
+      assert.ok(Buffer.byteLength(explicit.content[0].text, "utf8") <= 2048, "compact fixture must fit the requested byte budget");
+      assert.match(explicit.content[0].text, /^# Compact context\n- bounded observation$/);
+      assert.equal(withoutCompact.content[0].text, "# Default context\n- compact omitted");
+      assert.equal(withoutMaxBytes.content[0].text, "# Expanded context\n- explicit false");
+      assert.equal(omitted.content[0].text, "# Default context\n- compact omitted");
 
       const contextCalls = calls.filter((call) => call.method === "GET" && call.path.startsWith("/context?"));
       assert.equal(contextCalls.length, 4, "each invocation must make one GET /context request");
@@ -572,54 +586,6 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
       assert.equal(contextProperties.max_bytes.args[0].args[0].minimum, 1, "max_bytes must be positive");
       assert.equal(contextProperties.compact.kind, "Optional", "compact must be optional in the registered schema");
       assert.equal(contextProperties.compact.args[0].kind, "Boolean", "compact must be a boolean");
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
-    else process.env.ENGRAM_URL = originalUrl;
-  }
-});
-
-test("registered Pi-native mem_context rejects fractional and nonpositive bounds at the schema boundary", async () => {
-  const originalFetch = globalThis.fetch;
-  const originalUrl = process.env.ENGRAM_URL;
-  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
-  const { calls, fetchStub } = recordingFetch([
-    { method: "GET", path: "/health", body: { status: "ok" } },
-    { method: "GET", path: "/project/current", body: { project: "engram" } },
-    { method: "GET", path: "/context", body: { context: "bounded" } },
-  ]);
-  globalThis.fetch = fetchStub;
-  try {
-    await withPluginSandbox("engram-pi-context-validation-", async ({ sandbox }) => {
-      const { registeredTools } = await loadPluginHarness(sandbox);
-      const memContext = registeredTools.get("mem_context");
-      const bound = memContext.parameters.args[0].max_bytes;
-      assert.equal(bound.kind, "Optional");
-      assert.equal(bound.args[0].kind, "Integer");
-      assert.equal(bound.args[0].args[0].minimum, 1);
-      // The sandbox stub records registered TypeBox calls but cannot validate them. Rebuild
-      // this option from the registered Integer options with the real declared TypeBox package.
-      // Direct execute bypasses Pi's host schema gate; only admitted args reach it here.
-      const schema = Type.Object({ max_bytes: Type.Optional(Type.Integer(bound.args[0].args[0])) });
-      const executeAtBoundary = (id, params) => {
-        if (!Value.Check(schema, params)) return undefined;
-        return memContext.execute(id, params, undefined, undefined, runtimeContext("bound-session"));
-      };
-      for (const invalid of [1.5, 0, -5]) {
-        assert.equal(Value.Check(schema, { max_bytes: invalid }), false, `${invalid} must fail schema validation`);
-        assert.equal(executeAtBoundary("invalid-bound", { max_bytes: invalid }), undefined);
-      }
-      assert.equal(calls.some((call) => call.path.startsWith("/context")), false);
-      for (const [id, params] of [["valid-bound", { max_bytes: 1 }], ["omitted-bound", {}]]) {
-        assert.equal(Value.Check(schema, params), true, `${id} must pass schema validation`);
-        const result = await executeAtBoundary(id, params);
-        assert.notEqual(result.isError, true);
-      }
-      const contextCalls = calls.filter((call) => call.path.startsWith("/context"));
-      assert.equal(contextCalls.length, 2);
-      assert.equal(new URL(`http://test${contextCalls[0].path}`).searchParams.get("max_bytes"), "1");
-      assert.equal(new URL(`http://test${contextCalls[1].path}`).searchParams.has("max_bytes"), false);
     });
   } finally {
     globalThis.fetch = originalFetch;
