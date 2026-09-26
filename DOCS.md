@@ -197,6 +197,8 @@ engram cloud <sub>            Optional cloud configuration, enrollment, upgrade,
 engram projects list          List projects with observation/session/prompt counts
 engram projects consolidate [--all] [--dry-run]
                               Merge similar names interactively; --all --dry-run previews without prompts
+engram projects merge --from <name> --to <name> [--apply]
+                              Merge two explicitly named projects; previews counts without --apply
 engram projects prune         Prune projects with zero observations [--dry-run] [--paths-only]
 engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
                               Repair legacy local ownership without a server token
@@ -1442,6 +1444,8 @@ When saving to a project that doesn't exist yet, Engram checks for similar exist
 ### Retroactive cleanup
 
 Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation.
+
+For two names that are deliberately distinct under normalization (for example `acmeapi` and `acme-api`), name the pair explicitly: `engram projects merge --from <name> --to <name>` previews the observation, session, and prompt counts that would move, and `--apply` migrates them onto the target in one atomic transaction. The command refuses pairs that normalize to the same project — that case belongs to `consolidate`.
 
 Use `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` to assign ownership to legacy rows that carry none. It prints how many sessions, observations, and prompts moved, and — when anything was left behind — exactly which items and why. It works against the local store, so it needs no running server and no `ENGRAM_HTTP_TOKEN`.
 

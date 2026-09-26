@@ -2516,6 +2516,8 @@ func cmdProjects(cfg store.Config) {
 	switch subCmd {
 	case "consolidate":
 		cmdProjectsConsolidate(cfg)
+	case "merge":
+		cmdProjectsMerge(cfg)
 	case "prune":
 		cmdProjectsPrune(cfg)
 	case "rescue-ownership":
@@ -2532,6 +2534,7 @@ func cmdProjects(cfg store.Config) {
 func printProjectsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
+	fmt.Fprintln(os.Stderr, "       engram projects merge --from <name> --to <name> [--apply]")
 	fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run] [--paths-only]")
 	fmt.Fprintln(os.Stderr, "       engram projects rescue-ownership --project <name> [--session <id>]... [--observation <id>]... [--prompt <id>]...")
 }
@@ -3037,6 +3040,104 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		}
 		fmt.Println()
 	}
+}
+
+// cmdProjectsMerge implements the explicit `engram projects merge --from
+// <name> --to <name>` operator command. The operator names both sides, so the
+// store migrates the exact source spelling the operator typed onto the target
+// project. The default run is a read-only preview of what would move; only
+// --apply performs the merge, and it reports the same shape as consolidate —
+// including the honest nothing-merged outcome when the store moved nothing.
+func cmdProjectsMerge(cfg store.Config) {
+	var from, to string
+	apply := false
+	args := os.Args[3:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--from":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--from requires a project name")
+				printProjectsUsage()
+				exitFunc(1)
+				return
+			}
+			i++
+			from = args[i]
+		case "--to":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--to requires a project name")
+				printProjectsUsage()
+				exitFunc(1)
+				return
+			}
+			i++
+			to = args[i]
+		case "--apply":
+			apply = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", args[i])
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+	}
+
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		fmt.Fprintln(os.Stderr, "--from <name> and --to <name> are required")
+		printProjectsUsage()
+		exitFunc(1)
+		return
+	}
+
+	// The same-normalized refusal is unconditional — it holds for the preview
+	// and for the applied merge — and needs no store to decide.
+	fromNormalized, _ := store.NormalizeProject(from)
+	toNormalized, _ := store.NormalizeProject(to)
+	if fromNormalized == "" || toNormalized == "" {
+		fmt.Fprintf(os.Stderr, "project names must not be empty: --from %q --to %q\n", from, to)
+		printProjectsUsage()
+		exitFunc(1)
+		return
+	}
+	if fromNormalized == toNormalized {
+		fmt.Fprintf(os.Stderr, "refusing to merge project %q into %q: both normalize to %q; use `engram projects consolidate` for normalization-equivalent variants\n", from, to, fromNormalized)
+		exitFunc(1)
+		return
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	if !apply {
+		counts, err := s.CountProjectRecords(from)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("[dry-run] Would merge project %q into %q\n", counts.Project, to)
+		fmt.Printf("  Observations: %d\n", counts.Observations)
+		fmt.Printf("  Sessions:     %d\n", counts.Sessions)
+		fmt.Printf("  Prompts:      %d\n", counts.Prompts)
+		fmt.Printf("\nRun again with --apply to move these records.\n")
+		return
+	}
+
+	result, err := s.MergeProjectsByName(from, to)
+	if err != nil {
+		fatal(err)
+	}
+
+	if mergedRecordCount(result) == 0 {
+		fmt.Printf("Nothing merged into %q: the store moved no records for project %q.\n", result.Canonical, from)
+		return
+	}
+
+	fmt.Printf("Done! Merged project %q into %q:\n", from, result.Canonical)
+	fmt.Printf("  Observations: %d\n", result.ObservationsUpdated)
+	fmt.Printf("  Sessions:     %d\n", result.SessionsUpdated)
+	fmt.Printf("  Prompts:      %d\n", result.PromptsUpdated)
 }
 
 func cmdProjectsPrune(cfg store.Config) {
