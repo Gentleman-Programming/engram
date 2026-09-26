@@ -357,9 +357,6 @@ export default Plugin.define({
       return projectResolutionError === ""
     }
 
-    // Track tool counts per session (in-memory only, not critical)
-    const toolCounts = new Map<string, number>()
-
     // Track last nudge time per session to debounce save reminders
     const lastNudgeTime = new Map<string, number>() // sessionID -> epoch seconds
 
@@ -407,7 +404,6 @@ export default Plugin.define({
         knownSessions.delete(invalidID)
         subAgentSessions.delete(invalidID)
         parentSessions.delete(invalidID)
-        toolCounts.delete(invalidID)
         lastNudgeTime.delete(invalidID)
       }
     }
@@ -740,8 +736,7 @@ export default Plugin.define({
 
     // ─── Tool Execution Hooks ────────────────────────────────────
     // execute.before attributes memory-write calls to the authoritative
-    // session. execute.after counts tool calls for session stats and captures
-    // subagent output passively.
+    // session. execute.after captures subagent output passively.
 
     await ctx.tool.hook("execute.before", async (event) => {
       if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(canonicalEngramToolName(event.tool))) return
@@ -772,8 +767,6 @@ export default Plugin.define({
       const registered = await ensureSession(sessionId)
       const confirmedSessionID = await resolveAuthoritativeSessionID(event.sessionID)
       if (!registered || confirmedSessionID !== sessionId) return
-      toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
-
       // Passive capture: extract learnings from subagent tool output.
       // V1 exposed this tool as "Task"; V2 exposes it as "subagent".
       const toolName = event.tool.toLowerCase()
