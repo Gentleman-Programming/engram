@@ -20,7 +20,8 @@ If a generic MCP client retains an absolute Engram executable path after you mov
 | ------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | Claude Code   | `engram setup claude-code`                                                                    | [Details](#claude-code)                            |
 | Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
-| OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
+| OpenCode 1.x  | `engram setup opencode`                                                                      | [Details](#opencode)                               |
+| OpenCode 2.x  | `engram setup opencode-v2`                                                                   | [Details](#opencode-v2)                            |
 | Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
 | Codex           | `engram setup codex`                                                                         | [Details](#codex)                                  |
 | Antigravity CLI | `engram setup antigravity-cli`                                                               | [Details](#antigravity)                            |
@@ -281,6 +282,25 @@ Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` on all p
 ```
 
 See [Plugins → OpenCode Plugin](PLUGINS.md#opencode-plugin) for details on what the plugin provides beyond bare MCP.
+
+---
+
+## OpenCode v2
+
+OpenCode 2.x loads a new plugin API, so the 1.x adapter no longer loads. Use the v2 setup command instead:
+
+```bash
+engram setup opencode-v2
+```
+
+This does two things:
+
+1. Copies the V2 adapter to `~/.config/opencode/plugins/engram.ts` — the same destination as the 1.x plugin, so run only one of the two setup commands
+2. Registers the `engram` MCP server under `mcp.servers` in `opencode.json`, the V2 config shape (OpenCode 2.x ignores server names placed directly under `mcp`)
+
+Verification is identical to [OpenCode](#opencode): restart OpenCode, run `opencode mcp list`, then confirm a new agent session can use an `engram_mem_*` tool.
+
+> The v2 adapter keeps the same behavior contract as the 1.x plugin and does not rely on a Bun global, so it also works in hosts that run plugins on Node.
 
 ---
 

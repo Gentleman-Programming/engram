@@ -301,9 +301,10 @@ type Prompt struct {
 }
 
 type AddPromptParams struct {
-	SessionID string `json:"session_id"`
-	Content   string `json:"content"`
-	Project   string `json:"project,omitempty"`
+	SessionID     string `json:"session_id"`
+	Content       string `json:"content"`
+	Project       string `json:"project,omitempty"`
+	SourceInboxID string `json:"source_inbox_id,omitempty"`
 }
 
 // TruncationMetadata describes storage content processing after private-tag redaction.
@@ -1383,6 +1384,9 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfNotExists("user_prompts", "source_inbox_id", "TEXT"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfNotExists("sync_delete_tombstones", "last_remote_mutation_seq", "INTEGER"); err != nil {
 		return err
 	}
@@ -1398,6 +1402,7 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_deleted ON observations(deleted_at);
 		CREATE INDEX IF NOT EXISTS idx_obs_dedupe ON observations(normalized_hash, project, scope, type, title, created_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_prompts_sync_id ON user_prompts(sync_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_source_inbox ON user_prompts(session_id, source_inbox_id) WHERE source_inbox_id IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_prompt_tombstones_project ON prompt_tombstones(project, deleted_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_sync_delete_tombstones_project ON sync_delete_tombstones(project, deleted_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_sync_mutations_target_seq ON sync_mutations(target_key, seq);
@@ -3767,12 +3772,19 @@ func (s *Store) markReviewed(id int64, project string) error {
 // ─── User Prompts ────────────────────────────────────────────────────────────
 
 func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
+	id, _, err := s.AddPromptWithResult(p)
+	return id, err
+}
+
+// AddPromptWithResult reports whether a row was newly inserted.
+func (s *Store) AddPromptWithResult(p AddPromptParams) (int64, bool, error) {
+	inserted := false
 	// Normalize project name before storing
 	p.Project, _ = NormalizeProject(p.Project)
 
 	content, _ := s.prepareStoredContent(p.Content)
 	if content == "" {
-		return 0, ErrPromptContentRequired
+		return 0, false, ErrPromptContentRequired
 	}
 
 	var promptID int64
@@ -3787,10 +3799,25 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 			p.Project = resolved
 		}
 		syncID := newSyncID("prompt")
-		res, err := s.execHook(tx,
-			`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`,
-			syncID, p.SessionID, content, nullableString(p.Project),
-		)
+		var res sql.Result
+		var err error
+		if p.SourceInboxID != "" {
+			res, err = s.execHook(tx,
+				`INSERT INTO user_prompts (sync_id, session_id, content, project, source_inbox_id) VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(session_id, source_inbox_id) WHERE source_inbox_id IS NOT NULL DO NOTHING`,
+				syncID, p.SessionID, content, nullableString(p.Project), p.SourceInboxID)
+		} else {
+			res, err = s.execHook(tx,
+				`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`,
+				syncID, p.SessionID, content, nullableString(p.Project))
+		}
+		if err == nil && p.SourceInboxID != "" {
+			var affected int64
+			affected, err = res.RowsAffected()
+			if err == nil && affected == 0 {
+				return tx.QueryRow(`SELECT id FROM user_prompts WHERE session_id = ? AND source_inbox_id = ?`, p.SessionID, p.SourceInboxID).Scan(&promptID)
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -3798,6 +3825,7 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 		if err != nil {
 			return err
 		}
+		inserted = true
 		var createdAt string
 		if err := tx.QueryRow(`SELECT created_at FROM user_prompts WHERE id = ?`, promptID).Scan(&createdAt); err != nil {
 			return err
@@ -3814,9 +3842,9 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 		})
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return promptID, nil
+	return promptID, inserted, nil
 }
 
 func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {

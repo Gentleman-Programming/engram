@@ -126,7 +126,8 @@ Run the setup command for the agent you use, then restart that agent. `engram se
 | --- | --- |
 | Claude Code | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
 | Pi | `engram setup pi` |
-| OpenCode | `engram setup opencode` |
+| OpenCode 1.x | `engram setup opencode` |
+| OpenCode 2.x | `engram setup opencode-v2` |
 | Gemini CLI | `engram setup gemini-cli` |
 | Codex | `engram setup codex` |
 | Antigravity CLI | `engram setup antigravity-cli` |

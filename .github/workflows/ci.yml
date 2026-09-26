@@ -147,6 +147,9 @@ jobs:
         working-directory: plugin/pi
         run: npm test
 
+      - name: Run OpenCode V2 plugin tests
+        run: node --test plugin/opencode-v2/engram.test.mjs
+
   perf-ratchet:
     name: Performance Ratchet
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

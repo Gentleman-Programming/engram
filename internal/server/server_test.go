@@ -2155,6 +2155,45 @@ func TestOnWriteCalledAfterSuccessfulWrites(t *testing.T) {
 	}
 }
 
+func TestInboxPromptReplayDoesNotNotifyWrite(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("inbox-http", "engram", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, 0)
+	var writes atomic.Int32
+	srv.SetOnWrite(func() { writes.Add(1) })
+	send := func(inbox string) int64 {
+		t.Helper()
+		payload := fmt.Sprintf(`{"session_id":"inbox-http","content":"same user prompt","source_inbox_id":%q}`, inbox)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(payload)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("POST: %d %s", rec.Code, rec.Body.String())
+		}
+		var response struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.ID
+	}
+	first := send("one")
+	if got := send("one"); got != first {
+		t.Fatalf("replay id %d, want %d", got, first)
+	}
+	if got := writes.Load(); got != 1 {
+		t.Fatalf("replay triggered write: %d", got)
+	}
+	if got := send("two"); got == first {
+		t.Fatal("distinct inbox collapsed")
+	}
+	if got := writes.Load(); got != 2 {
+		t.Fatalf("distinct inbox writes: %d", got)
+	}
+}
+
 func TestOnWriteNotCalledOnReadOperations(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

@@ -3533,6 +3533,17 @@ func printPostInstall(result *setup.Result) {
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
+	case "opencode-v2":
+		fmt.Println("\nNext steps:")
+		if result.MCPConfigured {
+			fmt.Println("  1. Configuration written: the OpenCode v2 plugin and Engram MCP registration (mcp.servers).")
+		} else {
+			fmt.Println("  1. Plugin written, but Engram MCP registration needs the manual configuration shown above.")
+		}
+		fmt.Println("  2. Restart OpenCode, then run `opencode mcp list` to confirm that OpenCode reports Engram connected.")
+		fmt.Println("  3. Start a new OpenCode agent session and confirm it can use an `engram_mem_*` tool before relying on Engram.")
+		fmt.Println("     Setup and server connectivity checks cannot verify tool exposure in the active agent session.")
+		fmt.Println("  4. The plugin auto-starts the Engram HTTP server when needed.")
 	case "pi":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Pi so packages and MCP config are reloaded")
@@ -3643,9 +3654,9 @@ Commands:
                      Remove projects with no observations
                        --dry-run     Preview projects without removing data
                        --paths-only  Limit pruning to project names containing / or \
-  setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
-                     gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
-                     cursor, vscode-copilot, kilocode, kimi, commandcode)
+  setup [agent]      Install/setup agent integration (opencode, opencode-v2, pi,
+                     claude-code, gemini-cli, codex, antigravity-cli, windsurf,
+                     qwen, kiro, cursor, vscode-copilot, kilocode, kimi, commandcode)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status

@@ -14,9 +14,10 @@ Agent
   ├── Bare MCP
   │     └── engram mcp --tools=agent
   │
-  ├── OpenCode plugin
+  ├── OpenCode plugins
   │     ├── plugin/opencode/engram.ts
-  │     └── internal/setup setup opencode
+  │     ├── plugin/opencode-v2/engram.ts
+  │     └── internal/setup setup opencode | opencode-v2
   │
   ├── Claude Code plugin
   │     ├── plugin/claude-code/.claude-plugin/plugin.json

@@ -1685,6 +1685,101 @@ func TestUpdateObservationRejectsBlankContentBeforePersistenceAndSync(t *testing
 	}
 }
 
+func TestAddPromptSourceInboxIdentity(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("inbox-root", "engram", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	first := AddPromptParams{SessionID: "inbox-root", Project: "engram", Content: "same prompt", SourceInboxID: "inbox-1"}
+	id, err := s.AddPrompt(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeat, err := s.AddPrompt(first)
+	if err != nil || repeat != id {
+		t.Fatalf("repeat: id=%d err=%v; want %d", repeat, err, id)
+	}
+	first.SourceInboxID = "inbox-2"
+	other, err := s.AddPrompt(first)
+	if err != nil || other == id {
+		t.Fatalf("distinct inbox: id=%d err=%v", other, err)
+	}
+	var prompts, mutations int
+	if err := s.db.QueryRow(`SELECT count(*) FROM user_prompts WHERE session_id = ?`, first.SessionID).Scan(&prompts); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = 'prompt'`).Scan(&mutations); err != nil {
+		t.Fatal(err)
+	}
+	if prompts != 2 || mutations != 2 {
+		t.Fatalf("prompts=%d mutations=%d, want 2 each", prompts, mutations)
+	}
+}
+
+func TestAddPromptSourceInboxIdentityConcurrentAndSessionScoped(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []string{"inbox-a", "inbox-b"} {
+		if err := s.CreateSession(session, "engram", t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const callers = 12
+	ids := make(chan int64, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := s.AddPrompt(AddPromptParams{SessionID: "inbox-a", Project: "engram", Content: "same", SourceInboxID: "shared"})
+			ids <- id
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var first int64
+	for id := range ids {
+		if first == 0 {
+			first = id
+		} else if id != first {
+			t.Fatalf("concurrent replay id = %d, want %d", id, first)
+		}
+	}
+	other, err := s.AddPrompt(AddPromptParams{SessionID: "inbox-b", Project: "engram", Content: "same", SourceInboxID: "shared"})
+	if err != nil || other == first {
+		t.Fatalf("cross-session identity collapsed: id=%d err=%v", other, err)
+	}
+	for i := 0; i < 2; i++ {
+		id, err := s.AddPrompt(AddPromptParams{SessionID: "inbox-a", Project: "engram", Content: "same"})
+		if err != nil || id == first {
+			t.Fatalf("legacy empty identity deduplicated: id=%d err=%v", id, err)
+		}
+	}
+	var prompts, mutations int
+	if err := s.db.QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&prompts); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = 'prompt'`).Scan(&mutations); err != nil {
+		t.Fatal(err)
+	}
+	if prompts != 4 || mutations != 4 {
+		t.Fatalf("prompts=%d mutations=%d, want 4 each", prompts, mutations)
+	}
+}
+
 func TestUpdateObservationFindReplace(t *testing.T) {
 	newObservation := func(t *testing.T, content string, max int) (*Store, int64) {
 		t.Helper()
