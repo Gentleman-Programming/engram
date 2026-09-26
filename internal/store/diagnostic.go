@@ -357,6 +357,148 @@ func orphanedObservationProjects(tx *sql.Tx, sessionID string) (_ map[string]str
 	return projects, nil
 }
 
+// OrphanedPendingRelationEvidence identifies one legacy pending relation whose
+// source and target observations are both absent from the active observation
+// set. Such a row can never show a title in `engram conflicts show` and no
+// verdict can ever be recorded against it.
+type OrphanedPendingRelationEvidence struct {
+	ID       int64  `json:"id"`
+	SyncID   string `json:"sync_id"`
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+}
+
+// OrphanedPendingRelationEvidenceReport is the read-only doctor evidence for
+// unreviewable pending relations. Candidates and counts deliberately span all
+// projects: a relation whose endpoints are both absent belongs to no project,
+// so a project-scoped query could never return the rows it exists to surface.
+type OrphanedPendingRelationEvidenceReport struct {
+	Candidates         []OrphanedPendingRelationEvidence `json:"candidates"`
+	OneEndpointMissing int64                             `json:"one_endpoint_missing"`
+	LivePending        int64                             `json:"live_pending"`
+}
+
+// Endpoint-presence fragments shared by the orphaned-pending-relation doctor
+// evidence listing and its repair apply path, so both evaluate exactly one
+// absence predicate. An endpoint is present when an active observation (one
+// with deleted_at IS NULL) carries its sync_id; a soft-deleted endpoint counts
+// as absent, matching the conflicts listing LEFT JOIN.
+const (
+	orphanedPendingRelationSourcePresent = `EXISTS (SELECT 1 FROM observations src WHERE src.sync_id = r.source_id AND src.deleted_at IS NULL)`
+	orphanedPendingRelationTargetPresent = `EXISTS (SELECT 1 FROM observations tgt WHERE tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL)`
+)
+
+// orphanedPendingRelationCandidatePredicate matches legacy pending rows whose
+// source AND target endpoints are both absent.
+var orphanedPendingRelationCandidatePredicate = fmt.Sprintf(`r.judgment_status = 'pending' AND NOT %s AND NOT %s`, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent)
+
+// orphanedPendingRelationOneEndpointMissingPredicate matches pending rows with
+// exactly one absent endpoint; they stay reviewable and are never candidates.
+var orphanedPendingRelationOneEndpointMissingPredicate = fmt.Sprintf(`r.judgment_status = 'pending' AND ((NOT %s AND %s) OR (%s AND NOT %s))`, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent)
+
+// orphanedPendingRelationLivePredicate matches pending rows with both
+// endpoints present.
+var orphanedPendingRelationLivePredicate = fmt.Sprintf(`r.judgment_status = 'pending' AND %s AND %s`, orphanedPendingRelationSourcePresent, orphanedPendingRelationTargetPresent)
+
+// ListOrphanedPendingRelationEvidence reports legacy pending relation rows
+// whose source and target observations are both absent from the active
+// observation set. It additionally counts pending rows missing exactly one
+// endpoint and fully live pending rows, so a finding can show that a repair
+// will not touch still-reviewable relations. The listing is deliberately
+// unscoped: a relation with both endpoints absent belongs to no project.
+func (s *Store) ListOrphanedPendingRelationEvidence() (OrphanedPendingRelationEvidenceReport, error) {
+	report := OrphanedPendingRelationEvidenceReport{Candidates: []OrphanedPendingRelationEvidence{}}
+
+	rows, err := s.queryItHook(s.db, `SELECT r.id, ifnull(r.sync_id, ''), ifnull(r.source_id, ''), ifnull(r.target_id, '')
+		FROM memory_relations r
+		WHERE `+orphanedPendingRelationCandidatePredicate+`
+		ORDER BY r.id`)
+	if err != nil {
+		return report, err
+	}
+
+	for rows.Next() {
+		var item OrphanedPendingRelationEvidence
+		if err := rows.Scan(&item.ID, &item.SyncID, &item.SourceID, &item.TargetID); err != nil {
+			return report, closeRowsWithError(rows, err)
+		}
+		report.Candidates = append(report.Candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		return report, closeRowsWithError(rows, err)
+	}
+	if err := rows.Close(); err != nil {
+		return report, err
+	}
+
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationOneEndpointMissingPredicate).Scan(&report.OneEndpointMissing); err != nil {
+		return report, fmt.Errorf("count one-endpoint-missing pending relations: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&report.LivePending); err != nil {
+		return report, fmt.Errorf("count live pending relations: %w", err)
+	}
+	return report, nil
+}
+
+// OrphanedPendingRelationReclassificationResult reports one audited apply of
+// the orphaned-pending-relations repair. Reclassified counts the rows actually
+// moved into the `orphaned` disposition; CandidatesAtApply is the predicate
+// re-derived inside the apply transaction, so a row judged between evidence
+// and apply is never reclassified behind a reviewer's verdict.
+type OrphanedPendingRelationReclassificationResult struct {
+	Reclassified       int64  `json:"reclassified"`
+	CandidatesAtApply  int64  `json:"candidates_at_apply"`
+	OneEndpointMissing int64  `json:"one_endpoint_missing"`
+	LivePending        int64  `json:"live_pending"`
+	BackupPath         string `json:"backup_path,omitempty"`
+}
+
+// ReclassifyOrphanedPendingRelations moves every pending relation whose source
+// AND target observations are absent from the active observation set into the
+// audited `orphaned` disposition, the same terminal state the hard-delete
+// orphaning writers already produce. It creates a SQLite backup before the
+// transaction, revalidates the predicate inside the transaction so a stale or
+// concurrent judgment can never be overwritten, and — matching those existing
+// orphaning writers — emits no sync journal mutation: the reclassification is
+// local audit hygiene, not replicated state. The operation is idempotent; a
+// second run finds no pending candidates and changes nothing.
+func (s *Store) ReclassifyOrphanedPendingRelations() (OrphanedPendingRelationReclassificationResult, error) {
+	backupPath, err := s.BackupSQLite()
+	if err != nil {
+		return OrphanedPendingRelationReclassificationResult{}, err
+	}
+	var result OrphanedPendingRelationReclassificationResult
+	result.BackupPath = backupPath
+	err = s.withTx(func(tx *sql.Tx) error {
+		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationCandidatePredicate).Scan(&result.CandidatesAtApply); err != nil {
+			return fmt.Errorf("revalidate orphaned pending candidates: %w", err)
+		}
+		res, err := s.execHook(tx, `UPDATE memory_relations AS r
+			SET judgment_status = 'orphaned',
+			    updated_at      = datetime('now')
+			WHERE `+orphanedPendingRelationCandidatePredicate)
+		if err != nil {
+			return fmt.Errorf("reclassify orphaned pending relations: %w", err)
+		}
+		reclassified, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read reclassification count: %w", err)
+		}
+		result.Reclassified = reclassified
+		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationOneEndpointMissingPredicate).Scan(&result.OneEndpointMissing); err != nil {
+			return fmt.Errorf("count one-endpoint-missing pending relations: %w", err)
+		}
+		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&result.LivePending); err != nil {
+			return fmt.Errorf("count live pending relations: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return OrphanedPendingRelationReclassificationResult{}, err
+	}
+	return result, nil
+}
+
 // ListPendingProjectMutations returns pending cloud mutations for one project,
 // or all projects when project is empty, without enrollment filtering. Doctor
 // needs to diagnose blocked metadata even when a project is not enrolled.

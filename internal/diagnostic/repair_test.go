@@ -202,3 +202,65 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildRepairPlanOrphanedPendingRelations proves the planner derives its
+// candidates from fresh store evidence (never from the doctor report), sets
+// the planned relation count, keeps plan and dry-run nonmutating, and reports
+// a noop when the store has no candidates.
+func TestBuildRepairPlanOrphanedPendingRelations(t *testing.T) {
+	tests := []struct {
+		name      string
+		seed      bool
+		wantCount int64
+	}{
+		{name: "candidate store plans one reclassification", seed: true, wantCount: 1},
+		{name: "healthy store is a noop", seed: false, wantCount: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if tc.seed {
+				seedDiagnosticRelation(t, s, "rel-orphan", "missing-src", "missing-tgt", "pending")
+			}
+
+			for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun} {
+				wantStatus := "planned"
+				if mode == RepairModeDryRun {
+					wantStatus = "dry_run"
+				}
+				if !tc.seed {
+					wantStatus = "noop"
+				}
+				plan, err := BuildRepairPlan(context.Background(), Scope{Store: s}, Report{}, CheckOrphanedPendingRelations, mode)
+				if err != nil {
+					t.Fatalf("BuildRepairPlan %s: %v", mode, err)
+				}
+				if plan.Status != wantStatus {
+					t.Fatalf("%s status=%q, want %q", mode, plan.Status, wantStatus)
+				}
+				if tc.seed {
+					if plan.OrphanedPendingRelations == nil || len(plan.OrphanedPendingRelations.Candidates) != 1 || plan.OrphanedPendingRelations.Candidates[0].SyncID != "rel-orphan" {
+						t.Fatalf("%s evidence=%+v, want the seeded candidate", mode, plan.OrphanedPendingRelations)
+					}
+				} else if plan.OrphanedPendingRelations != nil {
+					t.Fatalf("%s evidence=%+v, want none", mode, plan.OrphanedPendingRelations)
+				}
+				if plan.Counts.RelationsPlanned != tc.wantCount {
+					t.Fatalf("%s relations_planned=%d, want %d", mode, plan.Counts.RelationsPlanned, tc.wantCount)
+				}
+			}
+
+			// Plan and dry-run must never mutate the candidate.
+			var status string
+			if err := s.DB().QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = 'rel-orphan'`).Scan(&status); err != nil {
+				if tc.seed {
+					t.Fatalf("read seeded relation: %v", err)
+				}
+				return
+			}
+			if tc.seed && status != "pending" {
+				t.Fatalf("nonmutating mode changed status to %q", status)
+			}
+		})
+	}
+}
