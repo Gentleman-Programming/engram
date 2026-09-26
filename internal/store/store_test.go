@@ -11619,6 +11619,14 @@ func TestMergeProjectsByNameMovesNamedSourceToExplicitTarget(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('target-session', 'acme-api', '')`); err != nil {
 		t.Fatal(err)
 	}
+	// A different exact spelling that normalizes to the source must NOT match
+	// the by-name merge: only the exact source spelling moves.
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('acmeapi-upper-session', 'ACMEAPI', '/work/engram')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('acmeapi-upper-obs', 'acmeapi-upper-session', 'decision', 'upper', 'content', 'ACMEAPI', 'project', 'upper-hash')`); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := s.MergeProjectsByName("acmeapi", "acme-api")
 	if err != nil {
@@ -11642,13 +11650,26 @@ func TestMergeProjectsByNameMovesNamedSourceToExplicitTarget(t *testing.T) {
 			if sourceCount != 0 || canonicalCount != 2 {
 				t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 2", table, sourceCount, canonicalCount)
 			}
-			continue
+		} else {
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'acme-api'`).Scan(&canonicalCount); err != nil {
+				t.Fatal(err)
+			}
+			if sourceCount != 0 || canonicalCount != 1 {
+				t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 1", table, sourceCount, canonicalCount)
+			}
 		}
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'acme-api'`).Scan(&canonicalCount); err != nil {
+		// The ACMEAPI spelling normalizes to "acmeapi" yet is a different exact
+		// spelling: the by-name merge must leave it untouched.
+		var upperCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'ACMEAPI'`).Scan(&upperCount); err != nil {
 			t.Fatal(err)
 		}
-		if sourceCount != 0 || canonicalCount != 1 {
-			t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 1", table, sourceCount, canonicalCount)
+		want := 0
+		if table == "sessions" || table == "observations" {
+			want = 1
+		}
+		if upperCount != want {
+			t.Fatalf("%s ACMEAPI rows = %d, want %d", table, upperCount, want)
 		}
 	}
 	for _, key := range []string{"legacy-session", "legacy-obs"} {
@@ -11716,6 +11737,35 @@ func TestMergeProjectsByNameToleratesMissingSource(t *testing.T) {
 	}
 }
 
+// A missing source is a successful no-op that must not enqueue sync mutations:
+// backfilling the untouched target would flood the sync journal with upserts
+// for records the merge never moved. The fixture enrolls the target first and
+// seeds its records afterwards through raw SQL, so the journal holds no rows
+// for them and an unconditional backfill would visibly write.
+func TestMergeProjectsByNameMissingSourceWritesNoSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "target-project")
+	seedLegacyMergeRecords(t, s, "target-project")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('target-prompt', 'legacy-session', 'prompt', 'target-project')`); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.MergeProjectsByName("ghost-project", "target-project")
+	if err != nil {
+		t.Fatalf("MergeProjectsByName with missing source: %v", err)
+	}
+	if result.ObservationsUpdated != 0 || result.SessionsUpdated != 0 || result.PromptsUpdated != 0 || len(result.SourcesMerged) != 0 {
+		t.Fatalf("unexpected no-op result: %+v", result)
+	}
+	var mutations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&mutations); err != nil {
+		t.Fatal(err)
+	}
+	if mutations != 0 {
+		t.Fatalf("no-op merge enqueued %d sync mutations, want 0", mutations)
+	}
+}
+
 // CountProjectRecords backs the dry-run preview: it counts the exact spelling
 // given (the rows a by-name merge would move, soft-deleted observations
 // included) and stays silent about other spellings of the same project.
@@ -11730,6 +11780,11 @@ func TestCountProjectRecordsCountsExactSpellingOnly(t *testing.T) {
 	}
 	// Another spelling of the same project must not leak into the counts.
 	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('other-obs', 'legacy-session', 'note', 'other', 'content', 'acme-api', 'project', 'other-hash')`); err != nil {
+		t.Fatal(err)
+	}
+	// "ACMEAPI" normalizes to "acmeapi" yet is a different exact spelling: the
+	// exact-spelling count must exclude it.
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('upper-obs', 'legacy-session', 'note', 'upper', 'content', 'ACMEAPI', 'project', 'upper-hash')`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -11747,6 +11802,25 @@ func TestCountProjectRecordsCountsExactSpellingOnly(t *testing.T) {
 	}
 	if counts.Observations != 0 || counts.Sessions != 0 || counts.Prompts != 0 {
 		t.Fatalf("expected zero counts for missing project, got: %+v", counts)
+	}
+}
+
+// A failed count query must surface as an error with nil counts: the dry-run
+// preview must never print a partially scanned shape as if it were complete.
+func TestCountProjectRecordsReturnsErrorAndNilCountsWhenQueryFails(t *testing.T) {
+	s := newTestStore(t)
+	// Deterministic failure: the third count query targets user_prompts, so
+	// the observations and sessions scans succeed before the loop aborts.
+	if _, err := s.db.Exec(`DROP TABLE user_prompts`); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := s.CountProjectRecords("acme-api")
+	if err == nil {
+		t.Fatal("CountProjectRecords must fail when a count query fails")
+	}
+	if counts != nil {
+		t.Fatalf("counts = %+v, want nil on error", counts)
 	}
 }
 
