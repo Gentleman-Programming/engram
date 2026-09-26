@@ -6254,10 +6254,10 @@ func TestImportRejectsNonOrphanedDanglingAndMissingSupersedingRelations(t *testi
 			destination := newTestStore(t)
 			project := "backup-project"
 			data := &ExportData{
-				Version: "0.2.0",
-				Sessions: []Session{{ID: "invalid-relation-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
+				Version:      "0.2.0",
+				Sessions:     []Session{{ID: "invalid-relation-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
 				Observations: []Observation{{SyncID: "obs-valid-endpoint", SessionID: "invalid-relation-session", Type: "note", Title: "valid", Content: "valid", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
-				Relations: []BackupRelation{{SyncID: "rel-invalid-endpoint", SourceID: "obs-valid-endpoint", TargetID: "obs-missing-endpoint", Relation: RelationRelated, JudgmentStatus: status, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+				Relations:    []BackupRelation{{SyncID: "rel-invalid-endpoint", SourceID: "obs-valid-endpoint", TargetID: "obs-missing-endpoint", Relation: RelationRelated, JudgmentStatus: status, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
 			}
 			if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "relation endpoint") {
 				t.Fatalf("import dangling %s relation error = %v, want missing endpoint error", status, err)
@@ -6270,7 +6270,7 @@ func TestImportRejectsNonOrphanedDanglingAndMissingSupersedingRelations(t *testi
 	project := "backup-project"
 	missingSuperseding := "rel-not-in-backup"
 	data := &ExportData{
-		Version: "0.2.0",
+		Version:  "0.2.0",
 		Sessions: []Session{{ID: "missing-superseding-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
 		Observations: []Observation{
 			{SyncID: "obs-superseding-source", SessionID: "missing-superseding-session", Type: "note", Title: "source", Content: "source", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
@@ -6313,10 +6313,10 @@ func TestImportValidatesMissingSupersedingRelationForExistingRelation(t *testing
 	project := "backup-project"
 	missingSuperseding := "rel-missing-superseder"
 	data := &ExportData{
-		Version: "0.2.0",
-		Sessions: []Session{{ID: "rolled-back-session", Project: project, Directory: "/tmp/rollback", StartedAt: "2026-01-01T00:00:00Z"}},
+		Version:      "0.2.0",
+		Sessions:     []Session{{ID: "rolled-back-session", Project: project, Directory: "/tmp/rollback", StartedAt: "2026-01-01T00:00:00Z"}},
 		Observations: []Observation{{SyncID: "obs-rolled-back", SessionID: "rolled-back-session", Type: "note", Title: "rollback", Content: "rollback", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
-		Relations: []BackupRelation{{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID, Relation: RelationRelated, JudgmentStatus: JudgmentStatusPending, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+		Relations:    []BackupRelation{{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID, Relation: RelationRelated, JudgmentStatus: JudgmentStatusPending, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
 	}
 	if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "superseding relation") {
 		t.Fatalf("import existing relation with missing superseder error = %v, want missing superseding relation error", err)
@@ -11416,6 +11416,124 @@ func TestMergeProjectsRejectsNonEquivalentSources(t *testing.T) {
 				t.Fatalf("MergeProjects error = %v, want normalization rejection", err)
 			}
 		})
+	}
+}
+
+func TestExplicitMergePreviewAndApply(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acmeapi")
+	if _, err := s.db.Exec(`UPDATE observations SET deleted_at = datetime('now') WHERE project = 'acmeapi'`); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.PreviewExplicitProjectMerge("acmeapi", "acme-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.ObservationsUpdated != 1 || preview.SessionsUpdated != 1 || preview.PromptsUpdated != 0 || preview.SyncIdentityChanges {
+		t.Fatalf("preview = %+v", preview)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("preview mutated source: %d, %v", count, err)
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{"acmeapi"}, "acme-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ObservationsUpdated != preview.ObservationsUpdated || result.SessionsUpdated != preview.SessionsUpdated {
+		t.Fatalf("preview %+v apply %+v", preview, result)
+	}
+}
+
+func TestExplicitMergePreviewValidationAndSyncOnly(t *testing.T) {
+	s := newTestStore(t)
+	for _, pair := range [][2]string{{"absent", "ab-sent"}, {"foo-bar", "foo_bar"}, {"café", "cafe"}, {"same", "same"}} {
+		if _, err := s.PreviewExplicitProjectMerge(pair[0], pair[1]); err == nil {
+			t.Fatalf("accepted %q -> %q", pair[0], pair[1])
+		}
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('foo-bar')`); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.PreviewExplicitProjectMerge("foo-bar", "foo_bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.SyncIdentityChanges || preview.ObservationsUpdated != 0 || preview.SessionsUpdated != 0 || preview.PromptsUpdated != 0 {
+		t.Fatalf("sync-only preview %+v", preview)
+	}
+}
+
+func TestExplicitMergePreviewCases(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, canonical string
+		allowed                 bool
+	}{
+		{"inserted separator", "acmeapi", "acme-api", true},
+		{"Unicode separator", "caféapi", "café-api", true},
+		{"Unicode mismatch", "caféapi", "cafe-api", false},
+		{"normalized equal case", "Acme-api", "acme-api", false},
+		{"normalized equal spacing", " acme-api ", "acme-api", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			seedLegacyMergeRecords(t, s, tc.source)
+			_, err := s.PreviewExplicitProjectMerge(tc.source, tc.canonical)
+			if (err == nil) != tc.allowed {
+				t.Fatalf("preview %q -> %q error = %v", tc.source, tc.canonical, err)
+			}
+		})
+	}
+}
+
+func TestExplicitMergePreviewPendingOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name, project, payload string
+		enrollment             bool
+	}{
+		{"journal column", "foo-bar", `{"project":"other"}`, false},
+		{"payload only", "", `{"project":"foo-bar"}`, false},
+		{"enrollment only", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if tc.enrollment {
+				if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('foo-bar')`); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, "preview-only", SyncOpUpsert, tc.payload, SyncSourceLocal, tc.project); err != nil {
+				t.Fatal(err)
+			}
+			preview, err := s.PreviewExplicitProjectMerge("foo-bar", "foo_bar")
+			if err != nil || !preview.SyncIdentityChanges || preview.ObservationsUpdated != 0 || preview.SessionsUpdated != 0 || preview.PromptsUpdated != 0 {
+				t.Fatalf("preview %+v, error %v", preview, err)
+			}
+			if _, err := s.MergeExplicitProjectVariants([]string{"foo-bar"}, "foo_bar"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestExplicitMergePreviewPrompts(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('preview-session', 'other', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('preview-prompt', 'preview-session', 'text', 'foo-bar')`); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.PreviewExplicitProjectMerge("foo-bar", "foo_bar")
+	if err != nil || preview.PromptsUpdated != 1 {
+		t.Fatalf("preview %+v, error %v", preview, err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE project = 'foo-bar'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("preview changed prompt: %d, %v", count, err)
+	}
+	applied, err := s.MergeExplicitProjectVariants([]string{"foo-bar"}, "foo_bar")
+	if err != nil || applied.PromptsUpdated != preview.PromptsUpdated {
+		t.Fatalf("apply %+v, error %v", applied, err)
 	}
 }
 
