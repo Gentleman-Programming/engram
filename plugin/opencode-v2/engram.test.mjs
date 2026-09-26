@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 
 const source = resolve('plugin/opencode-v2/engram.ts')
 
-async function harness(t, { localIdentity = false } = {}) {
+async function harness(t, { localIdentity = false, interruptFirstStream = null } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'engram-v2-hook-'))
   const previousURL = process.env.ENGRAM_URL
   const previousFetch = globalThis.fetch
@@ -54,6 +54,7 @@ async function harness(t, { localIdentity = false } = {}) {
   const { default: plugin } = await import(pathToFileURL(target).href)
   const hooks = new Map()
   let deliver
+  let subscriptions = 0
   const events = {
     async *[Symbol.asyncIterator]() {
       while (true) {
@@ -71,7 +72,15 @@ async function harness(t, { localIdentity = false } = {}) {
       hook: async (name, fn) => { hooks.set(name, fn) },
     },
     tool: { hook: async (name, fn) => { hooks.set(name, fn) } },
-    event: { subscribe: () => events },
+    event: { subscribe: () => {
+      subscriptions++
+      if (interruptFirstStream && subscriptions === 1) return {
+        async *[Symbol.asyncIterator]() {
+          if (interruptFirstStream === 'throw') throw new Error('stream failed')
+        },
+      }
+      return events
+    } },
   }
   cleanup = await plugin.setup(ctx)
   async function emit(value) {
@@ -82,8 +91,28 @@ async function harness(t, { localIdentity = false } = {}) {
     // The iterator resumes after the asynchronous handler finishes.
     while (!deliver) await new Promise(resolve => setImmediate(resolve))
   }
-  return { requests, hooks, emit }
+  return { requests, hooks, emit, subscriptions: () => subscriptions, dispose: cleanup }
 }
+
+for (const interruption of ['throw', 'end']) {
+  test(`V2 resubscribes after stream ${interruption} and captures a later prompt`, async t => {
+    const { requests, emit, subscriptions, dispose } = await harness(t, { interruptFirstStream: interruption })
+    await emit(admitted('root', 'recovered', 'A prompt after stream interruption'))
+    assert.equal(subscriptions(), 2)
+    assert.deepEqual(requests.filter(r => r.path === '/prompts').map(r => r.body.source_inbox_id), ['recovered'])
+    await dispose()
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(subscriptions(), 2)
+  })
+}
+
+test('V2 disposal during retry delay does not reopen the event stream', async t => {
+  const { subscriptions, dispose } = await harness(t, { interruptFirstStream: 'throw' })
+  assert.equal(subscriptions(), 1)
+  await dispose()
+  await new Promise(resolve => setTimeout(resolve, 150))
+  assert.equal(subscriptions(), 1)
+})
 
 function admitted(sessionID, inboxID, text, type = 'user') {
   return { type: 'session.inbox.enqueued', data: { sessionID, inboxID, item: { type, payload: { text } } } }

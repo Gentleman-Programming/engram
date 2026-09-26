@@ -651,8 +651,35 @@ export default Plugin.define({
 
     const controller = new AbortController()
 
+    async function* resilientEvents() {
+      while (!disposed && !controller.signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+            if (disposed || controller.signal.aborted) return
+            yield event
+          }
+        } catch {
+          // A failed stream can be replaced while this plugin is still loaded.
+        }
+        if (disposed || controller.signal.aborted) return
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            controller.signal.removeEventListener("abort", onAbort)
+            resolve()
+          }, 100)
+          function onAbort() {
+            clearTimeout(timer)
+            resolve()
+          }
+          controller.signal.addEventListener("abort", onAbort, { once: true })
+          if (controller.signal.aborted) onAbort()
+        })
+      }
+    }
+
     void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+      for await (const event of resilientEvents()) {
+        if (disposed || controller.signal.aborted) break
         if (!(await ensureLocalReady())) continue
 
         // --- Session Created ---
@@ -731,7 +758,7 @@ export default Plugin.define({
         }
       }
     })().catch(() => {
-      // Stream aborted on unload or server restart — nothing to do
+      // Unexpected event handling failures must not become unhandled rejections.
     })
 
     // ─── Tool Execution Hooks ────────────────────────────────────
