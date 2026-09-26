@@ -195,6 +195,8 @@ engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred
 engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
 engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
 engram projects list          List projects with observation/session/prompt counts
+engram projects merge --from acmeapi --to acme-api --dry-run
+engram projects merge --from acmeapi --to acme-api --apply
 engram projects consolidate [--all] [--dry-run]
                               Merge similar names interactively; --all --dry-run previews without prompts
 engram projects prune         Prune projects with zero observations [--dry-run] [--paths-only]
@@ -1440,6 +1442,8 @@ Both errors carry a `remedy` field naming the exact command to run: `engram proj
 When saving to a project that doesn't exist yet, Engram checks for similar existing project names (Levenshtein distance, substring, case-insensitive matching) and warns the agent if a likely variant already exists.
 
 ### Retroactive cleanup
+
+Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated or normalized-identical names are rejected. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves.
 
 Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation.
 
