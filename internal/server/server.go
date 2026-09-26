@@ -265,6 +265,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		if socketPath == "" && isAddressInUse(err) {
 			if s.instanceOwnsPort() {
+				log.Printf("[engram] HTTP server did not bind on %s: an existing instance owns the port", addr)
 				return nil
 			}
 			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)
@@ -494,6 +495,10 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.store.Stats(); err != nil {
+		jsonError(w, http.StatusInternalServerError, "health check failed")
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":      "ok",
 		"service":     "engram",
@@ -767,7 +772,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if body.Type == nil && body.Title == nil && body.Content == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
+	if body.Type == nil && body.Title == nil && body.Content == nil && body.Find == nil && body.Replace == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
 		jsonError(w, http.StatusBadRequest, "at least one field is required")
 		return
 	}
@@ -776,7 +781,12 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationTitleRequired),
-			errors.Is(err, store.ErrObservationContentRequired):
+			errors.Is(err, store.ErrObservationContentRequired),
+			errors.Is(err, store.ErrObservationFindReplacePairRequired),
+			errors.Is(err, store.ErrObservationFindReplaceContentConflict),
+			errors.Is(err, store.ErrObservationFindReplaceInputTooLarge),
+			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
+			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())
@@ -1312,6 +1322,23 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
+		var unknown *projectpkg.UnknownProjectError
+		if errors.As(err, &unknown) {
+			// The available-project lookup can fail independently of resolution.
+			available, listErr := s.store.ListProjectNames()
+			if listErr != nil {
+				jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
+				return
+			}
+			jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", unknown.Name), map[string]any{
+				"code": "unknown_project", "available_projects": available,
+			})
+			return
+		}
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
+			return
+		}
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
@@ -1322,7 +1349,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats, err = loadServerStats(s.store)
 	}
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, http.StatusInternalServerError, "stats unavailable")
 		return
 	}
 

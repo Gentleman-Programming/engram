@@ -42,28 +42,26 @@ Once the issue is approved:
 
 ### Step 4: Automated PR Checks
 
-Required checks run automatically on every PR:
-
-#### PR Validation
+The active required contexts run automatically on every PR and merge queue group:
 
 | Check | What it verifies |
 |-------|-----------------|
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
-| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](#transient-artifact-policy) |
-
-#### CI Tests
-
-| Check | What it runs |
-|-------|-------------|
-| **Lint** | golangci-lint reports no new findings in Go changes |
 | **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
+| **Plugin Tests** | The Pi plugin test suite runs from a clean checkout |
 
 All required checks must pass before a PR can be merged.
 
-> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, `PR Validation`, `Check PR Has type:* Label`, and `Check PR Has No Transient Artifacts`.
+> **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
+
+Non-required PR checks, including lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. They are not active `main` required contexts and do not run as merge-group CI jobs.
+
+### Merge Queue Activation (administrators)
+
+Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
 
 ## Transient Artifact Policy
 
@@ -120,10 +118,11 @@ configuration-split comparison fails.
 CI runs golangci-lint v2.13.2 with the `errcheck`, `staticcheck`, and `unused`
 linters. It reports only findings introduced by the pull request or the pushed
 main revision, so existing debt does not block adoption while new debt fails
-the check. Install golangci-lint v2.13.2 locally and run `make lint` before
-pushing; the target requires that exact version on `PATH` and fails before
-linting if it is missing or different. It reports findings in staged, unstaged,
-untracked, and latest committed changes compared with `HEAD~`.
+the check. When local lint is warranted by risk or the absence of PR CI, install
+golangci-lint v2.13.2 and run `make lint`; the target requires that exact version
+on `PATH` and fails before linting if it is missing or different. It reports
+findings in staged, unstaged, untracked, and latest committed changes compared
+with `HEAD~`.
 
 ---
 
@@ -218,10 +217,9 @@ The command is a dry run: it prints the canonical label list as JSON and never w
 
 - Keep PR scope focused — one logical change per PR
 - Use [conventional commits](https://www.conventionalcommits.org/) format
-- Ensure all tests pass locally before pushing:
-  - Unit: `go test ./...`
-  - E2E: `go test -tags e2e ./internal/server/...`
-  - Lint: `make lint` (requires golangci-lint v2.13.2)
+- For behavior changes, run a focused regression test and the affected package(s) locally before proposing the change; record the commands and outcomes. Use targeted coverage when useful to find missed behavior, without a numeric target or per-PR total module coverage requirement.
+- Verification is candidate evidence; GitHub CI is the broad automated execution venue once the candidate is pushed to a PR. CI runs the full unit suite (`go test ./...`), E2E suite (`go test -tags e2e ./internal/server/...`), lint, and applicable platform checks. Do not claim these results until they run.
+- For candidates without a PR or not yet pushed, and for justified high-risk changes, run additional applicable checks locally and report any missing CI evidence. Do not duplicate the broad CI suite locally by default when PR CI will run it.
 - Update docs in the same PR when behavior changes
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits

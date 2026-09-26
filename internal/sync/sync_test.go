@@ -1487,7 +1487,7 @@ func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
 			transport := newFakeCloudTransport()
 			transport.chunks["history"] = raw
 			sy := NewWithTransport(nil, transport)
-			_, available, historical, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
+			_, available, historical, _, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
 			if err != nil {
 				t.Fatalf("exportedChunkKeys: %v", err)
 			}
@@ -2823,7 +2823,7 @@ func TestImportBranches(t *testing.T) {
 			t.Fatalf("write gzip chunk: %v", err)
 		}
 
-		storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+		storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation, _ bool) error {
 			return errors.New("forced apply pulled chunk fail")
 		}
 
@@ -3120,7 +3120,7 @@ func TestLocalImportSkipsAlreadyImportedChunksIdempotently(t *testing.T) {
 		t.Fatalf("first import: %v", err)
 	}
 	applyCalls := 0
-	storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+	storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation, _ bool) error {
 		applyCalls++
 		return errors.New("already imported chunks should not be applied")
 	}
@@ -3405,6 +3405,47 @@ func TestCloudExportUsesMutationJournalForUpdatesAndDeletes(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("expected mutation journal to be acked after cloud export, got %+v", pending)
+	}
+}
+
+func TestCloudExportPropagatesFindReplace(t *testing.T) {
+	s := newTestStore(t)
+	transport := newFakeCloudTransport()
+	sy := NewCloudWithTransport(s, transport, "proj-a")
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.CreateSession("sess-find-replace", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "sess-find-replace", Type: "note", Title: "replace", Content: "old old", Project: "proj-a", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := sy.Export("alice", "proj-a"); err != nil {
+		t.Fatalf("export initial observation: %v", err)
+	}
+	var update store.UpdateObservationParams
+	if err := json.Unmarshal([]byte(`{"find":"old","replace":"new"}`), &update); err != nil {
+		t.Fatalf("decode replacement params: %v", err)
+	}
+	if _, err := s.UpdateObservation(id, update); err != nil {
+		t.Fatalf("replace observation: %v", err)
+	}
+	result, err := sy.Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export replacement: %v", err)
+	}
+	payload, ok := transport.chunks[result.ChunkID]
+	if !ok {
+		t.Fatalf("missing replacement chunk %q", result.ChunkID)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		t.Fatalf("decode replacement chunk: %v", err)
+	}
+	if len(chunk.Observations) != 1 || chunk.Observations[0].Content != "new new" {
+		t.Fatalf("replacement propagation = %+v", chunk.Observations)
 	}
 }
 
@@ -3725,10 +3766,10 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 			Payload:   `{"id":"remote-sess","project":"proj-a","directory":"/remote"}`,
 		},
 		{
-			Entity:    store.SyncEntityObservation,
-			EntityKey: "obs-bad",
+			Entity:    "unknown",
+			EntityKey: "invalid-entity",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-bad","session_id":"missing-session","type":"note","title":"bad","content":"fails fk","project":"proj-a","scope":"project"}`,
+			Payload:   `{}`,
 		},
 	}}
 	badPayload, err := json.Marshal(badChunk)
@@ -3751,6 +3792,118 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 	}
 	if synced[chunkID] {
 		t.Fatalf("failed chunk %q must not be marked synced", chunkID)
+	}
+}
+
+// A cloud chunk carrying a session upsert with a blank directory must fail the
+// whole chunk import: cloud inbound keeps the strict directory admission rule
+// (engram#1287 reviewer contract B1), so the session is not persisted and the
+// chunk is not recorded as imported. A corrected chunk with the same id stays
+// redeliverable afterwards.
+func TestCloudImportChunkRejectsBlankDirectorySessionAtomically(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-cloud-blank-dir"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: time.Now().UTC().Format(time.RFC3339)}}}
+	transport.chunks[chunkID] = []byte(`{"sessions":[{"id":"cloud-blank-sess","project":"proj-a","directory":"","started_at":"2026-01-01 00:00:00"}]}`)
+
+	importer := NewCloudWithTransport(dst, transport, "proj-a")
+	if _, err := importer.Import(); err == nil {
+		t.Fatal("expected cloud import failure for blank-directory session chunk")
+	}
+
+	if _, err := dst.GetSession("cloud-blank-sess"); err == nil {
+		t.Fatal("blank-directory session persisted via cloud chunk import")
+	}
+	synced, err := dst.GetSyncedChunksForTarget("cloud:proj-a")
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("rejected chunk %q must not be marked synced", chunkID)
+	}
+
+	// Fixing the payload and redelivering the same chunk id must converge.
+	transport.chunks[chunkID] = []byte(`{"sessions":[{"id":"cloud-blank-sess","project":"proj-a","directory":"/remote/dir","started_at":"2026-01-01 00:00:00"}]}`)
+	if _, err := importer.Import(); err != nil {
+		t.Fatalf("cloud import after corrected redelivery: %v", err)
+	}
+	sess, err := dst.GetSession("cloud-blank-sess")
+	if err != nil {
+		t.Fatalf("get session after corrected redelivery: %v", err)
+	}
+	if sess.Directory != "/remote/dir" {
+		t.Fatalf("stored directory = %q, want /remote/dir", sess.Directory)
+	}
+}
+
+// A cloud chunk carrying a session upsert whose payload omits the directory
+// key entirely must fail the same way: strict cloud admission rejects a missing
+// directory, nothing is persisted, and the chunk stays unrecorded.
+func TestCloudImportChunkRejectsMissingDirectoryKeySessionAtomically(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-cloud-missing-dir"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: time.Now().UTC().Format(time.RFC3339)}}}
+	transport.chunks[chunkID] = []byte(`{"mutations":[{"entity":"session","entity_key":"cloud-missing-dir-sess","op":"upsert","payload":"{\"id\":\"cloud-missing-dir-sess\",\"project\":\"proj-a\"}"}]}`)
+
+	importer := NewCloudWithTransport(dst, transport, "proj-a")
+	if _, err := importer.Import(); err == nil {
+		t.Fatal("expected cloud import failure for missing-directory-key session chunk")
+	}
+
+	if _, err := dst.GetSession("cloud-missing-dir-sess"); err == nil {
+		t.Fatal("missing-directory-key session persisted via cloud chunk import")
+	}
+	synced, err := dst.GetSyncedChunksForTarget("cloud:proj-a")
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("rejected chunk %q must not be marked synced", chunkID)
+	}
+}
+
+// Boundary guard: the local import domain keeps accepting a blank-directory
+// session exactly as before, so the cloud strictness above cannot be blamed on
+// the shared chunk-apply machinery.
+func TestLocalImportStillAcceptsBlankDirectorySession(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "local-blank", ChunkData{
+		Sessions: []store.Session{{
+			ID:        "local-blank-sess",
+			Project:   "proj-a",
+			Directory: "",
+			StartedAt: "2026-01-01 00:00:00",
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "local-blank", CreatedAt: "2026-01-01T00:00:00Z"}}})
+
+	if _, err := New(s, syncDir).Import(); err != nil {
+		t.Fatalf("local import with blank directory: %v", err)
+	}
+	sess, err := s.GetSession("local-blank-sess")
+	if err != nil {
+		t.Fatalf("get locally imported blank session: %v", err)
+	}
+	if sess.Directory != "" {
+		t.Fatalf("stored directory = %q, want exactly \"\"", sess.Directory)
+	}
+	synced, err := s.GetSyncedChunksForTarget(store.LocalChunkTargetKey)
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if !synced["local-blank"] {
+		t.Fatal("local chunk with blank directory must be recorded as imported")
 	}
 }
 
@@ -4527,15 +4680,15 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 		t.Fatalf("unexpected new prompts: %+v", newOnly.Prompts)
 	}
 
-	if got := normalizeTime("2025-01-01T15:04:05Z"); got != "2025-01-01 15:04:05" {
+	if got := normalizeTime("2025-01-01T15:04:05.123456789Z"); got != "2025-01-01 15:04:05.123456789" {
 		t.Fatalf("unexpected RFC3339 normalization: %q", got)
 	}
 	if got := normalizeTime(" 2025-01-01 15:04:05 "); got != "2025-01-01 15:04:05" {
 		t.Fatalf("unexpected plain normalization: %q", got)
 	}
 
-	m := &Manifest{Chunks: []ChunkEntry{{ID: "old", CreatedAt: "2025-01-01T00:00:00Z"}, {ID: "new", CreatedAt: "2025-02-01T00:00:00Z"}}}
-	if got := sy.lastChunkTime(m); got != "2025-02-01T00:00:00Z" {
+	m := &Manifest{Chunks: []ChunkEntry{{ID: "old", CreatedAt: "2025-02-01T00:00:00Z"}, {ID: "new", CreatedAt: "2025-02-01T00:00:00.5Z"}}}
+	if got := sy.lastChunkTime(m); got != "2025-02-01T00:00:00.5Z" {
 		t.Fatalf("unexpected last chunk time: %q", got)
 	}
 }
@@ -5409,10 +5562,10 @@ func TestCloudImportStallPathSurvivesRelationFiltering(t *testing.T) {
 			Payload:   `{"sync_id":"obs-stall-good","session_id":"sess-stall","type":"decision","title":"good","content":"importable endpoint","project":"proj-a","scope":"project"}`,
 		},
 		{
-			Entity:    store.SyncEntityObservation,
-			EntityKey: "obs-stall-orphan",
+			Entity:    "unknown",
+			EntityKey: "invalid-stall-entity",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-stall-orphan","session_id":"sess-never-anywhere","type":"note","title":"orphan","content":"references a session no chunk provides","project":"proj-a","scope":"project"}`,
+			Payload:   `{}`,
 		},
 		{
 			Entity:    store.SyncEntityRelation,
@@ -5429,8 +5582,8 @@ func TestCloudImportStallPathSurvivesRelationFiltering(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the chunk to keep stalling on its unrelated failure")
 	}
-	if !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "sess-never-anywhere") {
-		t.Fatalf("expected original stall error with pending session dependencies, got: %v", err)
+	if !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "unknown sync entity") {
+		t.Fatalf("expected original stall error with unrelated failure, got: %v", err)
 	}
 	synced, err := s.GetSyncedChunks()
 	if err != nil {

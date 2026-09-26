@@ -50,20 +50,19 @@ Closes #
 
 ## 🧪 Test Plan
 
-<!-- How did you verify this works? -->
+<!-- Record actual commands and outcomes, not assumed passes. For behavior changes, run a focused regression and affected package tests locally. For docs-only changes, mark Go tests N/A and list documentation checks. Targeted coverage is informative, not a total module coverage or per-PR numeric gate. Without a PR (or before pushing), and for high-risk changes, run additional applicable local checks and report missing CI evidence. -->
 
-- [ ] Unit tests pass locally: `go test ./...`
-- [ ] E2E tests pass locally: `go test -tags e2e ./internal/server/...`
-- [ ] Lint passes locally: `make lint`
-- [ ] Manually tested the affected functionality
+- [ ] Focused regression (behavior change): `<actual command>` — `<outcome or N/A: documentation-only>`
+- [ ] Affected package tests (behavior change): `<actual command>` — `<outcome or N/A: documentation-only>`
+- [ ] Other applicable local checks (including documentation/manual checks): `<actual command or steps>` — `<outcome or N/A with reason>`
 
-<!-- Describe any manual testing steps: -->
+<!-- Describe any manual testing steps and checks that could not run: -->
 
 ---
 
 ## 🤖 Automated Checks
 
-These run automatically and **all must pass** before merge:
+After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applicable platform checks. These automated statuses remain pending until the actual checks run; do not claim a pass from local evidence. Windows checks run for PRs but not merge groups, and are not among the six required contexts. Lint and Check PR Has No Transient Artifacts also run for PRs but are not required contexts; Lint also runs on pushes to main. All required checks must pass before merge:
 
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
@@ -75,6 +74,8 @@ These run automatically and **all must pass** before merge:
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
 | **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
 | **Lint** | golangci-lint reports no new findings | ⏳ |
+| **Windows Setup Test** | Windows setup preserves absolute paths and MCP job-object parent-lifetime tests pass | ⏳ |
+| **Cloud Sync Wrapper Tests (Windows)** | Cloud sync wrapper and missing-PowerShell-Engram tests pass on Windows | ⏳ |
 
 ---
 
@@ -82,9 +83,8 @@ These run automatically and **all must pass** before merge:
 
 - [ ] I linked an approved issue above (`Closes #N`)
 - [ ] I added exactly **one** `type:*` label to this PR
-- [ ] I ran unit tests locally: `go test ./...`
-- [ ] I ran e2e tests locally: `go test -tags e2e ./internal/server/...`
-- [ ] I ran lint locally: `make lint`
+- [ ] I recorded actual focused regression and affected package test commands/outcomes for behavior changes, or N/A for docs-only changes
+- [ ] I recorded additional applicable local checks for an unpushed/no-PR or high-risk change, and identified any missing CI evidence
 - [ ] Docs updated (if behavior changed)
 - [ ] Commits follow [conventional commits](https://www.conventionalcommits.org/) format
 - [ ] No `Co-Authored-By` trailers in commits

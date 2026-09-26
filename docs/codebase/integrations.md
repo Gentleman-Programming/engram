@@ -40,7 +40,7 @@ is either:
 - **declarative** — just an MCP path + format (`mcpServers` / `servers` / OpenCode's
   `mcp` object) and instruction surfaces; the generic `injectMCP` / `writeInstruction`
   driver in `registry.go` does the writes. Antigravity CLI, Windsurf, Qwen, Kiro,
-  Cursor, VS Code Copilot, and Kilo Code are all declarative.
+  Cursor, VS Code Copilot, Kilo Code, Kimi Code, and CommandCode are all declarative.
 
 Adding a declarative agent is normally just a new entry in `agentAdapters()` plus
 its path helpers — no new install code path. Agents not in the registry remain
@@ -61,6 +61,22 @@ Plugins may:
 Plugins **should not** implement core memory semantics. If there is a dedupe, prompt capture, relation judgment, or project resolution rule, it must be in Go.
 
 For per-agent details, use [docs/AGENT-SETUP.md](../AGENT-SETUP.md) and [docs/PLUGINS.md](../PLUGINS.md).
+
+## Runtime session identity
+
+Adapters translate host runtime identity into an Engram session; they do not own
+persistence or decide which session an omitted ID should select.
+
+| Adapter | Runtime-to-Engram mapping | Registration before identity use |
+| --- | --- | --- |
+| Claude Code | The SessionStart hook posts the host `session_id` with its resolved project and directory. | The hook attempts registration but does not inspect the response before continuing; do not treat its attempt as a confirmed identity handoff to MCP tools. |
+| Codex | The hook posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model. | The helper hands it off only after HTTP 201 with matching `id` and `status: "created"`; otherwise it instructs the model to omit `session_id`. |
+| OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. | Before session-attributed tool writes it attempts root registration, rechecks ownership, and injects the root `session_id` into tool arguments. Failed requests block injection, but an HTTP-success response is not checked for matching session identity. |
+
+Parent/root translation is specific to OpenCode's session hierarchy, not a
+universal adapter rule. Go owns the HTTP session registration and persistence
+contract ([Sessions](../../DOCS.md#sessions)), project/session validation and
+omitted-ID cardinality ([Write tools: explicit/session/cwd project resolution](../../DOCS.md#write-tools-explicitsessioncwd-project-resolution)).
 
 ## Setup boundary
 

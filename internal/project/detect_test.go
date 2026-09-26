@@ -1,6 +1,7 @@
 package project
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -611,6 +612,87 @@ func TestDetectProjectFull_Case3_SingleChild(t *testing.T) {
 	}
 	if res.Project != "my-child-repo" {
 		t.Errorf("Project = %q; want %q", res.Project, "my-child-repo")
+	}
+}
+
+func TestDetectProjectFull_Case3_CanonicalChildIdentity(t *testing.T) {
+	tests := []struct {
+		name, config, remote string
+		bind, invalidBinding bool
+		want                 string
+		wantError            error
+	}{
+		{name: "explicit config", config: `{"project_name":"Configured Child"}`, want: "configured child"},
+		{name: "remote identity", remote: "git@github.com:team/remote-child.git", want: "remote-child"},
+		{name: "existing binding wins over remote", remote: "git@github.com:team/new-remote.git", bind: true, want: "original-child"},
+		{name: "invalid config", config: `{"project_name":"bad/name"}`, wantError: ErrInvalidConfig},
+		{name: "invalid binding", invalidBinding: true, wantError: ErrRepositoryBinding},
+		{name: "ordinary fallback", want: "folder-child"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := t.TempDir()
+			child := filepath.Join(parent, "folder-child")
+			if err := os.Mkdir(child, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			initGit(t, child)
+			if tt.bind {
+				if got := DetectProjectFull(child); got.Error != nil {
+					t.Fatal(got.Error)
+				}
+				bindingPath := repositoryBindingPath(detectGitCommonDir(child))
+				data, err := os.ReadFile(bindingPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var binding repositoryBinding
+				if err := json.Unmarshal(data, &binding); err != nil {
+					t.Fatal(err)
+				}
+				binding.Project = "original-child"
+				data, err = json.Marshal(binding)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(bindingPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.invalidBinding {
+				if err := os.WriteFile(repositoryBindingPath(detectGitCommonDir(child)), []byte("invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.remote != "" {
+				cmd := exec.Command("git", "-C", child, "remote", "add", "origin", tt.remote)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git remote add: %v: %s", err, out)
+				}
+			}
+			if tt.config != "" {
+				if err := os.Mkdir(filepath.Join(child, ".engram"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(child, ".engram", "config.json"), []byte(tt.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fromChild := DetectProjectFull(child)
+			fromParent := DetectProjectFull(parent)
+			if !errors.Is(fromParent.Error, tt.wantError) || !errors.Is(fromChild.Error, tt.wantError) {
+				t.Fatalf("errors: parent=%v child=%v, want %v", fromParent.Error, fromChild.Error, tt.wantError)
+			}
+			if tt.wantError != nil {
+				if fromParent.Project != "" || fromParent.Source == SourceGitChild || fromParent.Warning != "" {
+					t.Fatalf("false promotion success: %+v", fromParent)
+				}
+				return
+			}
+			if fromParent.Project != tt.want || fromChild.Project != tt.want || fromParent.Source != SourceGitChild || fromParent.Warning == "" || canonicalizePath(fromParent.Path) != canonicalizePath(child) {
+				t.Fatalf("parent=%+v child=%+v, want %q and child provenance", fromParent, fromChild, tt.want)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
@@ -55,7 +56,7 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 		case "/work/engram":
 			return DetectedProject{Project: "engram", Source: "git_remote", Path: dir}, true
 		case "/work/ignored":
-			return DetectedProject{Project: "ignored", Source: "basename", Path: dir}, true
+			return DetectedProject{Project: "ignored", Source: projectpkg.SourceDirBasename, Path: dir}, true
 		default:
 			return DetectedProject{}, false
 		}
@@ -76,8 +77,67 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 	if got.SessionID != "s-engram" || got.FromProject != "sias-app" || got.ToProject != "engram" || got.EvidenceSource != "git_remote" {
 		t.Fatalf("action=%+v", got)
 	}
-	if len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != "untrusted_directory_evidence" {
-		t.Fatalf("skipped=%+v", plan.Skipped)
+	if len(plan.Skipped) != 0 {
+		t.Fatalf("skipped=%+v, want basename evidence omitted before repair planning", plan.Skipped)
+	}
+}
+
+// TestBuildRepairPlanOrphanedSessionRejectsWhitespaceEvidence proves the
+// orphaned-session planner treats whitespace-only SessionID and FirstObservedAt
+// values as invalid and skips them deterministically instead of planning a
+// placeholder the store could never apply.
+func TestBuildRepairPlanOrphanedSessionRejectsWhitespaceEvidence(t *testing.T) {
+	tests := []struct {
+		name      string
+		evidence  store.OrphanedObservationSessionEvidence
+		wantPlans int
+		wantSkip  string
+	}{
+		{
+			name:     "whitespace-only session id",
+			evidence: store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: " \t\n ", ObservationCount: 1, FirstObservedAt: "2026-01-01 00:00:00"},
+			wantSkip: "invalid_orphaned_session_evidence",
+		},
+		{
+			name:     "whitespace-only first observed timestamp",
+			evidence: store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: "missing-session", ObservationCount: 1, FirstObservedAt: "  \n "},
+			wantSkip: "invalid_orphaned_session_evidence",
+		},
+		{
+			name:      "complete evidence plans placeholder",
+			evidence:  store.OrphanedObservationSessionEvidence{Project: "engram", SessionID: "missing-session", ObservationCount: 1, FirstObservedAt: "2026-01-01 00:00:00"},
+			wantPlans: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report := Report{Checks: []CheckResult{{
+				CheckID: CheckOrphanedObservationSession,
+				Result:  "warning",
+				Findings: []Finding{{
+					CheckID:    CheckOrphanedObservationSession,
+					ReasonCode: CheckOrphanedObservationSession,
+					Message:    "test finding",
+					Evidence:   mustJSON(tc.evidence),
+				}},
+			}}}
+			plan, err := BuildRepairPlan(context.Background(), Scope{}, report, CheckOrphanedObservationSession, RepairModePlan)
+			if err != nil {
+				t.Fatalf("BuildRepairPlan: %v", err)
+			}
+			if len(plan.PlaceholderSessions) != tc.wantPlans {
+				t.Fatalf("placeholders=%+v", plan.PlaceholderSessions)
+			}
+			if tc.wantSkip == "" {
+				if len(plan.Skipped) != 0 {
+					t.Fatalf("skipped=%+v", plan.Skipped)
+				}
+				return
+			}
+			if len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != tc.wantSkip {
+				t.Fatalf("skipped=%+v, want %q", plan.Skipped, tc.wantSkip)
+			}
+		})
 	}
 }
 
@@ -105,7 +165,7 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			wantSkip: "manual_name_unknown_project",
 		},
 		{
-			name: "known manual target beats trusted third project directory",
+			name: "trusted third project directory leaves directory repair authoritative",
 			sessions: []store.DiagnosticSessionEvidence{
 				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/third-project"},
 				{ID: "known", Name: "known", Project: "engram", Directory: "/work/engram"},
@@ -113,7 +173,7 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			detect: func(string) (DetectedProject, bool) {
 				return DetectedProject{Project: "third-project", Source: "git_root", Path: "/work/third-project"}, true
 			},
-			wantAction: true,
+			wantAction: false,
 		},
 	}
 
@@ -132,6 +192,9 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			}
 			if tc.wantAction && (len(plan.Actions) != 1 || plan.Actions[0].ToProject != "engram") {
 				t.Fatalf("actions=%+v skipped=%+v", plan.Actions, plan.Skipped)
+			}
+			if tc.name == "trusted third project directory leaves directory repair authoritative" && len(plan.Actions) != 0 {
+				t.Fatalf("actions=%+v, want no competing manual repair", plan.Actions)
 			}
 			if tc.wantSkip != "" && (len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != tc.wantSkip) {
 				t.Fatalf("skipped=%+v actions=%+v", plan.Skipped, plan.Actions)

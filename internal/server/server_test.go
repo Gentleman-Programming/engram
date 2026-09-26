@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -73,7 +74,7 @@ func TestHealthReportsVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(nil, 0)
+			srv := New(newServerTestStore(t), 0)
 			if tt.setVersion {
 				srv.SetVersion(tt.version)
 			}
@@ -94,6 +95,30 @@ func TestHealthReportsVersion(t *testing.T) {
 				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)
 			}
 		})
+	}
+}
+
+func TestHealthRejectsFailedStore(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("failed store health = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	assertGenericStoreError(t, rec, "health check failed")
+}
+
+func assertGenericStoreError(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if body["error"] != want || strings.Contains(strings.ToLower(rec.Body.String()), "database is closed") || strings.Contains(strings.ToLower(rec.Body.String()), "sqlite") {
+		t.Fatalf("unsafe or unexpected error response: %s; want %q", rec.Body.String(), want)
 	}
 }
 
@@ -149,8 +174,16 @@ func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	go func() { _ = http.Serve(ln, winner.Handler()) }()
 	t.Cleanup(func() { _ = ln.Close() })
+	var output bytes.Buffer
+	originalWriter := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(originalWriter) })
 	if err := New(owner, port).Start(); err != nil {
 		t.Fatalf("same-instance bind loser: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "did not bind") || !strings.Contains(lines[0], "an existing instance owns the port") || !strings.Contains(lines[0], fmt.Sprintf("127.0.0.1:%d", port)) {
+		t.Fatalf("same-instance diagnostic = %q, want one actionable line", output.String())
 	}
 	foreign := newServerTestStore(t)
 	if err := New(foreign, port).Start(); err == nil || !strings.Contains(err.Error(), "different or legacy") {
@@ -2229,6 +2262,27 @@ func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 	}
 }
 
+func TestStatsRejectsFailedStore(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/stats?all_projects=true", "/stats?project=alpha"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("failed store stats = %d, want 500: %s", rec.Code, rec.Body.String())
+			}
+			want := "stats unavailable"
+			if path == "/stats?project=alpha" {
+				want = "project resolution failed"
+			}
+			assertGenericStoreError(t, rec, want)
+		})
+	}
+}
+
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
 	loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -2288,6 +2342,7 @@ func TestProjectResolutionStoreFailureReturnsInternalErrorCode(t *testing.T) {
 	if body["code"] != "project_resolution_failed" {
 		t.Fatalf("resolution failure code = %#v, want project_resolution_failed: %s", body["code"], rec.Body.String())
 	}
+	assertGenericStoreError(t, rec, "project resolution failed")
 }
 
 // ─── DELETE /sessions/{id} tests ─────────────────────────────────────────────
@@ -4000,6 +4055,46 @@ func TestHandleAddObservationBlankTitleNotMaskedBySessionError(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateObservationFindReplace(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	if err := st.CreateSession("s-find-replace", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-find-replace", Type: "note", Title: "Original", Content: "old old", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	replace := httptest.NewRecorder()
+	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
+	if replace.Code != http.StatusOK {
+		t.Fatalf("replacement PATCH = %d: %s", replace.Code, replace.Body.String())
+	}
+	var updated store.Observation
+	if err := json.Unmarshal(replace.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode replacement response: %v", err)
+	}
+	if updated.Content != "new new" {
+		t.Fatalf("replacement content = %q", updated.Content)
+	}
+
+	for _, body := range []string{`{"find":"new"}`, `{"find":"new","replace":"old","content":"other"}`} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("invalid replacement PATCH %s = %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"find":"old","replace":"new"}`)))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing replacement PATCH = %d: %s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
@@ -4138,6 +4233,56 @@ func TestListProjectsEndpointEmptyStore(t *testing.T) {
 	}
 	if body.Count != 0 || body.Projects == nil || len(body.Projects) != 0 {
 		t.Fatalf("expected empty successful listing, got count=%d projects=%v", body.Count, body.Projects)
+	}
+}
+
+func TestHandleCreateSessionClaimsEndedLegacyOwner(t *testing.T) {
+	st := newServerTestStore(t)
+	const id = "ended-unowned-http"
+	const ended = "2024-01-02 03:04:05"
+	if _, err := st.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '', ?, ?)`, id, ended, ended); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, 0).Handler()
+	for _, tc := range []struct{ project, code string }{
+		{"project-a", "session_already_ended"},
+		{"project-b", "session_project_conflict"},
+	} {
+		rec := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"id":%q,"project":%q,"ownership_mode":"project_owned"}`, id, tc.project)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		var response struct {
+			Code         string `json:"code"`
+			OwnerProject string `json:"owner_project"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusConflict || response.Code != tc.code {
+			t.Fatalf("%s response = %d %s", tc.project, rec.Code, rec.Body.String())
+		}
+		if tc.project == "project-b" && response.OwnerProject != "project-a" {
+			t.Fatalf("wrong owner: %s", rec.Body.String())
+		}
+	}
+	var project, mode, gotEnded string
+	if err := st.DB().QueryRow(`SELECT project, ownership_mode, ended_at FROM sessions WHERE id = ?`, id).Scan(&project, &mode, &gotEnded); err != nil {
+		t.Fatal(err)
+	}
+	if project != "project-a" || mode != store.SessionOwnershipProjectOwned || gotEnded != ended {
+		t.Fatalf("session project=%q mode=%q ended=%q", project, mode, gotEnded)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{SessionID: id, Project: "project-b", Type: "manual", Title: "blocked", Content: "blocked", Scope: "project"}); !errors.Is(err, store.ErrSessionOwnershipMismatch) {
+		t.Fatalf("losing observation = %v", err)
+	}
+	if _, err := st.AddPrompt(store.AddPromptParams{SessionID: id, Project: "project-b", Content: "blocked"}); !errors.Is(err, store.ErrSessionOwnershipMismatch) {
+		t.Fatalf("losing prompt = %v", err)
+	}
+	for _, table := range []string{"observations", "user_prompts"} {
+		var count int
+		if err := st.DB().QueryRow(`SELECT count(*) FROM `+table+` WHERE session_id = ?`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s losing writes=%d err=%v", table, count, err)
+		}
 	}
 }
 

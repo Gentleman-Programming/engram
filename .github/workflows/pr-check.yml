@@ -3,29 +3,59 @@ name: PR Validation
 on:
   pull_request:
     types: [opened, edited, labeled, unlabeled, synchronize]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   check-issue-reference:
     name: Check Issue Reference
     runs-on: ubuntu-latest
     steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          persist-credentials: false
       - name: Verify PR links an issue
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const body = context.payload.pull_request.body || '';
             const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const matches = [...body.matchAll(issuePattern)];
+            const validate = (pull) => {
+              const matches = [...(pull.body || '').matchAll(issuePattern)];
+              if (matches.length === 0) return ['no closing issue reference found'];
+              core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[1]).join(', ')}`);
+              return [];
+            };
+            let failures;
+            if (context.eventName === 'merge_group') {
+              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
+              try {
+                const pulls = await resolveAssociatedPullRequests(github, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  baseRef: context.payload.merge_group.base_ref,
+                  headRef: context.payload.merge_group.head_ref,
+                });
+                failures = await aggregatePullRequestResults(pulls, validate);
+              } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
+            } else {
+              const pull = context.payload.pull_request;
+              failures = validate(pull).map((error) => `PR #${pull.number}: ${error}`);
+            }
 
-            if (matches.length === 0) {
+            if (failures.length > 0) {
               core.setFailed(
                 '❌ PR must reference an approved issue.\n' +
-                'Add "Closes #N", "Fixes #N", or "Resolves #N" to the PR body.\n' +
-                'See CONTRIBUTING.md for the full contribution workflow.'
+                'Add "Closes #N", "Fixes #N", or "Resolves #N" to every PR body.\n' +
+                failures.join('\n')
               );
-            } else {
-              const issueNumbers = matches.map(m => m[1]).join(', ');
-              core.info(`✅ Found issue reference(s): #${issueNumbers}`);
             }
 
   check-issue-approved:
@@ -33,50 +63,59 @@ jobs:
     runs-on: ubuntu-latest
     needs: check-issue-reference
     steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          persist-credentials: false
       - name: Verify linked issue is approved
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const body = context.payload.pull_request.body || '';
             const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const matches = [...body.matchAll(issuePattern)];
+            const validate = async (pull) => {
+              const matches = [...(pull.body || '').matchAll(issuePattern)];
+              if (matches.length === 0) return ['no closing issue reference found'];
 
-            if (matches.length === 0) {
-              core.setFailed('❌ No issue reference found in PR body.');
-              return;
-            }
-
-            const failures = [];
-
-            for (const match of matches) {
-              const issueNumber = parseInt(match[1], 10);
-              core.info(`Checking issue #${issueNumber} for status:approved label...`);
-
-              let issue;
+              const errors = [];
+              for (const match of matches) {
+                const issueNumber = parseInt(match[1], 10);
+                core.info(`Checking PR #${pull.number} issue #${issueNumber} for status:approved label...`);
+                try {
+                  const issue = (await github.rest.issues.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                  })).data;
+                  const labels = issue.labels.map((label) => label.name);
+                  if (!labels.includes('status:approved')) {
+                    errors.push(`issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label.`);
+                  } else {
+                    core.info(`✅ PR #${pull.number} issue #${issueNumber} has status:approved`);
+                  }
+                } catch (err) {
+                  errors.push(`issue #${issueNumber}: could not be fetched (${err.message})`);
+                }
+              }
+              return errors;
+            };
+            let failures;
+            if (context.eventName === 'merge_group') {
+              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
               try {
-                const response = await github.rest.issues.get({
+                const pulls = await resolveAssociatedPullRequests(github, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: issueNumber,
+                  baseRef: context.payload.merge_group.base_ref,
+                  headRef: context.payload.merge_group.head_ref,
                 });
-                issue = response.data;
-              } catch (err) {
-                failures.push(`Issue #${issueNumber}: could not be fetched (${err.message})`);
-                continue;
-              }
-
-              const labels = issue.labels.map(l => l.name);
-              core.info(`Issue #${issueNumber} labels: ${labels.join(', ') || '(none)'}`);
-
-              if (!labels.includes('status:approved')) {
-                failures.push(
-                  `Issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label. ` +
-                  `A maintainer must approve the issue before a PR can be merged.`
-                );
-              } else {
-                core.info(`✅ Issue #${issueNumber} has status:approved`);
-              }
+                failures = await aggregatePullRequestResults(pulls, validate);
+              } catch (err) { core.setFailed(`❌ Could not fetch queued pull requests: ${err.message}`); return; }
+            } else {
+              const pull = context.payload.pull_request;
+              failures = (await validate(pull)).map((error) => `PR #${pull.number}: ${error}`);
             }
 
             if (failures.length > 0) {

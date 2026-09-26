@@ -1,7 +1,7 @@
 package plugin_test
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -56,33 +58,75 @@ func requireHookBinaries(t *testing.T) {
 	_ = bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh"))
 }
 
-// user-prompt-submit.sh hardcodes /tmp for its session markers (line 188 uses
-// /tmp, not TMPDIR), so tests clean up by absolute path rather than t.TempDir.
+// Git Bash /tmp is not necessarily Go's /tmp on Windows. Ask the same Bash
+// used by the hooks to translate its default temp directory to a native path.
+func hookStateDir() string {
+	if runtime.GOOS != "windows" {
+		if dir := os.Getenv("TMPDIR"); dir != "" {
+			return dir
+		}
+		return "/tmp"
+	}
+	output, err := exec.Command("bash", "-c", `cygpath -w "${TMPDIR:-/tmp}"`).Output()
+	if err != nil {
+		panic(fmt.Sprintf("resolve Git Bash marker directory: %v", err))
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func stateFilePath(sessionID string) string {
-	return filepath.Join("/tmp", "engram-claude-"+sessionID+"-tools-loaded")
+	return filepath.Join(hookStateDir(), "engram-claude-"+sessionID+"-tools-loaded")
 }
 
 func nudgeFilePath(sessionID string) string {
-	return filepath.Join("/tmp", "engram-claude-"+sessionID+"-last-nudge")
+	return filepath.Join(hookStateDir(), "engram-claude-"+sessionID+"-last-nudge")
 }
 
-// newSessionID derives a unique, deterministic UUID from the test name. This
-// matches the hook's unencoded session-key contract. It clears state left by an
-// interrupted earlier run so the first-message path is reachable, and registers
-// the same cleanup on exit.
+func TestNewSessionIDPreservesUnrelatedMarker(t *testing.T) {
+	requireHookBinaries(t)
+	outerID := newSessionID(t)
+	outerMarker := stateFilePath(outerID)
+	file, err := os.OpenFile(outerMarker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("create outer marker exclusively: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close outer marker: %v", err)
+	}
+
+	t.Run("inner cleanup", func(t *testing.T) {
+		innerID := newSessionID(t)
+		markSessionBootstrapped(t, innerID)
+	})
+	if _, err := os.Stat(outerMarker); err != nil {
+		t.Fatalf("outer marker must survive inner cleanup: %v", err)
+	}
+}
+
+// newSessionID creates an unpredictable per-run UUID. Cleanup only removes
+// markers belonging to this invocation, never markers from an earlier run.
 func newSessionID(t *testing.T) string {
 	t.Helper()
-	hash := sha256.Sum256([]byte(t.Name()))
-	id := hex.EncodeToString(hash[:16])
-	id = id[:12] + "4" + id[13:16] + "8" + id[17:]
-	id = id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
-
-	clean := func() {
-		os.Remove(stateFilePath(id))
-		os.Remove(nudgeFilePath(id))
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		t.Fatalf("generate session ID: %v", err)
 	}
-	clean()
-	t.Cleanup(clean)
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	id := hex.EncodeToString(bytes[:])
+	id = id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
+	for _, path := range []string{stateFilePath(id), nudgeFilePath(id)} {
+		if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
+			t.Fatalf("refuse to reuse existing session marker %q: %v", path, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, path := range []string{stateFilePath(id), nudgeFilePath(id)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Errorf("remove session marker %q: %v", path, err)
+			}
+		}
+	})
 	return id
 }
 
@@ -575,6 +619,10 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 		{"TestSubagentStopFallsBackToStdout", "sess-fallback", "", "from stdout", "from stdout"},
 		{"TestSubagentStopSkipsEmptyPayload", "sess-empty", "", "", ""},
 		{"TestSubagentStopPreservesShellMetacharacters", "sess-quoting", tricky, "", tricky},
+		{"TestSubagentStopPreservesBareCR", "sess-bare-cr", "before\rafter", "", "before\rafter"},
+		{"TestSubagentStopPreservesOriginalCRLF", "sess-crlf", "first\r\nsecond", "", "first\r\nsecond"},
+		{"TestSubagentStopPreservesLFAndBareCR", "sess-mixed", "first\nsecond\rthird", "", "first\nsecond\rthird"},
+		{"TestSubagentStopPreservesTrailingLF", "sess-trailing", "first\n", "", "first\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			requireHookBinaries(t)
@@ -607,6 +655,41 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 			}
 			if got[0].SessionID != tt.sessionID || got[0].Source != "subagent-stop" {
 				t.Errorf("passive capture = %+v, want session_id %q and source subagent-stop", got[0], tt.sessionID)
+			}
+		})
+	}
+}
+
+func TestSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
+	for _, tt := range []struct {
+		name, primary, stdout, want string
+	}{
+		{"primary wins", "primary", "fallback", "primary"},
+		{"empty primary falls back", "", "fallback", "fallback"},
+		{"both empty skip capture", "", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requireHookBinaries(t)
+			srv, captured := captureServer(t)
+			input, err := json.Marshal(struct {
+				SessionID            string `json:"session_id"`
+				CWD                  string `json:"cwd"`
+				LastAssistantMessage string `json:"last_assistant_message"`
+				Stdout               string `json:"stdout"`
+			}{"explicit-fields", t.TempDir(), tt.primary, tt.stdout})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runHook(t, "subagent-stop.sh", string(input), map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+			got := captured()
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("unexpected passive POSTs: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Content != tt.want || got[0].SessionID != "explicit-fields" || got[0].Source != "subagent-stop" || got[0].Project != "engram" {
+				t.Fatalf("passive POSTs = %+v, want one capture of %q", got, tt.want)
 			}
 		})
 	}
@@ -865,6 +948,56 @@ func healthyServer(t *testing.T) *httptest.Server {
 // TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard verifies session-start.sh's MCP-migration guard honors CLAUDE_CONFIG_DIR (issue #1081).
 // TestSessionStartAlwaysDelegatesClaudeMCPRegistration confirms the hook has no
 // config-file authority: setup owns inspection, conflict detection, and writes.
+func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
+	requireHookBinaries(t)
+
+	var registered struct {
+		ID            string `json:"id"`
+		Project       string `json:"project"`
+		Directory     string `json:"directory"`
+		OwnershipMode string `json:"ownership_mode"`
+	}
+	var registrations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/project/current":
+			_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+			if err := json.NewDecoder(r.Body).Decode(&registered); err != nil {
+				t.Errorf("decode session registration: %v", err)
+				return
+			}
+			registrations++
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	stubDir := t.TempDir()
+	stub := filepath.Join(stubDir, "engram")
+	if err := os.WriteFile(stub, []byte("#!/bin/bash\nif [ \"$*\" = \"protocol-mode claude-code\" ]; then printf 'slim\\n'; fi\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write engram stub: %v", err)
+	}
+	cwd := t.TempDir()
+	runHook(t, "session-start.sh", `{"session_id":"claude-parent-session","cwd":`+strconv.Quote(cwd)+`}`,
+		map[string]string{
+			"ENGRAM_URL": srv.URL,
+			"PATH":       stubDir + ":" + os.Getenv("PATH"),
+		})
+
+	if registrations != 1 {
+		t.Fatalf("session registrations = %d, want 1", registrations)
+	}
+	if registered.ID != "claude-parent-session" || registered.Project != "engram" || registered.Directory != cwd {
+		t.Fatalf("session registration = %#v, want Claude authoritative session and resolved project", registered)
+	}
+	if registered.OwnershipMode != "project_owned" {
+		t.Fatalf("ownership_mode = %q, want project_owned", registered.OwnershipMode)
+	}
+}
+
 func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
 	requireHookBinaries(t)
 

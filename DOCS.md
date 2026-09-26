@@ -13,6 +13,9 @@ This is the complete technical reference for Engram. For getting started, see th
 | Section                                                   | What you'll find                                             |
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
+| [Documentation Authority](#documentation-authority)       | Which doc owns each contract and what must change together   |
+| [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
+| [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
 | [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
@@ -38,6 +41,84 @@ For other docs:
 
 ---
 
+## Documentation Authority
+
+When documentation and code disagree, this table says which doc surface is canonical for each contract, where the code-level authority lives, and which sibling docs must change together with it.
+
+Reader and status guide:
+
+- [README.md](README.md) is the concise product overview; this living `DOCS.md` is the full technical reference. Maintainer and contributor guides explain how to work with the system rather than replacing the contract-specific authorities below; the [Codebase Guide](docs/CODEBASE-GUIDE.md) covers ownership and guardrails.
+- These living docs are maintained and checked against shipped code and tests, not presumed to be generated copies. A historical record does not supersede shipped behavior or its tests. Generation is claimed only where a source-to-copy path is verified below.
+- [CODEOWNERS](CODEOWNERS) assigns the default reviewer/owner `@Gentleman-Programming` to paths without a more specific match, including these docs; review ownership does not make every document canonical.
+
+| Contract                               | Canonical doc surface               | Code authority                                                               | Must change together                                                                                                                       |
+| -------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| MCP tool inventory                     | DOCS.md "MCP Tools"                 | `internal/mcp/mcp.go` registrations + `ProfileAgent`/`ProfileAdmin`          | `docs/ARCHITECTURE.md` tool table; `docs/AGENT-SETUP.md` setup claims; `docs/PLUGINS.md` comparison table; README.md intent table (subset) |
+| Tool input schemas                     | DOCS.md per-tool sections           | `internal/mcp/mcp.go` (live schemas); `internal/mcp/testdata/tool-contract-v1.json` (test-enforced v1 compatibility baseline; change only when intentionally changed) | (none)                                                                                                                                     |
+| SQLite schema                          | DOCS.md "Database Schema"           | `internal/store/store.go` `Store.migrate`                                    | (none)                                                                                                                                     |
+| Memory Protocol                        | `DOCS.md#memory-protocol-full-text` | (none; prose contract)                                                       | `skills/memory-protocol/SKILL.md`; `memoryProtocolMarkdown` embedded in `internal/setup`; `plugin/*/skills/memory/SKILL.md`                |
+| Setup instructions and per-agent paths | docs/AGENT-SETUP.md                 | `internal/setup/agents.go` + `setup.go`                                      | README.md setup table                                                                                                                      |
+| Plugin contracts                       | docs/PLUGINS.md                     | `plugin/*` assets, `internal/setup/plugins/`                                 | `docs/AGENT-SETUP.md` per-agent sections                                                                                                   |
+| HTTP API and CLI                       | DOCS.md HTTP API / CLI sections     | `internal/server/server.go` (local routes); `internal/cloud/cloudserver/cloudserver.go` (cloud routes); `cmd/engram` | `docs/PLUGINS.md` conflicts table (subset)                                                                                                 |
+| Package ownership boundaries           | docs/CODEBASE-GUIDE.md              | (none; prose contract)                                                       | (none)                                                                                                                                     |
+
+Code and tests beat docs: `internal/mcp` owns agent-facing tool schemas, `internal/store` owns the durable schema, `internal/setup` owns install surfaces, and `plugin/*` translates host events without duplicating durable policy.
+
+### Reading and updating the memory protocol
+
+For readers, [Memory Protocol](#memory-protocol-full-text) is the canonical living agent-facing prose contract. The table above names related surfaces to check when that behavior changes; "must change together" means review for behavioral alignment, not copy identical text into every host.
+
+For maintainers, distinguish these ownership paths:
+
+- `internal/setup/setup.go` maintains `memoryProtocolMarkdown` independently. Setup uses that embedded text for installed agent instructions; it is not generated from DOCS.md. Compare behavior when editing either prose surface.
+- `skills/memory-protocol/SKILL.md` is a manually maintained contributor skill. `plugin/claude-code/skills/memory/SKILL.md` and `plugin/codex/skills/memory/SKILL.md` are host-adapted, manually maintained skills. Consider their relevant instructions alongside the canonical prose rather than assuming byte identity or automatic sync.
+- `plugin/opencode/engram.ts` contains OpenCode's agent instructions. Its verified generated copy is `internal/setup/plugins/opencode/engram.ts`: `go generate ./internal/setup/` copies source to embedded destination, and `TestEmbeddedOpenCodePluginMatchesSourceByteForByte` checks equality. This generation direction applies to the OpenCode plugin copy, not the other prose and skill surfaces above.
+
+### Documentation surface catalog
+
+This catalog covers the 60 tracked Markdown files. **Owner `GP`** means CODEOWNERS review routing to `@Gentleman-Programming`, not an individual author or content owner. **Canonical** identifies a contract named in the matrix above; **guide** explains or operates alongside contracts; **instruction** directs agents; **policy/template** governs contribution or reuse. **Living** means maintained against current behavior, not a guarantee that every described optional feature is enabled. Beta material describes experimental paths, not universally shipped behavior.
+
+| Surface | Audience | Authority | Status | Owner |
+| --- | --- | --- | --- | --- |
+| [README.md](README.md) | New users | Guide: overview | Living | GP |
+| [DOCS.md](DOCS.md) | Users, maintainers | Canonical: technical contracts above | Living | GP |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributors | Policy: contribution workflow | Living | GP |
+| [SECURITY.md](SECURITY.md) | Security reporters | Policy: disclosure | Living | GP |
+| [TRADEMARKS.md](TRADEMARKS.md) | Reusers | Policy: marks | Living | GP |
+| [AGENTS.md](AGENTS.md) | Repository agents | Instruction: skill index | Living | GP |
+| [CHANGELOG.md](CHANGELOG.md) | Upgraders | Guide: release record | Historical | GP |
+| [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) | Contributors | Template: PR review | Living | GP |
+| [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) | Agent users | Canonical: setup paths | Living | GP |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Maintainers | Guide: architecture | Living | GP |
+| [docs/BETA_TESTING.md](docs/BETA_TESTING.md) | Beta testers | Guide: testing | Beta | GP |
+| [docs/CODEBASE-GUIDE.md](docs/CODEBASE-GUIDE.md) | Contributors | Canonical: package boundaries | Living | GP |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | Evaluators | Guide: comparison | Living | GP |
+| [docs/DOCTOR.md](docs/DOCTOR.md) | Operators | Guide: diagnostics | Living | GP |
+| [docs/ENGRAM-CLOUD-BRANDING.md](docs/ENGRAM-CLOUD-BRANDING.md) | Cloud readers | Guide: moved-page pointer | Compatibility redirect | GP |
+| [docs/ENGRAM-CLOUD.md](docs/ENGRAM-CLOUD.md) | Cloud readers | Guide: moved-page pointer | Compatibility redirect | GP |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installers | Guide: installation | Living | GP |
+| [docs/PLUGINS.md](docs/PLUGINS.md) | Plugin users | Canonical: plugin contracts | Living | GP |
+| [docs/RELEASE-POLICY.md](docs/RELEASE-POLICY.md) | Maintainers | Policy: releases | Living | GP |
+| [docs/SELF-TESTING.md](docs/SELF-TESTING.md) | Maintainers | Guide: self-tests | Living | GP |
+| [docs/TEAM-USAGE.md](docs/TEAM-USAGE.md) | Teams | Guide: collaboration | Living | GP |
+| [docs/beta/obsidian-brain.md](docs/beta/obsidian-brain.md) | Beta users | Guide: Obsidian export | Beta | GP |
+| [docs/codebase/*.md](docs/codebase/) | Maintainers | Guide: codebase maps and operations | Living | GP |
+| [docs/engram-cloud/README.md](docs/engram-cloud/README.md) | Cloud readers | Guide: cloud entry point | Living | GP |
+| [docs/engram-cloud/branding.md](docs/engram-cloud/branding.md) | Cloud maintainers | Guide: branding | Living | GP |
+| [docs/engram-cloud/production-checklist.md](docs/engram-cloud/production-checklist.md) | Cloud operators | Guide: production checks | Living | GP |
+| [docs/engram-cloud/quickstart.md](docs/engram-cloud/quickstart.md) | Cloud users | Guide: quickstart | Living | GP |
+| [docs/engram-cloud/troubleshooting.md](docs/engram-cloud/troubleshooting.md) | Cloud operators | Guide: troubleshooting | Living | GP |
+| [docs/intended-usage.md](docs/intended-usage.md) | Users | Guide: intended use | Living | GP |
+| [plugin/claude-code/skills/memory/SKILL.md](plugin/claude-code/skills/memory/SKILL.md) | Claude agents | Instruction: host-adapted memory skill | Living | GP |
+| [plugin/codex/skills/memory/SKILL.md](plugin/codex/skills/memory/SKILL.md) | Codex agents | Instruction: host-adapted memory skill | Living | GP |
+| [plugin/pi/README.md](plugin/pi/README.md) | Pi users | Guide: integration | Living | GP |
+| [skills/catalog.md](skills/catalog.md) | Contributor agents | Instruction: skill index | Living | GP |
+| [skills/*/SKILL.md](skills/) | Contributor agents | Instruction: domain skills | Living | GP |
+
+The memory protocol's canonical prose is [Memory Protocol](#memory-protocol-full-text); `internal/setup/setup.go` independently maintains `memoryProtocolMarkdown` for installed generated instructions. Claude and Codex plugin skill files above are manually maintained. OpenCode's source `plugin/opencode/engram.ts` has a verified generated embedded copy at `internal/setup/plugins/opencode/engram.ts`; neither is a separate Markdown catalog entry. Historical OpenSpec/SDD changes are transient, non-shipped records, not evidence of current behavior.
+
+---
+
 ## Database Schema
 
 ### Tables
@@ -51,6 +132,8 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
 - **sync_state** — one row per `target_key`, with lifecycle, sequence, retry/backoff, lease, error, success, and update metadata; **sync_mutations** — ordered mutation queue with target, project, entity, operation, payload, source, acknowledgement, and disposition metadata
+- **sync_delete_tombstones** — one row per deleted entity (PK `entity`, `entity_key`) with `session_id`, `project`, `deleted_at`, `hard_delete`, `active`, `last_mutation_seq`, and `last_remote_mutation_seq` metadata. `last_mutation_seq` retains the highest historical local delete-mutation sequence; backfill emits missing delete intent for active tombstones without a recorded remote delete sequence or matching unacknowledged delete mutation, without advancing that field. `last_remote_mutation_seq` records the default cloud target's remote delete floor. Pulled session and observation upserts first pass a tombstone guard: local sync compares a known payload generation with the hard-delete time, while cloud sync checks the applicable remote delete sequence floor. Without its own floor, an active tombstone blocks the default target; for non-default targets, it blocks only when no non-default target has a remote floor. Only permitted upserts can deactivate the tombstone.
+- **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
 - **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
@@ -61,6 +144,69 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - Busy timeout 5000ms
 - Synchronous NORMAL
 - Foreign keys ON
+
+### Data-directory filesystem safety
+
+Persistent SQLite WAL is unsafe on network filesystems. Engram rejects known NFS and SMB/CIFS data directories before it opens, migrates, or changes the database files. An unknown filesystem remains compatible, but is not a proof that the directory is local.
+
+If startup reports a network filesystem, stop **all** Engram processes, then copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet together to local storage. Set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected), start Engram, and run `engram doctor`. Then run the integrity check for your shell:
+
+```bash
+# POSIX shell or Git Bash
+sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"
+```
+
+```powershell
+# PowerShell
+sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
+```
+
+Engram does not auto-repair, quarantine, checkpoint, or fall back to rollback journaling for this condition.
+
+---
+
+## CLI Reference
+
+The CLI groups local memory operations, project maintenance, conflict audit, and optional cloud replication. Use `engram help` for live usage; the inventory below points to the detailed [conflict](#conflict-audit-cli-admin) and [cloud](#cloud-cli-opt-in) references.
+
+```text
+engram setup [agent]          Install an available agent integration (see Agent Setup)
+engram serve [port]           Start local HTTP API (default: 7437)
+engram mcp                    Start stdio MCP server
+engram tui                    Launch terminal UI
+engram test [suite]            Run isolated self-tests [--quick] [--json]
+engram init [name]             Initialize .engram/config.json [--force]
+engram search <query>         Search memories [--project P|--all] [--match all|any]
+engram save <title> <msg>     Save a memory
+engram delete <obs_id>        Delete an observation [--hard]
+engram delete session <id>    Delete an empty session
+engram delete prompt <id>     Delete a prompt permanently
+engram delete project <name> [--hard]
+                              Remove prompts; soft-delete observations by default; --hard deletes observations and only unreferenced sessions
+engram timeline <obs_id>      Chronological context [--project P|--all]
+engram context [project]      Recent context [--project P|--all]
+engram stats                  Memory statistics [--project P|--all]
+engram export [file]          Export memories to JSON [--project P|--all]
+engram import <file>          Import memories from JSON
+engram sync                   Export new memories to .engram/ [--all: every project]
+engram sync --cloud --project <name>
+                              Sync one project against the configured cloud endpoint
+engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred
+engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
+engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
+engram projects list          List projects with observation/session/prompt counts
+engram projects consolidate [--all] [--dry-run]
+                              Merge similar names interactively; --all --dry-run previews without prompts
+engram projects prune         Prune projects with zero observations [--dry-run] [--paths-only]
+engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
+                              Repair legacy local ownership without a server token
+engram obsidian-export        Export memories to Obsidian (beta; --all for every project)
+engram version                Show version
+```
+
+For `setup [agent]`, see [Agent Setup](docs/AGENT-SETUP.md) for supported integrations rather than treating a fixed agent list as exhaustive. `--all` deliberately selects every project for applicable reads and local sync export (cloud sync still requires a single project); do not combine it with an explicit project. `engram context [project]` accepts the positional project as an alternative to `--project`. `projects prune --paths-only` limits candidates to names containing `/` or `\`.
+
+Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enroll <project>`, `cloud unenroll <project>`, and `cloud serve`. For upgrades, use `cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>`; `remirror` rebuilds cloud state from authoritative local data. Server-side repair uses `cloud repair materialize-mutations --project <project> (--dry-run|--apply)`. Managed-admin setup uses `cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`; stranded-admin token recovery uses `cloud bootstrap recover-token [--name <name>] [--revoke-existing]`. See [Cloud CLI](#cloud-cli-opt-in) and [managed-user bootstrap](#managed-users-tokens-and-cli-bootstrap) for constraints and detailed syntax.
 
 ---
 
@@ -111,6 +257,15 @@ Dashboard route tree (`engram cloud serve`):
   - `GET /dashboard/admin/projects`
   - `GET /dashboard/admin/users` (admin-gated)
   - `GET /dashboard/admin/users/list` (admin-gated; HTMX partial)
+  - `GET /dashboard/admin/users/{principalID}` (admin-gated; managed-user detail)
+  - `POST /dashboard/admin/users` — create managed user
+  - `POST /dashboard/admin/users/{principalID}/enable` — enable managed user
+  - `POST /dashboard/admin/users/{principalID}/disable` — disable managed user
+  - `POST /dashboard/admin/users/{principalID}/tokens` — create managed token
+  - `POST /dashboard/admin/tokens/{tokenID}/revoke` — revoke managed token
+  - `POST /dashboard/admin/users/{principalID}/grants` — create project grant
+  - `POST /dashboard/admin/users/{principalID}/grants/{project}/revoke` — revoke project grant
+  - Managed-user detail and form routes use the dashboard session, unlike the JSON `/admin/*` API. Viewing detail allows dashboard admin sessions; mutations require managed-admin permission. Successful form mutations redirect (303, or `HX-Redirect` for HTMX), except token creation, which renders the show-once token directly without redirecting.
   - `GET /dashboard/admin/health` (admin-gated)
   - `POST /dashboard/admin/projects/{name}/sync` (admin-gated; toggle sync enabled/disabled)
   - `GET /dashboard/admin/projects/{name}/sync/form` (admin-gated; HTMX partial)
@@ -120,6 +275,13 @@ Dashboard route tree (`engram cloud serve`):
   - `GET /dashboard/observations/{project}/{sessionID}/{syncID}` — observation detail
   - `GET /dashboard/prompts/{project}/{sessionID}/{syncID}` — prompt detail
 
+Dashboard bootstrap/recovery (separate from Public and Protected routes):
+
+- `GET /dashboard/bootstrap` — show the first managed-admin creation form.
+- `POST /dashboard/bootstrap` — create the first managed admin; rejects creation when an active admin already exists.
+
+Both routes require legacy dashboard recovery access. In authenticated mode, this means a valid dashboard session for the configured legacy `ENGRAM_CLOUD_ADMIN` principal; managed admins and members cannot use these routes. In insecure mode, bypassing the dashboard session check does not supply a `LegacyEnvAdmin` principal, so the bootstrap handlers are not generally open.
+
 Engram is local-first: local SQLite is authoritative; cloud features are optional replication/shared access and enrollment controls.
 
 ### Mutation materialization attribution
@@ -128,7 +290,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
+- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>"}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
@@ -157,8 +319,9 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
 - `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
-  - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
+- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, find?, replace?, type?, project?, scope?, topic_key?}`
+  - `find` and `replace` must be supplied together and cannot be combined with `content`. They perform a literal, case-sensitive, global replacement inside the existing observation; empty `find`, no match, or normalized-identical output leaves content unchanged.
+  - Each replacement input and the transformed result are bounded by the configured observation content limit. `400` is returned for invalid pairs, content conflicts, bounds failures, or title/content validation failures; missing observations return `404`.
 - `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
 - `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
   - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
@@ -218,11 +381,11 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - Optional `?project=<name>` selects a known project; `?all_projects=true` exports every project
   - Current format `0.2.0` preserves observations (including local pin state), prompts, and complete memory-relation judgment and supersession metadata.
   - `400` for blank, malformed, or conflicting selectors
-- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Every imported relation must reference observations present in the same resulting store.
+- `POST /import` — Import one JSON backup atomically. Current `0.2.0` backups and legacy `0.1.0` backups that omit pins and relations are accepted; unsupported versions are rejected before mutation. Relations normally require both endpoint observations in the resulting store. Audit rows whose normalized `judgment_status` is exactly `orphaned` may retain missing source and/or target observations; their IDs and metadata are preserved. All other dangling relations and missing superseding relations reject and roll back the full import.
 
 ### Stats / Diagnostics
 
-- `GET /stats` — Current-project memory statistics. Use `?project=<name>` or `?all_projects=true` to select scope.
+- `GET /stats` — Current-project memory statistics. Use `?project=<name>` or `?all_projects=true` to select scope. Store query failures return `500` with a generic JSON error (`{"error":"stats unavailable"}`), not a successful zero-count response. Store-backed project resolution failures return `500` with `{"error":"project resolution failed","code":"project_resolution_failed"}`; invalid, unknown, and ambiguous projects retain their input-error responses.
 - `GET /doctor` — Read-only operational diagnostics. Query: `?project=X&check=CHECK_CODE`
   - Returns the same diagnostic report envelope as `engram doctor --json` and MCP `mem_doctor`
   - `project` and `check` are optional; omitted `project` uses current project detection
@@ -518,7 +681,7 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
+| `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
 | `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
@@ -573,6 +736,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 
 - `--dry-run` (default): for non-semantic lexical scans, reports candidates found with 0 pending rows inserted.
 - `--apply`: inserts up to `--max-insert` (default 100) new rows; prints WARNING when cap is reached.
+- `--dry-run` and `--apply` are mutually exclusive; combining them in either order exits with an error before opening the store.
 - `--since RFC3339`: scan only observations created at or after the timestamp.
 - `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
 - `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
@@ -616,7 +780,7 @@ Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD
 Cloud server always requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` (comma-separated), including insecure mode, so project scope remains server-enforced.
 `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_ALLOWED_PROJECTS` are server-side requirements for authenticated mode and must be configured before `engram cloud serve` (or compose startup).
 Authenticated mode also requires an explicit non-default `ENGRAM_JWT_SECRET`; implicit development defaults are rejected.
-Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
+Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. For cloud authenticated sync and admin requests, the Authorization parser trims outer whitespace and requires exactly two whitespace-delimited fields: a case-insensitive `Bearer` scheme and one credential. Tabs or multiple spaces between fields are accepted; whitespace embedded in the credential and a scheme glued to the credential are rejected. This describes field separation, not an RFC credential-character grammar; it does not describe the local `ENGRAM_HTTP_TOKEN` parser. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
 
 `ENGRAM_CLOUD_ADMIN` is optional in authenticated mode. Its sessions can access the existing dashboard admin read surfaces, project sync controls, and audit logs, but managed-user, token, and project-grant mutations require a managed admin token.
 `ENGRAM_CLOUD_ADMIN` is rejected in insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) to avoid an incoherent admin/browser auth path.
@@ -688,10 +852,22 @@ This path requires exactly one enabled managed human admin and exactly one activ
 
 #### Managed admin API response JSON
 
-The managed-admin API returns snake_case JSON keys for user and grant objects:
+These JSON routes require a managed-token admin principal; legacy admins and managed members cannot use them. Successful response shapes are:
 
-- `POST /admin/users` returns one user object and `GET /admin/users` returns an array of user objects. Each object contains `principal_id`, `username`, `email`, `display_name`, `role`, `enabled`, and `created_at`.
-- `POST /admin/users/{principalID}/grants` returns one grant object and `GET /admin/users/{principalID}/grants` returns an array of grant objects. Each object contains `principal_id`, `project`, `granted_by_principal_id`, and `created_at`.
+| Method | Path | Success JSON |
+| --- | --- | --- |
+| `GET` | `/admin/users` | Array of users |
+| `POST` | `/admin/users` | User object |
+| `POST` | `/admin/users/{principalID}/enable` | `{"status":"ok","principal_id":...,"enabled":true}` |
+| `POST` | `/admin/users/{principalID}/disable` | `{"status":"ok","principal_id":...,"enabled":false}` |
+| `GET` | `/admin/users/{principalID}/tokens` | Array of token metadata; no raw token or token hash |
+| `POST` | `/admin/users/{principalID}/tokens` | `{"raw_token":...,"token":...}`; raw token is returned only on creation, alongside token metadata (never the hash) |
+| `POST` | `/admin/tokens/{tokenID}/revoke` | `{"status":"ok","token_id":...}` |
+| `GET` | `/admin/users/{principalID}/grants` | Array of grants |
+| `POST` | `/admin/users/{principalID}/grants` | Grant object |
+| `POST` | `/admin/users/{principalID}/grants/{project}/revoke` | `{"status":"ok","principal_id":...,"project":...}` |
+
+User objects contain `principal_id`, `username`, `email`, `display_name`, `role`, `enabled`, and `created_at`; grant objects contain `principal_id`, `project`, `granted_by_principal_id`, and `created_at`. Token metadata contains `id`, `principal_id`, `token_prefix`, `name`, `created_by_principal_id`, and `created_at`, with optional usage/revocation fields. The `POST` payloads are JSON: user creation accepts `username`, `email`, `display_name`, `role`; token creation accepts `name`; token revocation accepts `reason`; grant creation accepts `project`. Enable, disable, and grant revocation use path parameters without a request payload.
 
 Cloud sync is still local-first and explicit:
 
@@ -815,9 +991,11 @@ Engram resolves the project at MCP tool call time. The default source is the **s
 | 1    | nearest `.engram/config.json` exists within the enclosing git root, or at cwd outside git | `config`          | `project_name` from config         |
 | 2    | cwd is inside a git repo that currently has an `origin` remote                              | `git_remote`      | if the binding is absent, initialize it from the remote repo name; otherwise reuse the stored binding label |
 | 3    | cwd is inside a git repo that currently has no `origin` remote                               | `git_root`        | if the binding is absent, initialize it from the git-root basename; otherwise reuse the stored binding label |
-| 4    | cwd has exactly one git-repo child                                                        | `git_child`       | child repo name (warning included) |
+| 4    | cwd has exactly one git-repo child                                                        | `git_child`       | child's canonical name: its config first, then existing Git binding or origin remote, then repository-root basename (warning included) |
 | 5    | cwd has multiple git-repo children                                                        | `ambiguous` error | — write tools fail fast            |
 | 6    | no git repo near cwd                                                                      | `dir_basename`    | basename of cwd                    |
+
+A promoted child's project name and path match detection from inside that child; its source remains `git_child` with an advisory warning. Invalid child config or Git binding fails closed instead of promoting a directory basename. An explicit config at the parent takes precedence over child scanning. Historical memories are not migrated by detection.
 
 Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dirs and noise dirs (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `.idea`, `.vscode`).
 
@@ -878,13 +1056,13 @@ For monorepos, detection now honors the **nearest** `.engram/config.json` at or 
 
 ### Read tools (optional project override)
 
-`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor` — `project` is an optional argument. If supplied, it is validated against the store via `ProjectExists`. Unknown project names return a structured error with `available_projects`. `mem_get_observation` resolves project from cwd for envelope metadata and does not accept a project override.
+`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`, and `mem_get_observation` accept an optional `project` argument validated against known projects. Unknown explicit project names return a structured error with `available_projects`. When `project` is omitted, the process override takes precedence over cwd detection. For `mem_get_observation`, the resolved project selects response-envelope context only; retrieval remains ID-based and does not filter by observation ownership.
 
 ### Admin tools
 
 `mem_delete` is ID-based and requires `id`; optional `hard_delete=true` permanently deletes the observation. It does not accept or auto-detect `project`.
 
-`mem_merge_projects` requires `from` (comma-separated source project names) and `to` (canonical target project name). It does not accept or auto-detect `project`.
+`mem_merge_projects` requires `from` (comma-separated, explicitly named source project names) and `to` (canonical target project name). Case/trim variants and matching `-`/`_` separator variants (for example, `foo-bar` to `foo_bar`) are allowed; unrelated names and missing sources are rejected. It does not accept or auto-detect `project`.
 
 ### mem_current_project
 
@@ -949,7 +1127,7 @@ Save responses include lifecycle metadata for the saved observation: computed `s
 
 ### mem_update
 
-Update an observation by ID. Public schema supports partial updates for `title`, `content`, `type`, `scope`, and `topic_key`. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
+Update an observation by ID. Public schema supports partial updates for `title`, `content`, `find`, `replace`, `type`, `scope`, and `topic_key`. `find` and `replace` are paired literal, case-sensitive global replacement inputs and cannot be combined with `content`; empty finds and replacements with no effective normalized change preserve content. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
 
 ### mem_review
 
@@ -1016,7 +1194,12 @@ The optional project filter is enforced: an observation owned by another project
 
 ### mem_get_observation
 
-Get full untruncated content of a specific observation by ID.
+Get full untruncated content of a specific observation by ID. The optional `project` argument is validated against known projects and selects the project context in the response envelope; it does not filter the ID-based lookup by observation ownership. When omitted, the tool uses the process project override or cwd detection.
+
+Parameters:
+
+- **id** (required): int — observation ID to retrieve
+- **project** (optional): string — explicit project context; unknown names return a structured error with `available_projects`
 
 ### mem_session_summary
 
@@ -1047,7 +1230,7 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 
 ### mem_merge_projects
 
-**Admin tool.** Merge multiple project name variants into a single canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. All observations, sessions, and prompts from the source projects are reassigned to the canonical project.
+**Admin tool.** Merge explicitly named case/trim or corresponding `-`/`_` separator variants into a canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. For example, `foo-bar` may merge into `foo_bar`, but unrelated names are rejected. Sources must exist; the CLI retains its stricter rules. Observations, sessions, prompts, pending sync identity, and enrollment migrate together. A no-op reports that no records moved.
 
 ### mem_current_project
 
@@ -1298,7 +1481,8 @@ Separate table captures what the USER asked (not just tool calls). Gives future 
 Share memories across machines, backup, or migrate:
 
 - `engram export` — Versioned JSON backup of sessions, observations, prompts, local pin state, and memory-relation metadata
-- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation
+- `engram import <file>` — Load an atomic backup transaction. Version `0.2.0` preserves pins and relations; legacy `0.1.0` backups without those fields remain compatible, while unsupported versions fail before mutation. Orphaned relation audit rows may retain missing endpoint observations; other dangling relations or missing superseding relations fail the complete transaction.
+- `engram export --help` and `engram import --help` — Show command-specific usage and options without an update check, configuration lookup, database migration, or store access. Export accepts an optional output filename and `--project NAME` or `--all`; import requires a backup filename for normal operation.
 
 ### Git Sync (Chunked)
 
@@ -1310,6 +1494,7 @@ Share memories through git repositories using compressed chunks with a manifest 
 - `engram sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
 - `engram sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
 - `engram sync --project NAME` — Filters export to a specific project
+- Local sync projects hard deletes as canonical observation, prompt, and session delete mutations; child deletes precede their session and remain replay-safe through manifest history.
 
 ```
 .engram/
@@ -1404,13 +1589,15 @@ After=network.target
 [Service]
 WorkingDirectory=%h
 ExecStart=%h/.local/bin/engram serve
-Restart=always
+Restart=on-failure
 RestartSec=3
 Environment=ENGRAM_DATA_DIR=%h/.engram
 
 [Install]
 WantedBy=default.target
 ```
+
+`Restart=on-failure` restarts unexpected failures but not a clean exit when the same Engram instance already owns the port. A different or legacy port owner still causes a startup error. Existing installed units are not changed by this example: manually update `~/.config/systemd/user/engram.service` and run `systemctl --user daemon-reload` to apply the policy.
 
 ### Using launchd (macOS)
 
@@ -1544,7 +1731,7 @@ The cloud dashboard uses [templ](https://templ.guide/) for server-side HTML comp
 
 ### Prerequisite
 
-Download the pinned templ binary:
+The templ CLI is registered as a module tool at v0.3.1001; no global PATH install is required. To download module dependencies ahead of time:
 
 ```sh
 go mod download
@@ -1555,10 +1742,10 @@ go mod download
 ```sh
 make templ
 # or directly:
-go tool templ generate ./internal/cloud/dashboard/...
+go tool templ generate -path ./internal/cloud/dashboard
 ```
 
-The regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` must be committed together with the `.templ` source changes. The test `TestTemplGeneratedFilesAreCheckedIn` in `internal/cloud/dashboard/templ_policy_test.go` will fail in CI if generated files are missing or outdated.
+The regenerated `components_templ.go`, `layout_templ.go`, and `login_templ.go` must be committed together with the `.templ` source changes. The test `TestTemplGeneratedFilesAreCheckedIn` in `internal/cloud/dashboard/templ_policy_test.go` checks that generated files are present; CI additionally checks regeneration for drift.
 
 **Important**: Always use the pinned version `github.com/a-h/templ v0.3.1001` (already in `go.mod`). Regenerating with a different version produces diff churn in generated output.
 

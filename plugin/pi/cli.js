@@ -9,6 +9,8 @@ const LEGACY_PACKAGE_NAMES = new Set([
   "npm:gentle-engram@0.1.8",
   "npm:gentle-engram@0.1.11",
   "npm:gentle-engram@0.1.12",
+  "npm:gentle-engram@0.1.14",
+  "npm:gentle-engram@0.1.15",
 ]);
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const HELP = `pi-engram
@@ -22,7 +24,7 @@ the package with: pi install ${PACKAGE_NAME}
 `;
 
 const MCP_LAUNCHER =
-  "const { spawn } = require('node:child_process'); const bin = process.env.ENGRAM_BIN || 'engram'; const child = spawn(bin, ['mcp', '--tools=agent'], { stdio: 'inherit' }); child.on('error', () => process.exit(127)); child.on('exit', (code, signal) => { if (typeof code === 'number') process.exit(code); process.kill(process.pid, signal || 'SIGTERM'); });";
+  "const { spawn } = require('node:child_process'); const bin = process.env.ENGRAM_BIN?.trim() ? process.env.ENGRAM_BIN : 'engram'; const child = spawn(bin, ['mcp', '--tools=agent'], { stdio: 'inherit' }); child.on('error', () => process.exit(127)); child.on('exit', (code, signal) => { if (typeof code === 'number') process.exit(code); process.kill(process.pid, signal || 'SIGTERM'); });";
 
 function getAgentDir() {
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	_ "modernc.org/sqlite"
 )
@@ -355,7 +356,7 @@ func TestOrphanedObservationSessionCheckReportsGroupedEvidence(t *testing.T) {
 	if evidence.Project != "engram" || evidence.SessionID != "missing-session" || evidence.ObservationCount != 1 {
 		t.Fatalf("evidence=%+v", evidence)
 	}
-	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "cannot be reconstructed") || !strings.Contains(finding.SafeNextStep, "no supported repair") {
+	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "orphaned_observation_session") || !strings.Contains(finding.SafeNextStep, "local placeholder") {
 		t.Fatalf("finding guidance=%+v", finding)
 	}
 }
@@ -434,7 +435,7 @@ func TestSessionProjectDirectoryMismatchFinding(t *testing.T) {
 		Project: "api",
 		DetectProject: func(dir string) (DetectedProject, bool) {
 			if dir == "/work/web" {
-				return DetectedProject{Project: "web", Source: "test", Path: dir}, true
+				return DetectedProject{Project: "web", Source: projectpkg.SourceGitRoot, Path: dir}, true
 			}
 			return DetectedProject{}, false
 		},
@@ -455,8 +456,8 @@ func TestSessionProjectDirectoryMismatchDefersToKnownManualTarget(t *testing.T) 
 		knownTarget  bool
 		wantFindings int
 	}{
-		{name: "known manual target beats third project directory", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 0},
-		{name: "healthy known manual session has no directory finding", sessionID: "manual-save-engram", project: "engram", wantFindings: 0},
+		{name: "trusted third project directory beats known manual target", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 1},
+		{name: "trusted directory mismatch beats matching manual suffix", sessionID: "manual-save-engram", project: "engram", wantFindings: 1},
 		{name: "unknown manual target retains trusted directory finding", sessionID: "manual-save-engram", project: "sias-app", wantFindings: 1},
 		{name: "non-manual session retains trusted directory finding", sessionID: "runtime-session", project: "sias-app", wantFindings: 1},
 	}
@@ -724,6 +725,45 @@ func TestInvalidSessionIdentityCheckReportsSourceReferencesAndJournal(t *testing
 	}
 	if plan.Status != "noop" || len(plan.Actions) != 0 || len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != "cannot_repair_without_explicit_canonical_session_id" {
 		t.Fatalf("repair plan=%+v", plan)
+	}
+}
+
+func TestInvalidSessionIdentityReplacementPreservesOtherFindings(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work'),(' ','engram','/other')`); err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Store: s, Project: "engram"}
+	report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: ReasonQuarantinedPulledSessionIdentity, Message: "remote evidence remains"})
+	planned := PlanSessionIdentityReplacement(scope, report, plan, "", true, "canonical")
+	if planned.IdentityRepair == nil || len(planned.Skipped) != 2 || planned.Skipped[0].SessionID != " " || planned.Skipped[1].ReasonCode != ReasonQuarantinedPulledSessionIdentity {
+		t.Fatalf("plan=%+v", planned)
+	}
+}
+
+func TestInvalidSessionIdentityRepairPlanNoReplacementPreservesGuidance(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work')`); err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Store: s, Project: "engram"}
+	report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
+		plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, mode)
+		if err != nil || plan.Status != "noop" || plan.IdentityRepair != nil || len(plan.Blockers) != 0 || len(plan.Skipped) != 1 || !strings.Contains(plan.Skipped[0].Message, "--replacement-id") {
+			t.Fatalf("mode=%s plan=%+v err=%v", mode, plan, err)
+		}
 	}
 }
 
@@ -1184,7 +1224,7 @@ func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *te
 		t.Run(column, func(t *testing.T) {
 			s, cfg := newDiagnosticTestStoreWithConfig(t)
 			seedDiagnosticPendingMutation(t, cfg.DataDir, "legacy", store.SyncEntitySession, "retired-session", store.SyncOpUpsert, `{"id":"retired-session","project":"legacy","directory":"/tmp/legacy"}`)
-			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), `+column+` = NULL WHERE entity_key = 'retired-session'`); err != nil {
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET disposition = 'superseded', disposition_reason = 'local_entity_deleted', disposition_evidence = '{"entity_key":"retired-session"}', disposition_at = datetime('now'), ` + column + ` = NULL WHERE entity_key = 'retired-session'`); err != nil {
 				t.Fatalf("seed incomplete supersession: %v", err)
 			}
 			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "legacy"}, CheckSyncMutationRequiredFields)
@@ -1196,5 +1236,63 @@ func TestSyncMutationRequiredFieldsCheckBlocksIncompleteSupersededEvidence(t *te
 				t.Fatalf("incomplete %s report=%+v", column, report)
 			}
 		})
+	}
+}
+
+// TestBuildRepairPlanOrphanedObservationSessionRules proves the planner's
+// grouping rules: single-project evidence becomes a sorted placeholder action,
+// a session ID referenced by multiple projects is skipped as ambiguous, blank
+// required fields are skipped as invalid, and a clean report yields a noop plan.
+func TestBuildRepairPlanOrphanedObservationSessionRules(t *testing.T) {
+	evidence := func(project, sessionID string, count int64, first string) Finding {
+		raw, err := json.Marshal(store.OrphanedObservationSessionEvidence{
+			Project: project, SessionID: sessionID, ObservationCount: count, FirstObservedAt: first,
+		})
+		if err != nil {
+			t.Fatalf("marshal evidence: %v", err)
+		}
+		return Finding{ReasonCode: CheckOrphanedObservationSession, Evidence: raw}
+	}
+	report := Report{Status: StatusWarning, Checks: []CheckResult{{
+		CheckID: CheckOrphanedObservationSession,
+		Result:  StatusWarning,
+		Findings: []Finding{
+			evidence("alpha", "missing-2", 2, "2026-01-02 00:00:00"),
+			evidence("alpha", "missing-1", 1, "2026-01-01 00:00:00"),
+			evidence("alpha", "missing-1", 1, "2026-01-03 00:00:00"),
+			evidence("beta", "missing-1", 1, "2026-01-04 00:00:00"),
+			evidence("", "missing-blank-project", 1, "2026-01-05 00:00:00"),
+			evidence("alpha", "", 1, "2026-01-06 00:00:00"),
+		},
+	}}}
+
+	plan, err := BuildRepairPlan(context.Background(), Scope{}, report, CheckOrphanedObservationSession, RepairModePlan)
+	if err != nil {
+		t.Fatalf("BuildRepairPlan: %v", err)
+	}
+	if len(plan.PlaceholderSessions) != 1 {
+		t.Fatalf("placeholders=%+v skipped=%+v", plan.PlaceholderSessions, plan.Skipped)
+	}
+	if got := plan.PlaceholderSessions[0]; got.SessionID != "missing-2" || got.Project != "alpha" || got.ObservationCount != 2 || got.StartedAt != "2026-01-02 00:00:00" {
+		t.Fatalf("placeholder=%+v", got)
+	}
+	skips := map[string]int{}
+	for _, skip := range plan.Skipped {
+		skips[skip.ReasonCode]++
+	}
+	if skips["ambiguous_orphaned_session_project"] != 1 || skips["invalid_orphaned_session_evidence"] != 2 {
+		t.Fatalf("skips=%+v", plan.Skipped)
+	}
+	if plan.Status != "planned" {
+		t.Fatalf("status=%q", plan.Status)
+	}
+
+	empty := Report{Status: StatusOK, Checks: []CheckResult{{CheckID: CheckOrphanedObservationSession, Result: StatusOK}}}
+	noop, err := BuildRepairPlan(context.Background(), Scope{}, empty, CheckOrphanedObservationSession, RepairModePlan)
+	if err != nil {
+		t.Fatalf("BuildRepairPlan empty: %v", err)
+	}
+	if noop.Status != "noop" || len(noop.PlaceholderSessions) != 0 {
+		t.Fatalf("noop plan=%+v", noop)
 	}
 }

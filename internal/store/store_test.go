@@ -1780,6 +1780,245 @@ func TestAddPromptSourceInboxIdentityConcurrentAndSessionScoped(t *testing.T) {
 	}
 }
 
+func TestUpdateObservationFindReplace(t *testing.T) {
+	newObservation := func(t *testing.T, content string, max int) (*Store, int64) {
+		t.Helper()
+		s := newTestStore(t)
+		if max > 0 {
+			s.cfg.MaxObservationLength = max
+		}
+		if err := s.CreateSession("s-find-replace", "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if err := s.EnrollProject("engram"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-find-replace", Type: "note", Title: "Original", Content: content, Project: "engram", Scope: "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		return s, id
+	}
+	params := func(t *testing.T, body string) UpdateObservationParams {
+		t.Helper()
+		var p UpdateObservationParams
+		if err := json.Unmarshal([]byte(body), &p); err != nil {
+			t.Fatalf("decode update params: %v", err)
+		}
+		return p
+	}
+	mutationCount := func(t *testing.T, s *Store) int {
+		t.Helper()
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&count); err != nil {
+			t.Fatalf("count sync mutations: %v", err)
+		}
+		return count
+	}
+
+	t.Run("rejects incomplete pairs and content conflicts without side effects", func(t *testing.T) {
+		for _, tc := range []struct {
+			body string
+			want error
+		}{
+			{`{"find":"old"}`, ErrObservationFindReplacePairRequired},
+			{`{"replace":"new"}`, ErrObservationFindReplacePairRequired},
+			{`{"find":"old","replace":"new","content":"replacement"}`, ErrObservationFindReplaceContentConflict},
+		} {
+			s, id := newObservation(t, "old value", 0)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation before update: %v", err)
+			}
+			mutationsBefore := mutationCount(t, s)
+			if _, err := s.UpdateObservation(id, params(t, tc.body)); !errors.Is(err, tc.want) {
+				t.Fatalf("UpdateObservation(%s) error = %v, want %v", tc.body, err, tc.want)
+			}
+			after, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation after rejected update: %v", err)
+			}
+			if after.Content != before.Content || after.RevisionCount != before.RevisionCount || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("rejected update changed observation or sync state: before=%#v after=%#v", before, after)
+			}
+		}
+	})
+
+	t.Run("replaces literal case-sensitive occurrences globally", func(t *testing.T) {
+		s, id := newObservation(t, "go Go go café", 0)
+		before, _ := s.GetObservation(id)
+		mutationsBefore := mutationCount(t, s)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"go","replace":"X"}`))
+		if err != nil {
+			t.Fatalf("replace content: %v", err)
+		}
+		if updated.Content != "X Go X café" {
+			t.Fatalf("content = %q, want literal case-sensitive replacement", updated.Content)
+		}
+		if updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+			t.Fatalf("successful replacement did not update exactly once: before=%#v after=%#v", before, updated)
+		}
+		var hash string
+		if err := s.DB().QueryRow(`SELECT normalized_hash FROM observations WHERE id = ?`, id).Scan(&hash); err != nil {
+			t.Fatalf("read normalized hash: %v", err)
+		}
+		if hash != hashNormalized(updated.Content) {
+			t.Fatalf("normalized hash = %q, want hash of replacement content", hash)
+		}
+		utf8Updated, err := s.UpdateObservation(id, params(t, `{"find":"café","replace":"té"}`))
+		if err != nil || utf8Updated.Content != "X Go X té" {
+			t.Fatalf("UTF-8 literal replacement = %#v, err=%v", utf8Updated, err)
+		}
+	})
+
+	t.Run("content no-ops preserve observation and sync state", func(t *testing.T) {
+		for _, body := range []string{`{"find":"","replace":"X"}`, `{"find":"absent","replace":"X"}`, `{"find":"value","replace":" value "}`} {
+			s, id := newObservation(t, "value", 0)
+			before, _ := s.GetObservation(id)
+			mutationsBefore := mutationCount(t, s)
+			updated, err := s.UpdateObservation(id, params(t, body))
+			if err != nil {
+				t.Fatalf("no-op replacement %s: %v", body, err)
+			}
+			if updated.Content != before.Content || updated.RevisionCount != before.RevisionCount || updated.UpdatedAt != before.UpdatedAt || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("replacement no-op changed state: before=%#v after=%#v", before, updated)
+			}
+		}
+	})
+
+	t.Run("metadata still updates when replacement is a content no-op", func(t *testing.T) {
+		s, id := newObservation(t, "value", 0)
+		before, _ := s.GetObservation(id)
+		mutationsBefore := mutationCount(t, s)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"absent","replace":"X","title":"Updated"}`))
+		if err != nil {
+			t.Fatalf("update metadata with no-op replacement: %v", err)
+		}
+		if updated.Content != before.Content || updated.Title != "Updated" || updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+			t.Fatalf("metadata update semantics changed: before=%#v after=%#v", before, updated)
+		}
+	})
+
+	t.Run("redacts private tags and rejects normalized-empty results", func(t *testing.T) {
+		s, id := newObservation(t, "start target end", 0)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"<private>secret</private>"}`))
+		if err != nil {
+			t.Fatalf("replace private tag: %v", err)
+		}
+		if updated.Content != "start [REDACTED] end" {
+			t.Fatalf("private replacement content = %q", updated.Content)
+		}
+		if _, err := s.UpdateObservation(id, params(t, `{"find":"start [REDACTED] end","replace":"  "}`)); err == nil {
+			t.Fatal("normalized-empty replacement succeeded")
+		}
+	})
+
+	t.Run("bounds inputs and output growth", func(t *testing.T) {
+		s, id := newObservation(t, "aa", 8)
+		tooLong := strings.Repeat("x", 9)
+		if _, err := s.UpdateObservation(id, params(t, fmt.Sprintf(`{"find":%q,"replace":"x"}`, tooLong))); !errors.Is(err, ErrObservationFindReplaceInputTooLarge) {
+			t.Fatalf("oversized find error = %v", err)
+		}
+		if _, err := s.UpdateObservation(id, params(t, fmt.Sprintf(`{"find":"a","replace":%q}`, tooLong))); !errors.Is(err, ErrObservationFindReplaceInputTooLarge) {
+			t.Fatalf("oversized replace error = %v", err)
+		}
+		if _, err := s.UpdateObservation(id, params(t, `{"find":"a","replace":"12345"}`)); !errors.Is(err, ErrObservationFindReplaceResultTooLarge) {
+			t.Fatalf("oversized replacement result error = %v", err)
+		}
+	})
+
+	t.Run("preserves recognized marker and rejects oversized legacy content", func(t *testing.T) {
+		s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+		before, _ := s.GetObservation(id)
+		updated, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"fixed"}`))
+		if err != nil {
+			t.Fatalf("replace marked content: %v", err)
+		}
+		marker := "... [truncated]"
+		want := strings.ReplaceAll(strings.TrimSuffix(before.Content, marker), "target", "fixed") + marker
+		if updated.Content != want {
+			t.Fatalf("marked replacement = %q, want %q", updated.Content, want)
+		}
+		if _, err := s.DB().Exec(`UPDATE observations SET content = ? WHERE id = ?`, strings.Repeat("legacy ", 5), id); err != nil {
+			t.Fatalf("seed legacy oversized content: %v", err)
+		}
+		if _, err := s.UpdateObservation(id, params(t, `{"find":"legacy","replace":"modern"}`)); !errors.Is(err, ErrObservationFindReplaceLegacyContentLarge) {
+			t.Fatalf("oversized legacy replacement error = %v", err)
+		}
+	})
+
+	t.Run("reserves markers across configuration changes", func(t *testing.T) {
+		t.Run("raised limit cannot replace the marker", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			if !strings.HasSuffix(before.Content, observationTruncationMarker) {
+				t.Fatalf("seed content missing marker: %q", before.Content)
+			}
+			s.cfg.MaxObservationLength = len(before.Content) + 1
+			mutationsBefore := mutationCount(t, s)
+			unchanged, err := s.UpdateObservation(id, params(t, fmt.Sprintf(`{"find":%q,"replace":"changed"}`, observationTruncationMarker)))
+			if err != nil {
+				t.Fatalf("replace reserved marker: %v", err)
+			}
+			if unchanged.Content != before.Content || unchanged.RevisionCount != before.RevisionCount || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("reserved marker replacement changed state: before=%#v after=%#v", before, unchanged)
+			}
+			updated, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"fixed"}`))
+			if err != nil {
+				t.Fatalf("replace marked prefix after raised limit: %v", err)
+			}
+			want := strings.ReplaceAll(strings.TrimSuffix(before.Content, observationTruncationMarker), "target", "fixed") + observationTruncationMarker
+			if updated.Content != want {
+				t.Fatalf("marked prefix replacement = %q, want %q", updated.Content, want)
+			}
+		})
+
+		t.Run("lowered limit permits metadata with an absent find", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			prefix := strings.TrimSuffix(before.Content, observationTruncationMarker)
+			s.cfg.MaxObservationLength = len(prefix) - 1
+			mutationsBefore := mutationCount(t, s)
+			updated, err := s.UpdateObservation(id, params(t, `{"find":"absent","replace":"replacement","title":"Updated"}`))
+			if err != nil {
+				t.Fatalf("metadata update with absent find: %v", err)
+			}
+			if updated.Title != "Updated" || updated.Content != before.Content || updated.RevisionCount != before.RevisionCount+1 || mutationCount(t, s) != mutationsBefore+1 {
+				t.Fatalf("absent-find metadata update changed semantics: before=%#v after=%#v", before, updated)
+			}
+		})
+
+		t.Run("lowered limit rejects an oversized marked prefix", func(t *testing.T) {
+			s, id := newObservation(t, "prefix target "+strings.Repeat("z", 20), 20)
+			before, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get marked observation: %v", err)
+			}
+			prefix := strings.TrimSuffix(before.Content, observationTruncationMarker)
+			s.cfg.MaxObservationLength = len(prefix) - 1
+			mutationsBefore := mutationCount(t, s)
+			if _, err := s.UpdateObservation(id, params(t, `{"find":"target","replace":"fixed"}`)); !errors.Is(err, ErrObservationFindReplaceLegacyContentLarge) {
+				t.Fatalf("lowered-limit marked replacement error = %v, want legacy size error", err)
+			}
+			after, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation after rejected replacement: %v", err)
+			}
+			if after.Content != before.Content || after.RevisionCount != before.RevisionCount || mutationCount(t, s) != mutationsBefore {
+				t.Fatalf("lowered-limit rejection changed state: before=%#v after=%#v", before, after)
+			}
+		})
+	})
+}
+
 func TestAddPromptRejectsBlankContentBeforePersistenceAndSync(t *testing.T) {
 	type addResult struct {
 		err      error
@@ -3199,6 +3438,34 @@ func TestPassiveCaptureReturnsErrorWhenSessionDoesNotExist(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error when session does not exist")
+	}
+}
+
+func TestStatsPropagatesCountErrors(t *testing.T) {
+	for _, table := range []string{"sessions", "observations", "user_prompts"} {
+		for _, scope := range []struct {
+			name    string
+			project string
+		}{
+			{name: "global"},
+			{name: "project", project: "alpha"},
+		} {
+			t.Run(table+"/"+scope.name, func(t *testing.T) {
+				s := newTestStore(t)
+				if _, err := s.db.Exec("DROP TABLE " + table); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if scope.project == "" {
+					_, err = s.Stats()
+				} else {
+					_, err = s.StatsProject(scope.project)
+				}
+				if err == nil {
+					t.Fatalf("missing %s table must fail %s stats", table, scope.name)
+				}
+			})
+		}
 	}
 }
 
@@ -5049,6 +5316,18 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
+	if err := s.CreateSession("missing-session", "engram", "/tmp/missing-session"); err != nil {
+		t.Fatalf("create observation parent: %v", err)
+	}
+	injectedObservationWriteErr := errors.New("injected observation foreign-key failure")
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO observations") {
+			return nil, injectedObservationWriteErr
+		}
+		return originalExec(db, query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = originalExec })
 
 	badChunk := []SyncMutation{
 		{
@@ -5065,8 +5344,8 @@ func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 		},
 	}
 
-	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); err == nil {
-		t.Fatal("expected chunk apply error for invalid observation payload")
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); !errors.Is(err, injectedObservationWriteErr) {
+		t.Fatalf("chunk apply error = %v, want injected observation write error", err)
 	}
 	if _, err := s.GetSession("chunk-session"); err == nil {
 		t.Fatal("expected chunk session upsert to roll back after failed chunk apply")
@@ -5977,6 +6256,196 @@ func TestExportImportRoundTripPreservesPinnedAndRelations(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestExportImportRoundTripPreservesOrphanedRelationsWithoutEndpoints(t *testing.T) {
+	source := newTestStore(t)
+	if err := source.CreateSession("orphaned-backup-session", "backup-project", "/tmp/backup"); err != nil {
+		t.Fatalf("create source session: %v", err)
+	}
+	sourceID, err := source.AddObservation(AddObservationParams{SessionID: "orphaned-backup-session", Type: "decision", Title: "source", Content: "source content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add source observation: %v", err)
+	}
+	targetID, err := source.AddObservation(AddObservationParams{SessionID: "orphaned-backup-session", Type: "decision", Title: "target", Content: "target content", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add target observation: %v", err)
+	}
+	sourceObservation, err := source.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get source observation: %v", err)
+	}
+	targetObservation, err := source.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get target observation: %v", err)
+	}
+	reason := "endpoint was hard deleted"
+	evidence := `{"audit":"preserve"}`
+	confidence := 0.73
+	actor := "agent:audit"
+	kind := "agent"
+	model := "audit-model"
+	sessionID := "orphaned-backup-session"
+	relations := []BackupRelation{
+		{SyncID: "rel-orphaned-missing-source", SourceID: "obs-missing-source", TargetID: targetObservation.SyncID, Relation: RelationConflictsWith, Reason: &reason, Evidence: &evidence, Confidence: &confidence, JudgmentStatus: JudgmentStatusOrphaned, MarkedByActor: &actor, MarkedByKind: &kind, MarkedByModel: &model, SessionID: &sessionID, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-02T00:00:00Z"},
+		{SyncID: "rel-orphaned-missing-target", SourceID: sourceObservation.SyncID, TargetID: "obs-missing-target", Relation: RelationSupersedes, Reason: &reason, Evidence: &evidence, Confidence: &confidence, JudgmentStatus: " ORPHANED ", MarkedByActor: &actor, MarkedByKind: &kind, MarkedByModel: &model, SessionID: &sessionID, CreatedAt: "2026-01-03T00:00:00Z", UpdatedAt: "2026-01-04T00:00:00Z"},
+		{SyncID: "rel-orphaned-missing-both", SourceID: "obs-missing-both-source", TargetID: "obs-missing-both-target", Relation: RelationRelated, Reason: &reason, Evidence: &evidence, Confidence: &confidence, JudgmentStatus: JudgmentStatusOrphaned, MarkedByActor: &actor, MarkedByKind: &kind, MarkedByModel: &model, SessionID: &sessionID, CreatedAt: "2026-01-05T00:00:00Z", UpdatedAt: "2026-01-06T00:00:00Z"},
+	}
+	for _, relation := range relations {
+		if _, err := source.DB().Exec(`INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status,
+			 marked_by_actor, marked_by_kind, marked_by_model, session_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			relation.SyncID, relation.SourceID, relation.TargetID, relation.Relation, relation.Reason, relation.Evidence, relation.Confidence,
+			relation.JudgmentStatus, relation.MarkedByActor, relation.MarkedByKind, relation.MarkedByModel, relation.SessionID,
+			relation.CreatedAt, relation.UpdatedAt); err != nil {
+			t.Fatalf("seed orphaned relation %q: %v", relation.SyncID, err)
+		}
+	}
+
+	exported, err := source.Export()
+	if err != nil {
+		t.Fatalf("export source: %v", err)
+	}
+	bytes, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	var imported ExportData
+	if err := json.Unmarshal(bytes, &imported); err != nil {
+		t.Fatalf("decode backup: %v", err)
+	}
+	destination := newTestStore(t)
+	if _, err := destination.Import(&imported); err != nil {
+		t.Fatalf("import backup: %v", err)
+	}
+	restored, err := destination.Export()
+	if err != nil {
+		t.Fatalf("export restored backup: %v", err)
+	}
+	for i := range exported.Relations {
+		if exported.Relations[i].SyncID == "rel-orphaned-missing-target" {
+			exported.Relations[i].JudgmentStatus = JudgmentStatusOrphaned
+		}
+	}
+	if !reflect.DeepEqual(restored.Relations, exported.Relations) {
+		t.Fatalf("restored orphaned relations = %#v, want canonical %#v", restored.Relations, exported.Relations)
+	}
+
+	visible, err := destination.GetRelationsForObservations([]string{sourceObservation.SyncID, targetObservation.SyncID})
+	if err != nil {
+		t.Fatalf("get restored relations: %v", err)
+	}
+	for syncID, relationSet := range visible {
+		if len(relationSet.AsSource) != 0 || len(relationSet.AsTarget) != 0 {
+			t.Fatalf("visible orphaned relations for %q = %#v", syncID, relationSet)
+		}
+	}
+}
+
+func TestImportRejectsNonOrphanedDanglingAndMissingSupersedingRelations(t *testing.T) {
+	for _, status := range []string{JudgmentStatusPending, JudgmentStatusJudged, "rejected", "orphaned-rejected"} {
+		t.Run(status, func(t *testing.T) {
+			destination := newTestStore(t)
+			project := "backup-project"
+			data := &ExportData{
+				Version: "0.2.0",
+				Sessions: []Session{{ID: "invalid-relation-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
+				Observations: []Observation{{SyncID: "obs-valid-endpoint", SessionID: "invalid-relation-session", Type: "note", Title: "valid", Content: "valid", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+				Relations: []BackupRelation{{SyncID: "rel-invalid-endpoint", SourceID: "obs-valid-endpoint", TargetID: "obs-missing-endpoint", Relation: RelationRelated, JudgmentStatus: status, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+			}
+			if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "relation endpoint") {
+				t.Fatalf("import dangling %s relation error = %v, want missing endpoint error", status, err)
+			}
+			assertImportRelationRollback(t, destination)
+		})
+	}
+
+	destination := newTestStore(t)
+	project := "backup-project"
+	missingSuperseding := "rel-not-in-backup"
+	data := &ExportData{
+		Version: "0.2.0",
+		Sessions: []Session{{ID: "missing-superseding-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
+		Observations: []Observation{
+			{SyncID: "obs-superseding-source", SessionID: "missing-superseding-session", Type: "note", Title: "source", Content: "source", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
+			{SyncID: "obs-superseding-target", SessionID: "missing-superseding-session", Type: "note", Title: "target", Content: "target", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
+		},
+		Relations: []BackupRelation{{SyncID: "rel-missing-superseding", SourceID: "obs-superseding-source", TargetID: "obs-superseding-target", Relation: RelationSupersedes, JudgmentStatus: JudgmentStatusOrphaned, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+	}
+	if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "superseding relation") {
+		t.Fatalf("import missing superseding relation error = %v, want missing superseding relation error", err)
+	}
+	assertImportRelationRollback(t, destination)
+}
+
+func TestImportValidatesMissingSupersedingRelationForExistingRelation(t *testing.T) {
+	destination := newTestStore(t)
+	const sessionID = "existing-relation-session"
+	if err := destination.CreateSession(sessionID, "backup-project", "/tmp/backup"); err != nil {
+		t.Fatalf("create existing session: %v", err)
+	}
+	sourceID, err := destination.AddObservation(AddObservationParams{SessionID: sessionID, Type: "note", Title: "source", Content: "source", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add existing source observation: %v", err)
+	}
+	targetID, err := destination.AddObservation(AddObservationParams{SessionID: sessionID, Type: "note", Title: "target", Content: "target", Project: "backup-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add existing target observation: %v", err)
+	}
+	source, err := destination.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get existing source observation: %v", err)
+	}
+	target, err := destination.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get existing target observation: %v", err)
+	}
+	if _, err := destination.SaveRelation(SaveRelationParams{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID}); err != nil {
+		t.Fatalf("seed existing relation: %v", err)
+	}
+
+	project := "backup-project"
+	missingSuperseding := "rel-missing-superseder"
+	data := &ExportData{
+		Version: "0.2.0",
+		Sessions: []Session{{ID: "rolled-back-session", Project: project, Directory: "/tmp/rollback", StartedAt: "2026-01-01T00:00:00Z"}},
+		Observations: []Observation{{SyncID: "obs-rolled-back", SessionID: "rolled-back-session", Type: "note", Title: "rollback", Content: "rollback", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+		Relations: []BackupRelation{{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID, Relation: RelationRelated, JudgmentStatus: JudgmentStatusPending, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+	}
+	if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "superseding relation") {
+		t.Fatalf("import existing relation with missing superseder error = %v, want missing superseding relation error", err)
+	}
+
+	for table, want := range map[string]int{"sessions": 1, "observations": 2, "memory_relations": 1} {
+		var count int
+		if err := destination.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != want {
+			t.Fatalf("%s count = %d, want %d after rollback", table, count, want)
+		}
+	}
+	var supersedingID sql.NullInt64
+	if err := destination.DB().QueryRow(`SELECT superseded_by_relation_id FROM memory_relations WHERE sync_id = ?`, "rel-existing-no-superseder").Scan(&supersedingID); err != nil {
+		t.Fatalf("read existing relation superseder: %v", err)
+	}
+	if supersedingID.Valid {
+		t.Fatalf("existing relation superseder = %d, want no mutation", supersedingID.Int64)
+	}
+}
+
+func assertImportRelationRollback(t *testing.T, s *Store) {
+	t.Helper()
+	for _, table := range []string{"sessions", "observations", "memory_relations"} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("invalid relation import persisted %d %s rows", count, table)
+		}
+	}
 }
 
 func TestImportRejectsUnsupportedExportVersion(t *testing.T) {
@@ -7544,8 +8013,8 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			}
 			return origQueryIt(db, query, args...)
 		}
-		if _, err := s.Stats(); err != nil {
-			t.Fatalf("stats should swallow project query errors: %v", err)
+		if _, err := s.Stats(); err == nil {
+			t.Fatal("stats must propagate project query errors")
 		}
 
 		if err := s.EndSession("s-c", "has summary"); err != nil {
@@ -8104,17 +8573,6 @@ func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("direct import with blank directory", func(t *testing.T) {
-		s := newTestStore(t)
-		_, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "engram", Directory: " "}}})
-		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-			t.Fatalf("Import error = %v, want ErrPulledSessionDirectoryInvalid", err)
-		}
-		if _, err := s.GetSession("blank-import"); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("blank imported session persisted: %v", err)
-		}
-	})
 }
 
 func TestApplyPulledSessionMutationSkipsInvalidIdentityWithEvidence(t *testing.T) {
@@ -8271,18 +8729,46 @@ func TestApplyPulledChunkObservationIdentityInvalidQuarantinesAndContinues(t *te
 
 func TestApplyPulledChunkObservationFailuresRemainClosed(t *testing.T) {
 	valid := SyncMutation{Entity: SyncEntityObservation, EntityKey: "closed-valid", Op: SyncOpUpsert, Payload: `{"sync_id":"closed-valid","session_id":"closed-parent","type":"decision","title":"valid","content":"must roll back","project":"engram","scope":"project"}`}
+	injectedForeignKeyErr := errors.New("injected foreign-key failure")
 	tests := []struct {
-		name string
-		bad  SyncMutation
+		name    string
+		bad     SyncMutation
+		wantErr error
+		setup   func(t *testing.T, s *Store)
 	}{
 		{name: "decode error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "decode-invalid", Op: SyncOpUpsert, Payload: "not JSON"}},
-		{name: "unrelated foreign key error", bad: SyncMutation{Entity: SyncEntityObservation, EntityKey: "missing-parent", Op: SyncOpUpsert, Payload: `{"sync_id":"missing-parent","session_id":"missing-parent-session","type":"decision","title":"missing parent","content":"must not quarantine","project":"engram","scope":"project"}`}},
+		{
+			name:    "injected foreign key error",
+			bad:     SyncMutation{Entity: SyncEntityObservation, EntityKey: "injected-fk", Op: SyncOpUpsert, Payload: `{"sync_id":"injected-fk","session_id":"injected-fk-parent","type":"decision","title":"injected FK","content":"must not quarantine","project":"engram","scope":"project"}`},
+			wantErr: injectedForeignKeyErr,
+			setup: func(t *testing.T, s *Store) {
+				t.Helper()
+				if err := s.CreateSession("injected-fk-parent", "engram", "/tmp/injected-fk-parent"); err != nil {
+					t.Fatalf("create observation parent: %v", err)
+				}
+				originalExec := s.hooks.exec
+				s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+					if strings.Contains(query, "INSERT INTO observations") {
+						return nil, injectedForeignKeyErr
+					}
+					return originalExec(db, query, args...)
+				}
+				t.Cleanup(func() { s.hooks.exec = originalExec })
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
-			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid}); err == nil {
+			if tc.setup != nil {
+				tc.setup(t, s)
+			}
+			err := s.ApplyPulledChunk(DefaultSyncTargetKey, "closed-"+tc.name, []SyncMutation{tc.bad, valid})
+			if err == nil {
 				t.Fatal("ApplyPulledChunk succeeded for a fail-closed observation error")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ApplyPulledChunk error = %v, want injected error", err)
 			}
 			if _, err := s.GetObservationBySyncID(valid.EntityKey); !errors.Is(err, sql.ErrNoRows) {
 				t.Fatalf("valid observation applied despite rollback: %v", err)
@@ -11023,6 +11509,150 @@ func TestMergeProjectsRejectsNonEquivalentSources(t *testing.T) {
 			}
 			if _, err := s.MergeProjects([]string{tt.source}, "engram"); err == nil || !strings.Contains(err.Error(), tt.errorPart) {
 				t.Fatalf("MergeProjects error = %v, want normalization rejection", err)
+			}
+		})
+	}
+}
+
+func TestExplicitMergeProjectsSeparatorVariant(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "foo-bar")
+	seedPendingLegacyMutations(t, s, "foo-bar")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('explicit-prompt', 'legacy-session', 'prompt', 'foo-bar')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('foo-bar')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{"foo-bar"}, "foo_bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Canonical != "foo_bar" || result.ObservationsUpdated != 1 || result.SessionsUpdated != 1 || result.PromptsUpdated != 1 {
+		t.Fatalf("unexpected merge: %+v", result)
+	}
+	for _, table := range []string{"sessions", "observations", "user_prompts", "sync_enrolled_projects"} {
+		var sourceCount, canonicalCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'foo-bar'`).Scan(&sourceCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'foo_bar'`).Scan(&canonicalCount); err != nil {
+			t.Fatal(err)
+		}
+		if sourceCount != 0 || canonicalCount != 1 {
+			t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 1", table, sourceCount, canonicalCount)
+		}
+	}
+	for _, key := range []string{"legacy-session", "legacy-obs"} {
+		mutation, ok := pendingMutationsByEntityKey(t, s)[key]
+		if !ok || mutation.Project != "foo_bar" || payloadProject(t, mutation.Payload) != "foo_bar" {
+			t.Fatalf("stale or missing sync mutation %q: %+v", key, mutation)
+		}
+	}
+}
+
+func TestExplicitMergeProjectsRejectsUnrelatedAndMissing(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "foo-bar")
+	for _, source := range []string{"foo-baz", "foo_bar_extra", "bar-foo"} {
+		if _, err := s.MergeExplicitProjectVariants([]string{"foo-bar", source}, "foo_bar"); err == nil {
+			t.Fatalf("source %q accepted", source)
+		}
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"absent-name"}, "absent_name"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing source error = %v", err)
+	}
+	// The second source is eligible but absent; its failure must roll back the first update.
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('atomic-session', 'foo-bar-baz', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"foo-bar-baz", "foo_bar-baz"}, "foo_bar_baz"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("second source error = %v", err)
+	}
+	var atomicCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = 'foo-bar-baz'`).Scan(&atomicCount); err != nil || atomicCount != 1 {
+		t.Fatalf("atomic rollback source count = %d, err %v", atomicCount, err)
+	}
+	for _, table := range []string{"sessions", "observations"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'foo-bar'`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s source after rejection = %d, err %v", table, count, err)
+		}
+	}
+}
+
+func TestExplicitMergeProjectsRejectsDifferentUnicodeWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "café-bar")
+	if _, err := s.MergeExplicitProjectVariants([]string{"café-bar"}, "cafà_bar"); err == nil {
+		t.Fatal("unrelated Unicode names accepted")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'café-bar'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source observations = %d, err %v", count, err)
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"café-bar"}, "café_bar"); err != nil {
+		t.Fatalf("identical Unicode with separator variant rejected: %v", err)
+	}
+}
+
+func TestExplicitMergeProjectsCanonicalRequiresExistingIdentity(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.MergeExplicitProjectVariants([]string{"missing_name"}, "missing_name"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing canonical source error = %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('canonical-session', 'missing_name', '')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{"missing_name"}, "missing_name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.SourcesMerged) != 0 || result.SessionsUpdated != 0 {
+		t.Fatalf("existing canonical identity should be a no-op: %+v", result)
+	}
+}
+
+func TestExplicitMergeProjectsSyncOnlySources(t *testing.T) {
+	for _, tc := range []struct {
+		name, project, payload string
+		enrollment             bool
+	}{
+		{name: "pending journal column", project: "foo-bar", payload: `{"project":"foo-bar"}`},
+		{name: "pending payload only", project: "", payload: `{"project":"foo-bar"}`},
+		{name: "enrollment only", enrollment: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if tc.enrollment {
+				if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('foo-bar')`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, "sync-only", SyncOpUpsert, tc.payload, SyncSourceLocal, tc.project); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := s.MergeExplicitProjectVariants([]string{"foo-bar"}, "foo_bar")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.SourcesMerged) != 1 || result.SourcesMerged[0] != "foo-bar" {
+				t.Fatalf("sync-only source not reported: %+v", result)
+			}
+			if tc.enrollment {
+				var count int
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'foo_bar'`).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("canonical enrollment = %d, err %v", count, err)
+				}
+			} else {
+				var project, payload string
+				if err := s.db.QueryRow(`SELECT project, payload FROM sync_mutations WHERE entity_key = 'sync-only' AND acked_at IS NULL`).Scan(&project, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if project != "foo_bar" || payloadProject(t, payload) != "foo_bar" {
+					t.Fatalf("unmigrated journal row: project=%q payload=%q", project, payload)
+				}
 			}
 		})
 	}

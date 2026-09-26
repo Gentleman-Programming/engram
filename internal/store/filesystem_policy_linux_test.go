@@ -1,0 +1,64 @@
+//go:build linux
+
+package store
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLinuxFilesystemAdapterMissingPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+	if _, err := detectFilesystem(missing); !os.IsNotExist(err) {
+		t.Fatalf("detectFilesystem(%q) error = %v, want not exist", missing, err)
+	}
+	setFilesystemInspector(t, func(path string) (filesystemInfo, error) {
+		if path != filepath.Dir(missing) {
+			t.Errorf("inspected path = %q, want existing parent %q", path, filepath.Dir(missing))
+		}
+		return filesystemInfo{Type: "local", Support: filesystemLocal}, nil
+	})
+	if err := checkDataDirectoryFilesystem(missing); err != nil {
+		t.Fatalf("missing path must retain ancestor inspection compatibility: %v", err)
+	}
+}
+
+func TestLinuxFilesystemAdapterRecognizesSigned32BitRemoteMagic(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		magic int64
+	}{
+		{"CIFS", linuxCIFSFilesystemMagic},
+		{"SMB2", linuxSMB2FilesystemMagic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded := uint32(tc.magic)
+			signed := int64(int32(encoded))
+			if got := classifyLinuxFilesystemMagic(signed).Support; got != filesystemRemote {
+				t.Errorf("classifyLinuxFilesystemMagic(%#x) support = %q, want %q", signed, got, filesystemRemote)
+			}
+		})
+	}
+}
+
+func TestLinuxFilesystemAdapterClassifiesMagic(t *testing.T) {
+	tests := []struct {
+		name  string
+		magic int64
+		want  filesystemSupport
+	}{
+		{name: "NFS", magic: linuxNFSFilesystemMagic, want: filesystemRemote},
+		{name: "CIFS", magic: linuxCIFSFilesystemMagic, want: filesystemRemote},
+		{name: "SMB2", magic: linuxSMB2FilesystemMagic, want: filesystemRemote},
+		{name: "unknown", magic: 0, want: filesystemUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyLinuxFilesystemMagic(tt.magic).Support; got != tt.want {
+				t.Errorf("classifyLinuxFilesystemMagic(%#x) support = %q, want %q", tt.magic, got, tt.want)
+			}
+		})
+	}
+}

@@ -17,7 +17,9 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,11 +100,13 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage         = "npm:gentle-engram@0.1.14"
-	piLegacyGentleEngramPackage   = "npm:gentle-engram@0.1.8"
-	piPreviousGentleEngramPackage = "npm:gentle-engram@0.1.11"
-	piPriorGentleEngramPackage    = "npm:gentle-engram@0.1.12"
-	piMCPAdapterPackage           = "npm:pi-mcp-adapter"
+	piGentleEngramPackage            = "npm:gentle-engram@0.1.16"
+	piLegacyGentleEngramPackage      = "npm:gentle-engram@0.1.8"
+	piPreviousGentleEngramPackage    = "npm:gentle-engram@0.1.11"
+	piPriorGentleEngramPackage       = "npm:gentle-engram@0.1.12"
+	piPredecessorGentleEngramPackage = "npm:gentle-engram@0.1.14"
+	piFormerGentleEngramPackage      = "npm:gentle-engram@0.1.15"
+	piMCPAdapterPackage              = "npm:pi-mcp-adapter"
 )
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -133,19 +137,18 @@ func claudeCodePermissionTools(agentTools map[string]bool) []string {
 	return permissions
 }
 
-// codexEngramBlock is the canonical Codex TOML MCP block.
-// Command is always the bare "engram" name in this constant because
-// upsertCodexEngramBlock generates the actual content via codexEngramBlockStr()
-// which uses resolveEngramCommand() at runtime. This constant is kept for tests
-// that verify idempotency against the already-written string when os.Executable
-// returns "engram" (fallback path).
+// codexEngramBlock is retained for non-Windows fallback compatibility tests.
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
 
-// codexEngramBlockStr returns the Codex TOML block for the engram MCP server,
-// using the resolved absolute binary path from os.Executable().
-func codexEngramBlockStr() string {
-	cmd := resolveEngramCommand()
-	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", cmd) + "\nargs = [\"mcp\", \"--tools=agent\"]"
+// windowsHookCommandMarkerPrefix identifies the first-line command pin consumed
+// by the Windows hook. Its value is JSON so PowerShell can decode it losslessly.
+const windowsHookCommandMarkerPrefix = "# engram-windows-hook-command-v1: "
+
+// codexEngramBlockStr returns the Codex TOML block for the supplied canonical
+// Engram command. installCodex resolves the command before it writes any setup
+// state so Windows cannot persist a PATH-dependent fallback.
+func codexEngramBlockStr(command string) string {
+	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", command) + "\nargs = [\"mcp\", \"--tools=agent\"]"
 }
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
@@ -367,7 +370,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage:
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage:
 				changed = true
 				continue
 			case piGentleEngramPackage:
@@ -472,8 +475,49 @@ func ensurePiMCPConfig(mcpPath string) (bool, error) {
 			return false, fmt.Errorf("parse Pi mcpServers: %w", err)
 		}
 	}
-	if _, exists := servers["engram"]; exists {
-		return false, nil
+	if raw, exists := servers["engram"]; exists {
+		// Revalidate instead of blindly preserving: a previously persisted
+		// absolute command can point at a mise install version directory that
+		// `mise up` plus `mise prune` removed, leaving a dead path that fails
+		// to spawn (ENOENT). Only a dead absolute command is repaired, and only
+		// its "command" value is rewritten; missing or relative commands, live
+		// absolute paths, and every other entry key are preserved untouched.
+		// The repair happens only when the recorded path does not exist
+		// (fs.ErrNotExist); any other stat error (EACCES, EIO, ...) leaves the
+		// entry untouched: this is a repair path, so a transient filesystem
+		// error must not rewrite a possibly valid custom command, and it must
+		// not fail the whole `engram setup` run either.
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return false, fmt.Errorf("parse Pi engram MCP server entry: %w", err)
+		}
+		var command string
+		if rawCommand, ok := fields["command"]; ok {
+			if err := json.Unmarshal(rawCommand, &command); err != nil {
+				command = ""
+			}
+		}
+		if command == "" || !filepath.IsAbs(command) {
+			return false, nil
+		}
+		if _, statErr := statFn(command); statErr == nil {
+			return false, nil
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return false, nil
+		}
+		fields["command"], err = jsonMarshalFn(resolveEngramCommand())
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi Engram MCP command: %w", err)
+		}
+		servers["engram"], err = jsonMarshalFn(fields)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
+		}
+		config["mcpServers"], err = jsonMarshalFn(servers)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
+		}
+		return true, writeJSONConfig(mcpPath, config)
 	}
 	server := map[string]any{
 		"command":     resolveEngramCommand(),
@@ -551,20 +595,20 @@ func rawArrayContainsString(values []json.RawMessage, target string) bool {
 //
 // Original line in source:
 //
-//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
+//	const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
 //
 // Patched line in installed copy:
 //
-//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "/abs/path/engram"
+//	const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "/abs/path/engram"
 //
 // Priority (left to right, first defined wins):
-//  1. ENGRAM_BIN env var — explicit user override, always respected.
+//  1. Nonblank ENGRAM_BIN env var — explicit user override, always respected.
 //  2. Absolute baked-in path — works in headless/systemd where PATH is stripped.
 //
 // If absBin is already bare "engram" (os.Executable fallback), retain the
 // source fallback so the installed Node plugin has no Bun runtime dependency.
 func patchEngramBINLine(src []byte, absBin string) []byte {
-	const marker = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`
+	const marker = `const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"`
 
 	var replacement string
 	if absBin == "engram" {
@@ -572,7 +616,7 @@ func patchEngramBINLine(src []byte, absBin string) []byte {
 		replacement = marker
 	} else {
 		// Normal case: bake in the absolute path as the final fallback.
-		replacement = fmt.Sprintf(`const ENGRAM_BIN = process.env.ENGRAM_BIN ?? %q`, absBin)
+		replacement = fmt.Sprintf(`const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? %q`, absBin)
 	}
 
 	return []byte(strings.Replace(string(src), marker, replacement, 1))
@@ -1259,7 +1303,7 @@ const (
 )
 
 type claudeCodeMCPServer struct {
-	Type    string   `json:"type"`
+	Type    *string  `json:"type"`
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
 }
@@ -1302,7 +1346,18 @@ func inspectClaudeCodeUserMCP(command string) (claudeCodeMCPState, error) {
 	if err := json.Unmarshal(rawServer, &server); err != nil {
 		return claudeCodeMCPConflict, fmt.Errorf("parse Claude Code mcpServers.engram in %s: %w", path, err)
 	}
-	if server.Type == "stdio" && server.Command == command && slices.Equal(server.Args, []string{"mcp", "--tools=agent"}) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawServer, &fields); err != nil || fields == nil {
+		return claudeCodeMCPConflict, nil
+	}
+	rawType, hasType := fields["type"]
+	var exactType *string
+	if hasType {
+		if err := json.Unmarshal(rawType, &exactType); err != nil {
+			return claudeCodeMCPConflict, fmt.Errorf("parse Claude Code mcpServers.engram in %s: %w", path, err)
+		}
+	}
+	if (!hasType || exactType != nil && *exactType == "stdio") && server.Command == command && slices.Equal(server.Args, []string{"mcp", "--tools=agent"}) {
 		return claudeCodeMCPExact, nil
 	}
 	return claudeCodeMCPConflict, nil
@@ -1575,14 +1630,19 @@ func resolveEngramCommand() string {
 // canonical engram command: it resolves symlinks via filepath.EvalSymlinks and
 // maps a versioned Homebrew/Linuxbrew Cellar path to the stable
 // <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
-// version (see stableHomebrewEngramCommand). Non-Homebrew installs keep their
-// resolved absolute path. It does not call osExecutable() — the caller is
-// responsible for obtaining exe and for any PATH-based fallback on failure.
+// version (see stableHomebrewEngramCommand), and a mise install path to the
+// existing mise shim (from environment, effective settings, or data dir) that keeps resolving to the active
+// version (see stableMiseEngramCommand). Other installs keep their resolved
+// absolute path. It does not call osExecutable() — the caller is responsible
+// for obtaining exe and for any PATH-based fallback on failure.
 func canonicalEngramCommand(exe string) string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
 	if stable, ok := stableHomebrewEngramCommand(exe); ok {
+		return stable
+	}
+	if stable, ok := stableMiseEngramCommand(exe); ok {
 		return stable
 	}
 	return exe
@@ -1632,6 +1692,91 @@ func stableHomebrewEngramCommand(exe string) (string, bool) {
 	return "engram", true
 }
 
+// stableMiseEngramCommand maps a mise install path to the stable mise shim.
+// An absolute MISE_SHIMS_DIR takes precedence over mise's effective shims_dir
+// setting; invalid settings fall back to <mise-data-dir>/shims. Mise installs
+// live under <mise-data-dir>/installs/engram/<version>/engram and `mise up` plus
+// `mise prune` removes superseded version directories, so baking the resolved
+// path into MCP client configs leaves a stale command that fails to spawn
+// (ENOENT) after an upgrade. The shim is mise's documented launcher entry
+// point and keeps resolving to the active version, so registrations survive
+// upgrades. Unlike the <data-dir>/installs/engram/latest/engram alias it does
+// not depend on which version the user pinned. On Windows the shim carries an
+// .exe extension (<data-dir>/shims/engram.exe), mirrored from the executable
+// base. It returns ("", false) when exe is not a mise install path, so other
+// installs keep their resolved absolute path. When the derived shim does not
+// exist on disk it falls back to the bare "engram" name so the command still
+// resolves via PATH.
+func stableMiseEngramCommand(exe string) (string, bool) {
+	const marker = "/installs/engram/"
+	clean := filepath.ToSlash(filepath.Clean(exe))
+	idx := strings.Index(clean, marker)
+	if idx < 0 {
+		return "", false
+	}
+	base := strings.ToLower(filepath.Base(clean))
+	if base != "engram" && base != "engram.exe" {
+		return "", false
+	}
+	// Everything before "/installs/" is the mise data directory, e.g.
+	// ~/.local/share/mise, ~/.mise, or a custom $MISE_DATA_DIR. The shims
+	// directory lives directly under it unless an absolute override is available.
+	shimName := "engram"
+	if base == "engram.exe" {
+		shimName = "engram.exe"
+	}
+	shimDir := filepath.FromSlash(clean[:idx] + "/shims")
+	if override := os.Getenv("MISE_SHIMS_DIR"); filepath.IsAbs(override) {
+		shimDir = override
+	} else if output, err := runCommand("mise", "settings", "get", "shims_dir"); err == nil {
+		// Reject diagnostics, multiple lines, and relative paths: MCP commands
+		// must be a single existing absolute executable path.
+		configured := strings.TrimSuffix(strings.TrimSuffix(string(output), "\n"), "\r")
+		if configured == strings.TrimSpace(configured) && filepath.IsAbs(configured) && !strings.ContainsAny(configured, "\r\n") {
+			shimDir = configured
+		}
+	}
+	stable := filepath.Join(shimDir, shimName)
+	if _, err := statFn(stable); err == nil {
+		return stable, true
+	}
+	return "engram", true
+}
+
+// codexEngramCommand is the caller-specific executable policy for the sole
+// Codex MCP authority. Windows requires a rooted .exe path derived from the
+// os.Executable/canonical symlink authority; it never falls back to PATH.
+func codexEngramCommand() (string, error) {
+	exe, err := osExecutable()
+	if err != nil {
+		if runtimeGOOS == "windows" {
+			return "", fmt.Errorf("resolve rooted absolute .exe Codex command: %w", err)
+		}
+		return "engram", nil
+	}
+
+	canonical := canonicalEngramCommand(exe)
+	if !isAbsoluteCodexCommand(canonical) && isAbsoluteCodexCommand(exe) {
+		canonical = exe
+	}
+	if runtimeGOOS == "windows" {
+		if !isAbsoluteCodexCommand(canonical) || !strings.EqualFold(filepath.Ext(canonical), ".exe") {
+			return "", fmt.Errorf("resolve rooted absolute .exe Codex command from executable path %q", exe)
+		}
+	}
+	return canonical, nil
+}
+
+func isAbsoluteCodexCommand(path string) bool {
+	if filepath.IsAbs(path) {
+		return true
+	}
+	if runtimeGOOS != "windows" {
+		return false
+	}
+	return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' && (path[2] == '\\' || path[2] == '/') || strings.HasPrefix(path, `\\`)
+}
+
 func writeGeminiSystemPrompt() error {
 	systemPath := geminiSystemPromptPath()
 	if err := os.MkdirAll(filepath.Dir(systemPath), 0755); err != nil {
@@ -1679,14 +1824,21 @@ func removeGeminiEnvOverride() {
 // ─── Codex ───────────────────────────────────────────────────────────────────
 
 func installCodex() (*Result, error) {
-	path := codexConfigPath()
+	command, err := codexEngramCommand()
+	if err != nil {
+		return nil, err
+	}
 
+	path := codexConfigPath()
+	if path == "" {
+		return nil, fmt.Errorf("resolve Codex config path: no absolute CODEX_HOME or user home")
+	}
 	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := injectCodexMCPFn(path); err != nil {
+	if err := injectCodexMCPFn(path, command); err != nil {
 		return nil, err
 	}
 
@@ -1734,7 +1886,7 @@ func installCodex() (*Result, error) {
 	}, nil
 }
 
-func injectCodexMCP(configPath string) error {
+func injectCodexMCP(configPath, command string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
@@ -1744,7 +1896,10 @@ func injectCodexMCP(configPath string) error {
 		return fmt.Errorf("read config: %w", err)
 	}
 
-	updated := upsertCodexEngramBlock(string(data))
+	bom, content := splitCodexBOM(string(data))
+	updated := upsertCodexEngramBlock(content, command)
+	updated = upsertCodexWindowsHookMarker(updated, command, runtimeGOOS == "windows")
+	updated = bom + updated
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
@@ -1780,18 +1935,27 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 		}
 	}
 
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	bom, content := splitCodexBOM(string(data))
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = upsertTopLevelTOMLString(content, "model_instructions_file", instructionsPath)
 	content = upsertTopLevelTOMLString(content, "experimental_compact_prompt_file", compactPromptPath)
 
-	if err := writeFileFn(configPath, []byte(content), 0644); err != nil {
+	if err := writeFileFn(configPath, []byte(bom+content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
 	return nil
 }
 
-func upsertCodexEngramBlock(content string) string {
+// Keep a leading BOM outside the line-oriented upserts so it stays at byte zero.
+func splitCodexBOM(content string) (string, string) {
+	if strings.HasPrefix(content, "\ufeff") {
+		return "\ufeff", strings.TrimPrefix(content, "\ufeff")
+	}
+	return "", content
+}
+
+func upsertCodexEngramBlock(content, command string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 
@@ -1815,12 +1979,40 @@ func upsertCodexEngramBlock(content string) string {
 	}
 
 	base := strings.TrimSpace(strings.Join(kept, "\n"))
-	block := codexEngramBlockStr()
+	block := codexEngramBlockStr(command)
 	if base == "" {
 		return block + "\n"
 	}
 
 	return base + "\n\n" + block + "\n"
+}
+
+// upsertCodexWindowsHookMarker replaces setup-owned markers only while they
+// are the first physical lines in the file. Later lookalikes are opaque TOML or
+// user content: the Windows hook reads only line 1 and must ignore them.
+func upsertCodexWindowsHookMarker(content, command string, enabled bool) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+	for len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
+		lines = lines[1:]
+	}
+	body := strings.Join(lines, "\n")
+
+	if !enabled {
+		return body
+	}
+
+	encodedCommand, err := json.Marshal(command)
+	if err != nil {
+		// json.Marshal cannot fail for a string; retain a fail-closed invariant if
+		// that ever changes rather than emitting an undecodable hook command.
+		panic(fmt.Sprintf("marshal Windows hook command: %v", err))
+	}
+	marker := windowsHookCommandMarkerPrefix + string(encodedCommand)
+	if body == "" {
+		return marker + "\n"
+	}
+	return marker + "\n" + body
 }
 
 func upsertTopLevelTOMLString(content, key, value string) string {
@@ -1883,17 +2075,14 @@ func geminiEnvPath() string {
 }
 
 func codexConfigPath() string {
-	home, _ := userHomeDir()
-
-	switch runtimeGOOS {
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "codex", "config.toml")
-		}
-		return filepath.Join(home, "AppData", "Roaming", "codex", "config.toml")
-	default:
-		return filepath.Join(home, ".codex", "config.toml")
+	if codexHome := os.Getenv("CODEX_HOME"); strings.TrimSpace(codexHome) != "" && filepath.IsAbs(codexHome) {
+		return filepath.Join(codexHome, "config.toml")
 	}
+	home, err := userHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" || !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "config.toml")
 }
 
 func codexInstructionsPath() string {

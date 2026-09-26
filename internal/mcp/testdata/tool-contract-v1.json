@@ -50,7 +50,8 @@
     "mem_get_observation": {
       "type": ["object"],
       "properties": {
-        "id": {"type":["number"],"additionalProperties":true}
+        "id": {"type":["number"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true}
       },
       "required": ["id"],
       "additionalProperties": true},
@@ -196,7 +197,9 @@
       "type": ["object"],
       "properties": {
         "content": {"type":["string"],"additionalProperties":true},
+        "find": {"type":["string"],"additionalProperties":true},
         "id": {"type":["number"],"additionalProperties":true},
+        "replace": {"type":["string"],"additionalProperties":true},
         "scope": {"type":["string"],"additionalProperties":true},
         "title": {"type":["string"],"additionalProperties":true},
         "topic_key": {"type":["string"],"additionalProperties":true},
