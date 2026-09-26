@@ -12,7 +12,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > - `engram setup ...` installs MCP/plugin integrations only; it does **not** auto-run `engram cloud config/enroll/upgrade`.
 > - Cloud onboarding contract remains CLI-first until script-level cloud flows are explicitly implemented.
 
-If a generic MCP client retains an absolute Engram executable path after you move or replace the binary, run `engram doctor` to identify the affected client, then run `engram setup <agent>` with the new binary to refresh its Engram registration. Doctor is read-only and does not flag bare custom commands or missing registrations. Setup preserves unrelated MCP server entries.
+If a generic MCP client retains an absolute Engram executable path after you move or replace the binary, run `engram doctor` to identify the affected client, then run `engram setup <agent>` with the new binary to refresh its Engram registration (Pi is an exception: its Engram MCP entry is user-owned and must be updated manually). Doctor is read-only and does not flag bare custom commands or missing registrations. Setup preserves unrelated MCP server entries.
 
 ## Quick Reference
 
@@ -35,7 +35,7 @@ If a generic MCP client retains an absolute Engram executable path after you mov
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` configures the
-> supported MCP registration and Memory Protocol idempotently. Claude Code is the
+> supported integration and Memory Protocol idempotently. Pi uses native tools instead of registering Engram MCP; Claude Code is the
 > exception to direct config writes: its CLI owns user-scope MCP registration. The
 > per-agent sections below describe each integration's authoritative owner and
 > manual equivalent.
@@ -56,13 +56,13 @@ marketplace plugin, it warns without changing the selected mode; session-only
 
 ## Pi
 
-Install Engram's Pi package, the MCP adapter, and Pi MCP config:
+Install Engram's Pi-native package and retain the MCP adapter for other servers:
 
 ```bash
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.16` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved unless their absolute command path no longer exists; setup repairs those entries with the current Engram command. Other filesystem errors leave the entry unchanged.
+`engram setup pi` runs `pi install npm:gentle-engram@0.1.16` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. This applies to the Go setup command only: until the Pi package update, `pi-engram init` still creates an Engram MCP entry and must not be used as a native-only setup path. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
 
 For versioned mise installations, setup selects the shim directory from an absolute `MISE_SHIMS_DIR`, the effective absolute `shims_dir` reported by `mise settings get shims_dir` (including global config), or the mise data directory's default `shims` folder, in that order. Invalid settings output or an unavailable mise CLI leaves the default directory as the fallback. If the shim is missing from the selected directory, the caller uses its existing executable/PATH fallback policy; setup never writes mise warnings as the Engram MCP command.
 
@@ -81,7 +81,7 @@ Restart Pi after installation.
 The package has two paths:
 
 - **HTTP event capture**: the Pi extension sends prompts, summaries, passive task learnings, and compact Pi-native `mem_*` tool calls to `engram serve`.
-- **MCP gateway**: `pi-mcp-adapter` exposes Engram's MCP surface by launching `engram mcp --tools=agent` and is also used by other Pi MCP integrations such as Notion.
+- **Optional MCP gateway**: `pi-mcp-adapter` remains for other Pi MCP servers such as Notion. Deliberate standalone/direct MCP clients can still launch `engram mcp` separately; do not register it in Pi for native-only agent writes. Until the Pi package update, `pi-engram init` still registers Engram MCP.
 
 Use an existing Engram HTTP server:
 
@@ -102,7 +102,7 @@ Use a custom Engram binary for MCP tools and local auto-start:
 ENGRAM_BIN=/path/to/engram pi
 ```
 
-If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi with `spawn engram ENOENT`.
+If the binary is missing, Pi-native local server startup reports an error without crashing Pi.
 
 ### Project auto-detection (important)
 
