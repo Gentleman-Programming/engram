@@ -506,6 +506,201 @@ func TestProjectFilter(t *testing.T) {
 	})
 }
 
+// ─── Org filter (#776) ───────────────────────────────────────────────────────
+
+func TestOrgFilter(t *testing.T) {
+	t.Run("--org flag limits exported observations to matching org", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-1",
+						Type:      "bugfix",
+						Title:     "Acme fix",
+						Content:   "acme fix content",
+						Scope:     "project",
+						CreatedAt: "2026-01-01T10:00:00Z",
+						UpdatedAt: "2026-01-01T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("acme-corp"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-2",
+						Type:      "decision",
+						Title:     "Globex decision",
+						Content:   "globex decision content",
+						Scope:     "project",
+						CreatedAt: "2026-01-02T10:00:00Z",
+						UpdatedAt: "2026-01-02T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("globex-inc"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+		cfg := ExportConfig{VaultPath: dir, Org: "acme-corp"}
+		exp := NewExporter(ms, cfg)
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created: got %d, want 1 (only acme-corp org)", result.Created)
+		}
+		// The globex-inc obs must NOT have a file
+		globexFile := dir + "/engram/eng/decision/globex-decision-2.md"
+		if fileExists(globexFile) {
+			t.Errorf("unexpected file for filtered-out org: %s", globexFile)
+		}
+	})
+
+	t.Run("no org filter exports observations regardless of org", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-1",
+						Type:      "bugfix",
+						Title:     "Acme fix",
+						Content:   "acme fix content",
+						Scope:     "project",
+						CreatedAt: "2026-01-01T10:00:00Z",
+						UpdatedAt: "2026-01-01T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("acme-corp"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-2",
+						Type:      "decision",
+						Title:     "Untagged decision",
+						Content:   "untagged decision content",
+						Scope:     "project",
+						CreatedAt: "2026-01-02T10:00:00Z",
+						UpdatedAt: "2026-01-02T10:00:00Z",
+						Project:   strPtr("eng"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+		cfg := ExportConfig{VaultPath: dir, Org: ""} // no filter
+		exp := NewExporter(ms, cfg)
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Created != 2 {
+			t.Errorf("Created: got %d, want 2 (all orgs)", result.Created)
+		}
+	})
+
+	t.Run("re-export scoped to a narrower org removes files for observations that fell out of scope", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-1",
+						Type:      "bugfix",
+						Title:     "Acme fix",
+						Content:   "acme fix content",
+						Scope:     "project",
+						CreatedAt: "2026-01-01T10:00:00Z",
+						UpdatedAt: "2026-01-01T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("acme-corp"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-2",
+						Type:      "decision",
+						Title:     "Globex decision",
+						Content:   "globex decision content",
+						Scope:     "project",
+						CreatedAt: "2026-01-02T10:00:00Z",
+						UpdatedAt: "2026-01-02T10:00:00Z",
+						Project:   strPtr("eng"),
+						Org:       strPtr("globex-inc"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		// First export: unfiltered, both observations land in the vault, each
+		// with its own session hub (sess-1 for acme, sess-2 for globex).
+		cfg := ExportConfig{VaultPath: dir}
+		exp := NewExporter(ms, cfg)
+		first, err := exp.Export()
+		if err != nil {
+			t.Fatalf("first Export() error: %v", err)
+		}
+		if first.Created != 2 {
+			t.Fatalf("first export Created: got %d, want 2", first.Created)
+		}
+		globexFile := dir + "/engram/eng/decision/globex-decision-2.md"
+		if !fileExists(globexFile) {
+			t.Fatalf("expected globex file after unfiltered export: %s", globexFile)
+		}
+		globexHub := dir + "/engram/_sessions/sess-2.md"
+		acmeHub := dir + "/engram/_sessions/sess-1.md"
+		if !fileExists(globexHub) {
+			t.Fatalf("expected globex session hub after unfiltered export: %s", globexHub)
+		}
+		if !fileExists(acmeHub) {
+			t.Fatalf("expected acme session hub after unfiltered export: %s", acmeHub)
+		}
+
+		// Second export: scoped to acme-corp only. The globex-inc observation
+		// falls out of scope; its previously tracked file AND its now-empty
+		// session hub must both be removed rather than left behind as
+		// orphans — the exporter is documented as a live mirror of the
+		// current selection.
+		cfg2 := ExportConfig{VaultPath: dir, Org: "acme-corp"}
+		exp2 := NewExporter(ms, cfg2)
+		second, err := exp2.Export()
+		if err != nil {
+			t.Fatalf("second Export() error: %v", err)
+		}
+		if fileExists(globexFile) {
+			t.Errorf("expected globex file removed after re-export scoped to acme-corp: %s", globexFile)
+		}
+		if fileExists(globexHub) {
+			t.Errorf("expected globex session hub removed after re-export scoped to acme-corp: %s", globexHub)
+		}
+		if second.Deleted != 2 {
+			t.Errorf("second export Deleted: got %d, want 2 (orphaned globex file + session hub)", second.Deleted)
+		}
+		acmeFile := dir + "/engram/eng/bugfix/acme-fix-1.md"
+		if !fileExists(acmeFile) {
+			t.Errorf("expected acme file to remain after re-export scoped to acme-corp: %s", acmeFile)
+		}
+		if !fileExists(acmeHub) {
+			t.Errorf("expected acme session hub to remain after re-export scoped to acme-corp: %s", acmeHub)
+		}
+	})
+}
+
 // ─── Task 2.9: TestFullExportPipeline ────────────────────────────────────────
 
 func TestFullExportPipeline(t *testing.T) {
@@ -1115,4 +1310,115 @@ func makeObs(id int64, sessionID, project, obsType, title, topicKey, ts string) 
 		obs.TopicKey = strPtr(topicKey)
 	}
 	return obs
+}
+
+// ─── Stale hub deletion failure keeps state entries for retry ────────────────
+
+func TestStaleHubDeletionFailureKeepsStateEntries(t *testing.T) {
+	dir := t.TempDir()
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{
+				{ID: "sess-1", Project: "eng"},
+				{ID: "sess-2", Project: "eng"},
+			},
+			Observations: []store.Observation{
+				{
+					ID: 1, SessionID: "sess-1", Type: "bugfix", Title: "Acme fix",
+					Content: "acme fix content", Scope: "project",
+					CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+					Project: strPtr("eng"), Org: strPtr("acme-corp"),
+				},
+				{
+					ID: 2, SessionID: "sess-2", Type: "decision", Title: "Globex one",
+					Content: "globex one content", Scope: "project",
+					CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+					Project: strPtr("eng"), Org: strPtr("globex-inc"),
+					TopicKey: strPtr("billing/one"),
+				},
+				{
+					ID: 3, SessionID: "sess-2", Type: "decision", Title: "Globex two",
+					Content: "globex two content", Scope: "project",
+					CreatedAt: "2026-01-03T10:00:00Z", UpdatedAt: "2026-01-03T10:00:00Z",
+					Project: strPtr("eng"), Org: strPtr("globex-inc"),
+					TopicKey: strPtr("billing/two"),
+				},
+			},
+			Prompts: []store.Prompt{},
+		},
+	}
+
+	// First export, unfiltered: sess-2 session hub and billing topic hub exist.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("first Export() error: %v", err)
+	}
+	sessionsDir := filepath.Join(dir, "engram", "_sessions")
+	topicsDir := filepath.Join(dir, "engram", "_topics")
+	staleSessionHub := filepath.Join(sessionsDir, "sess-2.md")
+	staleTopicHub := filepath.Join(topicsDir, "billing.md")
+	if !fileExists(staleSessionHub) || !fileExists(staleTopicHub) {
+		t.Fatalf("expected globex hubs after unfiltered export: %s, %s", staleSessionHub, staleTopicHub)
+	}
+
+	// Replace each stale hub file with a non-empty directory so os.Remove
+	// fails with a real error (not IsNotExist) on any OS and any euid —
+	// root-owned CI included — when the second export prunes stale hubs.
+	for _, hub := range []string{staleSessionHub, staleTopicHub} {
+		if err := os.Remove(hub); err != nil {
+			t.Fatalf("replace hub %s: %v", hub, err)
+		}
+		if err := os.MkdirAll(filepath.Join(hub, "marker"), 0o755); err != nil {
+			t.Fatalf("create blocking dir %s: %v", hub, err)
+		}
+	}
+
+	// Second export, scoped to acme-corp: both globex hubs fall out of the
+	// selection, deletion fails, and the state must keep both entries so a
+	// later export can retry.
+	second, err := NewExporter(ms, ExportConfig{VaultPath: dir, Org: "acme-corp"}).Export()
+	if err != nil {
+		t.Fatalf("second Export() error: %v", err)
+	}
+	if len(second.Errors) < 2 {
+		t.Fatalf("second export Errors: got %d, want >= 2 (session hub + topic hub): %v", len(second.Errors), second.Errors)
+	}
+	stateFile := filepath.Join(dir, "engram", ".engram-sync-state.json")
+	state, err := ReadState(stateFile)
+	if err != nil {
+		t.Fatalf("ReadState after failed prune: %v", err)
+	}
+	if _, kept := state.SessionHubs["sess-2"]; !kept {
+		t.Errorf("state.SessionHubs lost sess-2 after failed deletion; retry is impossible")
+	}
+	if _, kept := state.TopicHubs["billing"]; !kept {
+		t.Errorf("state.TopicHubs lost billing after failed deletion; retry is impossible")
+	}
+
+	// Empty the blocking directories: the retry can now delete them, files
+	// go away, and the state entries are pruned.
+	for _, hub := range []string{staleSessionHub, staleTopicHub} {
+		if err := os.Remove(filepath.Join(hub, "marker")); err != nil {
+			t.Fatalf("clear blocking dir %s: %v", hub, err)
+		}
+	}
+	third, err := NewExporter(ms, ExportConfig{VaultPath: dir, Org: "acme-corp"}).Export()
+	if err != nil {
+		t.Fatalf("third Export() error: %v", err)
+	}
+	if len(third.Errors) != 0 {
+		t.Fatalf("third export Errors: got %v, want none", third.Errors)
+	}
+	if fileExists(staleSessionHub) || fileExists(staleTopicHub) {
+		t.Errorf("stale hubs still present after retry export: %s, %s", staleSessionHub, staleTopicHub)
+	}
+	state, err = ReadState(stateFile)
+	if err != nil {
+		t.Fatalf("ReadState after retry: %v", err)
+	}
+	if _, kept := state.SessionHubs["sess-2"]; kept {
+		t.Errorf("state.SessionHubs still tracks sess-2 after successful retry deletion")
+	}
+	if _, kept := state.TopicHubs["billing"]; kept {
+		t.Errorf("state.TopicHubs still tracks billing after successful retry deletion")
+	}
 }

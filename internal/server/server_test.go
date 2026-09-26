@@ -4176,6 +4176,45 @@ func TestListProjectsEndpoint(t *testing.T) {
 	}
 }
 
+func TestListProjectsEndpointOrgFilter(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("s-1", "alpha", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := st.CreateSession("s-2", "beta", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{SessionID: "s-1", Type: "note", Title: "alpha note", Content: "content", Project: "alpha", Org: "acme"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{SessionID: "s-2", Type: "note", Title: "beta note", Content: "content", Project: "beta", Org: "globex"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/projects?org=acme", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /projects?org=acme = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Projects []store.ProjectStats `json:"projects"`
+		Count    int                  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /projects response: %v", err)
+	}
+	if body.Count != 1 || len(body.Projects) != 1 {
+		t.Fatalf("expected 1 project for org acme, got count=%d projects=%d", body.Count, len(body.Projects))
+	}
+	if body.Projects[0].Name != "alpha" {
+		t.Fatalf("expected project alpha for org acme, got %q", body.Projects[0].Name)
+	}
+}
+
 func TestListProjectsEndpointEmptyStore(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
