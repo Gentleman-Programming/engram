@@ -1244,6 +1244,31 @@ func clampContextBytes(v int) int {
 	return v
 }
 
+// contextBytesQuery caps positive decimal budgets before converting to int,
+// including values beyond the native integer range.
+func contextBytesQuery(r *http.Request) int {
+	v := r.URL.Query().Get("max_bytes")
+	if v == "" {
+		return 0
+	}
+	if v[0] == '+' {
+		v = v[1:]
+	}
+	if v == "" {
+		return 0
+	}
+	budget := 0
+	for _, digit := range v {
+		if digit < '0' || digit > '9' {
+			return 0
+		}
+		if budget <= contextMaxBytes {
+			budget = budget*10 + int(digit-'0')
+		}
+	}
+	return clampContextBytes(budget)
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -1262,7 +1287,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
 	// pass through untouched so all three states survive.
 	opts := store.ContextOptions{
-		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
+		MaxBytes:     contextBytesQuery(r),
 		Observations: clampContextLimit(queryInt(r, "observations", 0)),
 		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
 		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),

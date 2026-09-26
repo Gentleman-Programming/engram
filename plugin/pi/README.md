@@ -103,6 +103,8 @@ Pi-native compact tools use the same HTTP server path as event capture, includin
 
 ## Compact memory tool rendering
 
+`mem_context` accepts optional `max_bytes` and `compact` arguments and forwards supplied values to Engram's HTTP `/context` endpoint. Engram core owns the byte limit and context formatting; these options affect the context returned to the model, not Pi's separate compact/collapsed tool chrome. If either argument is omitted, Pi omits that query parameter and preserves the HTTP endpoint's existing behavior.
+
 `gentle-engram` owns the Pi chrome for Engram memory tools by registering compact Pi-native `mem_*` tools in the companion package. When tools such as `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, `mem_get_observation`, `mem_review`, `mem_judge`, and `mem_doctor` run in Pi, the default collapsed view stays compact:
 
 ```text
