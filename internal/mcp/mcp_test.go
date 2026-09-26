@@ -7895,7 +7895,7 @@ func TestHandleGetObservationProjectResolution(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	for _, projectName := range []string{"observation-owner", "explicit-project", "process-project"} {
+	for _, projectName := range []string{"observation-owner", "explicit-project", "process-project", "repo-a"} {
 		if err := s.CreateSession("session-"+projectName, projectName, "/tmp/"+projectName); err != nil {
 			t.Fatalf("create session for %q: %v", projectName, err)
 		}
@@ -7951,6 +7951,34 @@ func TestHandleGetObservationProjectResolution(t *testing.T) {
 		available, ok := body["available_projects"].([]any)
 		if !ok || len(available) == 0 {
 			t.Fatalf("available_projects = %#v, want known projects", body["available_projects"])
+		}
+	})
+
+	t.Run("ambiguous cwd accepts explicit known project", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "")
+		result, err := call(MCPConfig{}, "repo-a")
+		if err != nil || result.IsError {
+			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["project"] != "repo-a" || body["project_source"] != project.SourceExplicitOverride {
+			t.Fatalf("project envelope = %v, want repo-a from explicit override", body)
+		}
+	})
+
+	t.Run("ambiguous cwd without project fails closed", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "")
+		result, err := call(MCPConfig{}, "")
+		if err != nil || !result.IsError {
+			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["error_code"] != "ambiguous_project" {
+			t.Fatalf("error_code = %v, want ambiguous_project; body=%v", body["error_code"], body)
+		}
+		available, ok := body["available_projects"].([]any)
+		if !ok || len(available) < 2 {
+			t.Fatalf("available_projects = %#v, want at least two available projects", body["available_projects"])
 		}
 	})
 
