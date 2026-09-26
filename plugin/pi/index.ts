@@ -1411,7 +1411,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   mem_context: Type.Object({
     project: optionalString("Filter by project"),
     scope: optionalString("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
-    max_bytes: optionalNumber("Maximum context output size in bytes; enforced by Engram core"),
+    max_bytes: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum context output size in bytes; must be a positive integer; enforced by Engram core" })),
     compact: optionalBoolean("Use Engram core's compact context formatting"),
   }),
   mem_stats: Type.Object({
