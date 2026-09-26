@@ -2387,7 +2387,7 @@ func TestCmdProjectsMergePreviewDoesNotMutate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	for _, tc := range []struct {
 		table, project string
 		want           int
@@ -2431,7 +2431,7 @@ func TestCmdProjectsMergeApplyMovesRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	for _, tc := range []struct {
 		table, project string
 		want           int
@@ -2470,7 +2470,7 @@ func TestCmdProjectsMergeRefusesSameNormalizedPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	var count int
 	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acme-api'`).Scan(&count); err != nil {
 		t.Fatalf("count source observations: %v", err)

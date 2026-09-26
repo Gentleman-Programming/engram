@@ -3109,7 +3109,7 @@ func cmdProjectsMerge(cfg store.Config) {
 	if err != nil {
 		fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if !apply {
 		counts, err := s.CountProjectRecords(from)
