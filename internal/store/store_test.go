@@ -6254,10 +6254,10 @@ func TestImportRejectsNonOrphanedDanglingAndMissingSupersedingRelations(t *testi
 			destination := newTestStore(t)
 			project := "backup-project"
 			data := &ExportData{
-				Version: "0.2.0",
-				Sessions: []Session{{ID: "invalid-relation-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
+				Version:      "0.2.0",
+				Sessions:     []Session{{ID: "invalid-relation-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
 				Observations: []Observation{{SyncID: "obs-valid-endpoint", SessionID: "invalid-relation-session", Type: "note", Title: "valid", Content: "valid", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
-				Relations: []BackupRelation{{SyncID: "rel-invalid-endpoint", SourceID: "obs-valid-endpoint", TargetID: "obs-missing-endpoint", Relation: RelationRelated, JudgmentStatus: status, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+				Relations:    []BackupRelation{{SyncID: "rel-invalid-endpoint", SourceID: "obs-valid-endpoint", TargetID: "obs-missing-endpoint", Relation: RelationRelated, JudgmentStatus: status, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
 			}
 			if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "relation endpoint") {
 				t.Fatalf("import dangling %s relation error = %v, want missing endpoint error", status, err)
@@ -6270,7 +6270,7 @@ func TestImportRejectsNonOrphanedDanglingAndMissingSupersedingRelations(t *testi
 	project := "backup-project"
 	missingSuperseding := "rel-not-in-backup"
 	data := &ExportData{
-		Version: "0.2.0",
+		Version:  "0.2.0",
 		Sessions: []Session{{ID: "missing-superseding-session", Project: "backup-project", Directory: "/tmp/backup", StartedAt: "2026-01-01T00:00:00Z"}},
 		Observations: []Observation{
 			{SyncID: "obs-superseding-source", SessionID: "missing-superseding-session", Type: "note", Title: "source", Content: "source", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
@@ -6313,10 +6313,10 @@ func TestImportValidatesMissingSupersedingRelationForExistingRelation(t *testing
 	project := "backup-project"
 	missingSuperseding := "rel-missing-superseder"
 	data := &ExportData{
-		Version: "0.2.0",
-		Sessions: []Session{{ID: "rolled-back-session", Project: project, Directory: "/tmp/rollback", StartedAt: "2026-01-01T00:00:00Z"}},
+		Version:      "0.2.0",
+		Sessions:     []Session{{ID: "rolled-back-session", Project: project, Directory: "/tmp/rollback", StartedAt: "2026-01-01T00:00:00Z"}},
 		Observations: []Observation{{SyncID: "obs-rolled-back", SessionID: "rolled-back-session", Type: "note", Title: "rollback", Content: "rollback", Project: &project, Scope: "project", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
-		Relations: []BackupRelation{{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID, Relation: RelationRelated, JudgmentStatus: JudgmentStatusPending, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
+		Relations:    []BackupRelation{{SyncID: "rel-existing-no-superseder", SourceID: source.SyncID, TargetID: target.SyncID, Relation: RelationRelated, JudgmentStatus: JudgmentStatusPending, SupersededByRelationSyncID: &missingSuperseding, CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}},
 	}
 	if _, err := destination.Import(data); err == nil || !strings.Contains(err.Error(), "superseding relation") {
 		t.Fatalf("import existing relation with missing superseder error = %v, want missing superseding relation error", err)
@@ -11567,6 +11567,260 @@ func TestMergeProjectsRejectsSeparatorVariants(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.MergeProjects([]string{"foo-bar"}, "foo_bar"); err == nil || !strings.Contains(err.Error(), "must normalize") {
 		t.Fatalf("MergeProjects error = %v, want separator variant rejection", err)
+	}
+}
+
+// Regression pin for the explicit by-name merge: the detection-driven
+// MergeProjects must keep refusing the exact pair the issue asks to merge
+// (acmeapi → acme-api), because the two names do not normalize alike.
+func TestMergeProjectsStillRejectsNormalizationDivergentPair(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acmeapi")
+	if _, err := s.MergeProjects([]string{"acmeapi"}, "acme-api"); err == nil || !strings.Contains(err.Error(), "must normalize") {
+		t.Fatalf("MergeProjects error = %v, want normalization rejection for acmeapi → acme-api", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source observations after rejection = %d, err %v", count, err)
+	}
+}
+
+// Regression pin for the explicit by-name merge: MergeExplicitProjectVariants
+// must keep refusing pairs whose spellings have different lengths, such as
+// acmeapi (7) → acme-api (8), which is not a corresponding '-'/'_' swap.
+func TestExplicitMergeProjectsRejectsLengthMismatchPair(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acmeapi")
+	if _, err := s.MergeExplicitProjectVariants([]string{"acmeapi"}, "acme-api"); err == nil || !strings.Contains(err.Error(), "must normalize") {
+		t.Fatalf("MergeExplicitProjectVariants error = %v, want length-mismatch rejection for acmeapi → acme-api", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source observations after rejection = %d, err %v", count, err)
+	}
+}
+
+// The issue's exact example: the operator explicitly merges the project named
+// "acmeapi" into the project named "acme-api". The two names normalize
+// differently, so only the explicit by-name merge may move the records, and
+// it must carry observations, sessions, prompts, and the sync identity in one
+// transaction.
+func TestMergeProjectsByNameMovesNamedSourceToExplicitTarget(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acmeapi")
+	seedPendingLegacyMutations(t, s, "acmeapi")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('legacy-prompt', 'legacy-session', 'prompt', 'acmeapi')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES ('acmeapi')`); err != nil {
+		t.Fatal(err)
+	}
+	// A record already under the target spelling must stay put.
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('target-session', 'acme-api', '')`); err != nil {
+		t.Fatal(err)
+	}
+	// A different exact spelling that normalizes to the source must NOT match
+	// the by-name merge: only the exact source spelling moves.
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('acmeapi-upper-session', 'ACMEAPI', '/work/engram')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('acmeapi-upper-obs', 'acmeapi-upper-session', 'decision', 'upper', 'content', 'ACMEAPI', 'project', 'upper-hash')`); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.MergeProjectsByName("acmeapi", "acme-api")
+	if err != nil {
+		t.Fatalf("MergeProjectsByName: %v", err)
+	}
+	if result.Canonical != "acme-api" || result.ObservationsUpdated != 1 || result.SessionsUpdated != 1 || result.PromptsUpdated != 1 {
+		t.Fatalf("unexpected merge result: %+v", result)
+	}
+	if len(result.SourcesMerged) != 1 || result.SourcesMerged[0] != "acmeapi" {
+		t.Fatalf("SourcesMerged = %v, want [acmeapi]", result.SourcesMerged)
+	}
+	for _, table := range []string{"sessions", "observations", "user_prompts", "sync_enrolled_projects"} {
+		var sourceCount, canonicalCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'acmeapi'`).Scan(&sourceCount); err != nil {
+			t.Fatal(err)
+		}
+		if table == "sessions" {
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'acme-api'`).Scan(&canonicalCount); err != nil {
+				t.Fatal(err)
+			}
+			if sourceCount != 0 || canonicalCount != 2 {
+				t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 2", table, sourceCount, canonicalCount)
+			}
+		} else {
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'acme-api'`).Scan(&canonicalCount); err != nil {
+				t.Fatal(err)
+			}
+			if sourceCount != 0 || canonicalCount != 1 {
+				t.Fatalf("%s projects: source=%d canonical=%d, want 0 and 1", table, sourceCount, canonicalCount)
+			}
+		}
+		// The ACMEAPI spelling normalizes to "acmeapi" yet is a different exact
+		// spelling: the by-name merge must leave it untouched.
+		var upperCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project = 'ACMEAPI'`).Scan(&upperCount); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if table == "sessions" || table == "observations" {
+			want = 1
+		}
+		if upperCount != want {
+			t.Fatalf("%s ACMEAPI rows = %d, want %d", table, upperCount, want)
+		}
+	}
+	for _, key := range []string{"legacy-session", "legacy-obs"} {
+		mutation, ok := pendingMutationsByEntityKey(t, s)[key]
+		if !ok || mutation.Project != "acme-api" || payloadProject(t, mutation.Payload) != "acme-api" {
+			t.Fatalf("stale or missing sync mutation %q: %+v", key, mutation)
+		}
+	}
+}
+
+// The contract's explicit refusal: both names normalize to the SAME project,
+// so there is nothing to migrate and the call must fail without touching the
+// store.
+func TestMergeProjectsByNameRefusesSameNormalizedProject(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acme-api")
+
+	_, err := s.MergeProjectsByName("acme-api", "Acme--API")
+	if err == nil {
+		t.Fatal("MergeProjectsByName accepted a same-normalized pair")
+	}
+	for _, want := range []string{"acme-api", "Acme--API", "normalize to \"acme-api\""} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err.Error(), want)
+		}
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acme-api'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source observations after refusal = %d, err %v", count, err)
+	}
+}
+
+func TestMergeProjectsByNameRefusesEmptyNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		from, to  string
+		errorPart string
+	}{
+		{name: "empty source", from: "", to: "acme-api", errorPart: "must not be empty"},
+		{name: "blank source", from: "   ", to: "acme-api", errorPart: "must not be empty"},
+		{name: "empty target", from: "acmeapi", to: "", errorPart: "must not be empty"},
+		{name: "both empty", from: "", to: "", errorPart: "must not be empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if _, err := s.MergeProjectsByName(tt.from, tt.to); err == nil || !strings.Contains(err.Error(), tt.errorPart) {
+				t.Fatalf("MergeProjectsByName(%q, %q) error = %v, want %q", tt.from, tt.to, err, tt.errorPart)
+			}
+		})
+	}
+}
+
+// Merging a named source with no records is a successful no-op: the store
+// moved nothing and the caller must report that honestly instead of failing.
+func TestMergeProjectsByNameToleratesMissingSource(t *testing.T) {
+	s := newTestStore(t)
+
+	result, err := s.MergeProjectsByName("ghost-project", "target-project")
+	if err != nil {
+		t.Fatalf("MergeProjectsByName with missing source: %v", err)
+	}
+	if result.ObservationsUpdated != 0 || result.SessionsUpdated != 0 || result.PromptsUpdated != 0 || len(result.SourcesMerged) != 0 {
+		t.Fatalf("unexpected no-op result: %+v", result)
+	}
+}
+
+// A missing source is a successful no-op that must not enqueue sync mutations:
+// backfilling the untouched target would flood the sync journal with upserts
+// for records the merge never moved. The fixture enrolls the target first and
+// seeds its records afterwards through raw SQL, so the journal holds no rows
+// for them and an unconditional backfill would visibly write.
+func TestMergeProjectsByNameMissingSourceWritesNoSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "target-project")
+	seedLegacyMergeRecords(t, s, "target-project")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('target-prompt', 'legacy-session', 'prompt', 'target-project')`); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.MergeProjectsByName("ghost-project", "target-project")
+	if err != nil {
+		t.Fatalf("MergeProjectsByName with missing source: %v", err)
+	}
+	if result.ObservationsUpdated != 0 || result.SessionsUpdated != 0 || result.PromptsUpdated != 0 || len(result.SourcesMerged) != 0 {
+		t.Fatalf("unexpected no-op result: %+v", result)
+	}
+	var mutations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&mutations); err != nil {
+		t.Fatal(err)
+	}
+	if mutations != 0 {
+		t.Fatalf("no-op merge enqueued %d sync mutations, want 0", mutations)
+	}
+}
+
+// CountProjectRecords backs the dry-run preview: it counts the exact spelling
+// given (the rows a by-name merge would move, soft-deleted observations
+// included) and stays silent about other spellings of the same project.
+func TestCountProjectRecordsCountsExactSpellingOnly(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acmeapi")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('count-prompt', 'legacy-session', 'prompt', 'acmeapi')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash, deleted_at) VALUES ('deleted-obs', 'legacy-session', 'note', 'deleted', 'content', 'acmeapi', 'project', 'deleted-hash', datetime('now'))`); err != nil {
+		t.Fatal(err)
+	}
+	// Another spelling of the same project must not leak into the counts.
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('other-obs', 'legacy-session', 'note', 'other', 'content', 'acme-api', 'project', 'other-hash')`); err != nil {
+		t.Fatal(err)
+	}
+	// "ACMEAPI" normalizes to "acmeapi" yet is a different exact spelling: the
+	// exact-spelling count must exclude it.
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('upper-obs', 'legacy-session', 'note', 'upper', 'content', 'ACMEAPI', 'project', 'upper-hash')`); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := s.CountProjectRecords("acmeapi")
+	if err != nil {
+		t.Fatalf("CountProjectRecords: %v", err)
+	}
+	if counts.Project != "acmeapi" || counts.Observations != 2 || counts.Sessions != 1 || counts.Prompts != 1 {
+		t.Fatalf("unexpected counts: %+v", counts)
+	}
+
+	counts, err = s.CountProjectRecords("missing-project")
+	if err != nil {
+		t.Fatalf("CountProjectRecords missing: %v", err)
+	}
+	if counts.Observations != 0 || counts.Sessions != 0 || counts.Prompts != 0 {
+		t.Fatalf("expected zero counts for missing project, got: %+v", counts)
+	}
+}
+
+// A failed count query must surface as an error with nil counts: the dry-run
+// preview must never print a partially scanned shape as if it were complete.
+func TestCountProjectRecordsReturnsErrorAndNilCountsWhenQueryFails(t *testing.T) {
+	s := newTestStore(t)
+	// Deterministic failure: the third count query targets user_prompts, so
+	// the observations and sessions scans succeed before the loop aborts.
+	if _, err := s.db.Exec(`DROP TABLE user_prompts`); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := s.CountProjectRecords("acme-api")
+	if err == nil {
+		t.Fatal("CountProjectRecords must fail when a count query fails")
+	}
+	if counts != nil {
+		t.Fatalf("counts = %+v, want nil on error", counts)
 	}
 }
 
