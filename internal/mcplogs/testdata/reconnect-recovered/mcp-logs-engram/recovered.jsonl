@@ -1,0 +1,7 @@
+{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-09-27T10:00:00.000Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}
+{"debug":"Successfully connected (transport: stdio) in 98ms","timestamp":"2026-09-27T10:00:00.098Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}
+{"debug":"UNKNOWN connection closed after 3s (cleanly)","timestamp":"2026-09-27T10:00:03.000Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}
+{"debug":"Cleared connection cache for reconnection","timestamp":"2026-09-27T10:00:03.004Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}
+{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-09-27T10:00:33.000Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}
+{"debug":"Successfully connected (transport: stdio) in 105ms","timestamp":"2026-09-27T10:00:33.105Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}
+{"debug":"Tool 'mem_context' completed successfully","timestamp":"2026-09-27T10:01:00.000Z","sessionId":"recovered-session","cwd":"/tmp/mcp-probe"}

@@ -1,0 +1,5 @@
+{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-09-27T09:00:00.000Z","sessionId":"synthetic-defect","cwd":"/tmp/mcp-probe"}
+{"debug":"Successfully connected (transport: stdio) in 190ms","timestamp":"2026-09-27T09:00:00.190Z","sessionId":"synthetic-defect","cwd":"/tmp/mcp-probe"}
+{"debug":"Connection established with capabilities: {\"hasTools\":true}","timestamp":"2026-09-27T09:00:00.191Z","sessionId":"synthetic-defect","cwd":"/tmp/mcp-probe"}
+{"debug":"Tool 'codegraph_search' completed successfully","timestamp":"2026-09-27T09:00:40.000Z","sessionId":"synthetic-defect","cwd":"/tmp/mcp-probe"}
+{"debug":"UNKNOWN connection closed after 800s (cleanly)","timestamp":"2026-09-27T09:13:20.000Z","sessionId":"synthetic-defect","cwd":"/tmp/mcp-probe"}

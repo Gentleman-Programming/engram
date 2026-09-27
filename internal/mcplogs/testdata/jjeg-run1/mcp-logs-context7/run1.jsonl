@@ -1,0 +1,2 @@
+{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-08-24T06:00:00.000Z","sessionId":"jjeg-run1","cwd":"/tmp/mcp-probe"}
+{"debug":"Successfully connected (transport: stdio) in 88ms","timestamp":"2026-08-24T06:00:00.088Z","sessionId":"jjeg-run1","cwd":"/tmp/mcp-probe"}
