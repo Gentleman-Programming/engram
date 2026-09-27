@@ -71,12 +71,20 @@ Branch names are validated by a GitHub ruleset. Pushes that don't match **will b
 
 ## PR Body Format
 
-The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain:
+The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain one of the following:
 
 ### 1. Linked Issue (REQUIRED)
 
+Closing reference (auto-closes the issue on merge) — use only when this PR completes the issue:
+
 ```markdown
 Closes #<issue-number>
+```
+
+Non-closing reference (never closes the issue) — use only for a reviewable partial PR of an approved umbrella issue:
+
+```markdown
+Refs #<issue-number>
 ```
 
 Valid keywords (case insensitive): `Closes #N`, `Fixes #N`, `Resolves #N` are closing references — use them only when this PR completes the issue (they auto-close it on merge). `Refs #N` is a non-closing reference for reviewable partial PRs of an approved umbrella issue; it passes the same checks but never closes the issue.
