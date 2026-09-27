@@ -9,22 +9,33 @@ const prWorkflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
 const labelWorkflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
 const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
 
-function associatedPullsGitHub({ associated, pulls, paginateError, pullError } = {}) {
-  const listAssociated = () => {};
-  const getPull = () => {};
+function mergeQueueGitHub({ pages = [], pulls = new Map(), graphqlError, pullError } = {}) {
+  const queueCalls = [];
   const fetches = [];
+  const listAssociated = () => { throw new Error('synthetic commit association must not be queried'); };
   return {
+    queueCalls,
     fetches,
     github: {
-      paginate: async (method, params) => {
-        assert.equal(method, listAssociated);
-        assert.deepEqual(params, {
-          owner: 'Gentleman-Programming',
-          repo: 'engram',
-          commit_sha: 'merge-group-sha',
-        });
-        if (paginateError) throw paginateError;
-        return associated;
+      graphql: async (query, variables) => {
+        assert.match(query, /repository\([^)]*\)\s*\{\s*mergeQueue\(branch:/);
+        queueCalls.push(variables);
+        if (graphqlError) throw graphqlError;
+        const page = pages.find(({ cursor }) => cursor === variables.cursor);
+        if (!page) throw new Error(`unexpected merge queue cursor: ${variables.cursor}`);
+        const pageInfo = Object.hasOwn(page, 'pageInfo')
+          ? page.pageInfo
+          : { hasNextPage: Boolean(page.hasNextPage), endCursor: page.endCursor ?? null };
+        return {
+          repository: {
+            mergeQueue: {
+              entries: {
+                nodes: page.entries,
+                pageInfo,
+              },
+            },
+          },
+        };
       },
       rest: {
         repos: { listPullRequestsAssociatedWithCommit: listAssociated },
@@ -40,69 +51,101 @@ function associatedPullsGitHub({ associated, pulls, paginateError, pullError } =
   };
 }
 
-const repository = { owner: 'Gentleman-Programming', repo: 'engram', commitSha: 'merge-group-sha' };
+const repository = {
+  owner: 'Gentleman-Programming',
+  repo: 'engram',
+  baseRef: 'refs/heads/main',
+  headRef: 'refs/heads/gh-readonly-queue/main/pr-1314-0123456789abcdef0123456789abcdef01234567',
+};
 
-test('resolves one associated PR from current API metadata', async () => {
-  const currentPull = { number: 42, body: 'Closes #926', labels: [{ name: 'type:chore' }] };
-  const fixture = associatedPullsGitHub({
-    associated: [{ number: 42 }],
-    pulls: new Map([[42, currentPull]]),
+function queueEntry(position, number) {
+  return { position, pullRequest: { number } };
+}
+
+test('resolves the #1314 merge group when synthetic commit association is empty', async () => {
+  const currentPull = { number: 1314, body: 'Closes #1325', labels: [{ name: 'type:bug' }] };
+  const fixture = mergeQueueGitHub({
+    pages: [{ cursor: null, entries: [queueEntry(1, 1314)] }],
+    pulls: new Map([[1314, currentPull]]),
   });
 
   assert.deepEqual(await resolveAssociatedPullRequests(fixture.github, repository), [currentPull]);
-  assert.deepEqual(fixture.fetches, [{ owner: 'Gentleman-Programming', repo: 'engram', pull_number: 42 }]);
+  assert.deepEqual(fixture.queueCalls, [{ owner: 'Gentleman-Programming', repo: 'engram', baseRef: 'main', cursor: null }]);
+  assert.deepEqual(fixture.fetches, [{ owner: 'Gentleman-Programming', repo: 'engram', pull_number: 1314 }]);
 });
 
-test('resolves multiple associated PRs from current API metadata', async () => {
-  const first = { number: 42 };
-  const second = { number: 43 };
-  const fixture = associatedPullsGitHub({
-    associated: [{ number: 42 }, { number: 43 }],
-    pulls: new Map([[42, first], [43, second]]),
-  });
-
-  assert.deepEqual(await resolveAssociatedPullRequests(fixture.github, repository), [first, second]);
-  assert.deepEqual(fixture.fetches.map(({ pull_number }) => pull_number), [42, 43]);
-});
-
-test('deduplicates paginated associated PRs in first-seen order', async () => {
-  const fixture = associatedPullsGitHub({
-    associated: [{ number: 43 }, { number: 42 }, { number: 43 }, { number: 44 }, { number: 42 }],
-    pulls: new Map([[42, { number: 42 }], [43, { number: 43 }], [44, { number: 44 }]]),
+test('resolves a cumulative group through its tail PR in queue order across pages', async () => {
+  const fixture = mergeQueueGitHub({
+    pages: [
+      { cursor: null, entries: [queueEntry(1, 1312), queueEntry(2, 1313)], hasNextPage: true, endCursor: 'page-2' },
+      { cursor: 'page-2', entries: [queueEntry(3, 1314), queueEntry(4, 1315)] },
+    ],
+    pulls: new Map([[1312, { number: 1312 }], [1313, { number: 1313 }], [1314, { number: 1314 }]]),
   });
 
   assert.deepEqual(
     (await resolveAssociatedPullRequests(fixture.github, repository)).map(({ number }) => number),
-    [43, 42, 44],
+    [1312, 1313, 1314],
   );
-  assert.deepEqual(fixture.fetches.map(({ pull_number }) => pull_number), [43, 42, 44]);
+  assert.deepEqual(fixture.queueCalls.map(({ cursor }) => cursor), [null, 'page-2']);
+  assert.deepEqual(fixture.fetches.map(({ pull_number }) => pull_number), [1312, 1313, 1314]);
 });
 
-test('rejects a merge group with no associated PRs', async () => {
-  const fixture = associatedPullsGitHub({ associated: [], pulls: new Map() });
+test('fails closed for malformed queue head refs, absent tails, and empty queues', async () => {
+  await assert.rejects(
+    resolveAssociatedPullRequests(mergeQueueGitHub().github, { ...repository, baseRef: 'main' }),
+    /invalid merge queue base ref/,
+  );
 
   await assert.rejects(
-    resolveAssociatedPullRequests(fixture.github, repository),
-    /could not resolve associated pull requests/,
+    resolveAssociatedPullRequests(mergeQueueGitHub().github, { ...repository, headRef: 'refs/heads/main' }),
+    /invalid merge queue head ref/,
+  );
+
+  await assert.rejects(
+    resolveAssociatedPullRequests(mergeQueueGitHub({
+      pages: [{ cursor: null, entries: [queueEntry(1, 1313)] }],
+    }).github, repository),
+    /merge queue tail PR #1314 was not found/,
+  );
+
+  await assert.rejects(
+    resolveAssociatedPullRequests(mergeQueueGitHub({ pages: [{ cursor: null, entries: [] }] }).github, repository),
+    /merge queue is empty/,
   );
 });
 
-test('propagates associated-PR pagination failures', async () => {
-  const failure = new Error('GitHub pagination failed');
-  const fixture = associatedPullsGitHub({ paginateError: failure });
+test('fails closed for malformed pagination and propagates GitHub API failures', async () => {
+  for (const pageInfo of [undefined, { hasNextPage: 'false' }]) {
+    await assert.rejects(
+      resolveAssociatedPullRequests(mergeQueueGitHub({
+        pages: [{ cursor: null, entries: [queueEntry(1, 1314)], pageInfo }],
+      }).github, repository),
+      /merge queue response is malformed/,
+    );
+  }
 
-  await assert.rejects(resolveAssociatedPullRequests(fixture.github, repository), (error) => error === failure);
-});
+  await assert.rejects(
+    resolveAssociatedPullRequests(mergeQueueGitHub({
+      pages: [{ cursor: null, entries: [queueEntry(1, 1314)], pageInfo: { hasNextPage: true } }],
+    }).github, repository),
+    /merge queue pagination cursor is missing/,
+  );
 
-test('propagates current PR fetch failures', async () => {
-  const failure = new Error('GitHub pull lookup failed');
-  const fixture = associatedPullsGitHub({
-    associated: [{ number: 42 }],
-    pulls: new Map(),
-    pullError: failure,
-  });
+  const graphqlFailure = new Error('GitHub GraphQL failed');
+  await assert.rejects(
+    resolveAssociatedPullRequests(mergeQueueGitHub({ graphqlError: graphqlFailure }).github, repository),
+    (error) => error === graphqlFailure,
+  );
 
-  await assert.rejects(resolveAssociatedPullRequests(fixture.github, repository), (error) => error === failure);
+  const pullFailure = new Error('GitHub pull lookup failed');
+  await assert.rejects(
+    resolveAssociatedPullRequests(mergeQueueGitHub({
+      pages: [{ cursor: null, entries: [queueEntry(1, 1314)] }],
+      pullError: pullFailure,
+    }).github, repository),
+    (error) => error === pullFailure,
+  );
 });
 
 test('aggregates mixed valid and invalid pull-request results', async () => {
@@ -225,11 +268,24 @@ test('validates current queued PRs through trusted merge-queue helpers', () => {
       /^            const \{ aggregatePullRequestResults, resolveAssociatedPullRequests \} = await import\(.*merge-queue\.mjs/m,
       'ordinary PR validation must not import a helper absent from the trusted base',
     );
-    assert.match(job, /resolveAssociatedPullRequests/);
+    assert.match(job, /resolveAssociatedPullRequests\(github, \{/);
     assert.match(job, /aggregatePullRequestResults/);
     assert.doesNotMatch(job, /github\.paginate\(/);
     assert.doesNotMatch(job, /listPullRequestsAssociatedWithCommit/);
   }
+
+  for (const job of [issueReference, issueApproved]) {
+    assert.match(
+      job,
+      /resolveAssociatedPullRequests\(github, \{\r?\n                  owner: context\.repo\.owner,\r?\n                  repo: context\.repo\.repo,\r?\n                  baseRef: context\.payload\.merge_group\.base_ref,\r?\n                  headRef: context\.payload\.merge_group\.head_ref,\r?\n                \}\)/,
+      'PR validation must use the event base and queue head refs',
+    );
+  }
+  assert.match(
+    labelPolicy,
+    /const \{ base_ref: baseRef, head_ref: headRef \} = context\.payload\.merge_group;\r?\n                const pulls = await resolveAssociatedPullRequests\(github, \{\r?\n                  owner: context\.repo\.owner,\r?\n                  repo: context\.repo\.repo,\r?\n                  baseRef,\r?\n                  headRef,\r?\n                \}\)/,
+    'label policy must pass the event base and queue head refs',
+  );
 
   assertEventGatedStep(issueReference, 'Verify PR links an issue', ['pull_request', 'merge_group']);
   assertEventGatedStep(issueApproved, 'Verify linked issue is approved', ['pull_request', 'merge_group']);

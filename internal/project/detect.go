@@ -124,7 +124,7 @@ type DetectionResult struct {
 //  0. config     — nearest .engram/config.json inside the enclosing repo/root
 //  1. git_remote — Git repo currently has origin: initialize an absent private binding from the remote name; otherwise reuse it
 //  2. git_root   — Git repo currently has no origin: initialize an absent private binding from the root basename; otherwise reuse it
-//  3. git_child  — cwd has exactly one git-repo child → auto-promote it
+//  3. git_child  — cwd has exactly one git-repo child → resolve its canonical identity and auto-promote it
 //  4. ambiguous  — cwd has multiple git-repo children → return ErrAmbiguousProject
 //  5. dir_basename — none of the above → use filepath.Base(dir)
 func DetectProjectFull(dir string) DetectionResult {
@@ -155,13 +155,15 @@ func DetectProjectFull(dir string) DetectionResult {
 	case 1:
 		// Case 3: exactly one child repo — auto-promote.
 		child := children[0]
-		childName := normalize(filepath.Base(child))
-		absChild, _ := filepath.Abs(child)
+		childResult := DetectProjectFull(child)
+		if childResult.Error != nil {
+			return childResult
+		}
 		return DetectionResult{
-			Project: childName,
+			Project: childResult.Project,
 			Source:  SourceGitChild,
-			Path:    absChild,
-			Warning: "auto-promoted child repository: " + childName,
+			Path:    childResult.Path,
+			Warning: "auto-promoted child repository: " + childResult.Project,
 		}
 	default:
 		if len(children) > 1 {

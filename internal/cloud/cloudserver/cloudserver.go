@@ -493,6 +493,11 @@ func (s *CloudServer) recordAuthAuditBestEffort(ctx context.Context, event cloud
 	}
 }
 
+// bearerTokenFromRequest trims outer whitespace and requires exactly two
+// whitespace-delimited Authorization fields. The Bearer scheme is matched
+// case-insensitively; tabs and multiple spaces between fields are accepted.
+// Whitespace inside a credential or a scheme glued to it is rejected. This
+// parser does not enforce RFC character grammar for the credential.
 func bearerTokenFromRequest(r *http.Request) (string, error) {
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if header == "" {

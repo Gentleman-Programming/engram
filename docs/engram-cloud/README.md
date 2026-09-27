@@ -34,9 +34,11 @@ Continue with full verification and expected outputs in [Quickstart](./quickstar
 
 ## Public Container Image (GHCR)
 
-Engram Cloud publishes an official image at:
+Engram Cloud publishes an official production image at:
 
-- `ghcr.io/gentleman-programming/engram`
+- `ghcr.io/gentleman-programming/engram:v2.0.0`
+
+For exact image pinning plus upgrade and rollback steps, see [Quickstart](./quickstart.md#container-image-pin-upgrade-and-roll-back).
 
 Supported platforms:
 - `linux/amd64`

@@ -36,13 +36,11 @@ Use this skill when:
 
 ---
 
-## Validation Commands
+## Verification Ownership
 
-Run:
+Verification is evidence about the candidate; CI is the automated execution venue, not a substitute for local focused evidence.
 
-```bash
-go test ./...
-go test -cover ./...
-```
-
-Report package coverage and total coverage in the PR.
+- For behavior changes, run a focused regression test and tests for the affected package(s) locally before proposing the change. Report the commands and outcomes.
+- Use targeted coverage when useful to find missed behavior or branches. Do not require a numeric coverage target or total module coverage for every PR.
+- After the candidate is pushed to a PR, GitHub CI owns the full unit suite (`go test ./...`), E2E suite (`go test -tags e2e ./internal/server/...`), lint, and applicable platform checks. Do not report CI evidence until those checks actually run.
+- When there is no PR or the candidate is unpushed, or when risk justifies more verification, run the additional applicable checks locally. Report checks that could not run as missing evidence rather than claiming CI covered them. Avoid duplicating the broad suite locally by default when PR CI will run it.

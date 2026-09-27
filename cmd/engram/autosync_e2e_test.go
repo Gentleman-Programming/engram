@@ -339,9 +339,15 @@ func (s *autosyncFakeStore) ReleaseSyncLease(_, _ string) error { return nil }
 
 func (s *autosyncFakeStore) ApplyPulledMutation(_ string, _ store.SyncMutation) error { return nil }
 
+func (s *autosyncFakeStore) ApplyPulledMutationPreservingSyncState(_ string, _ store.SyncMutation) error {
+	return nil
+}
+
 func (s *autosyncFakeStore) MarkSyncFailure(_, _ string, _ time.Time) error { return nil }
 
 func (s *autosyncFakeStore) MarkSyncBlocked(_, _, _ string) error { return nil }
+
+func (s *autosyncFakeStore) MarkSyncBlockedAfterSuccess(_, _, _ string) error { return nil }
 
 func (s *autosyncFakeStore) MarkSyncHealthy(_ string) error { return nil }
 

@@ -34,7 +34,10 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const sourceProcessOverride = projectpkg.SourceProcessOverride
+const (
+	sourceProcessOverride         = projectpkg.SourceProcessOverride
+	sessionIDPropertyDescription = "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed."
+)
 
 // MCPConfig holds configuration for the MCP server.
 type MCPConfig struct {
@@ -517,7 +520,7 @@ Examples:
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description(sessionIDPropertyDescription),
 				),
 				mcp.WithString("scope",
 					mcp.Description("Scope for this observation: project (default), personal, or global"),
@@ -561,7 +564,13 @@ Examples:
 					mcp.Description("New title"),
 				),
 				mcp.WithString("content",
-					mcp.Description("New content"),
+					mcp.Description("New content; cannot be combined with find and replace"),
+				),
+				mcp.WithString("find",
+					mcp.Description("Literal case-sensitive text to replace everywhere; requires replace"),
+				),
+				mcp.WithString("replace",
+					mcp.Description("Literal replacement text; requires find"),
 				),
 				mcp.WithString("type",
 					mcp.Description("New type/category"),
@@ -661,7 +670,7 @@ Examples:
 					mcp.Description("The user's prompt text"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description(sessionIDPropertyDescription),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project."),
@@ -801,6 +810,9 @@ Examples:
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
 				),
+				mcp.WithString("project",
+					mcp.Description("Optional project for response context, validated against known projects. Omit to use the process override or cwd detection. ID-based lookup is not filtered by project ownership."),
+				),
 			),
 			handleGetObservation(s, cfg, activity),
 		)
@@ -853,7 +865,7 @@ GUIDELINES:
 					mcp.Description("Full session summary using the Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files format"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description(sessionIDPropertyDescription),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
@@ -873,7 +885,7 @@ GUIDELINES:
 	if shouldRegister("mem_session_start", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_session_start",
-				mcp.WithDescription("Register the start of a new coding session. Call this at the beginning of a session to track activity."),
+				mcp.WithDescription("Register a caller-provided session ID. Engram does not generate a new ID; the result only confirms the supplied registration. Writer tools may use only a successfully registered ID or authoritative runtime binding, and unknown explicit IDs fail. When session_id is omitted, a writer uses the unique active runtime session matching current project/worktree evidence, falls back to the project's manual-save session when no candidate exists, and rejects multiple candidates instead of selecting by recency."),
 				mcp.WithDeferLoading(true),
 				mcp.WithTitleAnnotation("Start Session"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -882,7 +894,7 @@ GUIDELINES:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithString("id",
 					mcp.Required(),
-					mcp.Description("Unique session identifier"),
+					mcp.Description("Caller-provided unique session ID; Engram does not generate one."),
 				),
 				mcp.WithString("directory",
 					mcp.Description("Working directory"),
@@ -935,7 +947,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The text output containing a '## Key Learnings:' section with numbered or bulleted items"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description(sessionIDPropertyDescription),
 				),
 				mcp.WithString("source",
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
@@ -949,7 +961,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 	if shouldRegister("mem_merge_projects", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_merge_projects",
-				mcp.WithDescription("Merge memories from multiple project name variants into one canonical name. Use when you discover project name drift (e.g. 'Engram' and 'engram' should be the same project). DESTRUCTIVE — moves all records from source names to the canonical name."),
+				mcp.WithDescription("Merge explicitly named project variants into one canonical name, including names differing only by '-' versus '_' at matching positions (e.g. 'foo-bar' to 'foo_bar'). Unrelated names are rejected. DESTRUCTIVE — moves all records from source names to the canonical name."),
 				mcp.WithDeferLoading(true),
 				mcp.WithTitleAnnotation("Merge Projects"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -1657,6 +1669,12 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		if v, ok := req.GetArguments()["content"].(string); ok {
 			update.Content = &v
 		}
+		if v, ok := req.GetArguments()["find"].(string); ok {
+			update.Find = &v
+		}
+		if v, ok := req.GetArguments()["replace"].(string); ok {
+			update.Replace = &v
+		}
 		if v, ok := req.GetArguments()["type"].(string); ok {
 			update.Type = &v
 		}
@@ -1667,7 +1685,7 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			update.TopicKey = &v
 		}
 
-		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
+		if update.Title == nil && update.Content == nil && update.Find == nil && update.Replace == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 
@@ -2235,9 +2253,11 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
 		}
 
-		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
-		// override is possible for get-by-ID.
-		detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+		// Resolve project context from an optional per-call override, then the
+		// process override or cwd (REQ-310, REQ-314). The project does not filter
+		// this ID-based lookup.
+		projectOverride, _ := req.GetArguments()["project"].(string)
+		detRes, detErr := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 
 		obsProject := ""
 		if obs.Project != nil {
@@ -2637,12 +2657,15 @@ func handleMergeProjects(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("at least one source project name is required in 'from'"), nil
 		}
 
-		result, err := s.MergeProjects(sources, to)
+		result, err := s.MergeExplicitProjectVariants(sources, to)
 		if err != nil {
 			return mcp.NewToolResultError("Merge failed: " + err.Error()), nil
 		}
 
 		msg := fmt.Sprintf("Merged %d source(s) into %q:\n", len(result.SourcesMerged), result.Canonical)
+		if len(result.SourcesMerged) == 0 {
+			msg = fmt.Sprintf("No records moved into %q.\n", result.Canonical)
+		}
 		msg += fmt.Sprintf("  Observations moved: %d\n", result.ObservationsUpdated)
 		msg += fmt.Sprintf("  Sessions moved:     %d\n", result.SessionsUpdated)
 		msg += fmt.Sprintf("  Prompts moved:      %d\n", result.PromptsUpdated)
@@ -3489,7 +3512,7 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 			case 1:
 				return ids[0], nil
 			default:
-				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id, end other active matching sessions, or save independently with engram save \"TITLE\" \"CONTENT\" --project PROJECT --type TYPE --topic TOPIC_KEY (writes to an independent project manual-save session and does not bind it to this MCP session)")
+				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id, end other active matching sessions, or save independently with engram save. The resolved project is %q; pass that exact name as the --project value and never invent another. This writes to an independent project manual-save session and does not bind it to this MCP session", project)
 			}
 		}
 	}

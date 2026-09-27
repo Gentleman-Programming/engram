@@ -1,5 +1,7 @@
 # Engram — Agent Skills Index
 
+Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md) for the issue-first workflow.
+
 When working on this project, load the relevant skill(s) BEFORE writing any code.
 
 ## How to Use

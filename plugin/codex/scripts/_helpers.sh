@@ -39,8 +39,8 @@ engram_session_handoff() {
       {id: .session_id, project: $project, directory: $dir}
     ' 2>/dev/null) || payload=""
     if [ -n "$payload" ]; then
-      response=$(curl -sf "${ENGRAM_URL}/sessions" --max-time 2 \
-        -X POST -H "Content-Type: application/json" -d "$payload" \
+      response=$(printf '%s' "$payload" | curl -sf "${ENGRAM_URL}/sessions" --max-time 2 \
+        -X POST -H "Content-Type: application/json" --data-binary @- \
         -w '\n%{http_code}' 2>/dev/null) || response=""
       if [ "${response##*$'\n'}" = 201 ] &&
         printf '%s' "${response%$'\n'*}" | jq -es --argjson request "$payload" '

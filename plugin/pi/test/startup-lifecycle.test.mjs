@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer } from "node:http";
 import { createServer } from "node:net";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -41,6 +41,7 @@ const { resolve } = require("node:path");
 
 const syntheticServePath = resolve("serve");
 const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
+if (process.argv.includes("sync") || process.argv.includes("--import")) { appendFileSync(${JSON.stringify(spawnLog)}, "sync --import\\n"); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
@@ -123,6 +124,7 @@ async function withFixture(options, run) {
     await writeFile(spawnLog, "", "utf8");
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
+      options.requests?.push({ method: request.method, url: request.url });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : (options.healthBody ?? { instance_id: "00000000000000000000000000000000" })));
     });
@@ -141,7 +143,7 @@ async function withFixture(options, run) {
     }
     const sandbox = await createPluginSandbox(dir);
     const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox });
-    await run({ ...plugin, spawnLog, dir, port });
+    await run({ ...plugin, spawnLog, dir, port, stopServer: () => new Promise((resolve) => readyServer.close(resolve)) });
   } finally {
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
@@ -152,10 +154,65 @@ async function withFixture(options, run) {
   }
 }
 
+test("manifest presence never triggers import while startup still detects the project", async () => {
+  for (const manifestPresent of [true, false]) {
+    await withFixture({ readyServer: true }, async ({ hooks, ctx, dir, spawnLog, statusCalls }) => {
+      if (manifestPresent) {
+        await mkdir(join(dir, ".engram"));
+        await writeFile(join(dir, ".engram", "manifest.json"), "{}", "utf8");
+      }
+      await hooks.get("session_start")({}, ctx);
+      assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]]);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(await readFile(spawnLog, "utf8"), "",
+        `startup with manifestPresent=${manifestPresent} must not spawn sync --import`);
+    });
+  }
+});
+
 async function countSpawns(spawnLog) {
   const log = await readFile(spawnLog, "utf8");
   return log.split("\n").filter((line) => line === "serve").length;
 }
+
+test("reload shutdown preserves the live session for its same-ID successor", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, requests }, async ({ hooks, ctx }) => {
+    await hooks.get("session_start")({}, ctx);
+    await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "A prompt long enough to register" }, ctx);
+    await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+    await hooks.get("session_start")({ reason: "reload" }, ctx);
+    await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "A second prompt long enough to register" }, ctx);
+    assert.equal(requests.filter(({ url }) => url === "/sessions/session-startup/end").length, 0);
+    await hooks.get("session_shutdown")({ reason: "quit" }, ctx);
+    assert.equal(requests.filter(({ url }) => url === "/sessions/session-startup/end").length, 1);
+  });
+});
+
+test("reload shutdown does not try terminal delivery after a registered session goes offline", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, exitCode: 1, requests }, async ({ hooks, ctx, stopServer }) => {
+    await hooks.get("session_start")({}, ctx);
+    await hooks.get("before_agent_start")({ systemPrompt: "", prompt: "A prompt long enough to register" }, ctx);
+    assert.equal(requests.filter(({ method, url }) => method === "POST" && url === "/sessions").length, 1,
+      "the session must be registered before the server goes offline");
+    await stopServer();
+
+    const originalFetch = globalThis.fetch;
+    const attemptedEnds = [];
+    globalThis.fetch = (input, init) => {
+      if (String(input).endsWith("/sessions/session-startup/end")) attemptedEnds.push(init);
+      return originalFetch(input, init);
+    };
+    try {
+      await assert.doesNotReject(hooks.get("session_shutdown")({ reason: "reload" }, ctx));
+      assert.equal(attemptedEnds.length, 0);
+      await assert.doesNotReject(hooks.get("session_start")({ reason: "reload" }, ctx));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
 
 test("an initially healthy Engram provider publishes ready status", async () => {
   await withFixture({ readyServer: true }, async ({ hooks, ctx, statusCalls }) => {
