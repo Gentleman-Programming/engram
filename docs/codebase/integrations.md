@@ -69,7 +69,7 @@ persistence or decide which session an omitted ID should select.
 | Adapter | Runtime-to-Engram mapping | Registration before identity use |
 | --- | --- | --- |
 | Claude Code | The SessionStart hook posts the host `session_id` with its resolved project and directory. | The hook attempts registration but does not inspect the response before continuing; do not treat its attempt as a confirmed identity handoff to MCP tools. |
-| Codex | The hook posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model. | The helper hands it off only after HTTP 201 with matching `id` and `status: "created"`; otherwise it instructs the model to omit `session_id`. |
+| Codex | The hook posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model. | The helper hands it off only after HTTP 201 with matching `id` and `status: "created"`; otherwise it instructs the model to stop agent-attributed writes until the host hook re-registers the same runtime ID. Its best-effort PreToolUse binds supported writes to the host ID but does not re-confirm registration per call. Independent CLI/manual saves are separate, not a session-attribution fallback; direct/manual MCP calls retain generic behavior. |
 | OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. | Before session-attributed tool writes it attempts root registration, rechecks ownership, and injects the root `session_id` into tool arguments. Failed requests block injection, but an HTTP-success response is not checked for matching session identity. |
 
 Parent/root translation is specific to OpenCode's session hierarchy, not a
