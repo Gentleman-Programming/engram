@@ -386,6 +386,7 @@ func extractIssuePatternLiterals(t *testing.T, workflow string) []string {
 	}
 }
 
+// workflowDirectory returns the repository's GitHub workflow directory relative to this test file.
 func workflowDirectory(t *testing.T) string {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)
