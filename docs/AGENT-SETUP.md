@@ -221,6 +221,8 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 
 **Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`) accept an optional `project` override validated against the store. Omit it to auto-detect. `mem_get_observation` is ID-based and does not accept a `project` override.
 
+`mem_get_observation` and `mem_update` operate by observation ID and are anchored on the record itself: when cwd detection is ambiguous, they fall back to the project stored on the observation (`project_source: "stored_project"`), so reading or updating an existing record by ID does not require ambiguous-project recovery. The recovery flow above applies to writes that create a new record with no anchored project.
+
 ---
 
 ## OpenCode

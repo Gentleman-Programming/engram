@@ -8486,10 +8486,11 @@ func TestHandleContext_EnvelopeProjectMatchesQueryProject(t *testing.T) {
 	}
 }
 
-// TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope verifies that a
-// get-by-ID request preserves actionable project-resolution metadata.
-func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
-	// Create a parent dir with two child git repos → ambiguous cwd.
+// newAmbiguousMCPSetup creates a parent dir with two child git repos so cwd
+// detection is ambiguous, chdirs the test into the parent, and returns the
+// parent path, a fresh store, and its data dir (for raw-DB fixtures).
+func newAmbiguousMCPSetup(t *testing.T) (string, *store.Store, string) {
+	t.Helper()
 	parent := t.TempDir()
 	for _, name := range []string{"repo-a", "repo-b"} {
 		child := filepath.Join(parent, name)
@@ -8499,8 +8500,38 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 		initTestGitRepo(t, child)
 	}
 	t.Chdir(parent)
+	s, dataDir := newMCPTestStoreWithDataDir(t)
+	return parent, s, dataDir
+}
 
-	s := newMCPTestStore(t)
+// addNilProjectObservation inserts an observation row with a NULL project
+// directly into the store database. AddObservation requires a project, so legacy
+// rows that predate project enforcement can only be created this way.
+func addNilProjectObservation(t *testing.T, s *store.Store, dataDir, sessionID string) int64 {
+	t.Helper()
+	rawDB, err := sql.Open("sqlite", filepath.Join(dataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = rawDB.Close() })
+	res, err := rawDB.Exec(`INSERT INTO observations (session_id, type, title, content, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?)`,
+		sessionID, "note", "nil project obs", "nil project content", "project", "nil-project-hash")
+	if err != nil {
+		t.Fatalf("insert nil-project observation: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+	return id
+}
+
+// TestHandleGetObservation_AmbiguousCwdUsesStoredProject verifies that get-by-ID
+// is anchored on the record identity: with an ambiguous cwd and an observation
+// that carries a project, the tool succeeds using the stored project (#1470).
+func TestHandleGetObservation_AmbiguousCwdUsesStoredProject(t *testing.T) {
+	parent, s, _ := newAmbiguousMCPSetup(t)
+
 	if err := s.CreateSession("sess-degraded", "degraded-project", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
@@ -8515,8 +8546,44 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleGetObservation(s, MCPConfig{})
-	res, err := h(context.Background(), mcppkg.CallToolRequest{
+	res, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id": float64(obsID),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("ambiguous cwd with stored project must succeed; text=%q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if got := body["project"]; got != "degraded-project" {
+		t.Fatalf("project = %v, want degraded-project", got)
+	}
+	if got := body["project_source"]; got != project.SourceStoredProject {
+		t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
+	}
+	if got := body["project_path"]; got != parent {
+		t.Fatalf("project_path = %v, want %q", got, parent)
+	}
+	if result, _ := body["result"].(string); !strings.Contains(result, "degraded obs title") {
+		t.Fatalf("result must contain the observation content; result=%q", result)
+	}
+}
+
+// TestHandleGetObservation_AmbiguousCwdNilProjectRecoveryEnvelope verifies that
+// an observation without a stored project still returns the ambiguity recovery
+// envelope: there is no anchored project to fall back to.
+func TestHandleGetObservation_AmbiguousCwdNilProjectRecoveryEnvelope(t *testing.T) {
+	parent, s, dataDir := newAmbiguousMCPSetup(t)
+
+	if err := s.CreateSession("sess-nil-project", "legacy-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	obsID := addNilProjectObservation(t, s, dataDir, "sess-nil-project")
+
+	res, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": float64(obsID),
 		}},
@@ -8525,7 +8592,7 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !res.IsError {
-		t.Fatalf("ambiguous resolution must return an error; text=%q", callResultText(t, res))
+		t.Fatalf("ambiguous cwd without stored project must return the recovery envelope; text=%q", callResultText(t, res))
 	}
 	body := callResultJSON(t, res)
 	if got := body["error_code"]; got != "ambiguous_project" {
@@ -8539,6 +8606,92 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 	}
 	if got := body["project_path"]; got != parent {
 		t.Fatalf("project_path = %v, want %q", got, parent)
+	}
+}
+
+// TestHandleUpdate_AmbiguousUsesStoredProject verifies that field updates by ID
+// are anchored on the record identity: with an ambiguous cwd and an observation
+// that carries a project, mem_update succeeds and persists the change (#1470).
+func TestHandleUpdate_AmbiguousUsesStoredProject(t *testing.T) {
+	parent, s, _ := newAmbiguousMCPSetup(t)
+
+	if err := s.CreateSession("sess-upd-stored", "stored-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	obsID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-upd-stored",
+		Type:      "note",
+		Title:     "Original",
+		Content:   "Original content",
+		Project:   "stored-project",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":    float64(obsID),
+			"title": "Updated via stored project",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("update handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("ambiguous cwd with stored project must succeed; text=%q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if got := body["project"]; got != "stored-project" {
+		t.Fatalf("project = %v, want stored-project", got)
+	}
+	if got := body["project_source"]; got != project.SourceStoredProject {
+		t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
+	}
+	if got := body["project_path"]; got != parent {
+		t.Fatalf("project_path = %v, want %q", got, parent)
+	}
+	updated, err := s.GetObservation(obsID)
+	if err != nil || updated.Title != "Updated via stored project" {
+		t.Fatalf("updated observation = %#v, err=%v", updated, err)
+	}
+}
+
+// TestHandleUpdate_AmbiguousNilProjectRecoveryEnvelope verifies that without a
+// stored project there is nothing to anchor on, so an ambiguous cwd keeps the
+// current error/recovery behavior instead of persisting the update.
+func TestHandleUpdate_AmbiguousNilProjectRecoveryEnvelope(t *testing.T) {
+	_, s, dataDir := newAmbiguousMCPSetup(t)
+
+	if err := s.CreateSession("sess-upd-nil", "legacy-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	obsID := addNilProjectObservation(t, s, dataDir, "sess-upd-nil")
+
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":    float64(obsID),
+			"title": "Should not persist",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("update handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("ambiguous cwd without stored project must return the recovery envelope; text=%q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if got := body["error_code"]; got != "ambiguous_project" {
+		t.Fatalf("error_code = %v, want ambiguous_project; body=%v", got, body)
+	}
+	// The write error path reports the candidates, not a resolved project.
+	if _, ok := body["available_projects"].([]any); !ok {
+		t.Fatalf("available_projects = %#v, want array", body["available_projects"])
+	}
+	updated, err := s.GetObservation(obsID)
+	if err != nil || updated.Title != "nil project obs" {
+		t.Fatalf("observation must be untouched = %#v, err=%v", updated, err)
 	}
 }
 
@@ -9484,8 +9637,23 @@ func TestGetObservationAndReviewPreserveAmbiguityRecoveryMetadata(t *testing.T) 
 	}
 
 	t.Run("get observation", func(t *testing.T) {
+		// #1470: get-by-ID is anchored on the record identity. The observation
+		// carries its project, so the ambiguous cwd resolves to the stored
+		// project instead of returning the recovery envelope.
 		result, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id)}}})
-		assertAmbiguousRecovery(t, result, err)
+		if err != nil || result.IsError {
+			t.Fatalf("result err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if got := body["project"]; got != "engram" {
+			t.Fatalf("project = %v, want engram", got)
+		}
+		if got := body["project_source"]; got != project.SourceStoredProject {
+			t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
+		}
+		if got := body["project_path"]; got != parent {
+			t.Fatalf("project_path = %v, want %q", got, parent)
+		}
 	})
 
 	t.Run("mark reviewed", func(t *testing.T) {
