@@ -75,6 +75,32 @@ function recordingFetch(routes) {
   return { calls, fetchStub };
 }
 
+test("Pi-native mem_session_end refuses an existing foreign session without an end request", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/project/current", body: { project: "paidosdep" } },
+    { method: "POST", path: "/sessions/foreign-existing-session/end", body: { status: "ended" } },
+  ]);
+  globalThis.fetch = fetchStub;
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const result = await registeredTools.get("mem_session_end").execute(
+        "foreign-end", { id: "foreign-existing-session" }, undefined, undefined, runtimeContext("host-session"),
+      );
+      assert.equal(result.isError, true);
+      assert.equal(calls.filter((call) => call.method === "POST" && call.path.endsWith("/end")).length, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("registered Pi-native mem_save_prompt persists through the Engram /prompts endpoint", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

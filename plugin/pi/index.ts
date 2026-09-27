@@ -1639,7 +1639,10 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         body: { id: params.id, project, directory: params.directory || directory || ctx.cwd },
       });
     case "mem_session_end": {
-      const endedSessionID = String(params.id);
+      if (typeof params.id !== "string" || !params.id || params.id !== sessionId) {
+        throw new Error("Pi-native session end requires the current host session ID; end independent sessions directly outside Pi-native tools");
+      }
+      const endedSessionID = sessionId;
       const pendingEnd = sessionEndingsInFlight.get(endedSessionID);
       if (pendingEnd) return pendingEnd;
       const end = () => fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
