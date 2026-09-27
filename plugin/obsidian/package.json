@@ -13,7 +13,8 @@
     "preinstall": "npx lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "dev": "node esbuild.config.mjs --watch"
+    "dev": "node esbuild.config.mjs --watch",
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": ["obsidian-plugin", "engram", "memory", "ai"],
   "license": "MIT",
