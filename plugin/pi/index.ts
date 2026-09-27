@@ -1642,15 +1642,29 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (typeof params.id !== "string" || !params.id || params.id !== sessionId) {
         throw new Error("Pi-native session end requires the current host session ID; end independent sessions directly outside Pi-native tools");
       }
-      const endedSessionID = sessionId;
+      const endedSessionID = effectiveSessionID(ctx, sessionId);
+      const persistedPending = pendingEffectiveSession(ctx, sessionId, endedSessionID);
+      const owner = persistedPending ? pendingEffectiveSessionProject(ctx, sessionId, endedSessionID) : undefined;
+      if (persistedPending) {
+        const localOwner = registeredSessionProjects.get(endedSessionID) || sessionRegistrationProjects.get(endedSessionID);
+        if (!appendEntry || !owner || owner !== (localOwner || (project !== "unknown" ? project : undefined))) {
+          throw new Error("Cannot end a pending Pi session without confirmed local project ownership and entry persistence");
+        }
+      }
       const pendingEnd = sessionEndingsInFlight.get(endedSessionID);
       if (pendingEnd) return pendingEnd;
-      const end = () => fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
-        method: "POST",
-        body: { summary: params.summary || "" },
-      });
-      return endedSessionID === sessionId && (hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID))
-        ? endRegisteredSessionOnce(endedSessionID, end)
+      const end = async () => {
+        const result = await fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
+          method: "POST",
+          body: { summary: params.summary || "" },
+        });
+        if (persistedPending) appendEntry!(EFFECTIVE_SESSION_ENTRY, {
+          runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
+        });
+        return result;
+      };
+      return endedSessionID !== sessionId || hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID)
+        ? endRegisteredSessionOnce(endedSessionID, end, persistedPending)
         : end();
     }
     case "mem_current_project": {

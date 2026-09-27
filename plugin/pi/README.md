@@ -94,7 +94,7 @@ Restart Pi after installation, then ask Pi what it remembers about the current p
 | Pi extension | Captures prompts/session events, injects the Memory Protocol, and exposes compact Pi-native `mem_*` tools over the Engram HTTP server. |
 | MCP tools    | Keeps Engram's MCP surface available through `pi-mcp-adapter` for clients and flows that use MCP directly.                             |
 
-Pi-native `mem_session_end` closes only the current Pi host session ID; a different, missing, or empty ID is refused before an end request. To end an independent/manual session, use a separate direct client rather than supplying its ID to the Pi-native tool. Matching host-session ends continue to coordinate with session shutdown.
+Pi-native `mem_session_end` accepts only the current Pi host session ID; a different, missing, or empty ID is refused before an end request. If a resumed conversation has a distinct persisted session ID, the matching host request ends that effective ID through the same coordination as session shutdown. To end an independent/manual session, use a separate direct client rather than supplying its ID to the Pi-native tool.
 
 ```text
 Pi events/tools -> gentle-engram extension -> ENGRAM_URL / engram serve -> SQLite

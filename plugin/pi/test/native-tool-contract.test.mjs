@@ -1433,6 +1433,79 @@ test("resumed ended conversation registers a distinct persistent identity before
   }
 });
 
+test("Pi-native explicit end targets the registered resumed identity, not the host ID", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  const entries = [];
+  const ctx = runtimeContext("explicit-resume");
+  ctx.sessionManager.getBranch = () => entries;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method: init.method ?? "GET", path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/sessions" && body.id === "explicit-resume") {
+      return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+    }
+    return new Response(JSON.stringify({ status: "ok" }));
+  };
+  try {
+    await withPluginSandbox("engram-pi-explicit-resume-end-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      const save = await registeredTools.get("mem_save").execute("save", { title: "resume", content: "resume" }, undefined, undefined, ctx);
+      assert.equal(save.isError, undefined, JSON.stringify(save));
+      const effectiveID = calls.filter(({ path }) => path === "/sessions").at(-1).body.id;
+      assert.match(effectiveID, /^explicit-resume:resume:/);
+      const endTool = registeredTools.get("mem_session_end");
+      for (const id of [effectiveID, "foreign", "", undefined]) {
+        const refused = await endTool.execute("refused", { id }, undefined, undefined, ctx);
+        assert.equal(refused.isError, true);
+      }
+      assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 0);
+      const ended = await endTool.execute("host-end", { id: "explicit-resume" }, undefined, undefined, ctx);
+      assert.equal(ended.isError, undefined, JSON.stringify(ended));
+      assert.deepEqual(calls.filter(({ path }) => path.endsWith("/end")).map(({ path }) => path),
+        [`/sessions/${encodeURIComponent(effectiveID)}/end`]);
+      assert.equal(entries.at(-1).data.pending, false, "explicit end must clear its persisted reservation");
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 1, "shutdown must not repeat explicit end");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("Pi-native explicit end refuses a foreign-owned pending reservation", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "local-project" } },
+  ]);
+  globalThis.fetch = fetchStub;
+  const ctx = runtimeContext("foreign-reservation");
+  ctx.sessionManager.getBranch = () => [{ type: "custom", customType: "engram-effective-session",
+    data: { runtimeID: "foreign-reservation", effectiveID: "foreign-reservation:resume:other", pending: true, project: "other-project" } }];
+  try {
+    await withPluginSandbox("engram-pi-foreign-explicit-end-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+      await eventHandlers.get("session_start")({}, ctx);
+      const result = await registeredTools.get("mem_session_end").execute("foreign-reservation-end",
+        { id: "foreign-reservation" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.equal(calls.filter(({ path }) => path.endsWith("/end")).length, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("ambiguous fresh registration reuses its submitted identity and ends it on shutdown", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
