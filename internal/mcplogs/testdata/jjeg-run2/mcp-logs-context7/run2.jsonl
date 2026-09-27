@@ -1,4 +1,0 @@
-{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-08-24T06:05:00.000Z","sessionId":"jjeg-run2","cwd":"/tmp/mcp-probe"}
-{"debug":"Successfully connected (transport: stdio) in 90ms","timestamp":"2026-08-24T06:05:00.090Z","sessionId":"jjeg-run2","cwd":"/tmp/mcp-probe"}
-{"debug":"UNKNOWN connection closed after 0s (cleanly)","timestamp":"2026-08-24T06:05:00.500Z","sessionId":"jjeg-run2","cwd":"/tmp/mcp-probe"}
-{"debug":"Cleared connection cache for reconnection","timestamp":"2026-08-24T06:05:00.503Z","sessionId":"jjeg-run2","cwd":"/tmp/mcp-probe"}

@@ -1,7 +1,0 @@
-{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-08-15T08:55:47.100Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}
-{"debug":"Successfully connected (transport: stdio) in 165ms","timestamp":"2026-08-15T08:55:47.265Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}
-{"debug":"Connection established with capabilities: {\"hasTools\":true}","timestamp":"2026-08-15T08:55:47.266Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}
-{"debug":"Channel notifications skipped: server did not declare claude/channel capability","timestamp":"2026-08-15T08:55:59.000Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}
-{"debug":"Channel notifications skipped: server did not declare claude/channel capability","timestamp":"2026-08-15T08:56:29.000Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}
-{"debug":"Sending SIGINT to MCP server process","timestamp":"2026-08-15T08:56:31.000Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}
-{"debug":"MCP server process exited cleanly","timestamp":"2026-08-15T08:56:31.050Z","sessionId":"healthy-44s-session","cwd":"/Users/jjeg/proj"}

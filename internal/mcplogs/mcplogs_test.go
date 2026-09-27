@@ -4,101 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
-// Fixtures under testdata/ are transcribed from the #1019 thread evidence:
-// report-broken (issue body 2026-07-05), healthy-44s (jjeg1979 2026-08-15),
-// jjeg-run1/jjeg-run2 (jjeg1979 2026-08-24 positive control), may-indeterminate
-// (Denver2828 2026-08-11 shape), synthetic-defect (labeled synthetic: the only
-// witness case; no confirmed defect-positive exists in the wild yet),
-// reconnect-recovered (clause 4 branch).
-
-func scanFixture(t *testing.T, name string) []SessionVerdict {
-	t.Helper()
-	verdicts, err := ScanDir(filepath.Join("testdata", name))
-	if err != nil {
-		t.Fatalf("ScanDir(%s): %v", name, err)
-	}
-	return verdicts
-}
-
-func findVerdict(verdicts []SessionVerdict, server string) (SessionVerdict, bool) {
-	for _, v := range verdicts {
-		if v.Server == server {
-			return v, true
-		}
-	}
-	return SessionVerdict{}, false
-}
-
-func TestScanClassifiesThreadFixtures(t *testing.T) {
-	cases := []struct {
-		fixture   string
-		server    string
-		candidate bool
-		verdict   Verdict
-		reason    string
-	}{
-		// Original report: candidate, but nothing else logged in the session.
-		{"report-broken", "plugin-engram-engram", true, VerdictIndeterminate, "no-peer"},
-		// Healthy 44s SIGINT teardown: not even a candidate.
-		{"healthy-44s", "engram", false, VerdictHealthy, "not-a-candidate"},
-		// jjeg1979 run 1: every server closes within seconds, nobody survives.
-		// codegraph is the load-bearing row: strict 4-clause match, still negative.
-		{"jjeg-run1", "plugin-engram-engram", true, VerdictTeardown, "peer-closed-within-10s"},
-		{"jjeg-run1", "engram", true, VerdictTeardown, "peer-closed-within-10s"},
-		{"jjeg-run1", "codegraph", true, VerdictTeardown, "peer-closed-within-10s"},
-		{"jjeg-run1", "context7", false, VerdictHealthy, "not-a-candidate"},
-		// jjeg1979 run 2: codegraph (1s) and context7 (0s) fall below the 2s bound.
-		{"jjeg-run2", "plugin-engram-engram", true, VerdictTeardown, "peer-closed-within-10s"},
-		{"jjeg-run2", "engram", true, VerdictTeardown, "peer-closed-within-10s"},
-		{"jjeg-run2", "codegraph", false, VerdictHealthy, "not-a-candidate"},
-		{"jjeg-run2", "context7", false, VerdictHealthy, "not-a-candidate"},
-		// Denver2828 May shape: a peer exists but never connected (needs-auth skip).
-		{"may-indeterminate", "plugin-engram-engram", true, VerdictIndeterminate, "peer-never-connected"},
-		// SYNTHETIC witness case: peer completes a tool call after our close and
-		// outlives us by minutes.
-		{"synthetic-defect", "engram", true, VerdictDefectSuspect, "peer-tool-call-after-close"},
-		// Clause 4: a later Starting connection after the close disqualifies the
-		// candidate outright.
-		{"reconnect-recovered", "engram", false, VerdictHealthy, "not-a-candidate"},
-	}
-	for _, tc := range cases {
-		verdicts := scanFixture(t, tc.fixture)
-		v, ok := findVerdict(verdicts, tc.server)
-		if !ok {
-			t.Errorf("%s/%s: no verdict for server (got %v)", tc.fixture, tc.server, verdicts)
-			continue
-		}
-		if v.Candidate != tc.candidate {
-			t.Errorf("%s/%s: candidate = %v, want %v", tc.fixture, tc.server, v.Candidate, tc.candidate)
-		}
-		if v.Verdict != tc.verdict {
-			t.Errorf("%s/%s: verdict = %q, want %q", tc.fixture, tc.server, v.Verdict, tc.verdict)
-		}
-		if v.Reason != tc.reason {
-			t.Errorf("%s/%s: reason = %q, want %q", tc.fixture, tc.server, v.Reason, tc.reason)
-		}
-	}
-}
-
-// TestNegativeControlNoDefectSuspects is the load-bearing property from
-// jjeg1979's 2026-08-24 comment: the unauthenticated short-session teardown
-// produces strict 4-clause matches on multiple servers, and a correct
-// detector must return zero defect-suspects on that input.
-func TestNegativeControlNoDefectSuspects(t *testing.T) {
-	for _, fixture := range []string{"jjeg-run1", "jjeg-run2", "report-broken", "may-indeterminate", "healthy-44s", "reconnect-recovered"} {
-		for _, v := range scanFixture(t, fixture) {
-			if v.Verdict == VerdictDefectSuspect {
-				t.Errorf("%s/%s: defect-suspect on negative-control fixture (reason %q)", fixture, v.Server, v.Reason)
-			}
-		}
-	}
-}
-
 func TestScanRejectsMissingRoot(t *testing.T) {
-	if _, err := ScanDir(filepath.Join("testdata", "does-not-exist")); err == nil {
-		t.Fatal("ScanDir on missing root must fail")
+	if _, err := ScanLifecycles(filepath.Join("testdata", "does-not-exist")); err == nil {
+		t.Fatal("ScanLifecycles on missing root must fail")
 	}
 }
 
@@ -116,15 +27,96 @@ func TestParseSurvivesMalformedLines(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(serverDir, "s1.jsonl"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	verdicts, err := ScanDir(dir)
+	lifecycles, err := ScanLifecycles(dir)
 	if err != nil {
-		t.Fatalf("ScanDir with malformed lines: %v", err)
+		t.Fatalf("ScanLifecycles with malformed lines: %v", err)
 	}
-	v, ok := findVerdict(verdicts, "engram")
-	if !ok {
-		t.Fatalf("no verdict parsed from malformed-tolerant file: %v", verdicts)
+	if len(lifecycles) != 1 {
+		t.Fatalf("got %d lifecycles, want 1: %v", len(lifecycles), lifecycles)
 	}
-	if !v.Candidate || v.Verdict != VerdictIndeterminate {
-		t.Errorf("malformed-tolerant parse: candidate=%v verdict=%q, want candidate=true indeterminate", v.Candidate, v.Verdict)
+	lc := lifecycles[0]
+	if lc.Server != "engram" || lc.SessionID != "s1" {
+		t.Fatalf("grouping = %s/%s, want engram/s1", lc.Server, lc.SessionID)
+	}
+	if !lc.HasClose || lc.ClosedAfterSec != 3 || lc.ClosedAt.IsZero() {
+		t.Errorf("close = %v/%d/%v, want true/3/non-zero", lc.HasClose, lc.ClosedAfterSec, lc.ClosedAt)
+	}
+	if !lc.ClearedCache || lc.EverConnected {
+		t.Errorf("cleared=%v everConnected=%v, want true/false", lc.ClearedCache, lc.EverConnected)
+	}
+}
+
+// TestExtractsSessionLifecycles covers the parse contract on inline-written
+// temp files: grouping by (server, session), close/clear/SIGINT/tool-call
+// extraction, everConnected, and deterministic server-then-session order.
+func TestExtractsSessionLifecycles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(server, name, lines string) {
+		t.Helper()
+		serverDir := filepath.Join(dir, "mcp-logs-"+server)
+		if err := os.MkdirAll(serverDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serverDir, name+".jsonl"), []byte(lines), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	line := func(debug, ts, session string) string {
+		return `{"debug":"` + debug + `","timestamp":"` + ts + `","sessionId":"` + session + `","cwd":"/tmp"}` + "\n"
+	}
+	write("zeta", "a",
+		line("Starting connection with timeout of 30000ms", "2026-09-27T09:00:00.000Z", "s1")+
+			line("Successfully connected", "2026-09-27T09:00:01.000Z", "s1")+
+			line("Tool 'mcp' completed successfully", "2026-09-27T09:00:02.000Z", "s1"))
+	write("alpha", "b",
+		line("connection closed after 4s (cleanly)", "2026-09-27T09:00:05.000Z", "s2")+
+			line("Cleared connection cache for reconnection", "2026-09-27T09:00:05.004Z", "s2")+
+			line("Sending SIGINT to MCP server process", "2026-09-27T09:00:06.000Z", "s2"))
+	write("alpha", "a", line("Successfully connected", "2026-09-27T09:00:03.000Z", "s1"))
+	lifecycles, err := ScanLifecycles(dir)
+	if err != nil {
+		t.Fatalf("ScanLifecycles: %v", err)
+	}
+	if len(lifecycles) != 3 {
+		t.Fatalf("got %d lifecycles, want 3: %v", len(lifecycles), lifecycles)
+	}
+	want := []SessionLifecycle{
+		{Server: "alpha", SessionID: "s1", EverConnected: true},
+		{Server: "alpha", SessionID: "s2", HasClose: true,
+			ClosedAt: time.Date(2026, 9, 27, 9, 0, 5, 0, time.UTC), ClosedAfterSec: 4,
+			ClearedCache: true, SIGINTSent: true},
+		{Server: "zeta", SessionID: "s1", EverConnected: true,
+			Starts:    []time.Time{time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)},
+			ToolCalls: []time.Time{time.Date(2026, 9, 27, 9, 0, 2, 0, time.UTC)}},
+	}
+	for i, w := range want {
+		got := lifecycles[i]
+		if got.Server != w.Server || got.SessionID != w.SessionID {
+			t.Errorf("row %d = %s/%s, want %s/%s (server-then-session order)", i, got.Server, got.SessionID, w.Server, w.SessionID)
+			continue
+		}
+		if got.EverConnected != w.EverConnected || got.HasClose != w.HasClose ||
+			got.ClosedAfterSec != w.ClosedAfterSec || got.ClearedCache != w.ClearedCache || got.SIGINTSent != w.SIGINTSent {
+			t.Errorf("row %d (%s/%s) flags = connected:%v close:%v/%d cleared:%v sigint:%v",
+				i, got.Server, got.SessionID, got.EverConnected, got.HasClose, got.ClosedAfterSec, got.ClearedCache, got.SIGINTSent)
+		}
+		if !got.ClosedAt.Equal(w.ClosedAt) {
+			t.Errorf("row %d (%s/%s) ClosedAt = %v, want %v", i, got.Server, got.SessionID, got.ClosedAt, w.ClosedAt)
+		}
+		if len(got.Starts) != len(w.Starts) || len(got.ToolCalls) != len(w.ToolCalls) {
+			t.Errorf("row %d (%s/%s) starts=%d toolCalls=%d, want %d/%d", i, got.Server, got.SessionID,
+				len(got.Starts), len(got.ToolCalls), len(w.Starts), len(w.ToolCalls))
+			continue
+		}
+		for k, at := range w.Starts {
+			if !got.Starts[k].Equal(at) {
+				t.Errorf("row %d (%s/%s) Starts[%d] = %v, want %v", i, got.Server, got.SessionID, k, got.Starts[k], at)
+			}
+		}
+		for k, at := range w.ToolCalls {
+			if !got.ToolCalls[k].Equal(at) {
+				t.Errorf("row %d (%s/%s) ToolCalls[%d] = %v, want %v", i, got.Server, got.SessionID, k, got.ToolCalls[k], at)
+			}
+		}
 	}
 }

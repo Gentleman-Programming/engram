@@ -1,8 +1,0 @@
-{"debug":"Starting connection with timeout of 30000ms","timestamp":"2026-07-05T10:02:44.340Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"Successfully connected (transport: stdio) in 191ms","timestamp":"2026-07-05T10:02:44.528Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"Server instructions truncated from 2539 to 2048 chars","timestamp":"2026-07-05T10:02:44.529Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"Connection established with capabilities: {\"hasTools\":true,\"hasPrompts\":false,\"hasResources\":false,\"hasResourceSubscribe\":false,\"serverVersion\":{\"name\":\"engram\",\"version\":\"0.1.0\"}}","timestamp":"2026-07-05T10:02:44.529Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"Sending SIGINT to MCP server process","timestamp":"2026-07-05T10:02:48.884Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"UNKNOWN connection closed after 4s (cleanly)","timestamp":"2026-07-05T10:02:48.890Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"Cleared connection cache for reconnection","timestamp":"2026-07-05T10:02:48.896Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
-{"debug":"MCP server process exited cleanly","timestamp":"2026-07-05T10:02:48.938Z","sessionId":"4f3f9430-1111-2222-3333-444444444444","cwd":"/home/ginopc/Desarrollo/Billetera"}
