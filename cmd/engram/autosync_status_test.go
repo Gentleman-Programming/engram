@@ -28,8 +28,8 @@ func (f *fakeAutosyncManager) Status() autosync.Status {
 }
 
 func (f *fakeAutosyncManager) Run(_ context.Context) {}
-func (f *fakeAutosyncManager) NotifyDirty()      {}
-func (f *fakeAutosyncManager) Stop()             {}
+func (f *fakeAutosyncManager) NotifyDirty()          {}
+func (f *fakeAutosyncManager) Stop()                 {}
 func (f *fakeAutosyncManager) StopForUpgrade(_ string) error {
 	return nil
 }

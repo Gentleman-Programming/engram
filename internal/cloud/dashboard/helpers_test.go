@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSafeQueryDefangsPercentEncodedQuoteAttack is the RED test for N1.
@@ -100,6 +101,27 @@ func withEngramTimezone(t *testing.T, tz string) {
 // time.Parse(time.RFC3339Nano, ts) which silently failed on SQLite-style
 // "YYYY-MM-DD HH:MM:SS" values and leaked raw UTC strings into the UI. The new
 // helper delegates to timeutil and must convert these values correctly.
+func TestFormatTimeValueUsesConfiguredZone(t *testing.T) {
+	withEngramTimezone(t, "America/Bogota")
+	instant := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	if got := formatTimeValue(instant); got != formatTimestamp("2026-05-22T14:00:00+02:00") {
+		t.Fatalf("typed = %q, string = %q", got, formatTimestamp("2026-05-22T14:00:00+02:00"))
+	}
+	if got := formatTimeValue(time.Time{}); got != "-" {
+		t.Errorf("zero = %q", got)
+	}
+	if got := formatTimePtr(nil); got != "Never" {
+		t.Errorf("nil = %q", got)
+	}
+	if got := formatTimePtr(&instant); got != "22 May 2026 07:00" {
+		t.Errorf("pointer = %q", got)
+	}
+	zero := time.Time{}
+	if got := formatTimePtr(&zero); got != "Never" {
+		t.Errorf("zero pointer = %q", got)
+	}
+}
+
 func TestFormatTimestampParsesSQLiteStyleInput(t *testing.T) {
 	withEngramTimezone(t, "America/Bogota") // UTC-5
 

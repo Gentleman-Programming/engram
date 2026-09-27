@@ -1753,6 +1753,45 @@ func materializeChunkRowsForDashboard(t *testing.T, chunks []dashboardChunkRow) 
 	return rows
 }
 
+func TestMutationOnlyChunkUpsertsMaterializeDashboardEntities(t *testing.T) {
+	const project = "proj-mutation-only"
+	chunks := []dashboardChunkRow{{
+		chunkID: "chunk-mutation-only", project: project, createdBy: "dev",
+		createdAt: time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		parsed: parseMustChunk(t, []byte(`{
+			"mutations":[
+				{"project":"proj-mutation-only","entity":"session","entity_key":"sess-1","op":"upsert","payload":"{\"id\":\"sess-1\",\"project\":\"proj-mutation-only\",\"started_at\":\"2026-05-04T09:00:00Z\"}"},
+				{"project":"proj-mutation-only","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-mutation-only\",\"type\":\"decision\",\"title\":\"Mutation only\",\"content\":\"Materialize me\",\"created_at\":\"2026-05-04T09:01:00Z\"}"},
+				{"project":"proj-mutation-only","entity":"prompt","entity_key":"prompt-1","op":"upsert","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"proj-mutation-only\",\"content\":\"Mutation prompt\",\"created_at\":\"2026-05-04T09:02:00Z\"}"}
+			]
+		}`)),
+	}}
+
+	rows := materializeChunkRowsForDashboard(t, chunks)
+	if len(rows) != 3 {
+		t.Fatalf("expected one mutation row per mutation-only entity, got %d: %+v", len(rows), rows)
+	}
+	model, err := buildDashboardReadModelFromRows(chunks, rows)
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
+
+	detail, err := cs.ProjectDetail(project)
+	if err != nil {
+		t.Fatalf("ProjectDetail: %v", err)
+	}
+	if detail.Stats.Sessions != 1 || detail.Stats.Observations != 1 || detail.Stats.Prompts != 1 {
+		t.Fatalf("expected mutation-only dashboard entities, got %+v", detail.Stats)
+	}
+	if observations, err := cs.ListRecentObservations(project, "Mutation only", 10); err != nil || len(observations) != 1 {
+		t.Fatalf("ListRecentObservations = %+v, %v; want one mutation-only observation", observations, err)
+	}
+	if prompts, err := cs.ListRecentPrompts(project, "Mutation prompt", 10); err != nil || len(prompts) != 1 {
+		t.Fatalf("ListRecentPrompts = %+v, %v; want one mutation-only prompt", prompts, err)
+	}
+}
+
 // TestDeletedPromptDisappearsFromDashboard drives the full cloud-side path for
 // #837: a first sync uploads the prompt, a second sync uploads only the delete
 // mutation (the local row is hard-deleted, so it cannot ride in chunk.Prompts).

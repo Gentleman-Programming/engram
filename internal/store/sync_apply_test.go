@@ -812,11 +812,25 @@ func TestApplyPulledRelation_UsesOuterMutationProjectForEndpointValidation(t *te
 			sourceScope: "project", targetScope: "project",
 		},
 		{
-			name:           "personal scope endpoints do not satisfy project relation",
+			name:           "same project personal endpoints satisfy project relation",
 			outerProject:   projectA,
 			payloadProject: projectA,
 			sourceProject:  projectA, targetProject: projectA,
 			sourceScope: "personal", targetScope: "personal",
+			wantApplied: true,
+		},
+		{
+			name: "same project global and personal endpoints satisfy project relation",
+			outerProject: projectA,
+			sourceProject: projectA, targetProject: projectA,
+			sourceScope: "global", targetScope: "personal",
+			wantApplied: true,
+		},
+		{
+			name: "unknown endpoint project does not satisfy project relation",
+			outerProject: projectA,
+			sourceProject: projectB, targetProject: projectA,
+			sourceScope: "global", targetScope: "personal",
 		},
 		{
 			name:          "normalized outer project accepts project scoped endpoints",
@@ -841,6 +855,14 @@ func TestApplyPulledRelation_UsesOuterMutationProjectForEndpointValidation(t *te
 
 			sourceID := addEndpoint("source", tt.sourceProject, tt.sourceScope)
 			targetID := addEndpoint("target", tt.targetProject, tt.targetScope)
+			if tt.name == "unknown endpoint project does not satisfy project relation" {
+				if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE sync_id = ?`, sourceID); err != nil {
+					t.Fatalf("clear source observation project: %v", err)
+				}
+				if _, err := s.db.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, "session-source"); err != nil {
+					t.Fatalf("clear source session project: %v", err)
+				}
+			}
 			relationSyncID := newSyncID("rel-outer-project")
 			mutation := buildRelationMutation(t, syncRelationPayload{
 				SyncID:         relationSyncID,
@@ -1746,9 +1768,8 @@ func TestRearmEligibleDeadRelationsForScope(t *testing.T) {
 	}
 }
 
-// TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate keeps
-// authoritative replay restricted to project-scoped endpoints while legacy rows
-// remain satisfiable when duplicate observation rows share one endpoint sync ID.
+// TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate accepts
+// authoritative same-project personal endpoints, including duplicate sync IDs.
 func TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate(t *testing.T) {
 	const targetKey = DefaultSyncTargetKey
 	const project = "proj-rearm-predicate"
@@ -1798,14 +1819,22 @@ func TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate(t *te
 	if err != nil {
 		t.Fatalf("RearmEligibleDeadRelationsForScope: %v", err)
 	}
-	if rearmed != 1 {
-		t.Fatalf("rearmed = %d, want only the legacy relation", rearmed)
+	if rearmed != 2 {
+		t.Fatalf("rearmed = %d, want both same-project relations", rearmed)
 	}
-	if status, retries := getDeferredRow(t, s, authoritativeID); status != "dead" || retries != 5 {
-		t.Fatalf("authoritative personal-endpoint row = (%q, %d), want (dead, 5)", status, retries)
+	if status, retries := getDeferredRow(t, s, authoritativeID); status != "deferred" || retries != 0 {
+		t.Fatalf("authoritative personal-endpoint row = (%q, %d), want (deferred, 0)", status, retries)
 	}
 	if status, retries := getDeferredRow(t, s, legacyID); status != "deferred" || retries != 0 {
 		t.Fatalf("legacy duplicate-endpoint row = (%q, %d), want (deferred, 0)", status, retries)
+	}
+	if _, err := s.ReplayDeferred(); err != nil {
+		t.Fatalf("ReplayDeferred: %v", err)
+	}
+	for _, syncID := range []string{authoritativeID, legacyID} {
+		if got := countRelationRows(t, s, syncID); got != 1 {
+			t.Fatalf("replayed relation %q rows = %d, want 1", syncID, got)
+		}
 	}
 }
 

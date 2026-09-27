@@ -12,6 +12,5 @@
   "license": "MIT",
   "category": "Productivity",
   "keywords": ["memory", "persistence", "sessions", "context"],
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json"
+  "hooks": "./hooks/hooks.json"
 }

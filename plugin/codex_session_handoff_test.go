@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,6 +15,28 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCodexPreToolUseManifestRegistersNativeBinder(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	entries := manifest.Hooks["PreToolUse"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 || entries[0].Matcher != "mcp__engram__mem_*|mcp__plugin_engram_engram__mem_*" || entries[0].Hooks[0].Command != "engram hook codex-pre-tool-use" {
+		t.Fatalf("unexpected Codex PreToolUse registration: %+v", entries)
+	}
+}
 
 func TestCodexRegisteredSessionHandoff(t *testing.T) {
 	if testing.Short() {
@@ -67,8 +90,17 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								}
 							}
 						case "/external/sessions":
+							body, err := io.ReadAll(r.Body)
+							if err != nil {
+								t.Errorf("read registration: %v", err)
+							}
+							if tc.name == "opaque text" {
+								if !bytes.Contains(body, []byte("é")) {
+									t.Errorf("registration body lost UTF-8 bytes for opaque ID: %q", body)
+								}
+							}
 							var payload map[string]string
-							if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							if err := json.Unmarshal(body, &payload); err != nil {
 								t.Errorf("decode registration: %v", err)
 							}
 							requests <- payload
@@ -232,10 +264,10 @@ func codexHandoffEnv(t *testing.T, cwd, serverURL string) []string {
         [ "$#" -ge 2 ] || return 1
         case "$2" in 1|2|3) ;; *) return 1 ;; esac
         shift 2 ;;
-      -X|-H|-d|-w)
+      -X|-H|--data-binary|-w)
         [ "$#" -ge 2 ] || return 1
         case "$1:$2" in
-          '-X:POST'|'-H:Content-Type: application/json'|'-d:{'*|'-w:\n%{http_code}') ;;
+          '-X:POST'|'-H:Content-Type: application/json'|'--data-binary:@-'|'-w:\n%{http_code}') ;;
           *) return 1 ;;
         esac
         shift 2 ;;

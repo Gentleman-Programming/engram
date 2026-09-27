@@ -859,3 +859,5 @@ export const Engram: Plugin = async (ctx) => {
     },
   }
 }
+
+export default { id: "engram", server: Engram }

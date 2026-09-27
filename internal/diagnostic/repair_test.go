@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
@@ -55,7 +56,7 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 		case "/work/engram":
 			return DetectedProject{Project: "engram", Source: "git_remote", Path: dir}, true
 		case "/work/ignored":
-			return DetectedProject{Project: "ignored", Source: "basename", Path: dir}, true
+			return DetectedProject{Project: "ignored", Source: projectpkg.SourceDirBasename, Path: dir}, true
 		default:
 			return DetectedProject{}, false
 		}
@@ -76,8 +77,8 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 	if got.SessionID != "s-engram" || got.FromProject != "sias-app" || got.ToProject != "engram" || got.EvidenceSource != "git_remote" {
 		t.Fatalf("action=%+v", got)
 	}
-	if len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != "untrusted_directory_evidence" {
-		t.Fatalf("skipped=%+v", plan.Skipped)
+	if len(plan.Skipped) != 0 {
+		t.Fatalf("skipped=%+v, want basename evidence omitted before repair planning", plan.Skipped)
 	}
 }
 
@@ -164,7 +165,7 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			wantSkip: "manual_name_unknown_project",
 		},
 		{
-			name: "known manual target beats trusted third project directory",
+			name: "trusted third project directory leaves directory repair authoritative",
 			sessions: []store.DiagnosticSessionEvidence{
 				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/third-project"},
 				{ID: "known", Name: "known", Project: "engram", Directory: "/work/engram"},
@@ -172,7 +173,7 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			detect: func(string) (DetectedProject, bool) {
 				return DetectedProject{Project: "third-project", Source: "git_root", Path: "/work/third-project"}, true
 			},
-			wantAction: true,
+			wantAction: false,
 		},
 	}
 
@@ -191,6 +192,9 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			}
 			if tc.wantAction && (len(plan.Actions) != 1 || plan.Actions[0].ToProject != "engram") {
 				t.Fatalf("actions=%+v skipped=%+v", plan.Actions, plan.Skipped)
+			}
+			if tc.name == "trusted third project directory leaves directory repair authoritative" && len(plan.Actions) != 0 {
+				t.Fatalf("actions=%+v, want no competing manual repair", plan.Actions)
 			}
 			if tc.wantSkip != "" && (len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != tc.wantSkip) {
 				t.Fatalf("skipped=%+v actions=%+v", plan.Skipped, plan.Actions)
