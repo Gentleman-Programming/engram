@@ -824,6 +824,10 @@ type replayIndexRows struct {
 }
 
 func (d *replayIndexDriver) Open(string) (driver.Conn, error) { return &replayIndexConn{state: d}, nil }
+func (d *replayIndexDriver) Connect(context.Context) (driver.Conn, error) {
+	return d.Open("")
+}
+func (d *replayIndexDriver) Driver() driver.Driver { return d }
 func (c *replayIndexConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("unexpected prepare")
 }
@@ -869,15 +873,10 @@ func TestWriteChunkReplayIndexFailure(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			state := &replayIndexDriver{indexErr: tt.indexErr}
-			name := "cloudstore-replay-" + strings.ReplaceAll(t.Name(), "/", "-")
-			sql.Register(name, state)
-			db, err := sql.Open(name, "")
-			if err != nil {
-				t.Fatalf("open fake database: %v", err)
-			}
+			db := sql.OpenDB(state)
 			t.Cleanup(func() { _ = db.Close() })
 			payload := []byte(`{"sessions":[{"id":"s-1"}]}`)
-			err = (&CloudStore{db: db}).WriteChunk(context.Background(), "project", chunkIDFromPayload(payload), "tester", "", payload)
+			err := (&CloudStore{db: db}).WriteChunk(context.Background(), "project", chunkIDFromPayload(payload), "tester", "", payload)
 			if !errors.Is(err, tt.indexErr) || (tt.indexErr != nil && !strings.Contains(err.Error(), `index session "s-1"`)) {
 				t.Fatalf("replay error = %v, want index error %v", err, tt.indexErr)
 			}
