@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -74,6 +76,113 @@ function recordingFetch(routes) {
   };
   return { calls, fetchStub };
 }
+
+test("Pi native saves persist under separate host sessions and stop on failed registration", async () => {
+  await withPluginSandbox("engram-pi-real-", async ({ dir, sandbox }) => {
+    const original = Object.fromEntries(["ENGRAM_URL", "ENGRAM_PROJECT", "ENGRAM_DATA_DIR", "ENGRAM_CLOUD_AUTOSYNC", "HOME"].map((key) => [key, process.env[key]]));
+    const executable = join(dir, process.platform === "win32" ? "real-server.exe" : "real-server");
+    const build = spawnSync("go", ["build", "-o", executable, "./plugin/pi/test/support/real-server"], {
+      cwd: join(ROOT, "../.."), timeout: 60000, encoding: "utf8",
+      env: { ...process.env, HOME: dir, ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_CLOUD_AUTOSYNC: "0" },
+    });
+    assert.ifError(build.error);
+    assert.equal(build.status, 0, build.stderr);
+    const child = spawn(executable, [join(dir, "store")], {
+      cwd: join(ROOT, "../.."),
+      env: { ...process.env, HOME: dir, ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_PROJECT: "pi-persistence-test", ENGRAM_CLOUD_AUTOSYNC: "0" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.on("error", (error) => { stderr += error.message; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    const lines = createInterface({ input: child.stdout });
+    try {
+      const url = await new Promise((resolve, reject) => {
+        const finish = (error, value) => {
+          clearTimeout(timer);
+          lines.off("line", onLine);
+          child.off("error", onError);
+          child.off("exit", onExit);
+          if (error) reject(error); else resolve(value);
+        };
+        const onLine = (line) => finish(null, line);
+        const onError = (error) => finish(error);
+        const onExit = (code) => finish(new Error(`server exited ${code}: ${stderr}`));
+        const timer = setTimeout(() => finish(new Error(`server startup timed out: ${stderr}`)), 60000);
+        lines.once("line", onLine);
+        child.once("error", onError);
+        child.once("exit", onExit);
+      });
+      process.env.ENGRAM_URL = url;
+      process.env.ENGRAM_PROJECT = "pi-persistence-test";
+      process.env.ENGRAM_DATA_DIR = join(dir, "data");
+      process.env.ENGRAM_CLOUD_AUTOSYNC = "0";
+      process.env.HOME = dir;
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const save = registeredTools.get("mem_save");
+      const ids = ["pi-host-alpha", "pi-host-beta"];
+      for (const [index, host] of [ids[0], ids[1], ids[0], ids[1]].entries()) {
+        const result = await save.execute(`real-${index}`, {
+          title: `persisted-${index}`, content: `real persistence ${index}`,
+          project: "pi-persistence-test", session_id: "model-foreign-session",
+        }, undefined, undefined, runtimeContext(host));
+        assert.notEqual(result.isError, true, result.content?.[0]?.text);
+      }
+      const persisted = async () => {
+        const response = await fetch(`${url}/observations?project=pi-persistence-test&limit=20`);
+        assert.equal(response.status, 200);
+        return response.json();
+      };
+      const rows = await persisted();
+      assert.equal(rows.length, 4, JSON.stringify(rows));
+      for (let index = 0; index < 4; index++) {
+        const row = rows.find(({ title }) => title === `persisted-${index}`);
+        assert.ok(row, `missing persisted row ${index}`);
+        assert.equal(row.session_id, ids[index % 2]);
+        assert.notEqual(row.session_id, "model-foreign-session");
+      }
+      // A failed registration is intercepted before any observation endpoint can be reached.
+      const realFetch = globalThis.fetch;
+      let observationPosts = 0;
+      globalThis.fetch = (request, init = {}) => {
+        const path = new URL(request).pathname;
+        if (path === "/sessions" && init.method === "POST") {
+          return Promise.resolve(new Response(JSON.stringify({ error: "registration unavailable" }), { status: 503 }));
+        }
+        if (path === "/observations" && init.method === "POST") observationPosts++;
+        return realFetch(request, init);
+      };
+      try {
+        const failed = await save.execute("real-denied", {
+          title: "must-not-persist", content: "registration failed", project: "pi-persistence-test",
+        }, undefined, undefined, runtimeContext("pi-host-unregistered"));
+        assert.equal(failed.isError, true);
+        assert.equal(observationPosts, 0);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      assert.equal((await persisted()).length, 4, "failed registration must not create a persisted row");
+    } finally {
+      for (const [key, value] of Object.entries(original)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      lines.close();
+      if (child.exitCode === null && child.signalCode === null && child.pid) {
+        await new Promise((resolve, reject) => {
+          let timer = setTimeout(() => {
+            if (!child.kill()) {
+              reject(new Error("test server did not stop and could not be killed"));
+              return;
+            }
+            timer = setTimeout(() => reject(new Error("test server did not exit after kill")), 5000);
+          }, 5000);
+          child.once("exit", () => { clearTimeout(timer); resolve(); });
+          child.stdin.end();
+        });
+      }
+    }
+  });
+});
 
 test("registered Pi-native mem_save_prompt persists through the Engram /prompts endpoint", async () => {
   const originalFetch = globalThis.fetch;
