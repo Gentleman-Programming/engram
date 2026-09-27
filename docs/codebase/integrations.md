@@ -70,7 +70,7 @@ persistence or decide which session an omitted ID should select.
 | --- | --- | --- |
 | Claude Code | The SessionStart hook posts the host `session_id` with its resolved project and directory. | The hook attempts registration but does not inspect the response before continuing; do not treat its attempt as a confirmed identity handoff to MCP tools. |
 | Codex | The hook posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model. | The helper hands it off only after HTTP 201 with matching `id` and `status: "created"`; otherwise it instructs the model to omit `session_id`. |
-| OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. | Before session-attributed tool writes it attempts root registration, rechecks ownership, and injects the root `session_id` into tool arguments. Failed requests block injection, but an HTTP-success response is not checked for matching session identity. |
+| OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. | Before session-attributed tool writes it attempts root registration, rechecks ownership, and injects the root `session_id` into tool arguments. Injection requires an HTTP-success response with the exact root `id` and `status: "created"`; missing or mismatched acknowledgements block injection. |
 
 Parent/root translation is specific to OpenCode's session hierarchy, not a
 universal adapter rule. Go owns the HTTP session registration and persistence

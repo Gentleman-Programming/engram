@@ -34,7 +34,7 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true, onJSON, jsonError) {
+function httpResponse(data = { id: "runtime", status: "created" }, ok = true, onJSON, jsonError) {
   return {
     ok,
     async json() {
@@ -208,7 +208,7 @@ async function createRuntime(t, {
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
-      return httpResponse()
+      return httpResponse({ id: body.id, status: "created" })
     }
     if (path.startsWith("/sessions/") && path.endsWith("/end")) {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
@@ -1048,6 +1048,34 @@ test("automatic hooks omit writes when ownership changes during registration", a
       assert.equal(runtime.requests.some(({ path }) => path === scenario.forbiddenPath), false)
     })
   }
+})
+
+test("registration acknowledgement must match each runtime ID and created status", async (t) => {
+  for (const acknowledgement of [
+    { status: "created" },
+    { id: "other", status: "created" },
+    { id: "runtime" },
+    { id: "runtime", status: "rejected" },
+  ]) {
+    await t.test(JSON.stringify(acknowledgement), async (t) => {
+      const runtime = await createRuntime(t, { registrationResponse: () => httpResponse(acknowledgement) })
+      const output = toolOutput()
+      await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "runtime" }, output), /could not confirm Engram session registration/)
+      assert.equal(output.args.session_id, MODEL_SESSION_ID)
+    })
+  }
+  await t.test("distinct IDs cannot accept swapped acknowledgements", async (t) => {
+    const runtime = await createRuntime(t, {
+      registrationResponse: (attempt) => httpResponse({ id: attempt === 1 ? "second" : "first", status: "created" }),
+    })
+    const first = toolOutput()
+    const second = toolOutput()
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "first" }, first), /could not confirm Engram session registration/)
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "second" }, second), /could not confirm Engram session registration/)
+    assert.equal(first.args.session_id, MODEL_SESSION_ID)
+    assert.equal(second.args.session_id, MODEL_SESSION_ID)
+    assert.deepEqual(runtime.registeredIDs, ["first", "second"])
+  })
 })
 
 test("runtime hook rejects failed bindings, retries registration, and binds children to parents", async (t) => {
