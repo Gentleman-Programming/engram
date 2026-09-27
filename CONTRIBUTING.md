@@ -56,8 +56,10 @@ Once the issue is approved:
 
 1. Fork the repo and create a branch from the canonical `main`
 2. Implement your change
-3. Open a PR using the PR template — **link the approved issue** with `Closes #N`
+3. Open a PR using the PR template — **link the approved issue** with `Closes #N`, `Fixes #N`, or `Resolves #N` when this PR completes it; use `Refs #N` for a partial PR that must not close the issue
 4. Add exactly **one `type:*` label** to the PR (see label system below)
+
+`Closes`, `Fixes`, and `Resolves` automatically close the issue on merge. `Refs` is non-closing and is intended for reviewable partial PRs of approved umbrella issues. Every reference must still be approved and assigned; existing qualified-reference and repository-trust rules also apply.
 
 #### Forks and remotes
 
@@ -134,8 +136,8 @@ The active required contexts run automatically on every PR and merge queue group
 
 | Check | What it verifies |
 |-------|-----------------|
-| **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
-| **Check Issue Has status:approved** | Every linked issue has `status:approved` and at least one assignee |
+| **Check Issue Reference** | PR body contains closing `Closes/Fixes/Resolves #N` or non-closing `Refs #N` |
+| **Check Issue Has status:approved** | Every referenced issue has `status:approved` and at least one assignee |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
 | **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
