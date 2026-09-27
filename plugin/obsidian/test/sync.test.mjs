@@ -48,10 +48,21 @@ test('writes observation, skips identical snapshot and updates stable note witho
   } finally { f.restore(); }
 });
 
+test('imported sync IDs with separators retain numeric-id note paths', async () => {
+  for (const sync_id of ['imported/one', 'imported\\two']) {
+    const f = fixture(payload([observation({ sync_id })]));
+    try {
+      assert.equal((await syncNow(f.plugin)).created, 1);
+      assert.deepEqual([...f.files.keys()].filter(p => p.endsWith('.md')), ['brain/observations/observation-42.md']);
+      assert.deepEqual(f.writes.filter(p => p.endsWith('.md')), ['brain/observations/observation-42.md']);
+    } finally { f.restore(); }
+  }
+});
+
 test('rejects incompatible snapshots before any vault writes', async () => {
   const f = fixture({ notes: [], count: 0 });
   try {
-    for (const bad of [null, { version: '1', exported_at: '2026-01-02T00:00:00Z', sessions: [], prompts: [] }, { ...payload([]), observations: {} }, payload([observation(), observation({ id: 'bad' })]), payload([observation({ project: 'other' })]), payload([observation({ sync_id: '../escape' })])]) {
+    for (const bad of [null, { version: '1', exported_at: '2026-01-02T00:00:00Z', sessions: [], prompts: [] }, { ...payload([]), observations: {} }, payload([observation(), observation({ id: 'bad' })]), payload([observation({ project: 'other' })]), payload([observation({ sync_id: 'bad\u0001id' })])]) {
       f.setResponse(bad);
       await assert.rejects(syncNow(f.plugin), /invalid|incompatible/i);
       assert.deepEqual(f.writes, []);

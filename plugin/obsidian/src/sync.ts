@@ -159,7 +159,7 @@ function isObservation(value: unknown): value is ExportObservation {
 	if (!isRecord(value)) return false;
 	return Number.isSafeInteger(value.id) && (value.id as number) > 0 &&
 		typeof value.sync_id === "string" && value.sync_id.length > 0 &&
-		!/[\\/\x00-\x1f]/.test(value.sync_id) &&
+		!/[\x00-\x1f]/.test(value.sync_id) &&
 		typeof value.title === "string" && typeof value.content === "string" &&
 		typeof value.type === "string" && value.type.length > 0 &&
 		(value.project === undefined || value.project === null || typeof value.project === "string") &&
