@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readFileSync, mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createInterface } from "node:readline"
 import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
 
@@ -116,6 +119,7 @@ async function createRuntime(t, {
   emitSpawnError = false,
   installBun = true,
   configuredEngramURL,
+  realServerFetch = false,
   engramBin,
   engramPort,
   healthOK = true,
@@ -208,8 +212,10 @@ async function createRuntime(t, {
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
+      if (realServerFetch) return originalFetch(url, init)
       return httpResponse()
     }
+    if (realServerFetch) return originalFetch(url, init)
     if (path.startsWith("/sessions/") && path.endsWith("/end")) {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
       return httpResponse({})
@@ -1198,4 +1204,119 @@ test("plugin disposal closes registered roots, not children, and waits for sessi
   const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))
   assert.equal(endRequests.length, 1)
   assert.equal(endRequests[0].path, `/sessions/${encodeURIComponent(rootID)}/end`)
+})
+
+// OpenCode owns the hook, not the external MCP tool wrapper. Forwarding below models only
+// that wrapper's HTTP POST after the exported hook has rewritten its arguments.
+test("OpenCode host bindings survive real server persistence and reject ended registration", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "engram-opencode-real-"))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => assert.equal(fs.existsSync(dir), false, `test directory remains: ${dir}`))
+  const executable = join(dir, process.platform === "win32" ? "real-server.exe" : "real-server")
+  const build = childProcess.spawnSync("go", ["build", "-o", executable, "./plugin/opencode/test/support/real-server"], {
+    cwd: new URL("../..", import.meta.url), timeout: 60000, encoding: "utf8",
+  })
+  assert.ifError(build.error)
+  assert.equal(build.status, 0, build.stderr)
+  const child = childProcess.spawn(executable, [join(dir, "store")], {
+    env: { ...process.env, HOME: dir, ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_CLOUD_AUTOSYNC: "0" },
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  let stderr = ""
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk })
+  const lines = createInterface({ input: child.stdout })
+  async function bounded(promise, message, ms = 5000) {
+    let timer
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${message}: ${stderr}`)), ms)
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  try {
+    const url = await new Promise((resolve, reject) => {
+      let settled = false
+      const cleanup = () => {
+        clearTimeout(timeout)
+        lines.off("line", onLine)
+        child.off("error", onError)
+        child.off("exit", onExit)
+      }
+      const settle = (finish, value) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        finish(value)
+      }
+      const onLine = line => settle(resolve, line)
+      const onError = error => settle(reject, error)
+      const onExit = code => settle(reject, new Error(`server exited ${code}: ${stderr}`))
+      const timeout = setTimeout(() => settle(reject, new Error(`server startup timed out: ${stderr}`)), 60000)
+      lines.on("line", onLine)
+      child.on("error", onError)
+      child.on("exit", onExit)
+    })
+    const runtime = await createRuntime(t, {
+      configuredEngramURL: url, realServerFetch: true, directory: dir,
+      sessionGet: async () => { throw new Error("event-cached roots should not query SDK") },
+    })
+    const ids = ["opencode-host-alpha", "opencode-host-beta"]
+    for (const id of ids) await runtime.event("session.created", session(id))
+    // The external MCP wrapper is deliberately not imported: direct/manual MCP callers
+    // retain their own session semantics; only hook-mediated calls are tested here.
+    let observationPosts = 0
+    const forward = async (output) => {
+      observationPosts += 1
+      return fetch(`${url}/observations`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(output.args),
+      })
+    }
+    for (const [index, host] of [ids[0], ids[1], ids[0], ids[1]].entries()) {
+      const output = { args: {
+        title: `opencode-persisted-${index}`, content: `persistence ${index}`,
+        project: "engram", session_id: `model-conflict-${index}`,
+      } }
+      await runtime.before({ tool: "mem_save", sessionID: host }, output)
+      assert.equal(output.args.session_id, host)
+      const response = await forward(output)
+      assert.equal(response.status, 201, await response.text())
+    }
+    const persisted = async () => {
+      const response = await fetch(`${url}/observations?project=engram&limit=20`)
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    const rows = await persisted()
+    assert.equal(rows.length, 4, JSON.stringify(rows))
+    for (let index = 0; index < 4; index++) {
+      const matching = rows.filter(row => row.title === `opencode-persisted-${index}`)
+      assert.equal(matching.length, 1)
+      assert.equal(matching[0].session_id, ids[index % 2])
+    }
+    const ended = await fetch(`${url}/sessions/${ids[0]}/end`, { method: "POST", body: "{}" })
+    assert.equal(ended.status, 200)
+    const conflict = await fetch(`${url}/sessions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: ids[0], project: "engram", directory: dir }),
+    })
+    assert.equal(conflict.status, 409, "the real server refuses ended registration")
+    const denied = { args: { title: "must-not-persist", content: "denied", session_id: "model-conflict" } }
+    const postsBefore = observationPosts
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: ids[0] }, denied), /could not confirm Engram session registration/)
+    assert.equal(denied.args.session_id, "model-conflict")
+    assert.equal(observationPosts, postsBefore, "rejected hook must stop before external MCP forwarding")
+    assert.equal((await persisted()).length, 4)
+  } finally {
+    lines.close()
+    if (child.exitCode === null && child.signalCode === null && child.pid) {
+      const exited = new Promise(resolve => child.once("exit", resolve))
+      child.stdin.end()
+      try { await bounded(exited, "server shutdown timed out") }
+      catch (error) {
+        child.kill()
+        await bounded(exited, "server kill timed out")
+        throw error
+      }
+    }
+  }
 })
