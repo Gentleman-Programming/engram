@@ -180,7 +180,7 @@ Output a structured triage report:
 
 #### PR #N — REQUEST CHANGES
 > Thanks for this! A few items before this can merge:
-> - [ ] Link an approved issue (`Closes #N`) — no PR can merge without one
+> - [ ] Link an approved issue (`Closes #N` / `Fixes #N` / `Resolves #N`, or non-closing `Refs #N`) — no PR can merge without one
 > - [ ] Add exactly one `type:*` label
 > - [ ] Rebase on `main` to resolve the failing CI check
 
@@ -215,7 +215,7 @@ gh issue close <number> --repo <owner/repo> \
 
 # Request changes on a PR
 gh pr review <number> --repo <owner/repo> --request-changes \
-  --body "Please link an approved issue (Closes #N) and add exactly one type:* label."
+  --body "Please link an approved issue (Closes #N / Fixes #N / Resolves #N, or non-closing Refs #N) and add exactly one type:* label."
 
 # Approve a PR
 gh pr review <number> --repo <owner/repo> --approve \
