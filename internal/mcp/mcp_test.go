@@ -869,6 +869,64 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 	}
 }
 
+func TestForeignSoleRuntimeCandidateFallsBackToManualMCPBinding(t *testing.T) {
+	const (
+		bindingProject = "binding-project"
+		foreignProject = "foreign-project"
+		foreignID = "foreign-runtime-session"
+	)
+	t.Setenv("ENGRAM_PROJECT", "")
+	s := newMCPTestStore(t)
+	if err := s.EnrollProject(bindingProject); err != nil {
+		t.Fatalf("enroll binding project: %v", err)
+	}
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/binding-project" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	directory := runtimeSessionDirectory("/work/binding-project")
+	if err := s.StartSessionWithOwnershipMode(foreignID, foreignProject, directory, store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("start sole foreign runtime session: %v", err)
+	}
+	before, err := s.GetSession(foreignID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title": "Direct manual MCP save", "content": "Foreign runtime candidate must not bind this save", "type": "manual", "project": bindingProject,
+	}}})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("manual fallback save failed: %s", callResultText(t, result))
+	}
+	observations, err := s.RecentObservations(bindingProject, "project", 5)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("binding observations = %#v, err=%v; want exactly one", observations, err)
+	}
+	if observations[0].SessionID != "manual-save-binding-project" {
+		t.Fatalf("manual fallback session = %q", observations[0].SessionID)
+	}
+	foreignObservations, err := s.RecentObservations(foreignProject, "project", 5)
+	if err != nil || len(foreignObservations) != 0 {
+		t.Fatalf("foreign observations = %#v, err=%v", foreignObservations, err)
+	}
+	for _, projectName := range []string{bindingProject, foreignProject} {
+		prompts, err := s.RecentPrompts(projectName, 5)
+		if err != nil || len(prompts) != 0 {
+			t.Fatalf("%s prompts = %#v, err=%v", projectName, prompts, err)
+		}
+	}
+	after, err := s.GetSession(foreignID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Project != before.Project || after.OwnershipMode != before.OwnershipMode || after.Directory != before.Directory || after.EndedAt != before.EndedAt {
+		t.Fatalf("foreign session changed: before=%#v after=%#v", before, after)
+	}
+}
+
 // TestHandleSaveResolvesActiveSessionFromStore reproduces issue #386: the
 // SessionStart hook registers a UUID session via POST /sessions (a separate
 // process from the MCP server, sharing only the SQLite store). A later
