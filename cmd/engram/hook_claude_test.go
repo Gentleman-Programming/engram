@@ -1,11 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 func claudeHookStdin(t *testing.T, input string, closed bool) *os.File {
@@ -50,6 +59,96 @@ func TestCmdHookWritesTransformedResponse(t *testing.T) {
 	}
 	if err := json.Unmarshal(output, &response); err != nil || response.HookSpecificOutput.UpdatedInput["session_id"] != "claude-session" || response.HookSpecificOutput.PermissionDecision != "" {
 		t.Fatalf("successful hook output = %s, %v", output, err)
+	}
+}
+
+func TestClaudeAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const project = "same-worktree"
+	hosts := []string{"claude-host-one", "claude-host-two"}
+	for _, host := range hosts {
+		if err := db.CreateSession(host, project, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"same-worktree","project_source":"config"}`)
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	oldStdin, oldOutput := os.Stdin, claudeHookOutput
+	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
+	mcpServer := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: project}, nil)
+	want := map[string]map[string]int{
+		hosts[0]: {"one first": 1, "one second": 1},
+		hosts[1]: {"two first": 1, "two second": 1},
+	}
+	for _, step := range []struct{ host, title string }{
+		{hosts[0], "one first"}, {hosts[1], "two first"},
+		{hosts[0], "one second"}, {hosts[1], "two second"},
+	} {
+		request, _ := json.Marshal(map[string]any{
+			"session_id": step.host, "cwd": root, "tool_name": "mcp__engram__mem_save",
+			"tool_input": map[string]any{"title": step.title, "content": step.title, "project": project, "session_id": "foreign-model-session"},
+		})
+		os.Stdin = claudeHookStdin(t, string(request), false)
+		var output []byte
+		claudeHookOutput = func(data []byte) error { output = append([]byte(nil), data...); return nil }
+		cmdHook([]string{"claude-pre-tool-use"})
+		var hook struct {
+			HookSpecificOutput struct {
+				PermissionDecision string         `json:"permissionDecision"`
+				UpdatedInput       map[string]any `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(output, &hook); err != nil {
+			t.Fatal(err)
+		}
+		bound := hook.HookSpecificOutput
+		if bound.PermissionDecision == "deny" || bound.UpdatedInput["session_id"] != step.host || bound.UpdatedInput["project"] != project {
+			t.Fatalf("host %s bound output = %s", step.host, output)
+		}
+		call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": bound.UpdatedInput}})
+		result := mcpServer.HandleMessage(context.Background(), call)
+		encoded, err := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), `"isError":true`) || !strings.Contains(string(encoded), step.title) {
+			t.Fatalf("host %s MCP result = %s, err=%v", step.host, encoded, err)
+		}
+	}
+	all, err := db.AllObservations(project, "", 100)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("project observations = %d, err=%v", len(all), err)
+	}
+	for host, expected := range want {
+		observations, err := db.SessionObservations(host, 100)
+		if err != nil || len(observations) != 2 {
+			t.Fatalf("host %s observations = %v, err=%v", host, observations, err)
+		}
+		counts := make(map[string]int)
+		for _, observation := range observations {
+			counts[observation.Title]++
+		}
+		for title, count := range expected {
+			if counts[title] != count {
+				t.Fatalf("host %s title %q count = %d, want %d; all titles: %v", host, title, counts[title], count, counts)
+			}
+		}
+		if len(counts) != len(expected) {
+			t.Fatalf("host %s has unexpected titles: %v", host, counts)
+		}
+	}
+	if _, err := db.GetSession("foreign-model-session"); err == nil {
+		t.Fatal("foreign model session was created")
 	}
 }
 
