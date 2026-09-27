@@ -198,22 +198,30 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 	}
 });
 
-test("Pi release contract accepts the package version tag and CLI guidance", () => {
-	const result = runReleaseContract(`pi-v${pkg.version}`);
+test("Pi release contract accepts the matching full tag ref and CLI guidance", () => {
+	const result = runReleaseContract(`refs/tags/pi-v${pkg.version}`);
 	assert.equal(result.status, 0, result.stderr);
 });
 
 test("Pi release contract rejects a tag that differs from the package version", () => {
-	const result = runReleaseContract("pi-v0.0.0");
+	const result = runReleaseContract("refs/tags/pi-v0.0.0");
 	assert.notEqual(result.status, 0);
 	assert.match(result.stderr, /must match package version/);
 });
 
-test("Pi publish workflow passes the release tag through a shell environment variable", () => {
+test("Pi release contract rejects branch refs even when their names match", () => {
+	for (const ref of ["refs/heads/main", `refs/heads/pi-v${pkg.version}`, `pi-v${pkg.version}`]) {
+		const result = runReleaseContract(ref);
+		assert.notEqual(result.status, 0, `${ref} must not be publishable`);
+		assert.match(result.stderr, /must match package version/);
+	}
+});
+
+test("Pi publish workflow passes the full event ref through a shell environment variable", () => {
 	assert.match(
 		PUBLISH_WORKFLOW_SOURCE,
-		/env:\s*\n\s+RELEASE_TAG:\s*\$\{\{\s*github\.ref_name\s*\}\}\s*\n\s+run:\s*node test\/release-contract\.mjs "\$RELEASE_TAG"/,
-		"the release tag must be provided as RELEASE_TAG and quoted when passed to the release contract",
+		/env:\s*\n\s+RELEASE_REF:\s*\$\{\{\s*github\.ref\s*\}\}\s*\n\s+run:\s*node test\/release-contract\.mjs "\$RELEASE_REF"/,
+		"the full event ref must be provided as RELEASE_REF and quoted when passed to the release contract",
 	);
 	assert.doesNotMatch(
 		PUBLISH_WORKFLOW_SOURCE,

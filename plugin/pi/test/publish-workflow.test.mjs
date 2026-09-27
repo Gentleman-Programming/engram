@@ -14,6 +14,18 @@ function namedStep(name) {
 	return { index: match.index, end: match.index + match[0].length, text: match[0] };
 }
 
+test("both event routes verify the full ref before any npm publication", () => {
+	const guard = namedStep("Verify Pi release version");
+	const tests = namedStep("Run Pi plugin tests");
+	const publish = namedStep("Publish to npm with provenance");
+
+	assert.doesNotMatch(guard.text, /^        (?:if|continue-on-error)\s*:/m, "the ref guard must run on push and workflow_dispatch and fail closed");
+	assert.match(guard.text, /^          RELEASE_REF: \$\{\{ github\.ref \}\}$/m, "the guard must receive the actual full event ref");
+	assert.match(guard.text, /^        run: node test\/release-contract\.mjs "\$RELEASE_REF"$/m);
+	assert.ok(guard.end <= tests.index && tests.end <= publish.index, "the ref guard and tests must precede publication");
+	assert.equal((workflow.match(/^        run: npm publish\b/gm) ?? []).length, 1, "there must be no alternate npm publish step");
+});
+
 test("Pi publication tests run fail-closed immediately before publishing", () => {
 	const testStep = namedStep("Run Pi plugin tests");
 	const publishStep = namedStep("Publish to npm with provenance");

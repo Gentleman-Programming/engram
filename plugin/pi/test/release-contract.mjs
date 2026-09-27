@@ -6,7 +6,7 @@ const packageMetadata = JSON.parse(readFileSync(new URL("../package.json", impor
 const installerSource = readFileSync(new URL("../../../internal/setup/setup.go", import.meta.url), "utf8");
 const installerPinMatches = [...installerSource.matchAll(/^\s*piGentleEngramPackage\s*=\s*"npm:gentle-engram@([^"]+)"\s*$/gm)];
 const packageName = `npm:${packageMetadata.name}@${packageMetadata.version}`;
-const expectedTag = `pi-v${packageMetadata.version}`;
+const expectedRef = `refs/tags/pi-v${packageMetadata.version}`;
 
 if (installerPinMatches.length === 0) {
 	throw new Error("Pi installer pin npm:gentle-engram@<version> is missing from internal/setup/setup.go");
@@ -22,11 +22,11 @@ if (installerVersion !== packageMetadata.version) {
 if (installerVersion === "0.1.14") {
 	throw new Error("Pi installer must not retain 0.1.14 as its current gentle-engram pin");
 }
-const releaseTag = process.argv[2];
+const releaseRef = process.argv[2];
 const cliPath = fileURLToPath(new URL("../cli.js", import.meta.url));
 
-if (releaseTag !== expectedTag) {
-	throw new Error(`Pi release tag ${JSON.stringify(releaseTag)} must match package version ${expectedTag}`);
+if (releaseRef !== expectedRef) {
+	throw new Error(`Pi release ref ${JSON.stringify(releaseRef)} must match package version tag ${expectedRef}`);
 }
 
 const help = execFileSync(process.execPath, [cliPath], { encoding: "utf8" });
