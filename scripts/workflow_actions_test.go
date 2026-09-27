@@ -281,11 +281,11 @@ func TestPRIssueReferenceContract(t *testing.T) {
 }
 
 // TestPRIssueReferenceApprovalOutcomes pins the approval outcomes of the PR
-// validation workflow over both events. pull_request and merge_group must
-// dispatch to the same per-job validate function, so the approval contract is
-// asserted once against that shared path: an approved Refs reference is
-// accepted, while a missing reference and an unapproved reference are
-// rejected.
+// validation workflow over both events. Source-fragment counts bind every
+// pull_request and merge_group dispatch to the shared per-job validate
+// function, and the deterministic table then checks the decision that shared
+// path must make: an approved Refs reference is accepted, while a missing
+// reference and an unapproved reference are rejected.
 func TestPRIssueReferenceApprovalOutcomes(t *testing.T) {
 	prCheckPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
 	prCheckContent, err := os.ReadFile(prCheckPath)
@@ -294,167 +294,72 @@ func TestPRIssueReferenceApprovalOutcomes(t *testing.T) {
 	}
 	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
 
-	// Branch binding: both events must execute the same validation path. Each
-	// validation job declares exactly one validate function, and both branch
-	// fragments invoke it: the merge_group fragment hands it to
-	// aggregatePullRequestResults, and the pull_request fragment calls it on
-	// the single PR payload. A branch that skipped reference or approval
-	// validation would break one of these per-job constraints.
-	scripts := prCheckScripts(t, prCheck)
-	if len(scripts) != 2 {
-		t.Fatalf("%s must contain exactly two validation job scripts, got %d", prCheckPath, len(scripts))
-	}
-	for _, script := range scripts {
-		if got := strings.Count(script, "const validate"); got != 1 {
-			t.Errorf("each validation job must declare exactly one validate function, got %d", got)
-		}
-		for _, branchFragment := range []string{
-			"context.eventName === 'merge_group'",
-			"aggregatePullRequestResults(pulls, validate)",
-			"validate(pull)",
-		} {
-			if !strings.Contains(script, branchFragment) {
-				t.Errorf("validation job must contain branch fragment %q", branchFragment)
-			}
+	// Branch binding via source fragments: the workflow has exactly two
+	// validation jobs, each with one script declaring a single shared validate
+	// function, and both event branches invoke that same validate — merge_group
+	// through aggregatePullRequestResults(pulls, validate) and pull_request
+	// through validate(pull). Any count other than two means an event split off
+	// the shared validation path.
+	for _, fragment := range []string{
+		"script: |",
+		"const validate",
+		"context.eventName === 'merge_group'",
+		"aggregatePullRequestResults(pulls, validate)",
+		"validate(pull)",
+	} {
+		if got := strings.Count(prCheck, fragment); got != 2 {
+			t.Errorf("%s must contain %q exactly twice (once per validation job), got %d", prCheckPath, fragment, got)
 		}
 	}
 
-	// Both jobs must define the same issue reference pattern (existing regex
-	// coverage pins that they are identical); the approval outcomes below run
-	// against the extracted literal, so a change to the accepted keywords is
-	// reflected deterministically in the cases.
+	// Deterministic outcomes over that shared path: matches come from the
+	// checked-in issuePattern literal, and the simulated issue labels stand in
+	// for the GitHub REST responses the workflow fetches at runtime.
 	patterns := extractIssuePatternLiterals(t, prCheck)
 	if len(patterns) != 2 {
 		t.Fatalf("%s must define the issue reference pattern once per validation job, got %d", prCheckPath, len(patterns))
+	}
+	issuePattern := regexp.MustCompile("(?i)" + patterns[0]) // JS flag `i`; `g` is irrelevant for Go
+	validate := func(body string, labels map[string][]string) []string {
+		matches := issuePattern.FindAllStringSubmatch(body, -1)
+		if len(matches) == 0 {
+			return []string{"no issue reference found"}
+		}
+		var failures []string
+		for _, match := range matches {
+			number := match[1]
+			approved := false
+			for _, label := range labels[number] {
+				if label == "status:approved" {
+					approved = true
+					break
+				}
+			}
+			if !approved {
+				failures = append(failures, fmt.Sprintf("issue #%s does not have the `status:approved` label.", number))
+			}
+		}
+		return failures
 	}
 
 	outcomes := []struct {
 		name   string
 		body   string
-		titles map[string]string
 		labels map[string][]string
 		want   []string // expected failures, in order; empty means accepted
 	}{
-		{
-			name:   "approved refs accepted",
-			body:   "Refs #1270",
-			titles: map[string]string{"1270": "Umbrella issue"},
-			labels: map[string][]string{"1270": {"status:approved"}},
-			want:   nil,
-		},
-		{
-			name: "missing reference rejected",
-			body: "This PR improves the plugin and its tests.",
-			want: []string{"no issue reference found"},
-		},
-		{
-			name:   "unapproved refs rejected",
-			body:   "Refs #1270",
-			titles: map[string]string{"1270": "Umbrella issue"},
-			labels: map[string][]string{"1270": {"type:feature"}},
-			want:   []string{"issue #1270 (\"Umbrella issue\") does not have the `status:approved` label."},
-		},
-		{
-			name:   "mixed approved and unapproved references rejected",
-			body:   "Refs #1270\nCloses #1493",
-			titles: map[string]string{"1270": "Umbrella issue", "1493": "Closes the umbrella"},
-			labels: map[string][]string{"1270": {"status:approved"}, "1493": {"type:bug"}},
-			want:   []string{"issue #1493 (\"Closes the umbrella\") does not have the `status:approved` label."},
-		},
+		{name: "approved refs accepted", body: "Refs #1270", labels: map[string][]string{"1270": {"status:approved"}}, want: nil},
+		{name: "missing reference rejected", body: "This PR improves the plugin and its tests.", want: []string{"no issue reference found"}},
+		{name: "unapproved refs rejected", body: "Refs #1270", labels: map[string][]string{"1270": {"type:feature"}}, want: []string{"issue #1270 does not have the `status:approved` label."}},
+		{name: "mixed approved and unapproved references rejected", body: "Refs #1270\nCloses #1493", labels: map[string][]string{"1270": {"status:approved"}, "1493": {"type:bug"}}, want: []string{"issue #1493 does not have the `status:approved` label."}},
 	}
 	for _, tt := range outcomes {
 		t.Run(tt.name, func(t *testing.T) {
-			got := referenceValidationFailures(tt.body, patterns[0], tt.titles, tt.labels)
-			if diff := compareStringSlices(got, tt.want); diff != "" {
+			if diff := compareStringSlices(validate(tt.body, tt.labels), tt.want); diff != "" {
 				t.Fatal(diff)
 			}
 		})
 	}
-}
-
-// prCheckScripts returns the script value of every github-script step in the
-// PR validation workflow, in declaration order. Each validation job owns
-// exactly one script, so the returned values are the per-job validation paths
-// guarded by the branch dispatch contract.
-func prCheckScripts(t *testing.T, workflow string) []string {
-	t.Helper()
-	var document yaml.Node
-	if err := yaml.Unmarshal([]byte(workflow), &document); err != nil {
-		t.Fatalf("parse PR validation workflow: %v", err)
-	}
-	if len(document.Content) != 1 {
-		t.Fatal("parse PR validation workflow: expected a single YAML document")
-	}
-
-	var scripts []string
-	for _, jobs := range mappingValues(document.Content[0], "jobs") {
-		jobs, err := resolveYAMLNode(jobs)
-		if err != nil || jobs.Kind != yaml.MappingNode {
-			t.Fatal("PR validation workflow must declare jobs")
-		}
-		for index := 1; index < len(jobs.Content); index += 2 {
-			job, err := resolveYAMLNode(jobs.Content[index])
-			if err != nil || job.Kind != yaml.MappingNode {
-				continue
-			}
-			for _, steps := range mappingValues(job, "steps") {
-				steps, err = resolveYAMLNode(steps)
-				if err != nil || steps.Kind != yaml.SequenceNode {
-					continue
-				}
-				for _, step := range steps.Content {
-					step, err = resolveYAMLNode(step)
-					if err != nil || step.Kind != yaml.MappingNode {
-						continue
-					}
-					for _, with := range mappingValues(step, "with") {
-						with, err = resolveYAMLNode(with)
-						if err != nil || with.Kind != yaml.MappingNode {
-							continue
-						}
-						for _, script := range mappingValues(with, "script") {
-							scripts = append(scripts, script.Value)
-						}
-					}
-				}
-			}
-		}
-	}
-	return scripts
-}
-
-// referenceValidationFailures runs the deterministic model of the workflow's
-// shared validation path over one pull request body. Matches are selected with
-// the checked-in issuePattern literal; a body without matches is rejected as
-// missing, and every matched reference must resolve to an issue carrying the
-// status:approved label or it is rejected with the workflow's exact failure
-// message. The titles and labels parameters stand in for the GitHub REST
-// responses the workflow fetches at runtime, keeping the outcome table
-// deterministic.
-func referenceValidationFailures(body, pattern string, titles map[string]string, labels map[string][]string) []string {
-	numberPattern := regexp.MustCompile("(?i)" + pattern)
-	var numbers []string
-	for _, match := range numberPattern.FindAllStringSubmatch(body, -1) {
-		numbers = append(numbers, match[1])
-	}
-	if len(numbers) == 0 {
-		return []string{"no issue reference found"}
-	}
-
-	var failures []string
-	for _, number := range numbers {
-		approved := false
-		for _, label := range labels[number] {
-			if label == "status:approved" {
-				approved = true
-				break
-			}
-		}
-		if !approved {
-			failures = append(failures, fmt.Sprintf("issue #%s (%q) does not have the `status:approved` label.", number, titles[number]))
-		}
-	}
-	return failures
 }
 
 // extractIssuePatternLiterals returns the JS regex source of every
