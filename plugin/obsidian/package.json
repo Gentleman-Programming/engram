@@ -12,12 +12,14 @@
   "scripts": {
     "preinstall": "npx lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
     "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
     "dev": "node esbuild.config.mjs --watch"
   },
   "keywords": ["obsidian-plugin", "engram", "memory", "ai"],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "builtin-modules": "^5.4.0",
     "esbuild": "^0.21.0",
     "lockfile-lint": "^4.14.1",
     "obsidian": "^1.4.0",
