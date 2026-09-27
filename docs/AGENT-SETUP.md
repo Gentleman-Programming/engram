@@ -73,7 +73,6 @@ Manual equivalent:
 ```bash
 pi install npm:gentle-engram@0.1.16
 pi install npm:pi-mcp-adapter
-pi-engram init
 ```
 
 Restart Pi after installation.
