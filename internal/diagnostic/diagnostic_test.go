@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -458,6 +459,47 @@ func TestOrphanedPendingRelationsCheckWarnsWithCountsAndBoundedSample(t *testing
 		if !strings.Contains(finding.SafeNextStep, want) {
 			t.Fatalf("SafeNextStep=%q, want %q", finding.SafeNextStep, want)
 		}
+	}
+}
+
+// TestOrphanedPendingRelationsCheckBoundedSampleUnderLargeBacklog proves the
+// doctor check keeps its output shape on a backlog larger than the sample
+// limit: the finding and metadata carry the TOTAL candidate count while the
+// embedded evidence sample stays bounded and id-ordered.
+func TestOrphanedPendingRelationsCheckBoundedSampleUnderLargeBacklog(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	for i := 0; i < 12; i++ {
+		seedDiagnosticRelation(t, s, fmt.Sprintf("rel-orphan-%02d", i), fmt.Sprintf("missing-src-%02d", i), fmt.Sprintf("missing-tgt-%02d", i), "pending")
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v, want one warning check with one aggregate finding", report)
+	}
+	finding := report.Checks[0].Findings[0]
+	var evidence struct {
+		CandidateCount int `json:"candidate_count"`
+		Sample         []struct {
+			SyncID string `json:"sync_id"`
+		} `json:"sample"`
+	}
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence.CandidateCount != 12 {
+		t.Fatalf("candidate_count=%d, want the full backlog size 12", evidence.CandidateCount)
+	}
+	if len(evidence.Sample) != 10 {
+		t.Fatalf("sample size=%d, want the bounded 10", len(evidence.Sample))
+	}
+	if evidence.Sample[0].SyncID != "rel-orphan-00" || evidence.Sample[9].SyncID != "rel-orphan-09" {
+		t.Fatalf("sample=%+v, want the id-ordered head of the candidate list", evidence.Sample)
+	}
+	if !strings.Contains(finding.Message, "12 pending relation(s)") {
+		t.Fatalf("Message=%q, want the full backlog count", finding.Message)
 	}
 }
 

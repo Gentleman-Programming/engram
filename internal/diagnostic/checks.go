@@ -36,9 +36,10 @@ const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_ident
 const ReasonForeignSyncTarget = "foreign_sync_target"
 
 // orphanedPendingRelationSampleLimit bounds how many candidate relations the
-// aggregate doctor finding embeds as evidence, so a large legacy backlog
-// cannot flood diagnostic output. The full candidate set is re-derived by the
-// repair plan and apply path from the same store evidence.
+// store's bounded diagnostic read returns to the aggregate doctor finding, so
+// a large legacy backlog cannot flood diagnostic output. The full candidate
+// set is re-derived by the repair plan and apply path from the same store
+// evidence.
 const orphanedPendingRelationSampleLimit = 10
 
 type SessionProjectDirectoryMismatchCheck struct{}
@@ -745,34 +746,30 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 // UnownedSessionProjectCheck).
 func (c OrphanedPendingRelationsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
-	evidence, err := scope.Store.ListOrphanedPendingRelationEvidence()
+	evidence, err := scope.Store.ListOrphanedPendingRelationEvidenceBounded(orphanedPendingRelationSampleLimit)
 	if err != nil {
 		return CheckResult{}, err
 	}
 	findings := make([]Finding, 0, 1)
-	if len(evidence.Candidates) > 0 {
-		sample := evidence.Candidates
-		if len(sample) > orphanedPendingRelationSampleLimit {
-			sample = sample[:orphanedPendingRelationSampleLimit]
-		}
+	if evidence.CandidateCount > 0 {
 		findings = append(findings, Finding{
 			CheckID:    c.Code(),
 			Severity:   SeverityWarning,
 			ReasonCode: CheckOrphanedPendingRelations,
-			Message:    fmt.Sprintf("%d pending relation(s) reference missing observations on both endpoints and can never be judged.", len(evidence.Candidates)),
+			Message:    fmt.Sprintf("%d pending relation(s) reference missing observations on both endpoints and can never be judged.", evidence.CandidateCount),
 			Why:        "A pending relation without an active source or target observation shows no titles and no verdict can ever be recorded against it, so it only inflates the pending backlog; reclassifying it into the audited `orphaned` disposition preserves the row as history without fabricating a verdict.",
 			Evidence: mustJSON(map[string]any{
-				"candidate_count":      len(evidence.Candidates),
+				"candidate_count":      evidence.CandidateCount,
 				"one_endpoint_missing": evidence.OneEndpointMissing,
 				"live_pending":         evidence.LivePending,
-				"sample":               sample,
+				"sample":               evidence.Sample,
 			}),
 			SafeNextStep:         "Review the sample, then run `engram doctor repair --check orphaned_pending_relations --dry-run`; apply reclassifies only these rows into the audited `orphaned` disposition after creating a SQLite backup.",
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{
-		"candidate_count":      len(evidence.Candidates),
+		"candidate_count":      evidence.CandidateCount,
 		"one_endpoint_missing": evidence.OneEndpointMissing,
 		"live_pending":         evidence.LivePending,
 	}, findings), nil

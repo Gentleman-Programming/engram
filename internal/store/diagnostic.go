@@ -440,6 +440,65 @@ func (s *Store) ListOrphanedPendingRelationEvidence() (OrphanedPendingRelationEv
 	return report, nil
 }
 
+// OrphanedPendingRelationEvidenceBounded is the bounded diagnostic read for
+// the doctor check: the total candidate count plus only the first `limit`
+// evidence rows, so a large legacy backlog cannot force the check to
+// materialize every candidate. CandidateCount always spans all candidates,
+// while Sample is the id-ordered head of the same list.
+type OrphanedPendingRelationEvidenceBounded struct {
+	CandidateCount     int64
+	OneEndpointMissing int64
+	LivePending        int64
+	Sample             []OrphanedPendingRelationEvidence
+}
+
+// ListOrphanedPendingRelationEvidenceBounded reports the same evidence as
+// ListOrphanedPendingRelationEvidence with the candidate rows bounded: it
+// returns the total candidate count plus only the first limit evidence rows,
+// so the doctor check can render a large legacy backlog without materializing
+// every candidate. The full candidate set remains available to the repair
+// planner and apply path through ListOrphanedPendingRelationEvidence. The
+// listing is deliberately unscoped: a relation with both endpoints absent
+// belongs to no project.
+func (s *Store) ListOrphanedPendingRelationEvidenceBounded(limit int) (OrphanedPendingRelationEvidenceBounded, error) {
+	report := OrphanedPendingRelationEvidenceBounded{Sample: []OrphanedPendingRelationEvidence{}}
+
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationCandidatePredicate).Scan(&report.CandidateCount); err != nil {
+		return report, fmt.Errorf("count orphaned pending candidates: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationOneEndpointMissingPredicate).Scan(&report.OneEndpointMissing); err != nil {
+		return report, fmt.Errorf("count one-endpoint-missing pending relations: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&report.LivePending); err != nil {
+		return report, fmt.Errorf("count live pending relations: %w", err)
+	}
+
+	if report.CandidateCount == 0 || limit <= 0 {
+		return report, nil
+	}
+	rows, err := s.queryItHook(s.db, `SELECT r.id, ifnull(r.sync_id, ''), ifnull(r.source_id, ''), ifnull(r.target_id, '')
+		FROM memory_relations r
+		WHERE `+orphanedPendingRelationCandidatePredicate+`
+		ORDER BY r.id LIMIT ?`, limit)
+	if err != nil {
+		return report, err
+	}
+	for rows.Next() {
+		var item OrphanedPendingRelationEvidence
+		if err := rows.Scan(&item.ID, &item.SyncID, &item.SourceID, &item.TargetID); err != nil {
+			return report, closeRowsWithError(rows, err)
+		}
+		report.Sample = append(report.Sample, item)
+	}
+	if err := rows.Err(); err != nil {
+		return report, closeRowsWithError(rows, err)
+	}
+	if err := rows.Close(); err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
 // OrphanedPendingRelationReclassificationResult reports one audited apply of
 // the orphaned-pending-relations repair. Reclassified counts the rows actually
 // moved into the `orphaned` disposition; CandidatesAtApply is the predicate
@@ -456,20 +515,32 @@ type OrphanedPendingRelationReclassificationResult struct {
 // ReclassifyOrphanedPendingRelations moves every pending relation whose source
 // AND target observations are absent from the active observation set into the
 // audited `orphaned` disposition, the same terminal state the hard-delete
-// orphaning writers already produce. It creates a SQLite backup before the
-// transaction, revalidates the predicate inside the transaction so a stale or
-// concurrent judgment can never be overwritten, and — matching those existing
-// orphaning writers — emits no sync journal mutation: the reclassification is
-// local audit hygiene, not replicated state. The operation is idempotent; a
-// second run finds no pending candidates and changes nothing.
+// orphaning writers already produce. The SQLite writer lock is acquired first
+// and covers both the pre-apply backup and the reclassification, so no
+// concurrent write can land between the snapshot and the apply it protects
+// (the backup comes from a separate connection — the store pool is
+// single-connection and is pinned by the held transaction). The predicate is
+// revalidated inside the transaction so a stale or concurrent judgment can
+// never be overwritten, and — matching those existing orphaning writers — no
+// sync journal mutation is emitted: the reclassification is local audit
+// hygiene, not replicated state. The operation is idempotent; a second run
+// finds no pending candidates and changes nothing.
 func (s *Store) ReclassifyOrphanedPendingRelations() (OrphanedPendingRelationReclassificationResult, error) {
-	backupPath, err := s.BackupSQLite()
-	if err != nil {
-		return OrphanedPendingRelationReclassificationResult{}, err
-	}
 	var result OrphanedPendingRelationReclassificationResult
-	result.BackupPath = backupPath
-	err = s.withTx(func(tx *sql.Tx) error {
+	err := withSQLiteWriteRetry(func() error {
+		result = OrphanedPendingRelationReclassificationResult{}
+		tx, err := s.beginTxHook()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		// The writer lock is now held (BEGIN IMMEDIATE via the store DSN):
+		// snapshot the pre-apply state through a second connection while no
+		// concurrent write can land between the snapshot and the apply below.
+		backupPath, err := s.backupSQLiteUnderWriteLock()
+		if err != nil {
+			return err
+		}
 		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationCandidatePredicate).Scan(&result.CandidatesAtApply); err != nil {
 			return fmt.Errorf("revalidate orphaned pending candidates: %w", err)
 		}
@@ -491,6 +562,10 @@ func (s *Store) ReclassifyOrphanedPendingRelations() (OrphanedPendingRelationRec
 		if err := tx.QueryRow(`SELECT count(*) FROM memory_relations r WHERE ` + orphanedPendingRelationLivePredicate).Scan(&result.LivePending); err != nil {
 			return fmt.Errorf("count live pending relations: %w", err)
 		}
+		if err := s.commitHook(tx); err != nil {
+			return err
+		}
+		result.BackupPath = backupPath
 		return nil
 	})
 	if err != nil {
@@ -1201,13 +1276,47 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	return result, nil
 }
 
-func (s *Store) BackupSQLite() (string, error) {
+func (s *Store) sqliteRepairBackupPath() (string, error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
+	return path, nil
+}
+
+func (s *Store) BackupSQLite() (string, error) {
+	path, err := s.sqliteRepairBackupPath()
+	if err != nil {
+		return "", err
+	}
 	if _, err := s.execHook(s.db, `VACUUM INTO ?`, path); err != nil {
+		return "", fmt.Errorf("backup sqlite database: %w", err)
+	}
+	return path, nil
+}
+
+// backupSQLiteUnderWriteLock creates the same VACUUM INTO snapshot as
+// BackupSQLite while the caller holds the SQLite writer lock on the store's
+// pooled connection, so no concurrent write can land between the snapshot and
+// the work the caller applies under that lock. The store pool is a single
+// connection pinned by the caller's transaction, so the snapshot MUST NOT go
+// through s.db — it would block forever waiting for the pool. A separate
+// database handle on the same file takes the snapshot instead: VACUUM INTO
+// only reads the source, and in WAL mode that read runs concurrently with the
+// held write transaction, always seeing the last committed (pre-apply) state
+// and never the caller's uncommitted changes.
+func (s *Store) backupSQLiteUnderWriteLock() (string, error) {
+	path, err := s.sqliteRepairBackupPath()
+	if err != nil {
+		return "", err
+	}
+	backupDB, err := openDB(filepath.Join(s.cfg.DataDir, "engram.db"), s.generation)
+	if err != nil {
+		return "", fmt.Errorf("backup sqlite database: open snapshot connection: %w", err)
+	}
+	defer func() { _ = backupDB.Close() }()
+	if _, err := s.execHook(backupDB, `VACUUM INTO ?`, path); err != nil {
 		return "", fmt.Errorf("backup sqlite database: %w", err)
 	}
 	return path, nil
