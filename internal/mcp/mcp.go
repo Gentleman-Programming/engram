@@ -2283,7 +2283,19 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		)
 
 		if detErr != nil {
-			return readProjectErrorResult(activity, detRes, detErr), nil
+			if strings.TrimSpace(projectOverride) == "" && obs.Project != nil && *obs.Project != "" {
+				path := ""
+				if session, err := s.GetSession(obs.SessionID); err == nil {
+					path = session.Directory
+				}
+				detRes = projectpkg.DetectionResult{
+					Project: *obs.Project,
+					Source:  projectpkg.SourceObservation,
+					Path:    path,
+				}
+			} else {
+				return readProjectErrorResult(activity, detRes, detErr), nil
+			}
 		}
 		return respondWithProject(detRes, result, nil), nil
 	}

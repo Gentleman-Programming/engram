@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ const (
 	SourceAmbiguous        = "ambiguous"         // cwd contains multiple git repos (Case 4)
 	SourceExplicitOverride = "explicit_override" // JR2-2: caller explicitly supplied a project name
 	SourceSessionProject   = "session"           // caller supplied a session_id with an existing project
+	SourceObservation      = "observation"       // derived from the target observation's stored project
 	// SourceUserSelectedAfterAmbiguousProject means an MCP write initially hit
 	// ErrAmbiguousProject and the caller provided an explicit user-selected
 	// project from the ambiguity result's available_projects list.
@@ -172,6 +174,7 @@ func DetectProjectFull(dir string) DetectionResult {
 			for i, c := range children {
 				names[i] = normalizeAvailableProject(filepath.Base(c))
 			}
+			slices.Sort(names)
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
 			// DetectProject wrapper handles CLI compat by using filepath.Base on error.

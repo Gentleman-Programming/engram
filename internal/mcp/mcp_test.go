@@ -7966,19 +7966,46 @@ func TestHandleGetObservationProjectResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("ambiguous cwd without project fails closed", func(t *testing.T) {
+	t.Run("ambiguous cwd without project returns observation using stored project", func(t *testing.T) {
 		t.Setenv("ENGRAM_PROJECT", "")
 		result, err := call(MCPConfig{}, "")
-		if err != nil || !result.IsError {
+		if err != nil || result.IsError {
 			t.Fatalf("get observation: err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
 		}
 		body := callResultJSON(t, result)
-		if body["error_code"] != "ambiguous_project" {
-			t.Fatalf("error_code = %v, want ambiguous_project; body=%v", body["error_code"], body)
+		if body["project"] != "observation-owner" || body["project_source"] != project.SourceObservation {
+			t.Fatalf("project envelope = %v, want observation-owner from observation source", body)
 		}
-		available, ok := body["available_projects"].([]any)
-		if !ok || len(available) < 2 {
-			t.Fatalf("available_projects = %#v, want at least two available projects", body["available_projects"])
+		content, _ := body["result"].(string)
+		if !strings.Contains(content, "ID-based retrieval must not filter by the resolved project.") {
+			t.Fatalf("ID-based lookup did not return observation: %q", content)
+		}
+	})
+
+	t.Run("ambiguous cwd without project fails closed when stored observation has no project", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "")
+		unownedID, err := s.AddObservation(store.AddObservationParams{
+			SessionID: "session-repo-a",
+			Type:      "manual",
+			Title:     "Observation with no project",
+			Content:   "Content without project",
+			Project:   "repo-a",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB().Exec("UPDATE observations SET project = NULL WHERE id = ?", unownedID); err != nil {
+			t.Fatal(err)
+		}
+		result, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+			Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(unownedID)}},
+		})
+		if err != nil || !result.IsError {
+			t.Fatalf("get unowned observation in ambiguous cwd: err=%v isError=%v", err, result.IsError)
+		}
+		body := callResultJSON(t, result)
+		if body["error_code"] != "ambiguous_project" {
+			t.Fatalf("error_code = %v, want ambiguous_project", body["error_code"])
 		}
 	})
 
@@ -8850,6 +8877,7 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 	if err := s.CreateSession("sess-degraded", "degraded-project", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
+	// When observation has no project, ambiguous cwd resolution must fail closed with recovery envelope.
 	obsID, err := s.AddObservation(store.AddObservationParams{
 		SessionID: "sess-degraded",
 		Type:      "manual",
@@ -8858,6 +8886,9 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 		Project:   "degraded-project",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec("UPDATE observations SET project = NULL WHERE id = ?", obsID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -8885,6 +8916,33 @@ func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 	}
 	if got := body["project_path"]; got != parent {
 		t.Fatalf("project_path = %v, want %q", got, parent)
+	}
+
+	// When observation has a project, ambiguous cwd returns the observation using obs.Project (Issue #1470).
+	if err := s.CreateSession("sess-owned", "degraded-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	ownedID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-owned",
+		Type:      "manual",
+		Title:     "owned obs title",
+		Content:   "owned obs content",
+		Project:   "degraded-project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resOwned, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id": float64(ownedID),
+		}},
+	})
+	if err != nil || resOwned.IsError {
+		t.Fatalf("expected observation to be returned for owned record: err=%v isError=%v", err, resOwned.IsError)
+	}
+	ownedBody := callResultJSON(t, resOwned)
+	if ownedBody["project"] != "degraded-project" || ownedBody["project_source"] != project.SourceObservation {
+		t.Fatalf("expected observation project envelope: %v", ownedBody)
 	}
 }
 
@@ -9831,7 +9889,13 @@ func TestGetObservationAndReviewPreserveAmbiguityRecoveryMetadata(t *testing.T) 
 
 	t.Run("get observation", func(t *testing.T) {
 		result, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id)}}})
-		assertAmbiguousRecovery(t, result, err)
+		if err != nil || result.IsError {
+			t.Fatalf("result err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if body["project"] != "engram" || body["project_source"] != project.SourceObservation {
+			t.Fatalf("project envelope = %v, want engram from observation source", body)
+		}
 	})
 
 	t.Run("mark reviewed", func(t *testing.T) {
