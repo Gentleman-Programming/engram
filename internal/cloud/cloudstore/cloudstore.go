@@ -231,7 +231,9 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		if string(normalizedIncoming) != string(normalizedExisting) {
 			return fmt.Errorf("%w: existing chunk %q has different payload", ErrChunkConflict, chunkID)
 		}
-		_ = cs.indexChunkSessions(ctx, project, payload)
+		if err := cs.indexChunkSessions(ctx, project, payload); err != nil {
+			return err
+		}
 		cs.invalidateDashboardReadModel()
 		return nil
 	}
