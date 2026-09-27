@@ -83,7 +83,8 @@ test("Pi native saves persist under separate host sessions and stop on failed re
     const executable = join(dir, process.platform === "win32" ? "real-server.exe" : "real-server");
     const build = spawnSync("go", ["build", "-o", executable, "./plugin/pi/test/support/real-server"], {
       cwd: join(ROOT, "../.."), timeout: 60000, encoding: "utf8",
-      env: { ...process.env, HOME: dir, ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_CLOUD_AUTOSYNC: "0" },
+      // Keep Go's toolchain and module caches outside the disposable server sandbox.
+      env: process.env,
     });
     assert.ifError(build.error);
     assert.equal(build.status, 0, build.stderr);

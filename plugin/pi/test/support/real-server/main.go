@@ -19,9 +19,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	srv := server.New(db, 0)
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	http := httptest.NewServer(srv.Handler())
 	defer http.Close()
 	fmt.Println(http.URL)
