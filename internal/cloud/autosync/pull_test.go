@@ -34,9 +34,6 @@ func (t *pagedPullTransport) PullMutations(_ context.Context, _ int64, _ int) (*
 	return p, nil
 }
 
-// emptyPullTransport always answers one empty terminal page.
-type emptyPullTransport struct{ pagedPullTransport }
-
 // deferredListFailureStore wraps a real store whose deferred-project
 // enumeration fails, to prove PullMutations surfaces the failure.
 type deferredListFailureStore struct {
