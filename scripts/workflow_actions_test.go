@@ -86,6 +86,7 @@ func TestWorkflowExternalActionsArePinned(t *testing.T) {
 	}
 }
 
+// TestPRValidationAndTransientArtifactWorkflowContracts verifies the repository's PR and transient-artifact workflow contracts.
 func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	prCheckPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
 	prCheckContent, err := os.ReadFile(prCheckPath)
