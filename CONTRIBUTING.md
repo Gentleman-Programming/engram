@@ -19,7 +19,7 @@ Use the correct template:
 - **Tracked Question** — for questions requiring maintainer investigation, a repository change, or a durable decision
 
 > ⚠️ Blank issues are disabled. You must use a template.
-> General questions and support belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions).
+> General questions and support currently use the [issue chooser](https://github.com/Gentleman-Programming/engram/issues/new/choose). Choose **Tracked Question** when the request needs maintainer investigation, a repository change, or a durable decision.
 
 Fill in all required fields. Your issue will automatically receive the `status:needs-review` label.
 
@@ -339,7 +339,7 @@ If you haven't received a response within 7 days on a PR or issue, a single ping
 
 - PRs opened without an approved issue
 - PRs that fail CI and aren't updated within 30 days
-- Issues that are vague, a duplicate, or belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions)
+- Issues that are vague, duplicates, or general support requests without enough detail for a tracked question
 - Issues with no response to a maintainer question after 14 days
 
 ---

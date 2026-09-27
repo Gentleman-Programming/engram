@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Questions & Discussions
-    url: https://github.com/Gentleman-Programming/engram/discussions
-    about: Use discussions for general questions; use the tracked-question form when maintainer work or a durable decision is required
+  - name: Questions & Support
+    url: https://github.com/Gentleman-Programming/engram/issues/new/choose
+    about: Use the issue chooser for support; select Tracked Question when maintainer work or a durable decision is required

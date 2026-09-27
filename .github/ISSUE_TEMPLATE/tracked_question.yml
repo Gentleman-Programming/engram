@@ -7,7 +7,7 @@ body:
       value: |
         # ❓ Tracked Question
 
-        Use this form only when the answer requires maintainer investigation, a repository change, or a durable project decision. Use [Discussions](https://github.com/Gentleman-Programming/engram/discussions) for general questions and support.
+        Use this form only when the answer requires maintainer investigation, a repository change, or a durable project decision. For other questions and support requests, return to the [issue chooser](https://github.com/Gentleman-Programming/engram/issues/new/choose) and select the appropriate template.
 
         This issue starts with `status:needs-review`. Wait for a maintainer to replace it with `status:approved` before opening a PR.
 
