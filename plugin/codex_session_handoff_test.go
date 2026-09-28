@@ -48,7 +48,11 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close prompt fixture store: %v", err)
+		}
+	})
 	id := "prompt-" + filepath.Base(root)
 	const project = "codex-prompt-probe"
 	if err := db.StartSession(id, project, root); err != nil {
@@ -115,10 +119,20 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("hook failed: %v: %s", err, output)
 	}
-	// Wait for the detached prompt POST; absence must also be checked after a bounded window.
-	select {
-	case <-requests:
-	case <-time.After(750 * time.Millisecond):
+	// The hook returns before its detached write. Wait for the active request;
+	// rejected requests get a bounded quiet window after registration completes.
+	if ended || refuseRegistration {
+		select {
+		case <-requests:
+			t.Fatal("prompt POST followed rejected registration")
+		case <-time.After(2 * time.Second):
+		}
+	} else {
+		select {
+		case <-requests:
+		case <-time.After(5 * time.Second):
+			t.Fatal("confirmed prompt POST did not arrive")
+		}
 	}
 	prompts, err := db.RecentPrompts(project, 10)
 	if err != nil {
