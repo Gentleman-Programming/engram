@@ -1737,9 +1737,21 @@ func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation
 	}
 
 	ordered := make([]store.SyncMutation, 0, len(mutations))
+	// A relocated session delete must not overtake deletes that preceded it
+	// in the chunk's original order: a child that still references the session
+	// (an observation hard delete, a relation delete) has to die first, or the
+	// sessions foreign key rejects the chunk while the child row exists
+	// (PR #1520 review). The drain is a monotonic cursor over the original
+	// order, so every preceding delete rides ahead of the session delete it
+	// protects, and the remaining deletes keep their phase.
+	otherDeleteCursor := 0
 	for upsertPos, upsert := range sessionUpserts {
 		for deletePos, deleted := range sessionDeletes {
 			if relocateAt[deletePos] == upsertPos {
+				for otherDeleteCursor < len(otherDeletes) && otherDeletes[otherDeleteCursor].index < deleted.index {
+					ordered = append(ordered, otherDeletes[otherDeleteCursor].mutation)
+					otherDeleteCursor++
+				}
 				ordered = append(ordered, deleted.mutation)
 			}
 		}
@@ -1751,8 +1763,8 @@ func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation
 	for _, mutation := range relationUpserts {
 		ordered = append(ordered, mutation.mutation)
 	}
-	for _, mutation := range otherDeletes {
-		ordered = append(ordered, mutation.mutation)
+	for ; otherDeleteCursor < len(otherDeletes); otherDeleteCursor++ {
+		ordered = append(ordered, otherDeletes[otherDeleteCursor].mutation)
 	}
 	for deletePos, deleted := range sessionDeletes {
 		if relocateAt[deletePos] == -1 {

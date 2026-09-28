@@ -44,6 +44,11 @@ func chunkObservationUpsert(key, sessionID string) store.SyncMutation {
 		Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":%q,"type":"note","title":"t","content":"c","project":"p","scope":"project","created_at":"2026-08-13 14:49:59","updated_at":"2026-08-13 14:49:59"}`, key, sessionID)}
 }
 
+func chunkObservationHardDelete(key string) store.SyncMutation {
+	return store.SyncMutation{Entity: store.SyncEntityObservation, Op: store.SyncOpDelete, EntityKey: key, Project: "p",
+		Payload: fmt.Sprintf(`{"sync_id":%q,"hard_delete":true,"deleted_at":"2026-08-13 14:50:00"}`, key)}
+}
+
 // applyOrderedChunk runs one chunk through the exact import path
 // importMutationChunk uses: orderMutationsForApply plus the store's pulled
 // apply, so the assertions cover the production ordering rather than a
@@ -95,6 +100,52 @@ func TestChunkAppliesCreateDeleteRecreateAttachChunk(t *testing.T) {
 	assertSessionConverged(t, s, "S1", "obs-1")
 }
 
+// TestChunkDeletesChildObservationBeforeSupersededSessionDelete pins the
+// review finding on PR #1520: with a pre-existing observation attached to a
+// session, a chunk carrying hard-delete O1, delete S1, recreate S1, attach O2
+// must apply in one pass. The superseded S1 delete rides before its own
+// recreate, and the O1 hard delete must run BEFORE that session delete, or
+// the sessions foreign key rejects the chunk while O1 still references it
+// (child-before-parent).
+func TestChunkDeletesChildObservationBeforeSupersededSessionDelete(t *testing.T) {
+	s := newChunkOrderingStore(t)
+	applyOrderedChunk(t, s, "chunk-seed", []store.SyncMutation{
+		chunkSessionUpsert("S1"),
+		chunkObservationUpsert("obs-1", "S1"),
+	})
+	assertSessionConverged(t, s, "S1", "obs-1")
+
+	applyOrderedChunk(t, s, "chunk-child-before-parent", []store.SyncMutation{
+		chunkObservationHardDelete("obs-1"),
+		chunkSessionDelete("S1"),
+		chunkSessionUpsert("S1"),
+		chunkObservationUpsert("obs-2", "S1"),
+	})
+
+	if _, err := s.GetSession("S1"); err != nil {
+		t.Fatalf("session S1 did not survive the chunk: %v", err)
+	}
+	observations, err := s.SessionObservations("S1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasObs1, hasObs2 := false, false
+	for _, observation := range observations {
+		if observation.SyncID == "obs-1" {
+			hasObs1 = true
+		}
+		if observation.SyncID == "obs-2" {
+			hasObs2 = true
+		}
+	}
+	if hasObs1 {
+		t.Fatalf("obs-1 survived its hard delete (%d observations)", len(observations))
+	}
+	if !hasObs2 {
+		t.Fatalf("obs-2 is not attached to the recreated S1 (%d observations)", len(observations))
+	}
+}
+
 // TestChunkDeleteThenRecreateConvergesToRecreatedState covers the sharper
 // convergence shape: a chunk whose first mutation deletes the session and a
 // later one recreates it. The final phase order used to end with the delete,
@@ -127,6 +178,14 @@ func TestOrderMutationsSupersededSessionDeleteRidesItsPosition(t *testing.T) {
 			chunkSessionUpsert("S1"), chunkSessionDelete("S1"), chunkSessionUpsert("S1"), chunkObservationUpsert("obs-1", "S1"),
 		})
 		if want := "upsert S1 | delete S1 | upsert S1 | upsert obs-1"; orderedMutationSummary(ordered) != want {
+			t.Fatalf("ordered = %q, want %q", orderedMutationSummary(ordered), want)
+		}
+	})
+	t.Run("child hard delete rides before the relocated session delete", func(t *testing.T) {
+		ordered := orderMutationsForApply([]store.SyncMutation{
+			chunkObservationHardDelete("obs-1"), chunkSessionDelete("S1"), chunkSessionUpsert("S1"), chunkObservationUpsert("obs-2", "S1"),
+		})
+		if want := "delete obs-1 | delete S1 | upsert S1 | upsert obs-2"; orderedMutationSummary(ordered) != want {
 			t.Fatalf("ordered = %q, want %q", orderedMutationSummary(ordered), want)
 		}
 	})
