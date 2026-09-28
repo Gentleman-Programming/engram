@@ -197,6 +197,24 @@ func TestChunkFreshImportAppliesInterleavedObservationViaDeferral(t *testing.T) 
 	if _, err := s.GetSession("S1"); err != nil {
 		t.Fatalf("session S1 was not recreated on the fresh import: %v", err)
 	}
+
+	// The deferred obs-1 upsert must not outlive its own hard delete: the
+	// delete ran after the upsert parked, so a replay that resurrected obs-1
+	// would converge against the source's final state (obs-1 deleted).
+	replay, err := s.ReplayDeferredForScope("cloud:p", "p")
+	if err != nil {
+		t.Fatalf("replay deferred: %v", err)
+	}
+	if replay.Retried != 0 {
+		t.Fatalf("replay retried %d deferred rows, want 0 (the hard delete cancels the parked upsert)", replay.Retried)
+	}
+	observations, err := s.SessionObservations("S1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 0 {
+		t.Fatalf("replay resurrected %d observations, want 0", len(observations))
+	}
 }
 
 // TestChunkDeleteThenRecreateConvergesToRecreatedState covers the sharper

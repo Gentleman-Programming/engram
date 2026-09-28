@@ -10284,6 +10284,18 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 			if err := s.applyObservationDeleteTx(tx, payload); err != nil {
 				return err
 			}
+			// A delete supersedes any upsert of the same observation that an
+			// earlier mutation in this chunk parked in sync_apply_deferred while
+			// its session was missing (the interleaved fresh-import shape from
+			// PR #1520): without this cancellation, ReplayDeferredForScope
+			// resurrects the observation after the source's history ends with
+			// it deleted. Matching by entity, entity_key, target, and op keeps
+			// the cancel precise: a delete that runs before its own upsert finds
+			// nothing parked yet and stays a no-op.
+			if _, err := s.execHook(tx, `DELETE FROM sync_apply_deferred WHERE entity = ? AND entity_key = ? AND target_key = ? AND op = ? AND apply_status = 'deferred'`,
+				SyncEntityObservation, payload.SyncID, targetKey, SyncOpUpsert); err != nil {
+				return err
+			}
 			if !cloud {
 				if !payload.HardDelete {
 					return nil
