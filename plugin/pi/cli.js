@@ -11,6 +11,7 @@ const LEGACY_PACKAGE_NAMES = new Set([
   "npm:gentle-engram@0.1.12",
   "npm:gentle-engram@0.1.14",
   "npm:gentle-engram@0.1.15",
+  "npm:gentle-engram@0.1.16",
 ]);
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const HELP = `pi-engram
@@ -18,13 +19,10 @@ const HELP = `pi-engram
 Usage:
   pi-engram init [--force]
 
-Creates Pi's Engram MCP config in the Pi agent dir and ensures pi-mcp-adapter
-is declared in settings.json. The Pi extension itself is loaded by installing
-the package with: pi install ${PACKAGE_NAME}
+Ensures pi-mcp-adapter and gentle-engram are declared in settings.json.
+Does not create or modify Pi MCP config. Install the extension with:
+pi install ${PACKAGE_NAME}
 `;
-
-const MCP_LAUNCHER =
-  "const { spawn } = require('node:child_process'); const bin = process.env.ENGRAM_BIN?.trim() ? process.env.ENGRAM_BIN : 'engram'; const child = spawn(bin, ['mcp', '--tools=agent'], { stdio: 'inherit' }); child.on('error', () => process.exit(127)); child.on('exit', (code, signal) => { if (typeof code === 'number') process.exit(code); process.kill(process.pid, signal || 'SIGTERM'); });";
 
 function getAgentDir() {
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -88,47 +86,26 @@ function ensureEngramPackage(settingsPath) {
   return changed;
 }
 
-function createEngramServerConfig() {
-  return {
-    command: "node",
-    args: ["-e", MCP_LAUNCHER],
-    lifecycle: "lazy",
-    directTools: false,
-  };
-}
-
-function ensureMcpConfig(mcpPath, force) {
+function warnExistingEngramMcp(mcpPath) {
   const config = readJsonObject(mcpPath);
-  const existingServers = config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers)
-    ? config.mcpServers
-    : {};
-
-  if (existingServers.engram && !force) {
-    return false;
+  if (config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers) && Object.hasOwn(config.mcpServers, "engram")) {
+    console.warn(`Warning: ${mcpPath} contains mcpServers.engram. Pi native-only agent writes are not guaranteed while this MCP path remains. To use native-only writes, manually remove only mcpServers.engram from ${mcpPath} (preserve other servers), then restart/reload Pi.`);
   }
-
-  config.mcpServers = {
-    ...existingServers,
-    engram: createEngramServerConfig(),
-  };
-  writeJsonObject(mcpPath, config);
-  return true;
 }
 
 function init() {
-  const force = process.argv.includes("--force");
   const agentDir = getAgentDir();
   const settingsPath = join(agentDir, "settings.json");
   const mcpPath = join(agentDir, "mcp.json");
 
   const adapterChanged = ensurePackage(settingsPath, MCP_ADAPTER_PACKAGE);
   const packageChanged = ensureEngramPackage(settingsPath);
-  const mcpChanged = ensureMcpConfig(mcpPath, force);
+  warnExistingEngramMcp(mcpPath);
 
   console.log(`Pi agent dir: ${agentDir}`);
   console.log(`${adapterChanged ? "Added" : "Kept"} ${MCP_ADAPTER_PACKAGE} in settings.json`);
   console.log(`${packageChanged ? "Added" : "Kept"} ${PACKAGE_NAME} in settings.json`);
-  console.log(`${mcpChanged ? "Wrote" : "Kept existing"} Engram MCP server in mcp.json`);
+  console.log("Pi-native mem_* tools own agent writes; no Engram MCP registration is created.");
   console.log("Set ENGRAM_URL for an existing engram serve instance, or ENGRAM_BIN for a custom engram binary path.");
 }
 

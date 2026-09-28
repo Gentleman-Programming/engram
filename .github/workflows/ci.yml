@@ -120,6 +120,32 @@ jobs:
           go-version: "1.25.10"
       - run: go test ./tools/ -run '^TestCloudSync(Wrappers|PowerShellMissingEngram)$' -v
 
+  obsidian-build:
+    name: Obsidian Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Install Obsidian dependencies
+        working-directory: plugin/obsidian
+        run: npm ci
+
+      - name: Typecheck Obsidian plugin
+        working-directory: plugin/obsidian
+        run: npm run typecheck
+
+      - name: Build Obsidian plugin
+        working-directory: plugin/obsidian
+        run: npm run build
+
   plugin-tests:
     name: Plugin Tests
     runs-on: ubuntu-latest
