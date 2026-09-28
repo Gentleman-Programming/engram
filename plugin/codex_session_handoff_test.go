@@ -168,9 +168,20 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						t.Fatal("hook attempted a forbidden executable or transport destination")
 					}
 					output := stdout.String()
-					for _, want := range []string{"ACTIVE PROTOCOL", "Never invent", "mem_session_start"} {
+					for _, want := range []string{"Never invent", "mem_session_start"} {
 						if !strings.Contains(output, want) {
 							t.Errorf("missing instruction %q", want)
+						}
+					}
+					if tc.registered {
+						if !strings.Contains(output, "ACTIVE PROTOCOL") {
+							t.Error("confirmed registration missing active protocol")
+						}
+					} else if event != "compact" {
+						for _, forbidden := range []string{"ACTIVE PROTOCOL", "Call `mem_save`", "Call `mem_session_summary`", "call mem_search"} {
+							if strings.Contains(output, forbidden) {
+								t.Errorf("unconfirmed startup instructs agent memory use: %q", forbidden)
+							}
 						}
 					}
 					if !tc.noProject && !strings.Contains(output, "retained-memory-context") {
@@ -197,14 +208,29 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								t.Errorf("missing identity reuse instruction %q", want)
 							}
 						}
-					} else if !strings.Contains(output, "omit session_id") {
-						t.Error("missing unavailable identity instruction")
+					} else {
+						for _, want := range []string{"Agent-attributed memory writes must stop", "host hook re-registers the same runtime ID", "independent CLI/manual save", "not a substitute for session attribution"} {
+							if !strings.Contains(output, want) {
+								t.Errorf("missing failed registration guidance %q", want)
+							}
+						}
+						if strings.Contains(output, "omit session_id") {
+							t.Error("failure advises omitted-ID agent write")
+						}
 					}
 					if event == "compact" {
 						first := strings.Index(output, "1. FIRST: Call mem_session_summary")
 						then := strings.Index(output, "2. THEN: Call mem_context")
-						if first < 0 || then <= first || (found && strings.Index(output, marker) > first) {
-							t.Error("compaction must receive identity before summary, then recover context")
+						if tc.registered {
+							if first < 0 || then <= first || strings.Index(output, marker) > first {
+								t.Error("confirmed compaction must receive identity before summary, then recover context")
+							}
+						} else {
+							for _, forbidden := range []string{"ACTIVE PROTOCOL", "1. FIRST: Call mem_session_summary", "2. THEN: Call mem_context", "call mem_search", "Call `mem_save`", "Call `mem_session_summary`"} {
+								if strings.Contains(output, forbidden) {
+									t.Errorf("unconfirmed compaction instructs tool use: %q", forbidden)
+								}
+							}
 						}
 					}
 					id, validID := tc.id.(string)

@@ -629,6 +629,34 @@ func TestCodexPreToolUseCommandExitsWhenResponseWriteFails(t *testing.T) {
 	}
 }
 
+func TestCodexPreToolUseNamespacedSaveUsesHostID(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, decision string
+	}{
+		{"model ID replaced", `{"session_id":"host","tool_name":"mcp__plugin_engram_engram__mem_save","tool_input":{"session_id":"model-picked","title":"retained"}}`, "allow"},
+		{"missing host ID denied", `{"tool_name":"mcp__plugin_engram_engram__mem_save","tool_input":{"session_id":"model-picked"}}`, "deny"},
+		{"malformed input denied", `{"session_id":"host","tool_name":"mcp__plugin_engram_engram__mem_save","tool_input":null}`, "deny"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var response struct {
+				HookSpecificOutput struct {
+					PermissionDecision string         `json:"permissionDecision"`
+					UpdatedInput       map[string]any `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(transformCodexPreToolUse([]byte(tc.input)), &response); err != nil {
+				t.Fatal(err)
+			}
+			if got := response.HookSpecificOutput.PermissionDecision; got != tc.decision {
+				t.Fatalf("decision = %q, want %q", got, tc.decision)
+			}
+			if tc.decision == "allow" && (response.HookSpecificOutput.UpdatedInput["session_id"] != "host" || response.HookSpecificOutput.UpdatedInput["title"] != "retained") {
+				t.Fatalf("unexpected bound input: %#v", response.HookSpecificOutput.UpdatedInput)
+			}
+		})
+	}
+}
+
 func TestCodexPreToolUseBindsWrites(t *testing.T) {
 	for _, tool := range claudeEngramWriteAndSessionTools {
 		t.Run(tool, func(t *testing.T) {
