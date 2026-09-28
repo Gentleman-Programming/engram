@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -114,6 +115,148 @@ func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 	}
 	if _, err := db.GetSession("foreign-model-session"); err == nil {
 		t.Fatal("foreign model session was created")
+	}
+}
+
+func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("invokes the Codex SessionStart bash hook")
+	}
+	for _, binary := range []string{"bash", "jq", "curl"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			t.Skipf("requires %s: %v", binary, err)
+		}
+	}
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	const project = "codex-lifecycle"
+	var reject atomic.Bool
+	var rejected atomic.Int32
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = io.WriteString(w, `{"project":"codex-lifecycle","project_source":"config"}`)
+		case "/context":
+			_, _ = io.WriteString(w, `{"context":""}`)
+		case "/sessions":
+			if reject.Load() {
+				rejected.Add(1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			production.ServeHTTP(w, r)
+		default:
+			t.Errorf("unexpected HTTP request %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	t.Setenv("HOME", root)
+	t.Setenv("ENGRAM_DATA_DIR", filepath.Join(root, "data"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("ENGRAM_PROJECT", "")
+	script, err := filepath.Abs(filepath.Join("..", "..", "plugin", "codex", "scripts", "session-start.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func(host string) string {
+		t.Helper()
+		input, _ := json.Marshal(map[string]string{"session_id": host, "cwd": root})
+		cmd := exec.Command("bash", script)
+		cmd.Dir = root // No manifest, import lock, or ambient repository state.
+		cmd.Stdin = bytes.NewReader(input)
+		cmd.Env = append(os.Environ(), "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "data"), "CODEX_HOME="+filepath.Join(root, "codex"), "ENGRAM_URL="+endpoint.URL, "ENGRAM_PROJECT=", "ENGRAM_SOCKET=")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("SessionStart %s: %v: %s", host, err, output)
+		}
+		return string(output)
+	}
+	hosts := []string{"codex-lifecycle-one", "codex-lifecycle-two"}
+	for _, host := range hosts {
+		if output := start(host); !strings.Contains(output, `"session_id":"`+host+`"`) || !strings.Contains(output, "Registered runtime session") {
+			t.Fatalf("unconfirmed SessionStart for %s: %s", host, output)
+		}
+		if _, err := db.GetSession(host); err != nil {
+			t.Fatalf("SessionStart did not persist host %s before PreToolUse: %v", host, err)
+		}
+	}
+	oldStdin, oldOutput := os.Stdin, claudeHookOutput
+	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
+	mcpServer := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: project}, nil)
+	preTool := func(host, title string) (string, map[string]any) {
+		t.Helper()
+		request, _ := json.Marshal(map[string]any{"session_id": host, "cwd": root, "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": title, "content": title, "project": project, "session_id": "untrusted-model-id"}})
+		os.Stdin = claudeHookStdin(t, string(request), false)
+		var output []byte
+		claudeHookOutput = func(data []byte) error { output = append([]byte(nil), data...); return nil }
+		cmdHook([]string{"codex-pre-tool-use"})
+		var hook struct {
+			HookSpecificOutput struct {
+				PermissionDecision string `json:"permissionDecision"`
+				UpdatedInput map[string]any `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(output, &hook); err != nil {
+			t.Fatalf("PreToolUse: %v: %s", err, output)
+		}
+		return hook.HookSpecificOutput.PermissionDecision, hook.HookSpecificOutput.UpdatedInput
+	}
+	want := map[string][]string{hosts[0]: {"one first", "one second"}, hosts[1]: {"two first", "two second"}}
+	for _, step := range []struct{ host, title string }{{hosts[0], "one first"}, {hosts[1], "two first"}, {hosts[0], "one second"}, {hosts[1], "two second"}} {
+		decision, bound := preTool(step.host, step.title)
+		if decision != "allow" || bound["session_id"] != step.host || bound["project"] != project {
+			t.Fatalf("bound write %s: decision=%s input=%v", step.title, decision, bound)
+		}
+		call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": bound}})
+		result := mcpServer.HandleMessage(context.Background(), call)
+		encoded, err := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), `"isError":true`) || !strings.Contains(string(encoded), step.title) {
+			t.Fatalf("MCP write %s: %s, err=%v", step.title, encoded, err)
+		}
+	}
+	reject.Store(true) // Simulated HTTP 503, not a real ended-session 409.
+	if output := start("codex-unconfirmed"); !strings.Contains(output, "No authoritative registered runtime identity") || strings.Contains(output, "Registered runtime session") {
+		t.Fatalf("unconfirmed SessionStart output: %s", output)
+	}
+	decision, bound := preTool("codex-unconfirmed", "must not persist")
+	if decision != "deny" || bound != nil || rejected.Load() != 2 {
+		t.Fatalf("503 refusal: decision=%s input=%v registration attempts=%d", decision, bound, rejected.Load())
+	}
+	// A denied PreToolUse has no MCP dispatch.
+	all, err := db.AllObservations(project, "", 100)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("persisted observations=%d, err=%v", len(all), err)
+	}
+	for host, titles := range want {
+		observations, err := db.SessionObservations(host, 100)
+		if err != nil || len(observations) != len(titles) {
+			t.Fatalf("host %s observations=%v, err=%v", host, observations, err)
+		}
+		counts := map[string]int{}
+		for _, observation := range observations {
+			counts[observation.Title]++
+		}
+		for _, title := range titles {
+			if counts[title] != 1 {
+				t.Fatalf("host %s title %q count=%d, want exactly one", host, title, counts[title])
+			}
+		}
+	}
+	for _, id := range []string{"untrusted-model-id", "codex-unconfirmed"} {
+		if _, err := db.GetSession(id); err == nil {
+			t.Fatalf("untrusted/unconfirmed session %s was created", id)
+		}
 	}
 }
 
