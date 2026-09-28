@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
@@ -166,6 +168,242 @@ func TestClaudeEndedRegistrationCannotPersistBoundWrite(t *testing.T) {
 	observations, err = db.AllObservations("project-a", "", 100)
 	if err != nil || len(observations) != 1 {
 		t.Fatalf("direct/manual MCP persistence: count=%d, err=%v, response=%s", len(observations), err, encoded)
+	}
+}
+
+func TestCodexEndedSessionStart409DeniesWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("invokes Codex SessionStart bash hook")
+	}
+	for _, binary := range []string{"bash", "jq", "curl"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			t.Skipf("requires %s: %v", binary, err)
+		}
+	}
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.CreateSession("host", "project-a", root); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession("host", "finished"); err != nil {
+		t.Fatal(err)
+	}
+	production := server.New(db, 0).Handler()
+	registrationStatus := 0
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
+			return
+		}
+		if r.URL.Path == "/context" {
+			_, _ = w.Write([]byte(`{"context":""}`))
+			return
+		}
+		if r.URL.Path != "/sessions" || r.Method != http.MethodPost {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL)
+			w.WriteHeader(404)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		capture := httptest.NewRecorder()
+		production.ServeHTTP(capture, r)
+		registrationStatus = capture.Code
+		w.WriteHeader(capture.Code)
+		_, _ = w.Write(capture.Body.Bytes())
+	}))
+	defer endpoint.Close()
+	input, _ := json.Marshal(map[string]string{"session_id": "host", "cwd": root})
+	command := exec.Command("bash", filepath.Join("..", "..", "plugin", "codex", "scripts", "session-start.sh"))
+	command.Stdin = strings.NewReader(string(input))
+	command.Env = append(os.Environ(), "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "data"), "ENGRAM_URL="+endpoint.URL, "ENGRAM_SOCKET=", "ENGRAM_PROJECT=", "ENGRAM_PORT=")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Codex SessionStart: %v: %s", err, output)
+	}
+	if registrationStatus != 409 || strings.Contains(string(output), `"session_id":"host"`) || strings.Contains(string(output), "Registered runtime session") {
+		t.Fatalf("409 handoff: status=%d output=%s", registrationStatus, output)
+	}
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	response := guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"` + filepath.ToSlash(root) + `","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","project":"project-a","title":"blocked"}}`))
+	var result struct {
+		HookSpecificOutput struct {
+			PermissionDecision string          `json:"permissionDecision"`
+			UpdatedInput       json.RawMessage `json:"updatedInput"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil || result.HookSpecificOutput.PermissionDecision != "deny" || result.HookSpecificOutput.UpdatedInput != nil {
+		t.Fatalf("response=%s err=%v", response, err)
+	}
+	observations, err := db.AllObservations("project-a", "", 100)
+	if err != nil || len(observations) != 0 {
+		t.Fatalf("observations=%d err=%v", len(observations), err)
+	}
+	ended, err := db.GetSession("host")
+	if err != nil || ended.EndedAt == nil {
+		t.Fatalf("ended=%+v err=%v", ended, err)
+	}
+}
+
+func TestCodexCallConfirmsSharedHostBeforeBinding(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.CreateSessionWithOwnershipMode("host", "project-a", root, store.SessionOwnershipShared); err != nil {
+		t.Fatal(err)
+	}
+	production := server.New(db, 0).Handler()
+	registrations := 0
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			if r.URL.Query().Get("cwd") != filepath.ToSlash(root) {
+				t.Errorf("cwd = %q", r.URL.Query().Get("cwd"))
+			}
+			_, _ = w.Write([]byte(`{"project":"project-b","project_source":"config"}`))
+			return
+		}
+		if r.URL.Path != "/sessions" || r.Method != http.MethodPost {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+			w.WriteHeader(404)
+			return
+		}
+		var registration struct {
+			ID        string `json:"id"`
+			Project   string `json:"project"`
+			Ownership string `json:"ownership_mode"`
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if err := json.Unmarshal(body, &registration); err != nil {
+			t.Error(err)
+		}
+		if registration.ID != "host" || registration.Project != "project-b" || registration.Ownership != "" {
+			t.Errorf("registration = %+v", registration)
+		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		capture := httptest.NewRecorder()
+		production.ServeHTTP(capture, r)
+		var confirmation struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(capture.Body.Bytes(), &confirmation); err != nil {
+			t.Error(err)
+		}
+		if capture.Code != http.StatusCreated || confirmation.ID != "host" || confirmation.Status != "created" {
+			t.Errorf("registration response: %d %s", capture.Code, capture.Body.String())
+		}
+		registrations++
+		w.WriteHeader(capture.Code)
+		_, _ = w.Write(capture.Body.Bytes())
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	input := []byte(`{"session_id":"host","cwd":"` + filepath.ToSlash(root) + `","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","project":"project-b","title":"retained","content":"cross-project observation"}}`)
+	var result struct {
+		HookSpecificOutput struct {
+			PermissionDecision string         `json:"permissionDecision"`
+			UpdatedInput       map[string]any `json:"updatedInput"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(guardCodexPreToolUse(input), &result); err != nil {
+		t.Fatal(err)
+	}
+	if registrations != 1 || result.HookSpecificOutput.PermissionDecision != "allow" || result.HookSpecificOutput.UpdatedInput["session_id"] != "host" || result.HookSpecificOutput.UpdatedInput["project"] != "project-b" {
+		t.Fatalf("registrations=%d result=%+v", registrations, result)
+	}
+	call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": result.HookSpecificOutput.UpdatedInput}})
+	mcpResult := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: "project-a"}, nil).HandleMessage(context.Background(), call)
+	encoded, err := json.Marshal(mcpResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"isError":true`) {
+		t.Fatalf("bound MCP write failed: %s", encoded)
+	}
+	observations, err := db.AllObservations("project-b", "", 100)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("project B observations=%d err=%v result=%s", len(observations), err, encoded)
+	}
+	bound, err := db.SessionObservations("host", 100)
+	if err != nil || len(bound) != 1 || bound[0].ID != observations[0].ID {
+		t.Fatalf("host observations=%v err=%v", bound, err)
+	}
+	owner, err := db.GetSession("host")
+	if err != nil || owner.Project != "project-a" || owner.OwnershipMode != store.SessionOwnershipShared || owner.EndedAt != nil {
+		t.Fatalf("shared owner=%+v err=%v", owner, err)
+	}
+	if _, err := db.GetSession("model"); err == nil {
+		t.Fatal("foreign model session created")
+	}
+}
+
+func TestCodexInvalidExplicitPortDenies(t *testing.T) {
+	for _, port := range []string{"invalid", "0", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			t.Setenv("ENGRAM_URL", "")
+			t.Setenv("ENGRAM_SOCKET", "")
+			t.Setenv("ENGRAM_PORT", port)
+			response := guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`))
+			var result struct {
+				HookSpecificOutput struct {
+					PermissionDecision string          `json:"permissionDecision"`
+					UpdatedInput       json.RawMessage `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(response, &result); err != nil || result.HookSpecificOutput.PermissionDecision != "deny" || result.HookSpecificOutput.UpdatedInput != nil {
+				t.Fatalf("response=%s err=%v", response, err)
+			}
+		})
+	}
+}
+
+func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"ended", 409, `{"code":"session_already_ended"}`},
+		{"unavailable", 503, `{}`},
+		{"wrong id", 201, `{"id":"other","status":"created"}`},
+		{"wrong status", 201, `{"id":"host","status":"failed"}`},
+		{"malformed", 201, `{`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/project/current" {
+					_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
+					return
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer endpoint.Close()
+			t.Setenv("ENGRAM_URL", endpoint.URL)
+			response := guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`))
+			var result struct {
+				HookSpecificOutput struct {
+					PermissionDecision string          `json:"permissionDecision"`
+					UpdatedInput       json.RawMessage `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(response, &result); err != nil || result.HookSpecificOutput.PermissionDecision != "deny" || result.HookSpecificOutput.UpdatedInput != nil {
+				t.Fatalf("response=%s err=%v", response, err)
+			}
+		})
 	}
 }
 
@@ -420,9 +658,19 @@ func TestCodexPreToolUseReadsDoNotRequireSessionOrInput(t *testing.T) {
 }
 
 func TestCodexPreToolUseCommandWritesAllowAndBoundInput(t *testing.T) {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"host","status":"created"}`))
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
 	oldStdin, oldOutput := os.Stdin, claudeHookOutput
 	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
-	os.Stdin = claudeHookStdin(t, `{"session_id":"host","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","title":"retained"}}`, false)
+	os.Stdin = claudeHookStdin(t, `{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","title":"retained"}}`, false)
 	var output []byte
 	claudeHookOutput = func(response []byte) error { output = append([]byte(nil), response...); return nil }
 	cmdHook([]string{"codex-pre-tool-use"})

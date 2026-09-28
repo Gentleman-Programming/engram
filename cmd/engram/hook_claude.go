@@ -61,7 +61,7 @@ func cmdHook(args []string) {
 	if args[0] == "codex-pre-tool-use" {
 		response = claudePreToolUseDeny("cannot read authoritative Codex hook input")
 		if err == nil {
-			response = transformCodexPreToolUse(input)
+			response = guardCodexPreToolUse(input)
 		}
 	} else if err == nil {
 		response = guardClaudePreToolUse(input)
@@ -95,6 +95,10 @@ func guardClaudePreToolUse(input []byte) []byte {
 }
 
 func confirmClaudeSession(id, cwd string) bool {
+	return confirmHookSession(id, cwd, true)
+}
+
+func confirmHookSession(id, cwd string, projectOwned bool) bool {
 	base := strings.TrimSpace(os.Getenv("ENGRAM_URL"))
 	client := &http.Client{}
 	if base == "" {
@@ -125,7 +129,11 @@ func confirmClaudeSession(id, cwd string) bool {
 	if !ok {
 		return false
 	}
-	body, _ := json.Marshal(map[string]string{"id": id, "project": project, "directory": cwd, "ownership_mode": "project_owned"})
+	registration := map[string]string{"id": id, "project": project, "directory": cwd}
+	if projectOwned {
+		registration["ownership_mode"] = "project_owned"
+	}
+	body, _ := json.Marshal(registration)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/sessions", strings.NewReader(string(body)))
 	if err != nil {
 		return false
@@ -189,6 +197,27 @@ func transformClaudePreToolUse(input []byte) []byte {
 	}
 
 	return claudePreToolUseResponse(updatedInput)
+}
+
+// guardCodexPreToolUse confirms only mutating Engram calls against the host session.
+func guardCodexPreToolUse(input []byte) []byte {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(input, &payload) != nil || payload == nil {
+		return claudePreToolUseDeny("malformed authoritative Codex hook input")
+	}
+	tool, ok := claudeHookRequiredString(payload, "tool_name")
+	if !ok {
+		return claudePreToolUseDeny("authoritative Codex tool_name is required")
+	}
+	if !isClaudeEngramWriteOrSessionTool(tool) {
+		return transformCodexPreToolUse(input)
+	}
+	id, idOK := claudeHookRequiredString(payload, "session_id")
+	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
+	if !idOK || !cwdOK || !confirmHookSession(id, cwd, false) {
+		return claudePreToolUseDeny("Codex host session registration could not be confirmed")
+	}
+	return transformCodexPreToolUse(input)
 }
 
 // Codex requires an explicit allow alongside updatedInput for MCP argument rewrites.
