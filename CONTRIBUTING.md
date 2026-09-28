@@ -57,7 +57,7 @@ All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
-Non-required PR checks, including the Claude plugin version guard, lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. The Claude plugin version guard is not an active `main` required context until a maintainer explicitly adds it to the ruleset; its workflow also runs on merge groups.
+Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the merge-queue, label-policy, and transient-artifacts script suites), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
 ### Merge Queue Activation (administrators)
 
