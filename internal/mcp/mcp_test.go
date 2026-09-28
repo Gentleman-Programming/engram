@@ -892,7 +892,9 @@ func TestForeignSoleRuntimeCandidateFallsBackToManualMCPBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.RecordPrompt(foreignID, foreignProject, "foreign session prompt")
+	result, err := handleSave(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title": "Direct manual MCP save", "content": "Foreign runtime candidate must not bind this save", "type": "manual", "project": bindingProject,
 	}}})
 	if err != nil {
