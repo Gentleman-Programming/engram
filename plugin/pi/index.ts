@@ -1659,7 +1659,24 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       // A persisted reservation from an earlier module graph is not local proof of
       // ownership. Confirm it with the server before allowing this graph to end it.
       if (persistedPending && !registeredSessionProjects.has(endedSessionID)) {
-        await ensureSession(endedSessionID, owner, fetch, true);
+        try {
+          await ensureSession(endedSessionID, owner, fetch, true);
+        } catch (error) {
+          const data = error instanceof EngramHttpError ? error.data as { code?: string; session_id?: string } | null : null;
+          if (!(error instanceof EngramHttpError && error.status === 409
+            && data?.code === "session_already_ended" && data.session_id === endedSessionID
+            && owner === project && pendingEffectiveSession(ctx, sessionId, endedSessionID))) throw error;
+          appendEntry!(EFFECTIVE_SESSION_ENTRY, {
+            runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
+          });
+          return { status: "already_ended", session_id: endedSessionID };
+        }
+      }
+      if (endedSessionID === sessionId && !registeredSessionProjects.has(endedSessionID)) {
+        await waitForSessionRegistration(endedSessionID, true);
+        if (!registeredSessionProjects.has(endedSessionID)) {
+          throw new Error(`Cannot end Pi session ${endedSessionID} without confirmed local registration`);
+        }
       }
       const end = async () => {
         const result = await fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {

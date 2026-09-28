@@ -2387,8 +2387,8 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
       uncertainRegistration.resolve();
       const [writeResult, endResult] = await Promise.all([write, explicitEnd]);
       assert.equal(writeResult.isError, true, "the registration outcome is uncertain");
-      assert.equal(endResult.isError, undefined, "explicit end must still attempt delivery");
-      assert.deepEqual(uncertainEndCalls, [{ method: "POST", body: { summary: "" } }]);
+      assert.equal(endResult.isError, true, "uncertain registration cannot authorize explicit end");
+      assert.deepEqual(uncertainEndCalls, []);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -2442,6 +2442,50 @@ test("Pi-native explicit end awaits a pending effective registration conflict be
     });
   } finally {
     gate.resolve();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("explicit end reconciles only an owned pending effective ID with matching already-ended evidence", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const runtimeID = "pending-explicit";
+  const effectiveID = `${runtimeID}:resume:reserved`;
+  const calls = [];
+  let responseID = effectiveID;
+  let owner = "local-project";
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
+    if (path === "/sessions") return new Response(JSON.stringify({ code: "session_already_ended", session_id: responseID }), { status: 409 });
+    if (path.endsWith("/end")) return new Response(JSON.stringify({ status: "ended" }));
+    throw new Error(`unexpected request: ${path}`);
+  };
+  try {
+    for (const [response, markerOwner, success] of [
+      [effectiveID, "local-project", true], ["other-id", "local-project", false],
+      [undefined, "local-project", false], [effectiveID, "foreign-project", false],
+    ]) {
+      responseID = response;
+      owner = markerOwner;
+      const entries = [{ type: "custom", customType: "engram-effective-session", data: {
+        runtimeID, effectiveID, pending: true, project: owner,
+      } }];
+      const ctx = runtimeContext(runtimeID);
+      ctx.sessionManager.getBranch = () => entries;
+      await withPluginSandbox("engram-pi-pending-explicit-", async ({ sandbox }) => {
+        const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+        const result = await registeredTools.get("mem_session_end").execute("end", { id: runtimeID }, undefined, undefined, ctx);
+        assert.equal(result.isError, success ? undefined : true);
+        assert.equal(entries.at(-1).data.pending, !success);
+        assert.equal(calls.filter((path) => path.endsWith("/end") || path.includes(":resume:")).length, 0);
+      });
+    }
+  } finally {
     globalThis.fetch = originalFetch;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL;
     else process.env.ENGRAM_URL = originalUrl;
