@@ -57,7 +57,7 @@ All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
-Non-required PR checks, including lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. They are not active `main` required contexts and do not run as merge-group CI jobs.
+Non-required checks include lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the merge-queue, label-policy, and transient-artifacts script suites), and **Obsidian Build** (tests, typecheck, and build after dependency installation). The policy-helper and Obsidian checks run for pull requests and merge groups; lint and Windows checks do not run as merge-group CI jobs. None of these are active `main` required contexts.
 
 ### Merge Queue Activation (administrators)
 
