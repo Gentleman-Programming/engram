@@ -407,6 +407,57 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 	}
 }
 
+func TestCodexGuardRejectsMissingHostIdentityWithoutNetwork(t *testing.T) {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unconfirmed call contacted server: %s %s", r.Method, r.URL)
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"missing cwd", `{"session_id":"host","tool_name":"mcp__engram__mem_save","tool_input":{}}`},
+		{"blank cwd", `{"session_id":"host","cwd":"  ","tool_name":"mcp__engram__mem_save","tool_input":{}}`},
+		{"missing session", `{"cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`},
+		{"blank session", `{"session_id":"  ","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var result struct {
+				HookSpecificOutput struct {
+					PermissionDecision string          `json:"permissionDecision"`
+					UpdatedInput       json.RawMessage `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			response := guardCodexPreToolUse([]byte(tc.input))
+			if err := json.Unmarshal(response, &result); err != nil || result.HookSpecificOutput.PermissionDecision != "deny" || result.HookSpecificOutput.UpdatedInput != nil {
+				t.Fatalf("want deny without updated input: %s, err=%v", response, err)
+			}
+		})
+	}
+}
+
+func TestCodexGuardReadOnlyAndNonEngramSkipNetwork(t *testing.T) {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("read-only call contacted server: %s %s", r.Method, r.URL)
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+
+	for _, tool := range []string{"mcp__engram__mem_search", "mcp__plugin_engram_engram__mem_search", "Bash"} {
+		t.Run(tool, func(t *testing.T) {
+			input, err := json.Marshal(map[string]string{"tool_name": tool})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(guardCodexPreToolUse(input)); got != "{}" {
+				t.Fatalf("want untouched read-only input, got %s", got)
+			}
+		})
+	}
+}
+
 func TestClaudeInvalidExplicitPortDeniesWithoutDefaultServer(t *testing.T) {
 	for _, port := range []string{"invalid", "0", "65536"} {
 		t.Run(port, func(t *testing.T) {
