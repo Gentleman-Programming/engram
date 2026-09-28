@@ -1236,20 +1236,23 @@ function hasSessionRegistrationInFlight(sessionId: string): boolean {
   return [...sessionRegistrationsInFlight.keys()].some((key) => key.endsWith(`:${sessionId}`));
 }
 
-async function waitForSessionRegistration(sessionId: string): Promise<void> {
+async function waitForSessionRegistration(sessionId: string, propagateFailure = false): Promise<void> {
   const registrations = [...sessionRegistrationsInFlight.entries()]
     .filter(([key]) => key.endsWith(`:${sessionId}`))
-    .map(([, registration]) => registration.catch(() => undefined));
+    .map(([, registration]) => propagateFailure ? registration : registration.catch(() => undefined));
   await Promise.all(registrations);
 }
 
-async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>, persistedPending = false): Promise<unknown> {
+async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>, persistedPending = false, requireConfirmedRegistration = false): Promise<unknown> {
   const existing = sessionEndingsInFlight.get(sessionId);
   if (existing) return existing;
 
   const registrationWasInFlight = hasSessionRegistrationInFlight(sessionId);
   const ending = (async () => {
-    await waitForSessionRegistration(sessionId);
+    await waitForSessionRegistration(sessionId, requireConfirmedRegistration);
+    if (requireConfirmedRegistration && !registeredSessionProjects.has(sessionId)) {
+      throw new Error(`Cannot end Pi session ${sessionId} without confirmed local project ownership`);
+    }
     if (!registrationWasInFlight && !hasKnownSession(sessionId) && !submittedEffectiveSessions.has(sessionId) && !persistedPending) return null;
     try {
       return await end();
@@ -1535,7 +1538,7 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
-async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"]): Promise<unknown> {
+async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
   const sessionId = getSessionId(ctx);
   const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
   const activeProject = requestedProject || project;
@@ -1639,15 +1642,60 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         body: { id: params.id, project, directory: params.directory || directory || ctx.cwd },
       });
     case "mem_session_end": {
-      const endedSessionID = String(params.id);
+      if (typeof params.id !== "string" || !params.id || params.id !== sessionId) {
+        throw new Error("Pi-native session end requires the current host session ID; end independent sessions directly outside Pi-native tools");
+      }
+      const endedSessionID = effectiveSessionID(ctx, sessionId);
+      const persistedPending = pendingEffectiveSession(ctx, sessionId, endedSessionID);
+      const owner = persistedPending ? pendingEffectiveSessionProject(ctx, sessionId, endedSessionID) : undefined;
+      if (persistedPending) {
+        const localOwner = registeredSessionProjects.get(endedSessionID) || sessionRegistrationProjects.get(endedSessionID);
+        if (!appendEntry || !owner || owner !== (localOwner || (project !== "unknown" ? project : undefined))) {
+          throw new Error("Cannot end a pending Pi session without confirmed local project ownership and entry persistence");
+        }
+      }
       const pendingEnd = sessionEndingsInFlight.get(endedSessionID);
       if (pendingEnd) return pendingEnd;
-      const end = () => fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
-        method: "POST",
-        body: { summary: params.summary || "" },
-      });
-      return endedSessionID === sessionId && (hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID))
-        ? endRegisteredSessionOnce(endedSessionID, end)
+      // A persisted reservation from an earlier module graph is not local proof of
+      // ownership. Confirm it with the server before allowing this graph to end it.
+      if (persistedPending && !registeredSessionProjects.has(endedSessionID)) {
+        try {
+          await ensureSession(endedSessionID, owner, fetch, true);
+        } catch (error) {
+          const data = error instanceof EngramHttpError ? error.data as { code?: string; session_id?: string } | null : null;
+          if (!(error instanceof EngramHttpError && error.status === 409
+            && data?.code === "session_already_ended" && data.session_id === endedSessionID
+            && owner === project && pendingEffectiveSession(ctx, sessionId, endedSessionID))) throw error;
+          appendEntry!(EFFECTIVE_SESSION_ENTRY, {
+            runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
+          });
+          return { status: "already_ended", session_id: endedSessionID };
+        }
+      }
+      if (endedSessionID === sessionId && !registeredSessionProjects.has(endedSessionID)) {
+        await waitForSessionRegistration(endedSessionID, true);
+        if (!registeredSessionProjects.has(endedSessionID)) {
+          throw new Error(`Cannot end Pi session ${endedSessionID} without confirmed local registration`);
+        }
+      }
+      const end = async () => {
+        const result = await fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
+          method: "POST",
+          body: { summary: params.summary || "" },
+        });
+        if (persistedPending && !transportFailure?.()) appendEntry!(EFFECTIVE_SESSION_ENTRY, {
+          runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
+        });
+        return result;
+      };
+      return endedSessionID !== sessionId || hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID)
+        ? endRegisteredSessionOnce(endedSessionID, async () => {
+          if (endedSessionID !== sessionId && (!registeredSessionProjects.has(endedSessionID)
+            || (persistedPending && registeredSessionProjects.get(endedSessionID) !== owner))) {
+            throw new Error(`Cannot end Pi session ${endedSessionID} without confirmed local project ownership`);
+          }
+          return end();
+        }, persistedPending, endedSessionID !== sessionId)
         : end();
     }
     case "mem_current_project": {
@@ -1747,7 +1795,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     await awaitWithAbort(initOnce(ctx.cwd), signal);
     await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
-    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry), signal);
+    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry, transport.transportFailure), signal);
     const failure = transport.transportFailure();
     if (failure) throw new Error(unreachableMessage(failure));
 
