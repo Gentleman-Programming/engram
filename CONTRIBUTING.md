@@ -57,11 +57,15 @@ All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
-Non-required PR checks, including lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. They are not active `main` required contexts and do not run as merge-group CI jobs.
+Non-required PR checks, including the Claude plugin version guard, lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. The Claude plugin version guard is not an active `main` required context until a maintainer explicitly adds it to the ruleset; its workflow also runs on merge groups.
 
 ### Merge Queue Activation (administrators)
 
 Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
+
+## Claude Plugin Version Rule
+
+When changing any file under `plugin/claude-code/` (including renames or deletions), increase the semantic version in both `plugin/claude-code/.claude-plugin/plugin.json` and the `engram` entry of `.claude-plugin/marketplace.json` to the same higher version. The PR and merge queue guard compare against the event's base commit; malformed, missing, or inconsistent versions fail. Changes outside the Claude plugin subtree need no version bump. The guard runs the policy from the trusted base whenever it exists. On the first PR introducing the policy, the base has no script, so CI must temporarily run the candidate's policy; this bootstrap cannot prevent that PR from weakening its own guard. After merge, subsequent PRs use the base policy.
 
 ## Transient Artifact Policy
 
