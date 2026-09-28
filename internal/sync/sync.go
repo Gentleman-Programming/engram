@@ -1745,22 +1745,51 @@ func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation
 	// order, so every preceding delete rides ahead of the session delete it
 	// protects, and the remaining deletes keep their phase.
 	otherDeleteCursor := 0
+	// A drained delete must not invert against its own entity's history: a
+	// same-identity non-session upsert that preceded the delete in the
+	// chunk's original order rides ahead of it, so the delete still lands on
+	// the upsert's result and the chunk converges to the source's final state
+	// instead of resurrecting the entity in a later phase.
+	otherUpsertEmitted := make([]bool, len(otherUpserts))
+	relationUpsertEmitted := make([]bool, len(relationUpserts))
+	drainPrecedingDeletes := func(limit int) {
+		for otherDeleteCursor < len(otherDeletes) && otherDeletes[otherDeleteCursor].index < limit {
+			drained := otherDeletes[otherDeleteCursor]
+			for upsertSlot, upsert := range otherUpserts {
+				if !otherUpsertEmitted[upsertSlot] && upsert.index < drained.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(drained.mutation) {
+					ordered = append(ordered, upsert.mutation)
+					otherUpsertEmitted[upsertSlot] = true
+				}
+			}
+			for upsertSlot, upsert := range relationUpserts {
+				if !relationUpsertEmitted[upsertSlot] && upsert.index < drained.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(drained.mutation) {
+					ordered = append(ordered, upsert.mutation)
+					relationUpsertEmitted[upsertSlot] = true
+				}
+			}
+			ordered = append(ordered, drained.mutation)
+			otherDeleteCursor++
+		}
+	}
 	for upsertPos, upsert := range sessionUpserts {
 		for deletePos, deleted := range sessionDeletes {
 			if relocateAt[deletePos] == upsertPos {
-				for otherDeleteCursor < len(otherDeletes) && otherDeletes[otherDeleteCursor].index < deleted.index {
-					ordered = append(ordered, otherDeletes[otherDeleteCursor].mutation)
-					otherDeleteCursor++
-				}
+				drainPrecedingDeletes(deleted.index)
 				ordered = append(ordered, deleted.mutation)
 			}
 		}
 		ordered = append(ordered, upsert.mutation)
 	}
-	for _, mutation := range otherUpserts {
+	for upsertSlot, mutation := range otherUpserts {
+		if otherUpsertEmitted[upsertSlot] {
+			continue
+		}
 		ordered = append(ordered, mutation.mutation)
 	}
-	for _, mutation := range relationUpserts {
+	for upsertSlot, mutation := range relationUpserts {
+		if relationUpsertEmitted[upsertSlot] {
+			continue
+		}
 		ordered = append(ordered, mutation.mutation)
 	}
 	for ; otherDeleteCursor < len(otherDeletes); otherDeleteCursor++ {

@@ -146,6 +146,34 @@ func TestChunkDeletesChildObservationBeforeSupersededSessionDelete(t *testing.T)
 	}
 }
 
+// TestChunkKeepsSameEntityUpsertBeforeItsDrainedDelete pins the CodeRabbit
+// finding on PR #1520's child-drain: a non-session upsert that PRECEDES its
+// own delete in the chunk's original order must stay before it when the
+// delete is drained ahead of a relocated session delete. Reordering them
+// resurrects the entity: the source history ends with O1 deleted, an
+// inverted pair ends with the late upsert recreating it.
+func TestChunkKeepsSameEntityUpsertBeforeItsDrainedDelete(t *testing.T) {
+	s := newChunkOrderingStore(t)
+	applyOrderedChunk(t, s, "chunk-seed", []store.SyncMutation{
+		chunkSessionUpsert("S1"),
+	})
+
+	applyOrderedChunk(t, s, "chunk-interleaved", []store.SyncMutation{
+		chunkObservationUpsert("obs-1", "S1"),
+		chunkObservationHardDelete("obs-1"),
+		chunkSessionDelete("S1"),
+		chunkSessionUpsert("S1"),
+	})
+
+	observations, err := s.SessionObservations("S1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 0 {
+		t.Fatalf("interleaved chunk left %d observations, want 0 (the source history ends with obs-1 deleted)", len(observations))
+	}
+}
+
 // TestChunkDeleteThenRecreateConvergesToRecreatedState covers the sharper
 // convergence shape: a chunk whose first mutation deletes the session and a
 // later one recreates it. The final phase order used to end with the delete,
