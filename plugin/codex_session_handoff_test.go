@@ -12,9 +12,129 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
+
+func TestCodexPromptSubmitRejectsEndedHostSession(t *testing.T) {
+	codexPromptSubmitSession(t, true, false)
+}
+
+func TestCodexPromptSubmitRejectsUnconfirmedRegistration(t *testing.T) {
+	codexPromptSubmitSession(t, false, true)
+}
+
+func TestCodexPromptSubmitPersistsActiveHostSession(t *testing.T) {
+	codexPromptSubmitSession(t, false, false)
+}
+
+func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("executes Codex shell hook")
+	}
+	bash := codexTestBash(t)
+	for _, tool := range []string{"curl", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("requires %s: %v", tool, err)
+		}
+	}
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	id := "prompt-" + filepath.Base(root)
+	const project = "codex-prompt-probe"
+	if err := db.StartSession(id, project, root); err != nil {
+		t.Fatal(err)
+	}
+	if ended {
+		if err := db.EndSession(id, "finished"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	production := server.New(db, 0).Handler()
+	var posts, registrations atomic.Int32
+	requests := make(chan struct{}, 1)
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" && r.Method == http.MethodPost {
+			registrations.Add(1)
+			if refuseRegistration {
+				http.Error(w, "registration unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		if r.URL.Path == "/project/current" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"project":"codex-prompt-probe","project_source":"config"}`)
+			return
+		}
+		if r.URL.Path == "/prompts" && r.Method == http.MethodPost {
+			posts.Add(1)
+			production.ServeHTTP(w, r)
+			select {
+			case requests <- struct{}{}:
+			default:
+			}
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer fixture.Close()
+	port := strings.TrimPrefix(strings.TrimPrefix(fixture.URL, "http://127.0.0.1:"), "http://localhost:")
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "touch"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const prompt = "capture only for an active host session"
+	payload, err := json.Marshal(map[string]string{"session_id": id, "cwd": root, "prompt": prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bash, filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh"))
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + root, "USERPROFILE=" + root, "APPDATA=" + root, "LOCALAPPDATA=" + root,
+		"TMPDIR=" + root, "TMP=" + root, "TEMP=" + root,
+		"ENGRAM_DATA_DIR=" + root, "ENGRAM_PORT=" + port, "ENGRAM_URL=" + fixture.URL,
+		"CURL_HOME=" + root, "XDG_CONFIG_HOME=" + root,
+	}
+	cmd.Stdin = bytes.NewReader(payload)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hook failed: %v: %s", err, output)
+	}
+	// Wait for the detached prompt POST; absence must also be checked after a bounded window.
+	select {
+	case <-requests:
+	case <-time.After(750 * time.Millisecond):
+	}
+	prompts, err := db.RecentPrompts(project, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 1
+	if ended || refuseRegistration {
+		want = 0
+	}
+	if registrations.Load() != 1 || len(prompts) != want || posts.Load() != int32(want) {
+		t.Fatalf("ended=%t refused=%t: registrations=%d, persisted prompts=%d, POST /prompts=%d; want one registration and %d prompts", ended, refuseRegistration, registrations.Load(), len(prompts), posts.Load(), want)
+	}
+	if want == 1 && (prompts[0].SessionID != id || prompts[0].Content != prompt) {
+		t.Fatalf("active prompt = %+v, want session %q and content %q", prompts[0], id, prompt)
+	}
+}
 
 func TestCodexPreToolUseManifestRegistersNativeBinder(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "hooks", "hooks.json"))
