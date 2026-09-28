@@ -360,7 +360,9 @@ You can absolutely tweak the graph view in Obsidian's UI — Engram's `preserve`
 
 ---
 
-## TypeScript Plugin (Optional)
+## HTTP Obsidian Plugin (Optional)
+
+Unlike the CLI exporter above, this plugin reads `GET /export` from a running `engram serve` instance. Each poll receives a **full snapshot**; the server does not support incremental `since` export. The plugin writes one Markdown note per observation under the configured vault subfolder (`observations/observation-<id>.md`), updating changed notes in place and leaving notes absent from later snapshots untouched. It does not generate CLI session/topic hubs or graph configuration. Set a project filter to request only that project; leave it empty to explicitly request all projects (`all_projects=true`). Scoped exports may include legacy observations with no project when their exported session belongs to the selected project. Truly foreign observations fail without writing notes or recording success. An incompatible response also fails explicitly rather than treating it as an empty export.
 
 For an in-Obsidian experience with a ribbon button, settings tab, and status bar indicator, there's a TypeScript community plugin in [`plugin/obsidian/`](https://github.com/Gentleman-Programming/engram/tree/main/plugin/obsidian).
 

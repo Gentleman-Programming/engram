@@ -1563,7 +1563,7 @@ test("already-cancelled preflight observes a later shared initialization rejecti
   await flush();
 
   assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
-  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry\), signal\);/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry, transport\.transportFailure\), signal\);/);
 });
 
 test("transport policies bound read, doctor and registration retries independently of writes", () => {
