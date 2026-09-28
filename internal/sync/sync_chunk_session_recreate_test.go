@@ -174,6 +174,31 @@ func TestChunkKeepsSameEntityUpsertBeforeItsDrainedDelete(t *testing.T) {
 	}
 }
 
+// TestChunkFreshImportAppliesInterleavedObservationViaDeferral pins the
+// behavior behind the CodeRabbit follow-up on PR #1520: on a store where the
+// referenced session does NOT exist yet and the chunk creates it only after
+// the observation's own ops, the drained observation upsert emits before its
+// parent session upsert in ordering terms. The chunk still applies, because
+// the store defers pulled observations whose session is missing (#1274) and
+// the session upsert later in the same chunk satisfies them. This pins that
+// tolerance so a future ordering change cannot silently turn the interleaved
+// fresh import into a hard failure.
+func TestChunkFreshImportAppliesInterleavedObservationViaDeferral(t *testing.T) {
+	s := newChunkOrderingStore(t)
+
+	// No seed: S1 exists nowhere when the chunk starts applying.
+	applyOrderedChunk(t, s, "chunk-fresh-interleaved", []store.SyncMutation{
+		chunkObservationUpsert("obs-1", "S1"),
+		chunkObservationHardDelete("obs-1"),
+		chunkSessionDelete("S1"),
+		chunkSessionUpsert("S1"),
+	})
+
+	if _, err := s.GetSession("S1"); err != nil {
+		t.Fatalf("session S1 was not recreated on the fresh import: %v", err)
+	}
+}
+
 // TestChunkDeleteThenRecreateConvergesToRecreatedState covers the sharper
 // convergence shape: a chunk whose first mutation deletes the session and a
 // later one recreates it. The final phase order used to end with the delete,
