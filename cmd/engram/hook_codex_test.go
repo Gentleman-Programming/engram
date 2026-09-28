@@ -28,7 +28,11 @@ func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	const project = "same-worktree"
 	hosts := []string{"codex-host-one", "codex-host-two"}
 	for _, host := range hosts {
@@ -94,16 +98,18 @@ func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 		if err != nil || len(observations) != len(titles) {
 			t.Fatalf("host %s observations = %v, err=%v", host, observations, err)
 		}
+		remaining := make(map[string]bool, len(titles))
+		for _, title := range titles {
+			remaining[title] = true
+		}
 		for _, observation := range observations {
-			found := false
-			for _, title := range titles {
-				if observation.Title == title {
-					found = true
-				}
+			if !remaining[observation.Title] {
+				t.Fatalf("host %s has unexpected or duplicate observation %+v", host, observation)
 			}
-			if !found {
-				t.Fatalf("host %s has foreign observation %+v", host, observation)
-			}
+			delete(remaining, observation.Title)
+		}
+		if len(remaining) != 0 {
+			t.Fatalf("host %s missing observations %v", host, remaining)
 		}
 	}
 	if _, err := db.GetSession("foreign-model-session"); err == nil {
