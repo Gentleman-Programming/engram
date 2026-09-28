@@ -1261,6 +1261,7 @@ test("OpenCode host bindings survive real server persistence and reject ended re
       })])
     } finally { clearTimeout(timer) }
   }
+  let shutdownError
   try {
     const url = await new Promise((resolve, reject) => {
       let settled = false
@@ -1341,10 +1342,12 @@ test("OpenCode host bindings survive real server persistence and reject ended re
       child.stdin.end()
       try { await bounded(exited, "server shutdown timed out") }
       catch (error) {
+        shutdownError = error
         child.kill()
-        await bounded(exited, "server kill timed out")
-        throw error
+        try { await bounded(exited, "server kill timed out") }
+        catch (killError) { shutdownError = killError }
       }
     }
   }
+  if (shutdownError) throw shutdownError
 })
