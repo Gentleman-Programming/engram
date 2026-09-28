@@ -17,9 +17,105 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 	"github.com/Gentleman-Programming/engram/v2/internal/server"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
+
+func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	const project = "same-worktree"
+	hosts := []string{"codex-host-one", "codex-host-two"}
+	for _, host := range hosts {
+		if err := db.CreateSession(host, project, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"same-worktree","project_source":"config"}`)
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	oldStdin, oldOutput := os.Stdin, claudeHookOutput
+	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
+	mcpServer := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: project}, nil)
+	want := map[string][]string{
+		hosts[0]: {"one first", "one second"},
+		hosts[1]: {"two first", "two second"},
+	}
+	for _, step := range []struct{ host, title string }{
+		{hosts[0], "one first"}, {hosts[1], "two first"},
+		{hosts[0], "one second"}, {hosts[1], "two second"},
+	} {
+		request, _ := json.Marshal(map[string]any{
+			"session_id": step.host, "cwd": root, "tool_name": "mcp__engram__mem_save",
+			"tool_input": map[string]any{"title": step.title, "content": step.title, "project": project, "session_id": "foreign-model-session"},
+		})
+		os.Stdin = claudeHookStdin(t, string(request), false)
+		var output []byte
+		claudeHookOutput = func(data []byte) error { output = append([]byte(nil), data...); return nil }
+		cmdHook([]string{"codex-pre-tool-use"})
+		var hook struct {
+			HookSpecificOutput struct {
+				PermissionDecision string         `json:"permissionDecision"`
+				UpdatedInput       map[string]any `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(output, &hook); err != nil {
+			t.Fatal(err)
+		}
+		bound := hook.HookSpecificOutput
+		if bound.PermissionDecision != "allow" || bound.UpdatedInput["session_id"] != step.host || bound.UpdatedInput["project"] != project {
+			t.Fatalf("host %s bound output = %s", step.host, output)
+		}
+		call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": bound.UpdatedInput}})
+		result := mcpServer.HandleMessage(context.Background(), call)
+		encoded, err := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), `"isError":true`) || !strings.Contains(string(encoded), step.title) {
+			t.Fatalf("host %s MCP result = %s, err=%v", step.host, encoded, err)
+		}
+	}
+	all, err := db.AllObservations(project, "", 100)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("project observations = %d, err=%v", len(all), err)
+	}
+	for host, titles := range want {
+		observations, err := db.SessionObservations(host, 100)
+		if err != nil || len(observations) != len(titles) {
+			t.Fatalf("host %s observations = %v, err=%v", host, observations, err)
+		}
+		remaining := make(map[string]bool, len(titles))
+		for _, title := range titles {
+			remaining[title] = true
+		}
+		for _, observation := range observations {
+			if !remaining[observation.Title] {
+				t.Fatalf("host %s has unexpected or duplicate observation %+v", host, observation)
+			}
+			delete(remaining, observation.Title)
+		}
+		if len(remaining) != 0 {
+			t.Fatalf("host %s missing observations %v", host, remaining)
+		}
+	}
+	if _, err := db.GetSession("foreign-model-session"); err == nil {
+		t.Fatal("foreign model session was created")
+	}
+}
 
 func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
 	for _, tc := range []struct {

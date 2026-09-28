@@ -10,16 +10,14 @@
 //     the resolved absolute binary path.
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
 //   - Codex: injects MCP registration in ~/.codex/config.toml
-//   - Pi: installs gentle-engram/pi-mcp-adapter packages and writes Pi MCP config
+//   - Pi: installs gentle-engram/pi-mcp-adapter packages; native tools own Engram writes
 package setup
 
 import (
 	"context"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -342,12 +340,8 @@ func installPi() (*Result, error) {
 		files++
 	}
 
-	mcpChanged, err := ensurePiMCPConfig(filepath.Join(agentDir, "mcp.json"))
-	if err != nil {
+	if err := warnPiMCPConfig(filepath.Join(agentDir, "mcp.json")); err != nil {
 		return nil, err
-	}
-	if mcpChanged {
-		files++
 	}
 
 	return &Result{Agent: "pi", Destination: agentDir, Files: files}, nil
@@ -463,77 +457,23 @@ func resolveMiseNodeVersion() string {
 	return "node@" + version
 }
 
-func ensurePiMCPConfig(mcpPath string) (bool, error) {
+// warnPiMCPConfig detects legacy registrations without rewriting user-owned
+// MCP config. Even a dead command may belong to a deliberate direct client.
+func warnPiMCPConfig(mcpPath string) error {
 	config, err := readJSONConfig(mcpPath)
 	if err != nil {
-		return false, fmt.Errorf("read Pi MCP config: %w", err)
+		return fmt.Errorf("read Pi MCP config: %w", err)
 	}
-	servers := make(map[string]json.RawMessage)
 	if raw, ok := config["mcpServers"]; ok {
+		var servers map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &servers); err != nil {
-			return false, fmt.Errorf("parse Pi mcpServers: %w", err)
+			return fmt.Errorf("parse Pi mcpServers: %w", err)
+		}
+		if _, exists := servers["engram"]; exists {
+			fmt.Fprintf(os.Stderr, "warning: %s contains mcpServers.engram; Pi native-only agent writes are not guaranteed while this MCP path remains. To use native-only writes, manually remove only mcpServers.engram from %s (preserve other servers), then restart/reload Pi.\n", mcpPath, mcpPath)
 		}
 	}
-	if raw, exists := servers["engram"]; exists {
-		// Revalidate instead of blindly preserving: a previously persisted
-		// absolute command can point at a mise install version directory that
-		// `mise up` plus `mise prune` removed, leaving a dead path that fails
-		// to spawn (ENOENT). Only a dead absolute command is repaired, and only
-		// its "command" value is rewritten; missing or relative commands, live
-		// absolute paths, and every other entry key are preserved untouched.
-		// The repair happens only when the recorded path does not exist
-		// (fs.ErrNotExist); any other stat error (EACCES, EIO, ...) leaves the
-		// entry untouched: this is a repair path, so a transient filesystem
-		// error must not rewrite a possibly valid custom command, and it must
-		// not fail the whole `engram setup` run either.
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return false, fmt.Errorf("parse Pi engram MCP server entry: %w", err)
-		}
-		var command string
-		if rawCommand, ok := fields["command"]; ok {
-			if err := json.Unmarshal(rawCommand, &command); err != nil {
-				command = ""
-			}
-		}
-		if command == "" || !filepath.IsAbs(command) {
-			return false, nil
-		}
-		if _, statErr := statFn(command); statErr == nil {
-			return false, nil
-		} else if !errors.Is(statErr, fs.ErrNotExist) {
-			return false, nil
-		}
-		fields["command"], err = jsonMarshalFn(resolveEngramCommand())
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi Engram MCP command: %w", err)
-		}
-		servers["engram"], err = jsonMarshalFn(fields)
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
-		}
-		config["mcpServers"], err = jsonMarshalFn(servers)
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
-		}
-		return true, writeJSONConfig(mcpPath, config)
-	}
-	server := map[string]any{
-		"command":     resolveEngramCommand(),
-		"args":        []string{"mcp", "--tools=agent"},
-		"lifecycle":   "lazy",
-		"directTools": false,
-	}
-	raw, err := jsonMarshalFn(server)
-	if err != nil {
-		return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
-	}
-	servers["engram"] = raw
-	config["mcpServers"], err = jsonMarshalFn(servers)
-	if err != nil {
-		return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
-	}
-	return true, writeJSONConfig(mcpPath, config)
+	return nil
 }
 
 func readJSONConfig(path string) (map[string]json.RawMessage, error) {
