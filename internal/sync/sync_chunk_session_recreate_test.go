@@ -1,0 +1,157 @@
+package sync
+
+// Regression tests for issue #1494: a pulled chunk that deletes and then
+// recreates the same session must apply in one pass and converge to the
+// source's final state. The chunk shape and payloads come from the
+// reporter's minimal reproduction (quirozino, engram#1494), with convergence
+// assertions added on top.
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+)
+
+func newChunkOrderingStore(t *testing.T) *store.Store {
+	t.Helper()
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func chunkSessionUpsert(key string) store.SyncMutation {
+	return store.SyncMutation{Entity: store.SyncEntitySession, Op: store.SyncOpUpsert, EntityKey: key, Project: "p",
+		Payload: fmt.Sprintf(`{"id":%q,"project":"p","directory":"/work/p","started_at":"2026-08-13 14:47:51"}`, key)}
+}
+
+func chunkSessionDelete(key string) store.SyncMutation {
+	return store.SyncMutation{Entity: store.SyncEntitySession, Op: store.SyncOpDelete, EntityKey: key, Project: "p",
+		Payload: fmt.Sprintf(`{"id":%q,"project":"p","deleted_at":"2026-08-13 14:48:00"}`, key)}
+}
+
+func chunkObservationUpsert(key, sessionID string) store.SyncMutation {
+	return store.SyncMutation{Entity: store.SyncEntityObservation, Op: store.SyncOpUpsert, EntityKey: key, Project: "p",
+		Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":%q,"type":"note","title":"t","content":"c","project":"p","scope":"project","created_at":"2026-08-13 14:49:59","updated_at":"2026-08-13 14:49:59"}`, key, sessionID)}
+}
+
+// applyOrderedChunk runs one chunk through the exact import path
+// importMutationChunk uses: orderMutationsForApply plus the store's pulled
+// apply, so the assertions cover the production ordering rather than a
+// hand-arranged sequence.
+func applyOrderedChunk(t *testing.T, s *store.Store, chunkID string, mutations []store.SyncMutation) {
+	t.Helper()
+	if err := s.ApplyPulledChunkForDomain("cloud:p", chunkID, orderMutationsForApply(mutations), true); err != nil {
+		t.Fatalf("chunk apply failed: %v", err)
+	}
+}
+
+func assertSessionConverged(t *testing.T, s *store.Store, sessionID, observationKey string) {
+	t.Helper()
+	session, err := s.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("session %s did not survive the chunk: %v", sessionID, err)
+	}
+	if strings.TrimSpace(session.ID) != sessionID {
+		t.Fatalf("session id = %q, want %q", session.ID, sessionID)
+	}
+	observations, err := s.SessionObservations(sessionID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, observation := range observations {
+		if observation.SyncID == observationKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("observation %s is not attached to session %s (%d observations)", observationKey, sessionID, len(observations))
+	}
+}
+
+// TestChunkAppliesCreateDeleteRecreateAttachChunk is the reporter's case: one
+// chunk carrying create S1, delete S1, recreate S1, attach O1. The phase
+// reorder used to apply the session delete after the observation attach, the
+// foreign key rejected it, and every import retry rolled the chunk back
+// (FOREIGN KEY constraint failed (787), Pending import: 1 forever).
+func TestChunkAppliesCreateDeleteRecreateAttachChunk(t *testing.T) {
+	s := newChunkOrderingStore(t)
+	applyOrderedChunk(t, s, "chunk-1494", []store.SyncMutation{
+		chunkSessionUpsert("S1"),
+		chunkSessionDelete("S1"),
+		chunkSessionUpsert("S1"),
+		chunkObservationUpsert("obs-1", "S1"),
+	})
+	assertSessionConverged(t, s, "S1", "obs-1")
+}
+
+// TestChunkDeleteThenRecreateConvergesToRecreatedState covers the sharper
+// convergence shape: a chunk whose first mutation deletes the session and a
+// later one recreates it. The final phase order used to end with the delete,
+// so the chunk "succeeded" while converging to the wrong final state.
+func TestChunkDeleteThenRecreateConvergesToRecreatedState(t *testing.T) {
+	s := newChunkOrderingStore(t)
+	applyOrderedChunk(t, s, "chunk-1494-b", []store.SyncMutation{
+		chunkSessionDelete("S1"),
+		chunkSessionUpsert("S1"),
+		chunkObservationUpsert("obs-2", "S1"),
+	})
+	assertSessionConverged(t, s, "S1", "obs-2")
+}
+
+func orderedMutationSummary(mutations []store.SyncMutation) string {
+	parts := make([]string, 0, len(mutations))
+	for _, mutation := range mutations {
+		parts = append(parts, mutation.Op+" "+mutation.EntityKey)
+	}
+	return strings.Join(parts, " | ")
+}
+
+// TestOrderMutationsSupersededSessionDeleteRidesItsPosition pins the ordering
+// contract directly: a session delete superseded by a later upsert of the same
+// entity rides between that entity's upserts, every other session delete keeps
+// the final phase, and unrelated entities keep their phase grouping.
+func TestOrderMutationsSupersededSessionDeleteRidesItsPosition(t *testing.T) {
+	t.Run("create delete recreate attach stays in history order", func(t *testing.T) {
+		ordered := orderMutationsForApply([]store.SyncMutation{
+			chunkSessionUpsert("S1"), chunkSessionDelete("S1"), chunkSessionUpsert("S1"), chunkObservationUpsert("obs-1", "S1"),
+		})
+		if want := "upsert S1 | delete S1 | upsert S1 | upsert obs-1"; orderedMutationSummary(ordered) != want {
+			t.Fatalf("ordered = %q, want %q", orderedMutationSummary(ordered), want)
+		}
+	})
+	t.Run("delete without recreate keeps the final phase", func(t *testing.T) {
+		ordered := orderMutationsForApply([]store.SyncMutation{
+			chunkSessionUpsert("S1"), chunkSessionDelete("S2"), chunkObservationUpsert("obs-1", "S1"),
+		})
+		if want := "upsert S1 | upsert obs-1 | delete S2"; orderedMutationSummary(ordered) != want {
+			t.Fatalf("ordered = %q, want %q", orderedMutationSummary(ordered), want)
+		}
+	})
+	t.Run("repeated deletes before one recreate keep their relative order", func(t *testing.T) {
+		ordered := orderMutationsForApply([]store.SyncMutation{
+			chunkSessionUpsert("S1"), chunkSessionDelete("S1"), chunkSessionDelete("S1"), chunkSessionUpsert("S1"),
+		})
+		if want := "upsert S1 | delete S1 | delete S1 | upsert S1"; orderedMutationSummary(ordered) != want {
+			t.Fatalf("ordered = %q, want %q", orderedMutationSummary(ordered), want)
+		}
+	})
+	t.Run("delete of another session does not ride an unrelated recreate", func(t *testing.T) {
+		ordered := orderMutationsForApply([]store.SyncMutation{
+			chunkSessionDelete("S2"), chunkSessionUpsert("S1"),
+		})
+		if want := "upsert S1 | delete S2"; orderedMutationSummary(ordered) != want {
+			t.Fatalf("ordered = %q, want %q", orderedMutationSummary(ordered), want)
+		}
+	})
+}

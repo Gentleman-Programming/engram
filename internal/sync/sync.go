@@ -1676,37 +1676,89 @@ func (sy *Syncer) chunkTrackingTargetKey(project string) string {
 	return cloudTargetKey(projectName)
 }
 
+// orderMutationsForApply groups one pulled chunk's mutations into the phases
+// the store's foreign keys require: session upserts first (observations and
+// relations reference them), then other upserts, then relation upserts, then
+// non-session deletes, and finally session deletes.
+//
+// A session delete whose entity is upserted again later in the SAME chunk
+// (issue #1494: one chunk carrying create, delete, recreate, attach) cannot
+// wait for the final phase: by then the recreated session owns observations
+// again and the delete fails the foreign key, rolling the chunk back on every
+// import pass. Such a superseded delete instead rides at its original
+// relative position among its entity's upserts, so the chunk replays the
+// source's history in order and converges to the source's final state.
+// Deletes whose entity no later upsert recreates keep the final phase:
+// nothing in the chunk re-owns what they remove.
 func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation {
 	if len(mutations) <= 1 {
 		return mutations
 	}
-	sessionUpserts := make([]store.SyncMutation, 0, len(mutations))
-	otherUpserts := make([]store.SyncMutation, 0, len(mutations))
-	relationUpserts := make([]store.SyncMutation, 0, len(mutations))
-	otherDeletes := make([]store.SyncMutation, 0, len(mutations))
-	sessionDeletes := make([]store.SyncMutation, 0, len(mutations))
+	type indexedMutation struct {
+		mutation store.SyncMutation
+		index    int
+	}
+	sessionUpserts := make([]indexedMutation, 0, len(mutations))
+	otherUpserts := make([]indexedMutation, 0, len(mutations))
+	relationUpserts := make([]indexedMutation, 0, len(mutations))
+	otherDeletes := make([]indexedMutation, 0, len(mutations))
+	sessionDeletes := make([]indexedMutation, 0, len(mutations))
 
-	for _, mutation := range mutations {
+	for index, mutation := range mutations {
+		indexed := indexedMutation{mutation: mutation, index: index}
 		switch {
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert:
-			sessionUpserts = append(sessionUpserts, mutation)
+			sessionUpserts = append(sessionUpserts, indexed)
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpDelete:
-			sessionDeletes = append(sessionDeletes, mutation)
+			sessionDeletes = append(sessionDeletes, indexed)
 		case mutation.Op == store.SyncOpDelete:
-			otherDeletes = append(otherDeletes, mutation)
+			otherDeletes = append(otherDeletes, indexed)
 		case mutation.Entity == store.SyncEntityRelation:
-			relationUpserts = append(relationUpserts, mutation)
+			relationUpserts = append(relationUpserts, indexed)
 		default:
-			otherUpserts = append(otherUpserts, mutation)
+			otherUpserts = append(otherUpserts, indexed)
+		}
+	}
+
+	// relocateAt maps each session delete to the session-upsert slot of the
+	// first upsert of the same entity that FOLLOWS it in the chunk's original
+	// order, or -1 when no later upsert recreates the deleted session. The
+	// sessionUpserts bucket preserves original order, so the first follower
+	// by bucket slot is also the first by arrival.
+	relocateAt := make([]int, len(sessionDeletes))
+	for deletePos, deleted := range sessionDeletes {
+		relocateAt[deletePos] = -1
+		for upsertPos, upsert := range sessionUpserts {
+			if upsert.index > deleted.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(deleted.mutation) {
+				relocateAt[deletePos] = upsertPos
+				break
+			}
 		}
 	}
 
 	ordered := make([]store.SyncMutation, 0, len(mutations))
-	ordered = append(ordered, sessionUpserts...)
-	ordered = append(ordered, otherUpserts...)
-	ordered = append(ordered, relationUpserts...)
-	ordered = append(ordered, otherDeletes...)
-	ordered = append(ordered, sessionDeletes...)
+	for upsertPos, upsert := range sessionUpserts {
+		for deletePos, deleted := range sessionDeletes {
+			if relocateAt[deletePos] == upsertPos {
+				ordered = append(ordered, deleted.mutation)
+			}
+		}
+		ordered = append(ordered, upsert.mutation)
+	}
+	for _, mutation := range otherUpserts {
+		ordered = append(ordered, mutation.mutation)
+	}
+	for _, mutation := range relationUpserts {
+		ordered = append(ordered, mutation.mutation)
+	}
+	for _, mutation := range otherDeletes {
+		ordered = append(ordered, mutation.mutation)
+	}
+	for deletePos, deleted := range sessionDeletes {
+		if relocateAt[deletePos] == -1 {
+			ordered = append(ordered, deleted.mutation)
+		}
+	}
 	return ordered
 }
 
