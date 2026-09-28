@@ -533,7 +533,7 @@ export const Engram: Plugin = async (ctx) => {
       method: "POST",
       body: { id: sessionId, project, directory: ctx.directory },
     }).then((acknowledgement) => {
-      if (acknowledgement === null) return false
+      if (acknowledgement?.id !== sessionId || acknowledgement?.status !== "created") return false
       knownSessions.add(sessionId)
       return true
     }).finally(() => registeringSessions.delete(sessionId))

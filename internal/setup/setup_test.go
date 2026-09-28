@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -758,7 +757,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install(pi) failed: %v", err)
 	}
-	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 2 {
+	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 1 {
 		t.Fatalf("unexpected install result: %#v", result)
 	}
 	wantCommands := []string{"pi install npm:gentle-engram@0.1.16", "pi install npm:pi-mcp-adapter"}
@@ -782,27 +781,8 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 		}
 	}
 
-	mcpRaw, err := os.ReadFile(filepath.Join(agentDir, "mcp.json"))
-	if err != nil {
-		t.Fatalf("read mcp: %v", err)
-	}
-	var mcpConfig struct {
-		MCPServers map[string]struct {
-			Command     string   `json:"command"`
-			Args        []string `json:"args"`
-			Lifecycle   string   `json:"lifecycle"`
-			DirectTools bool     `json:"directTools"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(mcpRaw, &mcpConfig); err != nil {
-		t.Fatalf("parse mcp: %v", err)
-	}
-	server, ok := mcpConfig.MCPServers["engram"]
-	if !ok {
-		t.Fatalf("expected mcpServers.engram in %#v", mcpConfig.MCPServers)
-	}
-	if server.Command != exe || !reflect.DeepEqual(server.Args, []string{"mcp", "--tools=agent"}) || server.Lifecycle != "lazy" || server.DirectTools {
-		t.Fatalf("unexpected engram MCP server: %#v", server)
+	if _, err := os.Stat(filepath.Join(agentDir, "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("fresh setup created mcp.json: %v", err)
 	}
 }
 
@@ -873,232 +853,54 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	}
 }
 
-// TestEnsurePiMCPConfigRepairsDeadEngramCommand covers the narrow
-// revalidation of a pre-existing mcpServers.engram entry (issue #1423): only a
-// dead absolute command is repaired; live absolute commands and missing or
-// relative commands are preserved untouched, and a missing entry keeps the
-// current creation behavior.
-func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
-	writeExe := func(t *testing.T, dir string) string {
-		t.Helper()
-		exe := filepath.Join(dir, "engram-bin")
-		if err := os.WriteFile(exe, []byte("engram"), 0755); err != nil {
-			t.Fatalf("write executable: %v", err)
-		}
-		return exe
+// Existing Pi MCP entries remain byte-identical, and absent entries are not created.
+func TestWarnPiMCPConfigPreservesExistingAndDoesNotCreate(t *testing.T) {
+	cases := []struct {
+		name, original string
+	}{
+		{"absent", ""},
+		{"unrelated server", `{"mcpServers":{"other":{"command":"other"}}}`},
+		{"existing Engram and unrelated server", `{"mcpServers":{"engram":{"command":"/missing/engram"},"other":{"command":"other"}}}`},
 	}
-	assertCanonicalCommand := func(t *testing.T, got, exe string) {
-		t.Helper()
-		want, err := filepath.EvalSymlinks(exe)
-		if err != nil {
-			t.Fatalf("canonicalize expected executable: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mcp.json")
+			if tc.original != "" {
+				if err := os.WriteFile(path, []byte(tc.original), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := warnPiMCPConfig(path); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if tc.original == "" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("created mcp.json: %v", err)
+				}
+				return
+			}
+			if err != nil || string(data) != tc.original {
+				t.Fatalf("changed config: %s, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestWarnPiMCPConfigRejectsMalformedConfig(t *testing.T) {
+	for _, contents := range []string{`{`, `{"mcpServers":[]}`} {
+		path := filepath.Join(t.TempDir(), "mcp.json")
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatal(err)
 		}
-		if got != want {
-			t.Fatalf("expected canonical command %q, got %q", want, got)
+		if err := warnPiMCPConfig(path); err == nil {
+			t.Fatalf("expected malformed config error for %q", contents)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != contents {
+			t.Fatalf("malformed config modified: %s, %v", data, err)
 		}
 	}
-
-	t.Run("dead absolute command is repaired", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		deadCommand := filepath.Join(agentDir, "installs", "engram", "2.1.0", "engram")
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp","--tools=agent"],"lifecycle":"lazy","directTools":false},"other":{"command":"other"}}}`, deadCommand)
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if !changed {
-			t.Fatalf("expected ensurePiMCPConfig to repair the dead engram command")
-		}
-
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after repair: %v", err)
-		}
-		var cfg struct {
-			MCPServers map[string]struct {
-				Command     string   `json:"command"`
-				Args        []string `json:"args"`
-				Lifecycle   string   `json:"lifecycle"`
-				DirectTools bool     `json:"directTools"`
-			} `json:"mcpServers"`
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			t.Fatalf("parse mcp after repair: %v", err)
-		}
-		entry, ok := cfg.MCPServers["engram"]
-		if !ok {
-			t.Fatalf("expected engram entry after repair, got %s", data)
-		}
-		assertCanonicalCommand(t, entry.Command, exe)
-		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
-			t.Fatalf("expected args/lifecycle/directTools to be preserved, got %#v", entry)
-		}
-		other, ok := cfg.MCPServers["other"]
-		if !ok || other.Command != "other" {
-			t.Fatalf("expected unrelated server to be preserved, got %#v", cfg.MCPServers["other"])
-		}
-	})
-
-	t.Run("non-not-exist stat error leaves the entry untouched", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		recordedCommand := filepath.Join(agentDir, "installs", "engram", "2.1.0", "engram")
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp"],"lifecycle":"lazy","directTools":false}}}`, recordedCommand)
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-		statFn = func(name string) (os.FileInfo, error) {
-			return nil, &os.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave the engram command untouched on a non-not-exist stat error")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("live absolute command is preserved byte-for-byte", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp"],"lifecycle":"eager"},"other":{"command":"other"}}}`, exe)
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave a live engram command untouched")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("relative command is never modified", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		original := `{"mcpServers":{"engram":{"command":"engram","args":["mcp"]}}}`
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave a relative command untouched")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("missing command field is never modified", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		original := `{"mcpServers":{"engram":{"args":["mcp"]}}}`
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave an entry without command untouched")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("missing entry keeps creation behavior", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if !changed {
-			t.Fatalf("expected ensurePiMCPConfig to create the engram entry")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after creation: %v", err)
-		}
-		var cfg struct {
-			MCPServers map[string]struct {
-				Command     string   `json:"command"`
-				Args        []string `json:"args"`
-				Lifecycle   string   `json:"lifecycle"`
-				DirectTools bool     `json:"directTools"`
-			} `json:"mcpServers"`
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			t.Fatalf("parse mcp after creation: %v", err)
-		}
-		entry, ok := cfg.MCPServers["engram"]
-		if !ok {
-			t.Fatalf("expected engram entry after creation, got %s", data)
-		}
-		assertCanonicalCommand(t, entry.Command, exe)
-		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
-			t.Fatalf("expected default args/lifecycle/directTools, got %#v", entry)
-		}
-	})
 }
 
 func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) {
@@ -1326,9 +1128,9 @@ func TestInstallPiWritesNpmCommandWhenMiseDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install(pi) failed: %v", err)
 	}
-	// settings.json changed (packages + npmCommand) + mcp.json
-	if result.Files != 2 {
-		t.Fatalf("expected 2 files written, got %d", result.Files)
+	// Only settings.json changed (packages + npmCommand).
+	if result.Files != 1 {
+		t.Fatalf("expected 1 file written, got %d", result.Files)
 	}
 
 	raw, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))

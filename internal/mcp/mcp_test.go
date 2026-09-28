@@ -869,6 +869,73 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 	}
 }
 
+func TestRuntimeSessionBindingConformance(t *testing.T) {
+	const projectName = "binding-project"
+	s := newMCPTestStore(t)
+	directory := runtimeSessionDirectory("/work/binding-project")
+	for _, id := range []string{"agent-one", "agent-two"} {
+		if err := s.StartSessionWithOwnershipMode(id, projectName, directory, store.SessionOwnershipProjectOwned); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateSession("manual-save-binding-project", projectName, directory); err != nil {
+		t.Fatal(err)
+	}
+	write := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	var saved []string
+	for _, scenario := range []struct {
+		name, id, project string
+		wantError bool
+	}{
+		{name: "first writer", id: "agent-one", project: projectName},
+		{name: "second writer", id: "agent-two", project: projectName},
+		{name: "interleaved first writer", id: "agent-one", project: projectName},
+		{name: "unknown ID", id: "unregistered", project: projectName, wantError: true},
+		{name: "wrong project", id: "agent-one", project: "another-project", wantError: true},
+		// This is an explicit MCP manual session, not a CLI manual-save invocation.
+		{name: "independent explicit MCP manual session", id: "manual-save-binding-project", project: projectName},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			result, err := write(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"title": scenario.name, "content": "Explicit session binding conformance", "type": "discovery", "project": scenario.project, "session_id": scenario.id,
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsError != scenario.wantError {
+				t.Fatalf("error=%v, want %v: %s", result.IsError, scenario.wantError, callResultText(t, result))
+			}
+			if !scenario.wantError {
+				saved = append(saved, scenario.id)
+			}
+			observations, err := s.RecentObservations(projectName, "project", 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observations) != len(saved) {
+				t.Fatalf("observation count = %d, want %d; rejected writes must have no side effects", len(observations), len(saved))
+			}
+			for i, want := range saved {
+				if got := observations[len(saved)-1-i].SessionID; got != want {
+					t.Fatalf("write %d attributed to %q, want %q", i, got, want)
+				}
+			}
+			other, err := s.RecentObservations("another-project", "project", 20)
+			if err != nil || len(other) != 0 {
+				t.Fatalf("wrong-project side effects: %#v, err=%v", other, err)
+			}
+		})
+	}
+	if err := s.EndSession("agent-two", "finished"); err != nil {
+		t.Fatal(err)
+	}
+	// Ended host IDs cannot be re-registered; this is a registration boundary,
+	// not a claim that generic direct MCP explicit writes reject ended IDs.
+	if err := s.StartSessionWithOwnershipMode("agent-two", projectName, directory, store.SessionOwnershipProjectOwned); err == nil {
+		t.Fatal("ended host ID was re-registered")
+	}
+}
+
 // TestHandleSaveResolvesActiveSessionFromStore reproduces issue #386: the
 // SessionStart hook registers a UUID session via POST /sessions (a separate
 // process from the MCP server, sharing only the SQLite store). A later
