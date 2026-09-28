@@ -2050,7 +2050,7 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 		projects := []string{project}
 		if project == "" {
 			projects = nil
-			rows, err := tx.Query(`SELECT DISTINCT project FROM sync_mutations WHERE target_key = ? AND disposition = ? AND acked_at IS NULL AND project != ''`, DefaultSyncTargetKey, SyncMutationDispositionPending)
+			rows, err := tx.Query(`SELECT DISTINCT project FROM sync_mutations WHERE target_key = ? AND disposition = ? AND acked_at IS NULL AND project != '' UNION SELECT DISTINCT s.project FROM sessions s JOIN sync_mutations m ON m.entity_key = s.id WHERE m.target_key = ? AND m.project = '' AND m.entity = 'session' AND m.op = 'upsert' AND m.disposition = ? AND m.acked_at IS NULL AND s.project != ''`, DefaultSyncTargetKey, SyncMutationDispositionPending, DefaultSyncTargetKey, SyncMutationDispositionPending)
 			if err != nil {
 				return err
 			}
@@ -2090,7 +2090,8 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 				if err != nil {
 					return err
 				}
-				if localProject != mutation.Project {
+				normalizedLocalProject, _ := NormalizeProject(localProject)
+				if strings.TrimSpace(normalizedLocalProject) != name || (mutation.Project != "" && mutation.Project != name) {
 					continue
 				}
 				eval, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
@@ -2101,7 +2102,7 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 					continue
 				}
 				if apply {
-					if _, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ? WHERE seq = ? AND target_key = ? AND project = ? AND acked_at IS NULL AND disposition = ?`, eval.repairedPayload, mutation.Seq, DefaultSyncTargetKey, name, SyncMutationDispositionPending); err != nil {
+					if _, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ?, project = ? WHERE seq = ? AND target_key = ? AND project = ? AND acked_at IS NULL AND disposition = ?`, eval.repairedPayload, name, mutation.Seq, DefaultSyncTargetKey, mutation.Project, SyncMutationDispositionPending); err != nil {
 						return err
 					}
 				}
@@ -2139,11 +2140,13 @@ func (s *Store) applyCloudUpgradeLegacyMutationRepairs(project string) error {
 				continue
 			}
 			if _, err := s.execHook(tx,
-				`UPDATE sync_mutations SET payload = ? WHERE target_key = ? AND project = ? AND seq = ? AND acked_at IS NULL`,
+				`UPDATE sync_mutations SET payload = ?, project = ? WHERE target_key = ? AND project = ? AND seq = ? AND acked_at IS NULL AND disposition = ?`,
 				eval.repairedPayload,
-				DefaultSyncTargetKey,
 				project,
+				DefaultSyncTargetKey,
+				mutation.Project,
 				mutation.Seq,
+				SyncMutationDispositionPending,
 			); err != nil {
 				return err
 			}
@@ -2195,7 +2198,49 @@ func (s *Store) listPendingProjectMutationsTx(tx *sql.Tx, project string) ([]Syn
 		}
 		mutations = append(mutations, m)
 	}
-	return mutations, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	// A blank journal project is attributable only through a matching local session.
+	blankRows, err := tx.Query(`SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at FROM sync_mutations WHERE target_key = ? AND project = '' AND entity = ? AND op = ? AND acked_at IS NULL AND disposition = ? ORDER BY seq`, DefaultSyncTargetKey, SyncEntitySession, SyncOpUpsert, SyncMutationDispositionPending)
+	if err != nil {
+		return nil, err
+	}
+	defer blankRows.Close()
+	for blankRows.Next() {
+		var m SyncMutation
+		if err := blankRows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt); err != nil {
+			return nil, err
+		}
+		var owner string
+		err := tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, m.EntityKey).Scan(&owner)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		normalized, _ := NormalizeProject(owner)
+		if strings.TrimSpace(normalized) == project {
+			mutations = append(mutations, m)
+			continue
+		}
+		if err == nil && strings.TrimSpace(normalized) != "" {
+			continue
+		}
+		var body syncSessionPayload
+		if decodeSyncPayload([]byte(m.Payload), &body) == nil {
+			payloadProject, _ := NormalizeProject(body.Project)
+			if strings.TrimSpace(payloadProject) == project {
+				mutations = append(mutations, m)
+			}
+		}
+	}
+	if err := blankRows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(mutations, func(i, j int) bool { return mutations[i].Seq < mutations[j].Seq })
+	return mutations, nil
 }
 
 func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMutation) (cloudUpgradeLegacyMutationEvaluation, error) {
@@ -2226,8 +2271,26 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		finding.Message = msg
 		return cloudUpgradeLegacyMutationEvaluation{finding: finding, hasIssue: true, canRepair: false}
 	}
-	if base.Project == "" || base.Project != mutation.Project {
-		return blocked(UpgradeReasonBlockedLegacyMutationManual, "mutation project must be non-empty and canonical for cloud transport and cannot be inferred from authoritative local state"), nil
+	ownerProject := base.Project
+	if base.Project == "" {
+		if entity != SyncEntitySession || op != SyncOpUpsert || base.EntityKey == "" {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, "mutation project must be non-empty and canonical for cloud transport and cannot be inferred from authoritative local state"), nil
+		}
+		var owner string
+		err := tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, base.EntityKey).Scan(&owner)
+		if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(owner) == "" {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, "mutation project must be non-empty and canonical for cloud transport and cannot be inferred from authoritative local state"), nil
+		}
+		if err != nil {
+			return cloudUpgradeLegacyMutationEvaluation{}, err
+		}
+		ownerProject, _ = NormalizeProject(owner)
+		ownerProject = strings.TrimSpace(ownerProject)
+		if ownerProject == "" {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, "mutation project must be non-empty and canonical for cloud transport and cannot be inferred from authoritative local state"), nil
+		}
+	} else if base.Project != mutation.Project {
+		return blocked(UpgradeReasonBlockedLegacyMutationManual, "mutation project must be canonical"), nil
 	}
 
 	if payload == "" {
@@ -2250,6 +2313,13 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		body.ID = strings.TrimSpace(body.ID)
 		body.Directory = strings.TrimSpace(body.Directory)
 		changed := false
+		if mutation.Project == "" {
+			if strings.TrimSpace(body.Project) != "" && strings.TrimSpace(body.Project) != ownerProject {
+				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload project conflicts with local session project"), nil
+			}
+			body.Project = ownerProject
+			changed = true
+		}
 		if body.ID == "" && strings.TrimSpace(mutation.EntityKey) != "" {
 			body.ID = strings.TrimSpace(mutation.EntityKey)
 			changed = true
@@ -2259,6 +2329,15 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		}
 		if strings.TrimSpace(mutation.EntityKey) != "" && strings.TrimSpace(mutation.EntityKey) != body.ID {
 			return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("session entity_key %q does not match payload id %q", mutation.EntityKey, body.ID)), nil
+		}
+		if mutation.Project == "" && op == SyncOpUpsert && body.Directory != "" {
+			var directory string
+			if err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, body.ID).Scan(&directory); err != nil {
+				return cloudUpgradeLegacyMutationEvaluation{}, err
+			}
+			if strings.TrimSpace(directory) != body.Directory {
+				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory conflicts with local session directory"), nil
+			}
 		}
 		if op == SyncOpUpsert && body.Directory == "" {
 			var directory string

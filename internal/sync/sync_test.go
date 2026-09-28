@@ -4577,6 +4577,29 @@ func TestFilterByPendingMutationsPaginatesBeforeProjectFiltering(t *testing.T) {
 	}
 }
 
+func TestFilterByPendingMutationsBlankProjectFailsWithIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, payload string
+		sessions           []store.Session
+	}{
+		{name: "local owner", key: "owned", payload: `{"id":"owned","project":""}`, sessions: []store.Session{{ID: "owned", Project: "proj-a"}}},
+		{name: "payload conflict", key: "owned", payload: `{"id":"owned","project":"proj-b"}`, sessions: []store.Session{{ID: "owned", Project: "proj-a"}}},
+		{name: "missing owner", key: "missing", payload: `{"id":"missing","project":"proj-a"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSyncTestHooks(t)
+			sy := NewCloudWithTransport(newTestStore(t), newFakeCloudTransport(), "proj-a")
+			storeListMutationsAfterSeq = func(_ *store.Store, _ string, _ int64, _ int) ([]store.SyncMutation, error) {
+				return []store.SyncMutation{{Seq: 123, Entity: store.SyncEntitySession, EntityKey: tc.key, Op: store.SyncOpUpsert, Payload: tc.payload}}, nil
+			}
+			_, _, err := sy.filterByPendingMutations(&store.ExportData{Sessions: tc.sessions}, "proj-a")
+			if err == nil || !strings.Contains(err.Error(), "seq=123") || !strings.Contains(err.Error(), `entity_key="`+tc.key+`"`) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
 func TestExportDoesNotReconcileUnsyncedChunksByCreatedByOnly(t *testing.T) {
 	s := newTestStore(t)
 	transport := newFakeCloudTransport()

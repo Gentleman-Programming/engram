@@ -12602,6 +12602,112 @@ func TestSupersedeUnenrolledLegacyMutationsContract(t *testing.T) {
 	}
 }
 
+func TestCloudUpgradeBlankProjectSessionRepair(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("legacy-blank", "project-a", "/tmp/legacy-blank"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, '')`, DefaultSyncTargetKey, SyncEntitySession, "legacy-blank", SyncOpUpsert, `{"id":"legacy-blank","project":"","directory":""}`, SyncSourceLocal); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DiagnoseCloudUpgradeLegacyMutations("project-a")
+	if err != nil || report.RepairableCount != 1 {
+		t.Fatalf("diagnosis=%+v err=%v", report, err)
+	}
+	if err := s.applyCloudUpgradeLegacyMutationRepairs("project-a"); err != nil {
+		t.Fatal(err)
+	}
+	var project, payload string
+	if err := s.db.QueryRow(`SELECT project, payload FROM sync_mutations WHERE entity_key = 'legacy-blank'`).Scan(&project, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var body syncSessionPayload
+	if err := decodeSyncPayload([]byte(payload), &body); err != nil {
+		t.Fatal(err)
+	}
+	if project != "project-a" || body.Project != "project-a" || body.Directory != "/tmp/legacy-blank" {
+		t.Fatalf("project=%q payload=%+v", project, body)
+	}
+}
+
+func TestRepairPendingSessionBlankProjectDirectory(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("blank-directory", "project-a", "/tmp/blank-directory"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, '')`, DefaultSyncTargetKey, SyncEntitySession, "blank-directory", SyncOpUpsert, `{"id":"blank-directory"}`, SyncSourceLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, _ := result.LastInsertId()
+	actions, err := s.RepairPendingSessionDirectories("project-a", false)
+	if err != nil || len(actions) != 1 || actions[0].Seq != seq {
+		t.Fatalf("dry-run=%+v err=%v", actions, err)
+	}
+	actions, err = s.RepairPendingSessionDirectories("project-a", true)
+	if err != nil || len(actions) != 1 {
+		t.Fatalf("apply=%+v err=%v", actions, err)
+	}
+	var project, payload string
+	if err := s.db.QueryRow(`SELECT project, payload FROM sync_mutations WHERE seq = ?`, seq).Scan(&project, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var body syncSessionPayload
+	if err := decodeSyncPayload([]byte(payload), &body); err != nil {
+		t.Fatal(err)
+	}
+	if project != "project-a" || body.Project != project || body.Directory != "/tmp/blank-directory" {
+		t.Fatalf("project=%q body=%+v", project, body)
+	}
+}
+
+func TestCloudUpgradeBlankProjectSessionOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, payload string
+		blocked            bool
+	}{
+		{"other project", "other", `{"id":"other","project":"project-b"}`, false},
+		{"conflicting payload", "owned", `{"id":"owned","project":"project-b"}`, true},
+		{"missing local session", "missing", `{"id":"missing","project":"project-a"}`, true},
+		{"wrong payload id", "owned", `{"id":"different","project":"project-a"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			for _, session := range []struct{ id, project string }{{"owned", "project-a"}, {"other", "project-b"}} {
+				if err := s.CreateSession(session.id, session.project, "/tmp/"+session.id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, '')`, DefaultSyncTargetKey, SyncEntitySession, tc.key, SyncOpUpsert, tc.payload, SyncSourceLocal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seq, _ := result.LastInsertId()
+			report, err := s.DiagnoseCloudUpgradeLegacyMutations("project-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := 0
+			if tc.blocked {
+				expected = 1
+			}
+			if report.BlockedCount != expected {
+				t.Fatalf("report=%+v", report)
+			}
+			if tc.blocked && (len(report.Findings) != 1 || report.Findings[0].Seq != seq || report.Findings[0].EntityKey != tc.key) {
+				t.Fatalf("finding=%+v", report.Findings)
+			}
+			if err := s.applyCloudUpgradeLegacyMutationRepairs("project-a"); err != nil {
+				t.Fatal(err)
+			}
+			var project string
+			if err := s.db.QueryRow(`SELECT project FROM sync_mutations WHERE seq = ?`, seq).Scan(&project); err != nil || project != "" {
+				t.Fatalf("project=%q err=%v", project, err)
+			}
+		})
+	}
+}
+
 func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("repairable", "project", "/tmp/repairable"); err != nil {

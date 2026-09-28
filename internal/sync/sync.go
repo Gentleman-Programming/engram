@@ -2475,6 +2475,11 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 	selectedMutations := make([]store.SyncMutation, 0, len(mutations))
 
 	for _, mutation := range mutations {
+		if mutation.Project == "" && mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
+			if owner, present := sessionProjectByID[mutation.EntityKey]; present && owner == project {
+				return nil, nil, fmt.Errorf("blank-project session mutation seq=%d entity_key=%q requires cloud upgrade diagnosis and repair before export", mutation.Seq, mutation.EntityKey)
+			}
+		}
 		mutationProject := resolveMutationProject(mutation, sessionProjectByID)
 		if mutationProject != project {
 			if mutationProject != "" {
@@ -2496,6 +2501,9 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 			default:
 				continue
 			}
+		}
+		if mutation.Project == "" && mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
+			return nil, nil, fmt.Errorf("blank-project session mutation seq=%d entity_key=%q has no authoritative local session in project %q; run cloud upgrade doctor", mutation.Seq, mutation.EntityKey, project)
 		}
 		seqs = append(seqs, mutation.Seq)
 		selectedMutations = append(selectedMutations, mutation)
