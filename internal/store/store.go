@@ -2209,7 +2209,7 @@ func (s *Store) listPendingProjectMutationsTx(tx *sql.Tx, project string) ([]Syn
 	if err != nil {
 		return nil, err
 	}
-	defer blankRows.Close()
+	defer func() { _ = blankRows.Close() }()
 	for blankRows.Next() {
 		var m SyncMutation
 		if err := blankRows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt); err != nil {
@@ -2237,6 +2237,9 @@ func (s *Store) listPendingProjectMutationsTx(tx *sql.Tx, project string) ([]Syn
 		}
 	}
 	if err := blankRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := blankRows.Close(); err != nil {
 		return nil, err
 	}
 	sort.Slice(mutations, func(i, j int) bool { return mutations[i].Seq < mutations[j].Seq })
