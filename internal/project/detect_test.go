@@ -1150,6 +1150,60 @@ func TestDetectProject_AmbiguousEmpty(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFull_AmbiguousChildrenStableOrder(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		if err := os.MkdirAll(filepath.Join(parent, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		entries []os.DirEntry
+	}{
+		{name: "forward", entries: entries},
+		{name: "reversed", entries: []os.DirEntry{entries[1], entries[0]}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldReadDir, oldNow := childScanReadDir, childScanNow
+			t.Cleanup(func() {
+				childScanReadDir = oldReadDir
+				childScanNow = oldNow
+			})
+			base := time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC)
+			childScanNow = func() time.Time { return base }
+			reads := 0
+			childScanReadDir = func(_ *os.File, count int) ([]os.DirEntry, error) {
+				if count != 1 {
+					t.Fatalf("ReadDir count = %d, want 1", count)
+				}
+				if reads == len(tc.entries) {
+					t.Fatal("child scan continued after the second repository")
+					return nil, io.EOF
+				}
+				entry := tc.entries[reads]
+				reads++
+				return []os.DirEntry{entry}, nil
+			}
+
+			res := DetectProjectFull(parent)
+			if !errors.Is(res.Error, ErrAmbiguousProject) {
+				t.Fatalf("Error = %v, want ErrAmbiguousProject", res.Error)
+			}
+			if want := []string{"repo-a", "repo-b"}; !reflect.DeepEqual(res.AvailableProjects, want) {
+				t.Fatalf("AvailableProjects = %q, want %q", res.AvailableProjects, want)
+			}
+			if reads != 2 {
+				t.Fatalf("ReadDir calls = %d, want 2", reads)
+			}
+		})
+	}
+}
+
 func TestChildScan_ContinuesPastNoiseUntilSecondRepository(t *testing.T) {
 	parent := t.TempDir()
 	firstRepo := filepath.Join(parent, "01-repo")

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -172,6 +173,7 @@ func DetectProjectFull(dir string) DetectionResult {
 			for i, c := range children {
 				names[i] = normalizeAvailableProject(filepath.Base(c))
 			}
+			slices.Sort(names)
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
 			// DetectProject wrapper handles CLI compat by using filepath.Base on error.
