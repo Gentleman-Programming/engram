@@ -83,7 +83,7 @@ pi install npm:pi-mcp-adapter
 pi-engram init
 ```
 
-Run this quick start only after `gentle-engram@0.1.17` is published to npm; preparing this package version does not make it available yet. Published `0.1.16` still registers Engram MCP during `pi-engram init`, so do not use it for native-only setup. Go's `engram setup pi` remains pinned to published `0.1.16` until the separate npm release and a follow-up pin update.
+Use this quick start if `gentle-engram@0.1.17` is available on npm; otherwise wait for its publication before running these commands for native-only setup. Published `0.1.16` still registers Engram MCP during `pi-engram init`, so do not use it for native-only setup. Go's `engram setup pi` remains pinned to `0.1.16` pending a separate pin update.
 
 Restart Pi after installation, then ask Pi what it remembers about the current project or call `mem_context`.
 
@@ -283,7 +283,7 @@ MCP tool calls still use Engram core's canonical project resolver at call time. 
 
 | Symptom                                                      | Fix                                                                                                                                                                                                                                                                     |
 | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mem_*` tools are missing                                    | After the separate npm release, install/verify `npm:gentle-engram@0.1.17`, run `pi-engram init`, then restart Pi. Keep `npm:pi-mcp-adapter` installed if you use MCP integrations such as Notion or direct MCP flows.                                                                                    |
+| `mem_*` tools are missing                                    | If `gentle-engram@0.1.17` is available on npm, install/verify `npm:gentle-engram@0.1.17`, run `pi-engram init`, then restart Pi. Published `0.1.16` init still registers Engram MCP; do not use it for native-only setup. Keep `npm:pi-mcp-adapter` installed if you use MCP integrations such as Notion or direct MCP flows.                                                                                    |
 | Pi cannot find `engram`                                      | Set `ENGRAM_BIN=/absolute/path/to/engram`.                                                                                                                                                                                                                              |
 | Session capture should use another server                    | Set `ENGRAM_URL=http://host:7437`.                                                                                                                                                                                                                                      |
 | Pi shows `error MCP: 0/N servers` but `mem_*` works          | That status is Pi's global MCP gateway, not proof that Engram's Pi-native HTTP tools failed. Check `~/.pi/agent/mcp.json` for stale/unreachable servers such as remote OAuth services, and keep `npm:pi-mcp-adapter` installed if you use MCP integrations like Notion. |
