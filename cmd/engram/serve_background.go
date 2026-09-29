@@ -10,7 +10,7 @@ import (
 
 // launchServeBackground starts a server without inheriting the caller's pipe handles.
 // In particular, Git Bash redirection alone cannot detach Windows named pipes.
-func launchServeBackground(executable, logPath string) error {
+func launchServeBackground(executable, logPath string) (retErr error) {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("background serve is supported only on Windows")
 	}
@@ -18,12 +18,20 @@ func launchServeBackground(executable, logPath string) error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer func() {
+		if err := logFile.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close serve log: %w", err)
+		}
+	}()
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
-	defer null.Close()
+	defer func() {
+		if err := null.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close null device: %w", err)
+		}
+	}()
 	child := exec.Command(executable, "serve")
 	child.Stdin, child.Stdout, child.Stderr = null, null, logFile
 	if err := child.Start(); err != nil {

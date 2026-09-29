@@ -423,14 +423,22 @@ func TestCodexWindowsBashHookDispatcherBackground(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer reader.Close()
+		defer func() {
+			if err := reader.Close(); err != nil {
+				t.Errorf("close hook stdout reader: %v", err)
+			}
+		}()
 		cmd.Stdout = writer
 		stderrFile, err := os.CreateTemp(dir, "hook-stderr-*.log")
 		if err != nil {
 			_ = writer.Close()
 			t.Fatal(err)
 		}
-		defer stderrFile.Close()
+		defer func() {
+			if err := stderrFile.Close(); err != nil {
+				t.Errorf("close hook stderr file: %v", err)
+			}
+		}()
 		cmd.Stderr = stderrFile
 		start := time.Now()
 		if err := cmd.Start(); err != nil {
@@ -465,7 +473,6 @@ func TestCodexWindowsBashHookDispatcherBackground(t *testing.T) {
 			case wait = <-waitDone:
 			case <-ctx.Done():
 				_ = cmd.Process.Kill()
-				_ = reader.Close()
 				t.Fatalf("hook exit or consumer EOF exceeded 12 seconds (exit=%t EOF=%t): %v", !wait.at.IsZero(), !read.at.IsZero(), ctx.Err())
 			}
 		}
