@@ -334,8 +334,8 @@ func (a *mutationTransportAdapter) PushMutations(entries []autosync.MutationEntr
 	return &autosync.PushMutationsResult{AcceptedSeqs: seqs}, nil
 }
 
-func (a *mutationTransportAdapter) PullMutations(sinceSeq int64, limit int) (*autosync.PullMutationsResponse, error) {
-	resp, err := a.remote.PullMutations(sinceSeq, limit)
+func (a *mutationTransportAdapter) PullMutations(ctx context.Context, sinceSeq int64, limit int) (*autosync.PullMutationsResponse, error) {
+	resp, err := a.remote.PullMutations(ctx, sinceSeq, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +663,15 @@ func cloudTargetKeyForProject(project string) string {
 	return fmt.Sprintf("%s:%s", constants.TargetKeyCloud, project)
 }
 
-func markCloudSyncFailure(s *store.Store, targetKey string, syncErr error) {
+// syncStateMarker is the degraded-state marking surface used by cloud sync
+// callers to record auth-required, blocked, or generic transport failures.
+type syncStateMarker interface {
+	MarkSyncAuthRequired(targetKey, message string) error
+	MarkSyncBlocked(targetKey, reasonCode, message string) error
+	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
+}
+
+func markCloudSyncFailure(s syncStateMarker, targetKey string, syncErr error) {
 	if syncErr == nil {
 		return
 	}

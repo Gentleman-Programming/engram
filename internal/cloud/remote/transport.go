@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -404,10 +405,12 @@ func (mt *MutationTransport) PushMutations(entries []MutationEntry) ([]int64, er
 }
 
 // PullMutations fetches mutations from the cloud server since the given sequence.
+// The request is bound to ctx so caller cancellation (e.g. CLI Ctrl+C or manager
+// shutdown) aborts an in-flight pull promptly.
 // REQ-201: 404 → reason_code=server_unsupported; 401 → IsAuthFailure.
-func (mt *MutationTransport) PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error) {
+func (mt *MutationTransport) PullMutations(ctx context.Context, sinceSeq int64, limit int) (*PullMutationsResponse, error) {
 	reqURL := fmt.Sprintf("%s/sync/mutations/pull?since_seq=%d&limit=%d", mt.baseURL, sinceSeq, limit)
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cloud: build mutation pull request: %w", err)
 	}
