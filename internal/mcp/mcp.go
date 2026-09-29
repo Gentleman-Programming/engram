@@ -2801,6 +2801,7 @@ func storedProjectFallback(obs *store.Observation, detRes projectpkg.DetectionRe
 	}
 	detRes.Project = *obs.Project
 	detRes.Source = projectpkg.SourceStoredProject
+	detRes.Path = ""
 	detRes.Error = nil
 	return detRes, nil
 }

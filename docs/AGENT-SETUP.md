@@ -221,7 +221,9 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 
 **Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`) accept an optional `project` override validated against the store. Omit it to auto-detect. `mem_get_observation` is ID-based and does not accept a `project` override.
 
-`mem_get_observation` and `mem_update` operate by observation ID and are anchored on the record itself: when cwd detection is ambiguous, they fall back to the project stored on the observation (`project_source: "stored_project"`), so reading or updating an existing record by ID does not require ambiguous-project recovery. The recovery flow above applies to writes that create a new record with no anchored project.
+`mem_get_observation` and `mem_update` operate by observation ID and are anchored on the record itself: only when cwd detection is ambiguous and the observation has a nonblank stored project do they fall back to that project (`project_source: "stored_project"`, `project_path: ""`). The stored project identifies the record's owner, not a verified repository path. This ID-anchored read/write exception does not require ambiguous-project recovery; the recovery flow above still applies to writes that create a new record with no anchored project.
+
+The exception does not bypass invalid or unknown process-level project overrides, missing/blank stored projects, or `mem_update` ownership checks against a known current project. Existing session ownership protections remain unchanged. An update payload's `project` is not a project-resolution override and cannot authorize an otherwise rejected update.
 
 ---
 

@@ -8530,7 +8530,7 @@ func addNilProjectObservation(t *testing.T, s *store.Store, dataDir, sessionID s
 // is anchored on the record identity: with an ambiguous cwd and an observation
 // that carries a project, the tool succeeds using the stored project (#1470).
 func TestHandleGetObservation_AmbiguousCwdUsesStoredProject(t *testing.T) {
-	parent, s, _ := newAmbiguousMCPSetup(t)
+	_, s, _ := newAmbiguousMCPSetup(t)
 
 	if err := s.CreateSession("sess-degraded", "degraded-project", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -8564,8 +8564,8 @@ func TestHandleGetObservation_AmbiguousCwdUsesStoredProject(t *testing.T) {
 	if got := body["project_source"]; got != project.SourceStoredProject {
 		t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
 	}
-	if got := body["project_path"]; got != parent {
-		t.Fatalf("project_path = %v, want %q", got, parent)
+	if got := body["project_path"]; got != "" {
+		t.Fatalf("project_path = %v, want empty for stored project", got)
 	}
 	if result, _ := body["result"].(string); !strings.Contains(result, "degraded obs title") {
 		t.Fatalf("result must contain the observation content; result=%q", result)
@@ -8613,7 +8613,7 @@ func TestHandleGetObservation_AmbiguousCwdNilProjectRecoveryEnvelope(t *testing.
 // are anchored on the record identity: with an ambiguous cwd and an observation
 // that carries a project, mem_update succeeds and persists the change (#1470).
 func TestHandleUpdate_AmbiguousUsesStoredProject(t *testing.T) {
-	parent, s, _ := newAmbiguousMCPSetup(t)
+	_, s, _ := newAmbiguousMCPSetup(t)
 
 	if err := s.CreateSession("sess-upd-stored", "stored-project", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -8649,8 +8649,8 @@ func TestHandleUpdate_AmbiguousUsesStoredProject(t *testing.T) {
 	if got := body["project_source"]; got != project.SourceStoredProject {
 		t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
 	}
-	if got := body["project_path"]; got != parent {
-		t.Fatalf("project_path = %v, want %q", got, parent)
+	if got := body["project_path"]; got != "" {
+		t.Fatalf("project_path = %v, want empty for stored project", got)
 	}
 	updated, err := s.GetObservation(obsID)
 	if err != nil || updated.Title != "Updated via stored project" {
@@ -8692,6 +8692,59 @@ func TestHandleUpdate_AmbiguousNilProjectRecoveryEnvelope(t *testing.T) {
 	updated, err := s.GetObservation(obsID)
 	if err != nil || updated.Title != "nil project obs" {
 		t.Fatalf("observation must be untouched = %#v, err=%v", updated, err)
+	}
+}
+
+func TestHandleUpdate_AmbiguousOwnershipGuardrails(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		override string
+		blank    bool
+	}{
+		{name: "malformed override", override: "../stored-project"},
+		{name: "unknown override", override: "unknown-project"},
+		{name: "known mismatch", override: "repo-a"},
+		{name: "blank stored project", blank: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, s, _ := newAmbiguousMCPSetup(t)
+			if err := s.CreateSession("guarded-session", "stored-project", "/tmp"); err != nil {
+				t.Fatal(err)
+			}
+			id, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "guarded-session", Type: "note", Title: "Original",
+				Content: "Original content", Project: "stored-project",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.name == "known mismatch" {
+				if err := s.CreateSession("other-session", "repo-a", "/tmp"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.blank {
+				if _, err := s.DB().Exec(`UPDATE observations SET project = '   ' WHERE id = ?`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ENGRAM_PROJECT", tt.override)
+			res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"id": float64(id), "title": "Must not persist", "project": "stored-project",
+				}},
+			})
+			if err != nil || !res.IsError {
+				t.Fatalf("guarded update: err=%v, result=%#v", err, res)
+			}
+			if tt.name == "known mismatch" && callResultJSON(t, res)["error_code"] != "project_mismatch" {
+				t.Fatalf("expected ownership mismatch: %s", callResultText(t, res))
+			}
+			obs, err := s.GetObservation(id)
+			if err != nil || obs.Title != "Original" {
+				t.Fatalf("observation changed: %#v, err=%v", obs, err)
+			}
+		})
 	}
 }
 
@@ -9651,8 +9704,8 @@ func TestGetObservationAndReviewPreserveAmbiguityRecoveryMetadata(t *testing.T) 
 		if got := body["project_source"]; got != project.SourceStoredProject {
 			t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
 		}
-		if got := body["project_path"]; got != parent {
-			t.Fatalf("project_path = %v, want %q", got, parent)
+		if got := body["project_path"]; got != "" {
+			t.Fatalf("project_path = %v, want empty for stored project", got)
 		}
 	})
 
