@@ -19,6 +19,7 @@ func TestDeadcodeRatchetToolchain(t *testing.T) {
 	}
 	for _, tt := range []struct {
 		name, module, mode, want string
+		baseline, wantBaseline   string
 		override, fail, wantErr  bool
 	}{
 		{name: "repository minimum", module: "module fixture\ngo 1.25.10\ntoolchain go1.26.1\n", want: "go1.25.10+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
@@ -31,6 +32,7 @@ func TestDeadcodeRatchetToolchain(t *testing.T) {
 		{name: "override bypass", module: "go invalid\n", override: true, want: "local|./..."},
 		{name: "compare bypass", mode: "--compare", want: "no newly unreachable functions"},
 		{name: "default failure", module: "go 1.25.10\n", fail: true, wantErr: true, want: "GOTOOLCHAIN=go1.25.10+auto"},
+		{name: "successful update", module: "go 1.25.10\n", mode: "--update", baseline: "internal/store/store.go\tStore.Delete\n", wantBaseline: "internal/store/store.go\tStore.Save\n", want: "go1.25.10+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
 		{name: "update failure", module: "go 1.25.10\n", mode: "--update", fail: true, wantErr: true, want: "GOTOOLCHAIN=go1.25.10+auto"},
 		{name: "override update failure", mode: "--update", override: true, fail: true, wantErr: true, want: "refusing to overwrite the baseline"},
 	} {
@@ -45,7 +47,15 @@ func TestDeadcodeRatchetToolchain(t *testing.T) {
 				writeRatchetFixture(t, dir, "go.mod", tt.module)
 			}
 			const debt = "internal/store/store.go\tStore.Save\n"
-			baseline := writeRatchetFixture(t, dir, "baseline.txt", debt)
+			initialBaseline := debt
+			if tt.baseline != "" {
+				initialBaseline = tt.baseline
+			}
+			wantBaseline := initialBaseline
+			if tt.wantBaseline != "" {
+				wantBaseline = tt.wantBaseline
+			}
+			baseline := writeRatchetFixture(t, dir, "baseline.txt", initialBaseline)
 			log := filepath.Join(dir, "invocation.txt")
 			fake := writeRatchetFixture(t, dir, "go", "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"$GOTOOLCHAIN\" \"$*\" >\"$INVOCATION\"\nif [[ $FAIL_ANALYZER == 1 ]]; then echo 'partial analyzer output'; echo 'underlying toolchain failure' >&2; exit 17; fi\nprintf '%s\\n' 'internal/store/store.go:42:7: unreachable func: Store.Save'\n")
 			if err := os.Chmod(fake, 0o755); err != nil {
@@ -95,9 +105,15 @@ func TestDeadcodeRatchetToolchain(t *testing.T) {
 					t.Fatalf("failure diagnostic = %q", output)
 				}
 			}
+			if tt.mode == "--update" && !tt.wantErr {
+				wantOutput := "updated " + baseline + " with deadcode v0.30.0 output\n"
+				if string(output) != wantOutput {
+					t.Fatalf("output = %q, want %q", output, wantOutput)
+				}
+			}
 			got, err := os.ReadFile(baseline)
-			if err != nil || string(got) != debt {
-				t.Fatalf("baseline changed: %q (%v)", got, err)
+			if err != nil || string(got) != wantBaseline {
+				t.Fatalf("baseline = %q (%v), want %q", got, err, wantBaseline)
 			}
 		})
 	}
