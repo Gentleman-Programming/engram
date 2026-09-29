@@ -75,6 +75,20 @@ function peerRangeAllows(range, version) {
 	return patch >= floorPatch;
 }
 
+// Regression contract for #1557: TypeBox is provided by the Pi host.
+test("typebox is not a hard or optional dependency", () => {
+	assert.equal(pkg.dependencies?.typebox, undefined, "the Pi host must provide typebox, not a hard dependency");
+	assert.equal(pkg.optionalDependencies?.typebox, undefined, "optional dependencies would still install a separate typebox copy");
+});
+
+test("typebox is declared as a wildcard peer dependency", () => {
+	assert.equal(pkg.peerDependencies?.typebox, "*", "typebox must accept the Pi host's version without a package-owned constraint");
+});
+
+test("typebox peer dependency is optional", () => {
+	assert.equal(pkg.peerDependenciesMeta?.typebox?.optional, true, "npm must not auto-install a separate typebox peer");
+});
+
 test("pi-tui is not a hard dependency", () => {
 	assert.equal(
 		pkg.dependencies?.[PI_TUI],
