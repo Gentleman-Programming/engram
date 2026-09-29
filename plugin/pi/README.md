@@ -38,7 +38,7 @@ Install it once. Keep coding. Pi remembers.
 - **Cloud when the team needs it** — Engram Cloud adds opt-in, project-scoped replication, shared access, and a browser dashboard while keeping local SQLite authoritative.
 - **Token-efficient by design** — Engram stores curated summaries, decisions, prompts, and session handoffs instead of a noisy firehose of raw tool calls. Agents search first, then fetch only the relevant memory.
 - **Compaction survival** — before context resets, the Memory Protocol pushes summaries into Engram so the next session can recover what matters.
-- **Simple Pi setup** — install the Pi package, install the MCP adapter, run `pi-engram init`, restart Pi.
+- **Simple Pi setup** — install the Pi package, retain the MCP adapter for other servers, run `pi-engram init`, restart Pi.
 - **Built by Gentleman Programming** — Engram comes from the Gentleman Programming ecosystem: an open-source engineering community, YouTube channel, and hands-on agentic-coding workflow around real tools instead of toy demos.
 - **Real open-source project** — Engram ships docs, releases, beta programs, contributor guidelines, issue templates, CI, and a growing contributor/community workflow around the main repository.
 
@@ -78,30 +78,36 @@ Engram includes a terminal UI for browsing sessions, observations, prompts, proj
 ## Quick start
 
 ```bash
-pi install npm:gentle-engram@0.1.13
+pi install npm:gentle-engram@0.1.17
 pi install npm:pi-mcp-adapter
 pi-engram init
 ```
+
+Use this quick start if `gentle-engram@0.1.17` is available on npm; otherwise wait for its publication before running these commands for native-only setup. Published `0.1.16` still registers Engram MCP during `pi-engram init`, so do not use it for native-only setup. Go's `engram setup pi` remains pinned to `0.1.16` pending a separate pin update.
 
 Restart Pi after installation, then ask Pi what it remembers about the current project or call `mem_context`.
 
 ## What gets installed
 
-`gentle-engram` connects Pi to Engram through two complementary paths:
+`gentle-engram` connects Pi to Engram through Pi-native tools. Direct MCP is separate and opt-in:
 
 | Path         | Purpose                                                                                                                                |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Pi extension | Captures prompts/session events, injects the Memory Protocol, and exposes compact Pi-native `mem_*` tools over the Engram HTTP server. |
-| MCP tools    | Keeps Engram's MCP surface available through `pi-mcp-adapter` for clients and flows that use MCP directly.                             |
+| Direct MCP (manual) | Standalone MCP clients may still run `engram mcp`; Pi setup does not register Engram MCP. `pi-mcp-adapter` stays installed for other servers. |
+
+Pi-native `mem_session_end` accepts only the current Pi host session ID; a different, missing, or empty ID is refused before an end request. If a resumed conversation has a distinct persisted session ID, the matching host request ends that effective ID through the same coordination as session shutdown. A raw host-ID end requires locally confirmed registration; an uncertain registration cannot authorize it. A pending resumed ID whose end acknowledgement was lost can be reconciled without another end request only when Engram confirms that exact ID is already ended under the resolved local project. To end an independent/manual session, use a separate direct client rather than supplying its ID to the Pi-native tool.
 
 ```text
 Pi events/tools -> gentle-engram extension -> ENGRAM_URL / engram serve -> SQLite
-Pi MCP tools   -> pi-mcp-adapter -> ENGRAM_BIN / engram mcp -> SQLite
+Standalone MCP client -> engram mcp -> SQLite (deliberate, separate setup)
 ```
 
-Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, lifecycle review, conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_review`, `mem_judge`, and `mem_compare`, cross-project discovery through `mem_list_projects`, and local pin curation through `mem_pin`/`mem_unpin`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP direct tools are not enabled by default in Pi to avoid duplicate raw `engram_mem_*` tool rows.
+Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, lifecycle review, conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_review`, `mem_judge`, and `mem_compare`, cross-project discovery through `mem_list_projects`, and local pin curation through `mem_pin`/`mem_unpin`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP is not registered by Pi setup. An existing Pi MCP entry remains active until you manually remove it and restart/reload Pi; native-only agent writes are not guaranteed while it remains.
 
 ## Compact memory tool rendering
+
+`mem_context` accepts optional `max_bytes` and `compact` arguments and forwards supplied values to Engram's HTTP `/context` endpoint. Engram core owns the byte limit and context formatting; these options affect the context returned to the model, not Pi's separate compact/collapsed tool chrome. If either argument is omitted, Pi omits that query parameter and preserves the HTTP endpoint's existing behavior.
 
 `gentle-engram` owns the Pi chrome for Engram memory tools by registering compact Pi-native `mem_*` tools in the companion package. When tools such as `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, `mem_get_observation`, `mem_review`, `mem_judge`, and `mem_doctor` run in Pi, the default collapsed view stays compact:
 
@@ -162,7 +168,7 @@ This is a lightweight convenience convention, not a full secret-scanning system.
 
 When Pi emits a compaction lifecycle event, `gentle-engram` reads the current payload field `compactionEntry.summary` first, then falls back to supported legacy fields when that value is absent or blank. It uses the opaque Pi runtime session identity captured from a fresh lifecycle event; it never accepts a model-supplied session ID for compaction recovery.
 
-Before archiving, the extension requires Engram to acknowledge registration for that exact runtime session. It saves a `session_summary` observation with topic key `session/compaction-recovery`, then requests `/context/compaction?session_id=...` for recovery guidance scoped to the same session.
+Before archiving, the extension requires Engram to acknowledge registration for the effective session identity. Whenever a resumed Pi conversation's effective Engram session has already ended, the extension registers another distinct Engram session before writing; every ended row remains closed. Pi session entries retain the mapping for extension reloads, while a fork uses its own runtime conversation ID and cannot inherit the parent's mapping. Unknown registration failures and project ownership conflicts still prevent attributed writes. It saves a `session_summary` observation with topic key `session/compaction-recovery`, then requests `/context/compaction?session_id=...` for recovery guidance scoped to the same session.
 After a second distinct or blank/missing runtime identity, compaction recovery permanently fails closed until the plugin process restarts.
 
 The next turn receives outcome-specific guidance:
@@ -186,15 +192,28 @@ Engram can grow with your workflow:
 
 Cloud is opt-in and project-scoped. Local SQLite remains the source of truth; cloud replicates and makes memory visible when you explicitly enroll a project.
 
+### Importing Git-synced memories in Pi
+
+Pi connects to Engram (starting a local server when needed) and detects the project without importing memories from a checkout's `.engram/manifest.json`. A manifest's presence does not establish that its chunks are new, valid, or appropriate for your local store. If you want to import Git-synced memories, run this command explicitly from the checkout:
+
+```bash
+engram sync --import
+```
+
+Run it again when new chunks are published and you want to import them. Opening Pi or restarting a session never imports new chunks automatically.
+
 ## Requirements
 
 - Pi coding agent with npm package support.
 - Engram installed as `engram` on `PATH`, or `ENGRAM_BIN` pointing at the binary.
+- For Pi-native `mem_list_projects`, a running Engram core server v2.1.0 or later, which provides HTTP `GET /projects`. If `/health` returns 200 but this tool gets a 404, upgrade and restart the server; updating `gentle-engram` alone does not add the route.
 - `pi-mcp-adapter` only if you want the optional MCP gateway for compatibility/debugging; Pi-native `mem_*` tools come from `gentle-engram`.
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
 
-When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi replays only safe reads and idempotent session registration after health returns `2xx`; other writes report the transport failure instead of risking a duplicate mutation.
+When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi gives ordinary reads a bounded 10-second retry policy and `mem_doctor` a bounded 15-second retry policy. Session registration uses a separate bounded 5-second replay policy because Engram core implements that route as idempotent. Other writes are sent once with a short deadline: if their transport outcome is ambiguous, Pi reports it as **unknown** and tells you to verify before retrying rather than risking a duplicate mutation. Caller cancellation is propagated, not reported as a transport failure.
+
+A local `/health` response without `instance_id` is treated as legacy only when it reports a recognized version older than `2.0.0-rc.11`, the release that introduced instance identity. Current, unknown, absent, or malformed versions without identity fail closed with identity-verification guidance; Pi does not adopt, terminate, or replace that server automatically.
 
 ## Configuration
 
@@ -218,20 +237,27 @@ ENGRAM_BIN=/path/to/engram pi
 
 If the binary is missing, Pi keeps running and memory degrades instead of crashing with `spawn engram ENOENT`.
 
+## Environment variables
+
+The Pi extension treats absent, empty, and whitespace-only `ENGRAM_URL`, `ENGRAM_BIN`, and `ENGRAM_PORT` values as unset. It detects blankness without trimming nonblank explicit values.
+
+| Variable          | Default  | Effect                                                                                                                                                                                                                                                                                  |
+| ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENGRAM_URL`      | unset    | Adopt an already running Engram HTTP server (for example `http://127.0.0.1:7437`). When set, the extension skips spawning `engram serve` and skips local instance-identity ownership checks; the server is treated as externally managed.                                                |
+| `ENGRAM_BIN`      | `engram` | Binary override. The named executable is resolved from `PATH` and used to auto-start the local server, resolve its instance identity (`instance-id`), and report its version (`version`). Binaries older than v2.0.0-rc.11 cannot resolve an identity and are reported with upgrade guidance. |
+| `ENGRAM_PORT`     | `7437`   | Port of the local server the extension spawns and probes when `ENGRAM_URL` is unset.                                                                                                                                                                                                       |
+| `ENGRAM_DATA_DIR` | unset    | Data directory inherited by the spawned `engram serve` process. When unset, the server stores memory in `~/.engram` (`%USERPROFILE%\.engram` on Windows).                                                                                                                               |
+
 ## Install command details
 
-`pi-engram init` writes Pi-owned config in the Pi agent directory:
+With this Pi package version, `pi-engram init` updates Pi-owned config in the Pi agent directory:
 
-- `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram@0.1.13` are declared, replacing affected `npm:gentle-engram@0.1.8`, `npm:gentle-engram@0.1.11`, and `npm:gentle-engram@0.1.12` pins when present.
-- `mcp.json`: adds an `engram` MCP server that launches `engram mcp --tools=agent` through a safe Node wrapper with `directTools: false`, so MCP remains available through the gateway without duplicating Pi-native `mem_*` tools.
+- `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram@0.1.17` are declared, replacing affected `npm:gentle-engram@0.1.8`, `npm:gentle-engram@0.1.11`, `npm:gentle-engram@0.1.12`, `npm:gentle-engram@0.1.14`, `npm:gentle-engram@0.1.15`, and `npm:gentle-engram@0.1.16` pins when present.
+- `mcp.json`: never created or changed by init. Existing `mcpServers.engram` triggers a warning with its exact config path. Manually remove only that key and restart/reload Pi to guarantee native-only agent writes; preserve unrelated MCP servers.
 
 `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` when [mise](https://mise.jdx.dev/) is detected in `PATH`. It sets `npmCommand` to `["mise", "exec", "node@<version>", "--", "npm"]` so Pi always uses the mise-managed Node version. Existing `npmCommand` values are never overwritten; if mise is not found, this step is a no-op.
 
-Existing `mcpServers.engram` entries are preserved unless you pass `--force`:
-
-```bash
-pi-engram init --force
-```
+Existing `mcpServers.engram` entries are preserved even with `--force`; the flag does not bypass native-only safety guidance. The published `mcp-template.json` is a legacy **Pi MCP configuration shape** for explicit, optional Pi MCP clients; it is not a generic standalone MCP template and neither `pi-engram init` nor `engram setup pi` uses it.
 
 The command respects `PI_CODING_AGENT_DIR`; otherwise it writes to `~/.pi/agent`.
 
@@ -257,11 +283,11 @@ MCP tool calls still use Engram core's canonical project resolver at call time. 
 
 | Symptom                                                      | Fix                                                                                                                                                                                                                                                                     |
 | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mem_*` tools are missing                                    | Install/verify `npm:gentle-engram@0.1.13`, run `pi-engram init`, then restart Pi. Keep `npm:pi-mcp-adapter` installed if you use MCP integrations such as Notion or direct MCP flows.                                                                                    |
+| `mem_*` tools are missing                                    | If `gentle-engram@0.1.17` is available on npm, install/verify `npm:gentle-engram@0.1.17`, run `pi-engram init`, then restart Pi. Published `0.1.16` init still registers Engram MCP; do not use it for native-only setup. Keep `npm:pi-mcp-adapter` installed if you use MCP integrations such as Notion or direct MCP flows.                                                                                    |
 | Pi cannot find `engram`                                      | Set `ENGRAM_BIN=/absolute/path/to/engram`.                                                                                                                                                                                                                              |
 | Session capture should use another server                    | Set `ENGRAM_URL=http://host:7437`.                                                                                                                                                                                                                                      |
 | Pi shows `error MCP: 0/N servers` but `mem_*` works          | That status is Pi's global MCP gateway, not proof that Engram's Pi-native HTTP tools failed. Check `~/.pi/agent/mcp.json` for stale/unreachable servers such as remote OAuth services, and keep `npm:pi-mcp-adapter` installed if you use MCP integrations like Notion. |
-| Existing MCP config was not replaced                         | Run `pi-engram init --force`.                                                                                                                                                                                                                                           |
+| Existing Pi `mcpServers.engram` entry                         | Manually remove only that key from the warned `mcp.json` path and restart/reload Pi; setup never replaces user-owned MCP config.                                                                                                                                                                                                                                           |
 | `mem_current_project` reports `/project/current` unsupported | Restart or upgrade the running `engram serve`; check `ENGRAM_URL`/`ENGRAM_BIN`. If `.engram/config.json` exists, Pi uses it as a temporary fallback.                                                                                                                    |
 | `mem_session_summary` cannot detect a project                | Ask the user which project should receive the summary, then retry `mem_session_summary` with `project: "name"`.                                                                                                                                                         |
 | Pi warns that its runtime session belongs to another project | Pi registers runtime sessions as `project_owned`. If Engram already persists that session under another nonblank project, its structured `409 session_project_conflict` response suppresses prompt and passive capture even after Pi restarts. Start a fresh Pi session in the current project. |

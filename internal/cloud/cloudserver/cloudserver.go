@@ -315,6 +315,10 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
+	s.mux.HandleFunc("POST /sync/session-authorities", s.withAuth(s.handleRegisterSessionAuthority))
+	s.mux.HandleFunc("POST /sync/prompt-pair-claims", s.withAuth(s.handlePromptPairClaim))
+	s.mux.HandleFunc("POST /sync/prompt-source-attestations", s.withAuth(s.handlePromptSourceAttestation))
+	s.mux.HandleFunc("POST /sync/prompt-source-attestations/verify", s.withAuth(s.handleVerifyPromptSourceAttestation))
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
 	s.mux.HandleFunc("GET /admin/users", s.withAuth(s.handleAdminListUsers))
@@ -493,6 +497,11 @@ func (s *CloudServer) recordAuthAuditBestEffort(ctx context.Context, event cloud
 	}
 }
 
+// bearerTokenFromRequest trims outer whitespace and requires exactly two
+// whitespace-delimited Authorization fields. The Bearer scheme is matched
+// case-insensitively; tabs and multiple spaces between fields are accepted.
+// Whitespace inside a credential or a scheme glued to it is rejected. This
+// parser does not enforce RFC character grammar for the credential.
 func bearerTokenFromRequest(r *http.Request) (string, error) {
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if header == "" {

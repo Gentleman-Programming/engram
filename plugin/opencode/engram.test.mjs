@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readFileSync, mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createInterface } from "node:readline"
 import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
 
@@ -34,7 +37,7 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true, onJSON, jsonError) {
+function httpResponse(data = { id: "runtime", status: "created" }, ok = true, onJSON, jsonError) {
   return {
     ok,
     async json() {
@@ -116,7 +119,11 @@ async function createRuntime(t, {
   emitSpawnError = false,
   installBun = true,
   configuredEngramURL,
+  realServerFetch = false,
+  engramBin,
+  engramPort,
   healthOK = true,
+  selectLegacyDefault = false,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
     registrationResponse,
     sessionEndResponse,
@@ -128,16 +135,23 @@ async function createRuntime(t, {
 	const originalFetch = globalThis.fetch
 	const originalBun = globalThis.Bun
 	const originalEngramURL = process.env.ENGRAM_URL
+  const originalEngramBin = process.env.ENGRAM_BIN
+  const originalEngramPort = process.env.ENGRAM_PORT
   const originalSpawnSync = childProcess.spawnSync
   const originalSpawn = childProcess.spawn
   const originalExistsSync = fs.existsSync
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
+  const healthURLs = []
 	const spawns = []
 	const startupEvents = []
 	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
 	else process.env.ENGRAM_URL = configuredEngramURL
+  if (engramBin === undefined) delete process.env.ENGRAM_BIN
+  else process.env.ENGRAM_BIN = engramBin
+  if (engramPort === undefined) delete process.env.ENGRAM_PORT
+  else process.env.ENGRAM_PORT = engramPort
   if (installBun) {
     globalThis.Bun = {
       spawnSync(args) {
@@ -185,7 +199,10 @@ async function createRuntime(t, {
   syncBuiltinESMExports()
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
-		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+		if (path === "/health") {
+      healthURLs.push(String(url))
+      return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+    }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
 		if (path === "/project/current") {
@@ -195,8 +212,10 @@ async function createRuntime(t, {
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
-      return httpResponse()
+      if (realServerFetch) return originalFetch(url, init)
+      return httpResponse({ id: body.id, status: "created" })
     }
+    if (realServerFetch) return originalFetch(url, init)
     if (path.startsWith("/sessions/") && path.endsWith("/end")) {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
       return httpResponse({})
@@ -214,6 +233,10 @@ async function createRuntime(t, {
 		globalThis.Bun = originalBun
 		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
 		else process.env.ENGRAM_URL = originalEngramURL
+    if (originalEngramBin === undefined) delete process.env.ENGRAM_BIN
+    else process.env.ENGRAM_BIN = originalEngramBin
+    if (originalEngramPort === undefined) delete process.env.ENGRAM_PORT
+    else process.env.ENGRAM_PORT = originalEngramPort
     childProcess.spawnSync = originalSpawnSync
     childProcess.spawn = originalSpawn
     fs.existsSync = originalExistsSync
@@ -221,8 +244,16 @@ async function createRuntime(t, {
 	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
-  const { Engram } = await import(moduleURL.href)
-  const plugin = await Engram({
+  const module = await import(moduleURL.href)
+  let factory = module.Engram
+  if (selectLegacyDefault) {
+    assert.equal(typeof module.default, "object", "V1 loader needs a default entrypoint")
+    assert.equal(module.default.id, "engram")
+    assert.strictEqual(module.default.server, module.Engram)
+    assert.equal(typeof module.shouldNudgeForObservations, "function", "named helper remains exported")
+    factory = module.default.server
+  }
+  const plugin = await factory({
     directory,
     project: { id: PROJECT_ID },
     client: {
@@ -246,16 +277,54 @@ async function createRuntime(t, {
     registeredIDs,
     sessionGetIDs,
     requests,
+    healthURLs,
 		spawns,
 		startupEvents,
   }
 }
+
+test("V1 default selection initializes only the Engram factory once", async (t) => {
+  const runtime = await createRuntime(t, { selectLegacyDefault: true })
+  assert.equal(typeof runtime.plugin.event, "function")
+  assert.equal(runtime.healthURLs.length, 1, "the selected factory runs once")
+  assert.equal(runtime.startupEvents.filter((event) => event === "project-current:response").length, 1)
+})
 
 test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t) => {
   const runtime = await createRuntime(t, { installBun: false })
 
   assert.equal(typeof runtime.plugin.event, "function")
   assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+test("adapter treats blank optional Engram environment values as unset at its import boundary", async (t) => {
+  for (const scenario of [
+    { name: "absent", engramBin: undefined, engramPort: undefined, configuredEngramURL: undefined },
+    { name: "empty", engramBin: "", engramPort: "", configuredEngramURL: "" },
+    { name: "whitespace-only", engramBin: " \t", engramPort: " \n", configuredEngramURL: " \t" },
+    { name: "explicit", engramBin: " /custom/engram ", engramPort: "17437", configuredEngramURL: undefined },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, { ...scenario, healthOK: false })
+      const server = runtime.spawns.find(({ args }) => args[1] === "serve")
+
+      assert.equal(server?.args[0], scenario.engramBin?.trim() ? scenario.engramBin : "engram")
+      assert.equal(new URL(runtime.healthURLs[0]).port, scenario.engramPort?.trim() ? scenario.engramPort : "7437")
+    })
+  }
+})
+
+test("an explicit OpenCode ENGRAM_URL keeps precedence and its exact value", async (t) => {
+  const configuredEngramURL = " http://127.0.0.1:17437"
+  const runtime = await createRuntime(t, {
+    configuredEngramURL,
+    engramBin: "custom-engram",
+    engramPort: "18437",
+    healthOK: false,
+  })
+
+  assert.equal(runtime.spawns.some(({ args }) => args[1] === "serve"), false)
+  assert.equal(runtime.healthURLs[0], `${configuredEngramURL}/health`)
 })
 
 test("adapter returns hooks when local identity lookup fails", async (t) => {
@@ -490,11 +559,44 @@ test("registration enters the cache only after a successful acknowledgement", as
   await runtime.event("session.created", session("runtime"))
   assert.deepEqual(runtime.registeredIDs, ["runtime"])
 
-  for (const expectedRegistrations of [2, 2]) {
+  for (const expectedRegistrations of [2, 3]) {
     const output = toolOutput(undefined)
     await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
     assert.equal(output.args.session_id, "runtime")
     assert.equal(runtime.registeredIDs.length, expectedRegistrations)
+  }
+})
+
+test("OpenCode activity renews a cached root session once per activity wave", async (t) => {
+  const renewal = deferredResponse()
+  const runtime = await createRuntime(t, {
+    registrationResponse: (attempt) => attempt === 2 ? renewal.handler() : httpResponse(),
+  })
+  await runtime.event("session.created", session("runtime"))
+  assert.deepEqual(runtime.registeredIDs, ["runtime"], "session.created remains initial registration")
+
+  const message = { message: {}, parts: [{ type: "text", text: "A sufficiently long root prompt" }] }
+  const first = runtime.chat({ sessionID: "runtime" }, message)
+  const started = await Promise.race([
+    renewal.started.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 25)),
+  ])
+  try {
+    assert.equal(started, true, "cached runtime activity must start a renewal request")
+    const second = runtime.chat({ sessionID: "runtime" }, message)
+    await Promise.resolve()
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime"], "concurrent activity shares the renewal flight")
+
+    renewal.resolve(httpResponse())
+    await Promise.all([first, second])
+    await runtime.after({ tool: "Task", sessionID: "runtime" }, "A".repeat(60))
+
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime", "runtime"], "later non-Engram tool activity renews before use")
+    assert.equal(runtime.requests.filter(({ path }) => path === "/prompts").length, 2)
+    assert.equal(runtime.requests.filter(({ path }) => path === "/observations/passive").length, 1)
+  } finally {
+    renewal.resolve(httpResponse())
+    await first
   }
 })
 
@@ -521,7 +623,7 @@ test("qualified Engram write IDs inject the authoritative root session", async (
   }
 
   assert.deepEqual(runtime.sessionGetIDs, ["root", "leaf"])
-  assert.deepEqual(runtime.registeredIDs, ["root"], "a child must reuse its authoritative root")
+  assert.deepEqual(runtime.registeredIDs, ["root", "root", "root", "root"], "a child must renew the authoritative root, never register itself")
 })
 
 test("subagent sessions resolve to the authoritative parent and never register themselves", () => {
@@ -660,13 +762,13 @@ test("session.updated reparents a known leaf while deletion tombstones dominate 
   const afterUpdate = toolOutput(undefined)
   await runtime.before({ tool: "mem_save", sessionID: "leaf" }, afterUpdate)
   assert.equal(afterUpdate.args.session_id, "new-root")
-  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root"])
+  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root", "old-root", "new-root"])
 
   await runtime.event("session.deleted", { id: "new-root" })
   const deleted = toolOutput()
   await assertNoForward(runtime.before({ tool: "mem_save", sessionID: "leaf" }, deleted), deleted)
   assert.deepEqual(runtime.sessionGetIDs, [])
-  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root"], "deleted descendants must never revive")
+  assert.deepEqual(runtime.registeredIDs, ["old-root", "new-root", "old-root", "new-root"], "deleted descendants must never revive")
 })
 
 test("deleting a leaf during its SDK lookup aborts without mutation or registration", async (t) => {
@@ -835,6 +937,17 @@ test("write tool hook revalidates leaf and ancestor ownership after registration
   }
 })
 
+test("chat.message redacts a private block that straddles the truncation limit", async (t) => {
+  const runtime = await createRuntime(t)
+  const text = `${"a".repeat(1980)}<private>PIN=42</private> trailing`
+  await runtime.chat({ sessionID: "runtime" }, { message: {}, parts: [{ type: "text", text }] })
+
+  const prompts = runtime.requests.filter(({ path }) => path === "/prompts")
+  assert.equal(prompts.length, 1)
+  assert.equal(JSON.stringify(prompts[0].body).includes("PIN=42"), false)
+  assert.equal(prompts[0].body.content.includes("[REDACTED]"), true)
+})
+
 test("chat.message resolves an unobserved child and skips its prompt", async (t) => {
   const runtime = await createRuntime(t, { sessionGet: sdkLookup(CHILD_SESSIONS) })
   await runtime.chat(
@@ -954,6 +1067,34 @@ test("automatic hooks omit writes when ownership changes during registration", a
   }
 })
 
+test("registration acknowledgement must match each runtime ID and created status", async (t) => {
+  for (const acknowledgement of [
+    { status: "created" },
+    { id: "other", status: "created" },
+    { id: "runtime" },
+    { id: "runtime", status: "rejected" },
+  ]) {
+    await t.test(JSON.stringify(acknowledgement), async (t) => {
+      const runtime = await createRuntime(t, { registrationResponse: () => httpResponse(acknowledgement) })
+      const output = toolOutput()
+      await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "runtime" }, output), /could not confirm Engram session registration/)
+      assert.equal(output.args.session_id, MODEL_SESSION_ID)
+    })
+  }
+  await t.test("distinct IDs cannot accept swapped acknowledgements", async (t) => {
+    const runtime = await createRuntime(t, {
+      registrationResponse: (attempt) => httpResponse({ id: attempt === 1 ? "second" : "first", status: "created" }),
+    })
+    const first = toolOutput()
+    const second = toolOutput()
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "first" }, first), /could not confirm Engram session registration/)
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "second" }, second), /could not confirm Engram session registration/)
+    assert.equal(first.args.session_id, MODEL_SESSION_ID)
+    assert.equal(second.args.session_id, MODEL_SESSION_ID)
+    assert.deepEqual(runtime.registeredIDs, ["first", "second"])
+  })
+})
+
 test("runtime hook rejects failed bindings, retries registration, and binds children to parents", async (t) => {
   const runtime = await createRuntime(t, {
     sessionGet: async ({ path }) => ["unresolved", "orphan"].includes(path.id)
@@ -982,7 +1123,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   const subagent = toolOutput("sub")
   await runtime.before({ tool: "mem_session_summary", sessionID: "sub" }, subagent)
   assert.equal(subagent.args.session_id, "runtime")
-  assert.equal(runtime.registeredIDs.length, 2, "child must reuse the confirmed parent, not register itself")
+  assert.equal(runtime.registeredIDs.length, 3, "child must renew the confirmed parent, not register itself")
 
   const unresolved = toolOutput()
   let resolutionErrorMessage = ""
@@ -993,7 +1134,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   })
   assert.notEqual(resolutionErrorMessage, registrationErrorMessage)
   assert.equal(unresolved.args.session_id, MODEL_SESSION_ID, "failed resolution must not forward MCP arguments")
-  assert.equal(runtime.registeredIDs.length, 2)
+  assert.equal(runtime.registeredIDs.length, 3)
 
   await runtime.event("session.created", { id: "orphan", parentID: "" })
   const orphan = toolOutput(undefined)
@@ -1001,7 +1142,7 @@ test("runtime hook rejects failed bindings, retries registration, and binds chil
   await runtime.event("session.updated", session("orphan", "runtime"))
   await runtime.before({ tool: "mem_capture_passive", sessionID: "orphan" }, orphan)
   assert.equal(orphan.args.session_id, "runtime", "a later authoritative mapping must remain retryable")
-  assert.equal(runtime.registeredIDs.length, 2)
+  assert.equal(runtime.registeredIDs.length, 4)
 })
 
 test("a title-only session.created event registers an authoritative root", async (t) => {
@@ -1011,7 +1152,7 @@ test("a title-only session.created event registers an authoritative root", async
   const output = toolOutput(undefined)
   await runtime.before({ tool: "mem_capture_passive", sessionID: "legitimate-root" }, output)
   assert.equal(output.args.session_id, "legitimate-root")
-  assert.deepEqual(runtime.registeredIDs, ["legitimate-root"])
+  assert.deepEqual(runtime.registeredIDs, ["legitimate-root", "legitimate-root"])
   assert.deepEqual(runtime.sessionGetIDs, [], "event-cached roots must not query the SDK")
 })
 
@@ -1081,7 +1222,7 @@ test("deleting a parent invalidates descendants and prevents later writes or re-
     await assert.rejects(runtime.before({ tool: "mem_session_summary", sessionID }, toolOutput(undefined)), RESOLUTION_ERROR)
   }
 
-  assert.deepEqual(runtime.registeredIDs, ["parent"], "invalid descendants must never re-register as top-level sessions")
+  assert.deepEqual(runtime.registeredIDs, ["parent", "parent"], "invalid descendants must never re-register as top-level sessions")
 })
 
 test("plugin disposal closes registered roots, not children, and waits for session ends", async (t) => {
@@ -1102,4 +1243,122 @@ test("plugin disposal closes registered roots, not children, and waits for sessi
   const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))
   assert.equal(endRequests.length, 1)
   assert.equal(endRequests[0].path, `/sessions/${encodeURIComponent(rootID)}/end`)
+})
+
+// OpenCode owns the hook, not the external MCP tool wrapper. Forwarding below models only
+// that wrapper's HTTP POST after the exported hook has rewritten its arguments.
+test("OpenCode host bindings survive real server persistence and reject ended registration", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "engram-opencode-real-"))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => assert.equal(fs.existsSync(dir), false, `test directory remains: ${dir}`))
+  const executable = join(dir, process.platform === "win32" ? "real-server.exe" : "real-server")
+  const build = childProcess.spawnSync("go", ["build", "-o", executable, "./plugin/opencode/test/support/real-server"], {
+    cwd: new URL("../..", import.meta.url), timeout: 60000, encoding: "utf8",
+  })
+  assert.ifError(build.error)
+  assert.equal(build.status, 0, build.stderr)
+  const child = childProcess.spawn(executable, [join(dir, "store")], {
+    env: { ...process.env, HOME: dir, ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_CLOUD_AUTOSYNC: "0" },
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  let stderr = ""
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk })
+  const lines = createInterface({ input: child.stdout })
+  async function bounded(promise, message, ms = 5000) {
+    let timer
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${message}: ${stderr}`)), ms)
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  let shutdownError
+  try {
+    const url = await new Promise((resolve, reject) => {
+      let settled = false
+      const cleanup = () => {
+        clearTimeout(timeout)
+        lines.off("line", onLine)
+        child.off("error", onError)
+        child.off("exit", onExit)
+      }
+      const settle = (finish, value) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        finish(value)
+      }
+      const onLine = line => settle(resolve, line)
+      const onError = error => settle(reject, error)
+      const onExit = code => settle(reject, new Error(`server exited ${code}: ${stderr}`))
+      const timeout = setTimeout(() => settle(reject, new Error(`server startup timed out: ${stderr}`)), 60000)
+      lines.on("line", onLine)
+      child.on("error", onError)
+      child.on("exit", onExit)
+    })
+    const runtime = await createRuntime(t, {
+      configuredEngramURL: url, realServerFetch: true, directory: dir,
+      sessionGet: async () => { throw new Error("event-cached roots should not query SDK") },
+    })
+    const ids = ["opencode-host-alpha", "opencode-host-beta"]
+    for (const id of ids) await runtime.event("session.created", session(id))
+    // The external MCP wrapper is deliberately not imported: direct/manual MCP callers
+    // retain their own session semantics; only hook-mediated calls are tested here.
+    let observationPosts = 0
+    const forward = async (output) => {
+      observationPosts += 1
+      return fetch(`${url}/observations`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(output.args),
+      })
+    }
+    for (const [index, host] of [ids[0], ids[1], ids[0], ids[1]].entries()) {
+      const output = { args: {
+        title: `opencode-persisted-${index}`, content: `persistence ${index}`,
+        project: "engram", session_id: `model-conflict-${index}`,
+      } }
+      await runtime.before({ tool: "mem_save", sessionID: host }, output)
+      assert.equal(output.args.session_id, host)
+      const response = await forward(output)
+      assert.equal(response.status, 201, await response.text())
+    }
+    const persisted = async () => {
+      const response = await fetch(`${url}/observations?project=engram&limit=20`)
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    const rows = await persisted()
+    assert.equal(rows.length, 4, JSON.stringify(rows))
+    for (let index = 0; index < 4; index++) {
+      const matching = rows.filter(row => row.title === `opencode-persisted-${index}`)
+      assert.equal(matching.length, 1)
+      assert.equal(matching[0].session_id, ids[index % 2])
+    }
+    const ended = await fetch(`${url}/sessions/${ids[0]}/end`, { method: "POST", body: "{}" })
+    assert.equal(ended.status, 200)
+    const conflict = await fetch(`${url}/sessions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: ids[0], project: "engram", directory: dir }),
+    })
+    assert.equal(conflict.status, 409, "the real server refuses ended registration")
+    const denied = { args: { title: "must-not-persist", content: "denied", session_id: "model-conflict" } }
+    const postsBefore = observationPosts
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: ids[0] }, denied), /could not confirm Engram session registration/)
+    assert.equal(denied.args.session_id, "model-conflict")
+    assert.equal(observationPosts, postsBefore, "rejected hook must stop before external MCP forwarding")
+    assert.equal((await persisted()).length, 4)
+  } finally {
+    lines.close()
+    if (child.exitCode === null && child.signalCode === null && child.pid) {
+      const exited = new Promise(resolve => child.once("exit", resolve))
+      child.stdin.end()
+      try { await bounded(exited, "server shutdown timed out") }
+      catch (error) {
+        shutdownError = error
+        child.kill()
+        try { await bounded(exited, "server kill timed out") }
+        catch (killError) { shutdownError = killError }
+      }
+    }
+  }
+  if (shutdownError) throw shutdownError
 })

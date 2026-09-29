@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -130,7 +131,7 @@ type DetectionResult struct {
 //  0. config     — nearest .engram/config.json inside the enclosing repo/root
 //  1. git_remote — Git repo currently has origin: initialize an absent private binding from the remote name; otherwise reuse it
 //  2. git_root   — Git repo currently has no origin: initialize an absent private binding from the root basename; otherwise reuse it
-//  3. git_child  — cwd has exactly one git-repo child → auto-promote it
+//  3. git_child  — cwd has exactly one git-repo child → resolve its canonical identity and auto-promote it
 //  4. ambiguous  — cwd has multiple git-repo children → return ErrAmbiguousProject
 //  5. dir_basename — none of the above → use filepath.Base(dir)
 func DetectProjectFull(dir string) DetectionResult {
@@ -161,13 +162,15 @@ func DetectProjectFull(dir string) DetectionResult {
 	case 1:
 		// Case 3: exactly one child repo — auto-promote.
 		child := children[0]
-		childName := normalize(filepath.Base(child))
-		absChild, _ := filepath.Abs(child)
+		childResult := DetectProjectFull(child)
+		if childResult.Error != nil {
+			return childResult
+		}
 		return DetectionResult{
-			Project: childName,
+			Project: childResult.Project,
 			Source:  SourceGitChild,
-			Path:    absChild,
-			Warning: "auto-promoted child repository: " + childName,
+			Path:    childResult.Path,
+			Warning: "auto-promoted child repository: " + childResult.Project,
 		}
 	default:
 		if len(children) > 1 {
@@ -176,6 +179,7 @@ func DetectProjectFull(dir string) DetectionResult {
 			for i, c := range children {
 				names[i] = normalizeAvailableProject(filepath.Base(c))
 			}
+			slices.Sort(names)
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
 			// DetectProject wrapper handles CLI compat by using filepath.Base on error.

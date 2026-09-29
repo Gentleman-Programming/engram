@@ -445,7 +445,7 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "[--match all|any]") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
-	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode"} {
+	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode", "kimi", "commandcode"} {
 		if !strings.Contains(stdout, agent) {
 			t.Fatalf("usage missing setup agent %q: %q", agent, stdout)
 		}
@@ -563,6 +563,13 @@ func TestPrintPostInstall(t *testing.T) {
 			result:  &setup.Result{Agent: "kilocode"},
 			expects: []string{"Restart Kilo Code", "~/.config/kilo/opencode.json"},
 		},
+		// kimi lives in TestPrintPostInstallKimiUsesEffectivePaths: its steps
+		// depend on KIMI_CODE_HOME, so the expectations need explicit env control.
+		{
+			name:    "commandcode",
+			result:  &setup.Result{Agent: "commandcode"},
+			expects: []string{"Restart the CommandCode session", "~/.commandcode/mcp.json", "~/.commandcode/AGENTS.md"},
+		},
 		{
 			name:   "unknown",
 			result: &setup.Result{Agent: "unknown"},
@@ -590,6 +597,53 @@ func TestPrintPostInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrintPostInstallKimiUsesEffectivePaths verifies the Kimi Code next steps
+// name the files setup actually wrote: the default data root when
+// KIMI_CODE_HOME is unset, and the override when it holds an absolute path.
+func TestPrintPostInstallKimiUsesEffectivePaths(t *testing.T) {
+	kimiSteps := func(t *testing.T) string {
+		t.Helper()
+		stdout, stderr := captureOutput(t, func() { printPostInstall(&setup.Result{Agent: "kimi"}) })
+		if stderr != "" {
+			t.Fatalf("expected no stderr, got: %q", stderr)
+		}
+		return stdout
+	}
+
+	t.Run("default data root", func(t *testing.T) {
+		t.Setenv("KIMI_CODE_HOME", "")
+
+		stdout := kimiSteps(t)
+		for _, expected := range []string{
+			"Restart Kimi Code",
+			filepath.Join(".kimi-code", "mcp.json"),
+			filepath.Join(".kimi-code", "AGENTS.md"),
+		} {
+			if !strings.Contains(stdout, expected) {
+				t.Fatalf("output missing %q: %q", expected, stdout)
+			}
+		}
+	})
+
+	t.Run("absolute KIMI_CODE_HOME", func(t *testing.T) {
+		custom := t.TempDir()
+		t.Setenv("KIMI_CODE_HOME", custom)
+
+		stdout := kimiSteps(t)
+		for _, expected := range []string{
+			filepath.Join(custom, "mcp.json"),
+			filepath.Join(custom, "AGENTS.md"),
+		} {
+			if !strings.Contains(stdout, expected) {
+				t.Fatalf("output missing %q: %q", expected, stdout)
+			}
+		}
+		if strings.Contains(stdout, filepath.Join(".kimi-code", "mcp.json")) {
+			t.Fatalf("output still points at the default root: %q", stdout)
+		}
+	})
 }
 
 func TestPrintPostInstallClaudeCodeAllowlist(t *testing.T) {
@@ -1258,6 +1312,137 @@ func TestCmdSyncHonorsProcessProjectOverride(t *testing.T) {
 	}
 }
 
+func TestMainExportImportHelp(t *testing.T) {
+	for _, tc := range []struct {
+		command  string
+		trailing bool
+		extra    bool
+		present  bool
+		want     []string
+	}{
+		{command: "export", want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", present: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, present: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, extra: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "export", trailing: true, extra: true, present: true, want: []string{"Usage: engram export", "--project", "--all"}},
+		{command: "import", want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", present: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, present: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, extra: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+		{command: "import", trailing: true, extra: true, present: true, want: []string{"Usage: engram import <file.json>", "Options:", "--help"}},
+	} {
+		name := tc.command + "/absent"
+		if tc.present {
+			name = tc.command + "/present"
+		}
+		if tc.trailing {
+			name += "/trailing"
+		}
+		if tc.extra {
+			name += "/extra"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			withCwd(t, dir)
+			t.Setenv("ENGRAM_DATA_DIR", dir)
+			db := filepath.Join(dir, "engram.db")
+			if tc.present {
+				if err := os.WriteFile(db, []byte("untouched database"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			file := filepath.Join(dir, "backup.json")
+			if tc.trailing && tc.present {
+				if err := os.WriteFile(file, []byte("untouched file"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var calls []string
+			oldUpdate, oldConfig, oldMigration, oldStore, oldExit := checkForUpdates, storeDefaultConfig, migrateOrphanedDatabase, storeNew, exitFunc
+			checkForUpdates = func(string) versioncheck.CheckResult {
+				calls = append(calls, "update")
+				return versioncheck.CheckResult{}
+			}
+			storeDefaultConfig = func() (store.Config, error) {
+				calls = append(calls, "config")
+				return store.Config{DataDir: dir}, nil
+			}
+			migrateOrphanedDatabase = func(string) {
+				calls = append(calls, "migration")
+			}
+			storeNew = func(store.Config) (*store.Store, error) {
+				calls = append(calls, "store")
+				return nil, errors.New("unexpected store")
+			}
+			exitFunc = func(code int) {
+				calls = append(calls, fmt.Sprintf("exit:%d", code))
+			}
+			t.Cleanup(func() {
+				checkForUpdates, storeDefaultConfig, migrateOrphanedDatabase, storeNew, exitFunc = oldUpdate, oldConfig, oldMigration, oldStore, oldExit
+			})
+			args := []string{"engram", tc.command, "--help"}
+			if tc.trailing {
+				args = []string{"engram", tc.command, file, "--help"}
+				if tc.extra {
+					extra := "--all"
+					if tc.command == "import" {
+						extra = "extra"
+					}
+					args = []string{"engram", tc.command, file, extra, "--help"}
+				}
+			}
+			withArgs(t, args...)
+			stdout, stderr := captureOutput(t, main)
+			if stderr != "" {
+				t.Errorf("stderr = %q", stderr)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("stdout %q missing %q", stdout, want)
+				}
+			}
+			if len(calls) != 0 {
+				t.Errorf("startup calls = %v, want none", calls)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCount := 0
+			if tc.present {
+				wantCount = 1
+				if tc.trailing {
+					wantCount++
+				}
+			}
+			if len(entries) != wantCount {
+				t.Errorf("directory entries = %v, want %d", entries, wantCount)
+			}
+			if tc.present {
+				content, err := os.ReadFile(db)
+				if err != nil {
+					t.Fatalf("read existing database: %v", err)
+				}
+				if string(content) != "untouched database" {
+					t.Errorf("database content = %q, want untouched database", content)
+				}
+			}
+			if tc.trailing {
+				content, err := os.ReadFile(file)
+				if tc.present {
+					if err != nil || string(content) != "untouched file" {
+						t.Errorf("file content = %q, error = %v; want untouched file", content, err)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("absent file read error = %v, want os.ErrNotExist", err)
+				}
+			}
+		})
+	}
+}
+
 func TestMainVersionAndHelpAliases(t *testing.T) {
 	oldVersion := version
 	version = "9.9.9-test"
@@ -1624,6 +1809,175 @@ func TestCmdContextRejectsConflictingProjectSelectors(t *testing.T) {
 }
 
 // ─── Projects command tests ───────────────────────────────────────────────────
+
+func TestProjectsMergeDryRunAndApply(t *testing.T) {
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "merge-session", "acmeapi", "note", "merge-note", "content", "project")
+	for _, tc := range []struct {
+		mode string
+		want string
+	}{{"--dry-run", "No changes made"}, {"--apply", "observations 1"}} {
+		withArgs(t, "engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", tc.mode)
+		out, stderr := captureOutput(t, func() { cmdProjects(cfg) })
+		if stderr != "" || !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: stdout=%q stderr=%q", tc.mode, out, stderr)
+		}
+		s, err := store.New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := s.PreviewExplicitProjectMerge("acmeapi", "acme-api")
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if tc.mode == "--dry-run" && (err != nil || source.ObservationsUpdated != 1) {
+			t.Fatalf("dry-run changed source: %+v %v", source, err)
+		}
+		if tc.mode == "--apply" && err == nil {
+			t.Fatalf("apply left source: %+v", source)
+		}
+	}
+}
+
+func TestProjectsMergeRequiresExplicitMode(t *testing.T) {
+	cfg := testConfig(t)
+	oldExit := exitFunc
+	exitFunc = func(code int) { panic("exit") }
+	t.Cleanup(func() { exitFunc = oldExit })
+	for _, args := range [][]string{
+		{"engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api"},
+		{"engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", "--dry-run", "--apply"},
+		{"engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", "--apply", "--apply"},
+	} {
+		withArgs(t, args...)
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+		if recovered == nil || !strings.Contains(stderr, "usage:") {
+			t.Fatalf("args %v: stderr=%q panic=%v", args, stderr, recovered)
+		}
+	}
+}
+
+func TestProjectsMergeRejectsInvalidPairsWithoutMutation(t *testing.T) {
+	for _, tc := range []struct{ name, from, to string }{
+		{"unrelated", "acmeapi", "other-project"},
+		{"normalized equal", "acmeapi", "ACMEAPI"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			mustSeedObservation(t, cfg, "invalid-session", "acmeapi", "note", "invalid-note", "content", "project")
+			oldExit := exitFunc
+			exitFunc = func(code int) { panic("exit") }
+			t.Cleanup(func() { exitFunc = oldExit })
+			for _, mode := range []string{"--dry-run", "--apply"} {
+				withArgs(t, "engram", "projects", "merge", "--from", tc.from, "--to", tc.to, mode)
+				_, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+				if recovered == nil || !strings.Contains(stderr, "distinct separator variant") {
+					t.Fatalf("%s: stderr=%q panic=%v", mode, stderr, recovered)
+				}
+				s, err := store.New(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var count int
+				err = s.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count)
+				if closeErr := s.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+				if err != nil || count != 1 {
+					t.Fatalf("%s mutated source: count=%d err=%v", mode, count, err)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectsMergeSyncOnly(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollProject("foo-bar"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ mode, want string }{{"--dry-run", "Sync identity changes: true"}, {"--apply", "Sync identity may also change"}} {
+		withArgs(t, "engram", "projects", "merge", "--from", "foo-bar", "--to", "foo_bar", tc.mode)
+		out, stderr := captureOutput(t, func() { cmdProjects(cfg) })
+		if stderr != "" || !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: stdout=%q stderr=%q", tc.mode, out, stderr)
+		}
+		s, err := store.New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := s.IsProjectEnrolled("foo-bar")
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := s.IsProjectEnrolled("foo_bar")
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.mode == "--dry-run" && (!source || target) {
+			t.Fatalf("dry-run changed enrollment: source=%t target=%t", source, target)
+		}
+		if tc.mode == "--apply" && (source || !target) {
+			t.Fatalf("apply failed enrollment: source=%t target=%t", source, target)
+		}
+	}
+}
+
+func TestProjectsMergeInvalidFlagsDoNotWrite(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"no mode", []string{"--from", "acmeapi", "--to", "acme-api"}},
+		{"conflicting modes", []string{"--from", "acmeapi", "--to", "acme-api", "--dry-run", "--apply"}},
+		{"unknown", []string{"--from", "acmeapi", "--to", "acme-api", "--aplly"}},
+		{"repeated source", []string{"--from", "acmeapi", "--from", "acmeapi", "--to", "acme-api", "--apply"}},
+		{"repeated target", []string{"--from", "acmeapi", "--to", "acme-api", "--to", "acme-api", "--apply"}},
+		{"repeated mode", []string{"--from", "acmeapi", "--to", "acme-api", "--apply", "--apply"}},
+		{"missing from", []string{"--to", "acme-api", "--apply"}},
+		{"missing to", []string{"--from", "acmeapi", "--apply"}},
+		{"missing value", []string{"--from", "--to", "acme-api", "--apply"}},
+		{"empty value", []string{"--from", " ", "--to", "acme-api", "--apply"}},
+		{"extra position", []string{"--from", "acmeapi", "--to", "acme-api", "--apply", "extra"}},
+		{"equals spelling", []string{"--from=acmeapi", "--to", "acme-api", "--apply"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			mustSeedObservation(t, cfg, "flag-session", "acmeapi", "note", "flag-note", "content", "project")
+			oldExit := exitFunc
+			exitFunc = func(code int) { panic("exit") }
+			t.Cleanup(func() { exitFunc = oldExit })
+			withArgs(t, append([]string{"engram", "projects", "merge"}, tc.args...)...)
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+			if recovered == nil || !strings.Contains(stderr, "usage:") {
+				t.Fatalf("stderr=%q panic=%v", stderr, recovered)
+			}
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			err = s.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count)
+			if closeErr := s.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if err != nil || count != 1 {
+				t.Fatalf("source mutated: count=%d err=%v", count, err)
+			}
+		})
+	}
+}
 
 func TestCmdProjectsListEmpty(t *testing.T) {
 	cfg := testConfig(t)

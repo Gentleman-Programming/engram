@@ -265,6 +265,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		if socketPath == "" && isAddressInUse(err) {
 			if s.instanceOwnsPort() {
+				log.Printf("[engram] HTTP server did not bind on %s: an existing instance owns the port", addr)
 				return nil
 			}
 			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)
@@ -494,6 +495,10 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.store.Stats(); err != nil {
+		jsonError(w, http.StatusInternalServerError, "health check failed")
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":      "ok",
 		"service":     "engram",
@@ -522,9 +527,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = store.SessionOwnershipShared
 	}
-	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+	if err := s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {
+		case errors.Is(err, store.ErrSessionAlreadyEnded):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
+				"code":       "session_already_ended",
+				"session_id": body.ID,
+			})
 		case errors.As(err, &conflict):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
 				"code":              "session_project_conflict",
@@ -762,7 +772,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if body.Type == nil && body.Title == nil && body.Content == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
+	if body.Type == nil && body.Title == nil && body.Content == nil && body.Find == nil && body.Replace == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
 		jsonError(w, http.StatusBadRequest, "at least one field is required")
 		return
 	}
@@ -771,7 +781,12 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationTitleRequired),
-			errors.Is(err, store.ErrObservationContentRequired):
+			errors.Is(err, store.ErrObservationContentRequired),
+			errors.Is(err, store.ErrObservationFindReplacePairRequired),
+			errors.Is(err, store.ErrObservationFindReplaceContentConflict),
+			errors.Is(err, store.ErrObservationFindReplaceInputTooLarge),
+			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
+			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())
@@ -1036,11 +1051,13 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.store.AddPrompt(body)
+	id, inserted, err := s.store.AddPromptWithResult(body)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPromptContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrPromptInboxDeleted):
+			jsonError(w, http.StatusConflict, err.Error())
 		case writeOwnershipError(w, body.SessionID, err):
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())
@@ -1048,7 +1065,9 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifyWrite()
+	if inserted {
+		s.notifyWrite()
+	}
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 
@@ -1229,6 +1248,31 @@ func clampContextBytes(v int) int {
 	return v
 }
 
+// contextBytesQuery caps positive decimal budgets before converting to int,
+// including values beyond the native integer range.
+func contextBytesQuery(r *http.Request) int {
+	v := r.URL.Query().Get("max_bytes")
+	if v == "" {
+		return 0
+	}
+	if v[0] == '+' {
+		v = v[1:]
+	}
+	if v == "" {
+		return 0
+	}
+	budget := 0
+	for _, digit := range v {
+		if digit < '0' || digit > '9' {
+			return 0
+		}
+		if budget <= contextMaxBytes {
+			budget = budget*10 + int(digit-'0')
+		}
+	}
+	return clampContextBytes(budget)
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -1247,7 +1291,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
 	// pass through untouched so all three states survive.
 	opts := store.ContextOptions{
-		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
+		MaxBytes:     contextBytesQuery(r),
 		Observations: clampContextLimit(queryInt(r, "observations", 0)),
 		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
 		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),
@@ -1305,6 +1349,23 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
+		var unknown *projectpkg.UnknownProjectError
+		if errors.As(err, &unknown) {
+			// The available-project lookup can fail independently of resolution.
+			available, listErr := s.store.ListProjectNames()
+			if listErr != nil {
+				jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
+				return
+			}
+			jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", unknown.Name), map[string]any{
+				"code": "unknown_project", "available_projects": available,
+			})
+			return
+		}
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
+			return
+		}
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
@@ -1315,7 +1376,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats, err = loadServerStats(s.store)
 	}
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, http.StatusInternalServerError, "stats unavailable")
 		return
 	}
 

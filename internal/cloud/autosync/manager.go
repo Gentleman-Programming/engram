@@ -86,8 +86,10 @@ type LocalStore interface {
 	AcquireSyncLease(targetKey, owner string, ttl time.Duration, now time.Time) (bool, error)
 	ReleaseSyncLease(targetKey, owner string) error
 	ApplyPulledMutation(targetKey string, mutation store.SyncMutation) error
+	ApplyPulledMutationPreservingSyncState(targetKey string, mutation store.SyncMutation) error
 	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
 	MarkSyncBlocked(targetKey, reasonCode, message string) error
+	MarkSyncBlockedAfterSuccess(targetKey, reasonCode, message string) error
 	MarkSyncHealthy(targetKey string) error
 	ListDeferredProjectsForTarget(targetKey string) ([]string, error)
 	ReplayDeferredForScope(targetKey, project string) (store.ReplayDeferredResult, error)
@@ -104,6 +106,39 @@ type irreparableSyncMutationQuarantiner interface {
 	QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (store.SyncMutationQuarantineReport, error)
 }
 
+// promptPreflightError means this entry was rejected before transport and remains pending.
+type promptPreflightError struct{ err error }
+
+func (e *promptPreflightError) Error() string { return e.err.Error() }
+func (e *promptPreflightError) Unwrap() error { return e.err }
+
+// Only a tree made entirely of known per-entry denials may bypass the push gate.
+func safeOutboundBlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch e := err.(type) {
+	case *nonEnrolledPendingError, *promptPreflightError:
+		return true
+	case interface{ Unwrap() []error }:
+		children := e.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !safeOutboundBlock(child) {
+				return false
+			}
+		}
+		return true
+	default:
+		if inner := errors.Unwrap(err); inner != nil {
+			return safeOutboundBlock(inner)
+		}
+		return false
+	}
+}
+
 type nonEnrolledPendingError struct {
 	counts []store.PendingSyncMutationProjectCount
 }
@@ -116,6 +151,23 @@ func (e *nonEnrolledPendingError) Error() string {
 type CloudTransport interface {
 	PushMutations(mutations []MutationEntry) (*PushMutationsResult, error)
 	PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error)
+}
+
+// Provenance capabilities are optional for legacy transports/stores, but keyed
+// prompts fail closed when either capability is unavailable.
+type pendingMutationPager interface {
+	ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]store.SyncMutation, error)
+	MaxPendingSyncMutationSeq(targetKey string) (int64, error)
+}
+
+type localPromptProvenance interface {
+	LocalSessionProvenance(id string) (owner string, eligible bool, err error)
+	LocalPromptCreationIdentity(syncID string) (session, inbox, project string, eligible bool, err error)
+}
+
+type promptAuthorityTransport interface {
+	RegisterSessionAuthority(sessionID, ownerProject string) error
+	ClaimPromptPair(sessionID, sourceInboxID, syncID, ownerProject, promptProject string) error
 }
 
 // transportStatusError is an optional interface that transport errors may implement.
@@ -489,15 +541,31 @@ func (m *Manager) cycle(ctx context.Context) {
 	m.leaseHeld = true
 	m.mu.Unlock()
 
-	// Push, then pull.
+	// Only exclusively local per-entry preflight blocks can leave inbound
+	// replication independent of the outbound failure.
 	if err := m.push(ctx); err != nil {
-		var blocked *nonEnrolledPendingError
-		if errors.As(err, &blocked) {
-			m.recordBlocked(err.Error(), constants.ReasonNonEnrolledPendingMutations)
+		if !safeOutboundBlock(err) {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
 			return
 		}
-		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
+
+		blockedMessage := err.Error()
+		blockedReason := constants.ReasonNonEnrolledPendingMutations
+		var nonEnrolled *nonEnrolledPendingError
+		if !errors.As(err, &nonEnrolled) {
+			blockedReason = "prompt_provenance_blocked"
+		}
+		m.recordBlocked(blockedMessage, blockedReason)
+		if err := m.pullPreservingSyncState(ctx); err != nil {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
+			return
+		}
+		if err := m.recordBlockedAfterSuccess(blockedMessage, blockedReason); err != nil {
+			reasonCode := classifyTransportError(err)
+			m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("persist blocked state after successful pull: %v", err), err), reasonCode)
+		}
 		return
 	}
 
@@ -603,11 +671,47 @@ func (m *Manager) push(ctx context.Context) error {
 		}
 	}
 
-	pending, err := m.store.ListPendingSyncMutations(m.cfg.TargetKey, m.cfg.PushBatchSize)
-	if err != nil {
-		return fmt.Errorf("list pending: %w", err)
+	pager, ok := m.store.(pendingMutationPager)
+	if !ok {
+		return fmt.Errorf("bounded pending mutation pagination unavailable")
 	}
-	if len(pending) == 0 {
+	// Snapshot the eligible journal after repair: new enqueues belong to a later cycle.
+	highWater, err := pager.MaxPendingSyncMutationSeq(m.cfg.TargetKey)
+	if err != nil {
+		return fmt.Errorf("read push high-water: %w", err)
+	}
+	var failures []error
+	var afterSeq int64
+	seen := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		pending, err := pager.ListPendingSyncMutationsAfterSeq(m.cfg.TargetKey, afterSeq, m.cfg.PushBatchSize)
+		if err != nil {
+			return errors.Join(append(failures, fmt.Errorf("list pending: %w", err))...)
+		}
+		page := make([]store.SyncMutation, 0, len(pending))
+		for _, mut := range pending {
+			if mut.Seq <= afterSeq {
+				return errors.Join(append(failures, fmt.Errorf("pending pagination did not advance"))...)
+			}
+			if mut.Seq > highWater {
+				break
+			}
+			page = append(page, mut)
+			afterSeq = mut.Seq
+		}
+		if len(page) == 0 {
+			break
+		}
+		seen = true
+		failures = append(failures, m.pushPage(ctx, page)...)
+		if len(pending) < m.cfg.PushBatchSize || afterSeq >= highWater {
+			break
+		}
+	}
+	if !seen {
 		counts, err := m.store.CountPendingNonEnrolledSyncMutations(m.cfg.TargetKey)
 		if err != nil {
 			return fmt.Errorf("count pending non-enrolled mutations: %w", err)
@@ -618,6 +722,10 @@ func (m *Manager) push(ctx context.Context) error {
 		return nil
 	}
 
+	return errors.Join(failures...)
+}
+
+func (m *Manager) pushPage(ctx context.Context, pending []store.SyncMutation) []error {
 	// Group by project (preserve order). Empty or padded project values are invalid
 	// for cloud transport: never send them, but continue with healthy project groups.
 	groups := make(map[string][]store.SyncMutation)
@@ -638,22 +746,43 @@ func (m *Manager) push(ctx context.Context) error {
 	for _, project := range order {
 		if err := ctx.Err(); err != nil {
 			failures = append(failures, err)
-			return errors.Join(failures...)
+			return failures
 		}
 		batch := groups[project]
-		entries := make([]MutationEntry, len(batch))
-		seqs := make([]int64, len(batch))
-		for i, mut := range batch {
-			entries[i] = MutationEntry{
-				Project:   mut.Project,
-				Entity:    mut.Entity,
-				EntityKey: mut.EntityKey,
-				Op:        mut.Op,
-				Payload:   json.RawMessage(mut.Payload),
+		entries := make([]MutationEntry, 0, len(batch))
+		seqs := make([]int64, 0, len(batch))
+		for _, mut := range batch {
+			if mut.Entity == store.SyncEntityPrompt {
+				var identity struct {
+					SyncID  string `json:"sync_id"`
+					Session string `json:"session_id"`
+					Inbox   string `json:"source_inbox_id"`
+					Project string `json:"project"`
+				}
+				if err := json.Unmarshal([]byte(mut.Payload), &identity); err != nil {
+					failures = append(failures, fmt.Errorf("prompt seq %d: invalid identity: %w", mut.Seq, err))
+					continue
+				}
+				if identity.SyncID == "" || identity.SyncID != mut.EntityKey || identity.Project != project || identity.Session == "" {
+					failures = append(failures, fmt.Errorf("prompt seq %d: invalid journal identity", mut.Seq))
+					continue
+				}
+				if identity.Inbox != "" {
+					if err := m.preflightPrompt(mut, identity.SyncID, identity.Session, identity.Inbox, identity.Project); err != nil {
+						failures = append(failures, fmt.Errorf("prompt seq %d: %w", mut.Seq, err))
+						continue
+					}
+				}
 			}
-			seqs[i] = mut.Seq
+			entries = append(entries, MutationEntry{
+				Project: mut.Project, Entity: mut.Entity, EntityKey: mut.EntityKey,
+				Op: mut.Op, Payload: json.RawMessage(mut.Payload),
+			})
+			seqs = append(seqs, mut.Seq)
 		}
-
+		if len(entries) == 0 {
+			continue
+		}
 		result, err := m.transport.PushMutations(entries)
 		if err != nil {
 			failures = append(failures, &projectTransportFailure{project: project, err: err})
@@ -669,16 +798,60 @@ func (m *Manager) push(ctx context.Context) error {
 		}
 		if err := m.store.AckSyncMutationSeqs(m.cfg.TargetKey, seqs); err != nil {
 			failures = append(failures, fmt.Errorf("ack project %q: %w", project, err))
-			return errors.Join(failures...)
+			return failures
 		}
 	}
 
-	return errors.Join(failures...)
+	return failures
+}
+
+func (m *Manager) preflightPrompt(mut store.SyncMutation, syncID, session, inbox, project string) error {
+	if syncID == "" || session == "" || inbox == "" || project == "" ||
+		syncID != mut.EntityKey || project != mut.Project {
+		return &promptPreflightError{err: fmt.Errorf("unverified keyed prompt mutation identity")}
+	}
+	local, ok := m.store.(localPromptProvenance)
+	if !ok {
+		return fmt.Errorf("local prompt provenance unavailable")
+	}
+	remote, ok := m.transport.(promptAuthorityTransport)
+	if !ok {
+		return fmt.Errorf("remote prompt authority unavailable")
+	}
+	originalSession, originalInbox, originalProject, eligible, err := local.LocalPromptCreationIdentity(syncID)
+	if err != nil {
+		return fmt.Errorf("read local prompt origin: %w", err)
+	}
+	if !eligible || originalSession != session || originalInbox != inbox || originalProject != project {
+		return &promptPreflightError{err: fmt.Errorf("unverified keyed prompt origin")}
+	}
+	owner, eligible, err := local.LocalSessionProvenance(session)
+	if err != nil {
+		return fmt.Errorf("read local session origin: %w", err)
+	}
+	if !eligible || owner == "" {
+		return &promptPreflightError{err: fmt.Errorf("unverified local session owner")}
+	}
+	if err := remote.RegisterSessionAuthority(session, owner); err != nil {
+		return fmt.Errorf("register session authority: %w", err)
+	}
+	if err := remote.ClaimPromptPair(session, inbox, syncID, owner, project); err != nil {
+		return fmt.Errorf("claim prompt pair: %w", err)
+	}
+	return nil
 }
 
 // ─── Pull ────────────────────────────────────────────────────────────────────
 
 func (m *Manager) pull(ctx context.Context) error {
+	return m.pullWithSyncState(ctx, false)
+}
+
+func (m *Manager) pullPreservingSyncState(ctx context.Context) error {
+	return m.pullWithSyncState(ctx, true)
+}
+
+func (m *Manager) pullWithSyncState(ctx context.Context, preserveSyncState bool) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -720,7 +893,12 @@ func (m *Manager) pull(ctx context.Context) error {
 			// ApplyPulledMutation handles relation FK misses internally by writing
 			// to sync_apply_deferred and returning nil — the cursor advances normally.
 			// All other errors (legacy entities, decode errors) propagate and halt the pull.
-			if err := m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut); err != nil {
+			if preserveSyncState {
+				err = m.store.ApplyPulledMutationPreservingSyncState(m.cfg.TargetKey, localMut)
+			} else {
+				err = m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut)
+			}
+			if err != nil {
 				return fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, err)
 			}
 			project := strings.TrimSpace(rm.Project)
@@ -787,6 +965,7 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	m.status.ConsecutiveFailures = failures
 	m.status.LastError = msg
 	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = msg
 
 	backoff := m.computeBackoff(failures)
 	bu := time.Now().Add(backoff)
@@ -816,6 +995,24 @@ func (m *Manager) recordBlocked(msg, reasonCode string) {
 	m.mu.Unlock()
 
 	_ = m.store.MarkSyncBlocked(m.cfg.TargetKey, reasonCode, msg)
+}
+
+func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) error {
+	if err := m.store.MarkSyncBlockedAfterSuccess(m.cfg.TargetKey, reasonCode, msg); err != nil {
+		return err
+	}
+
+	now := time.Now()
+	m.mu.Lock()
+	m.status.Phase = PhasePushFailed
+	m.status.ConsecutiveFailures = 0
+	m.status.LastError = msg
+	m.status.BackoffUntil = nil
+	m.status.LastSyncAt = &now
+	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = msg
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) recordSuccess() {

@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -11,9 +12,165 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
+
+func TestCodexPromptSubmitRejectsEndedHostSession(t *testing.T) {
+	codexPromptSubmitSession(t, true, false)
+}
+
+func TestCodexPromptSubmitRejectsUnconfirmedRegistration(t *testing.T) {
+	codexPromptSubmitSession(t, false, true)
+}
+
+func TestCodexPromptSubmitPersistsActiveHostSession(t *testing.T) {
+	codexPromptSubmitSession(t, false, false)
+}
+
+func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("executes Codex shell hook")
+	}
+	bash := codexTestBash(t)
+	for _, tool := range []string{"curl", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("requires %s: %v", tool, err)
+		}
+	}
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close prompt fixture store: %v", err)
+		}
+	})
+	id := "prompt-" + filepath.Base(root)
+	const project = "codex-prompt-probe"
+	if err := db.StartSession(id, project, root); err != nil {
+		t.Fatal(err)
+	}
+	if ended {
+		if err := db.EndSession(id, "finished"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	production := server.New(db, 0).Handler()
+	var posts, registrations atomic.Int32
+	requests := make(chan struct{}, 1)
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" && r.Method == http.MethodPost {
+			registrations.Add(1)
+			if refuseRegistration {
+				http.Error(w, "registration unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		if r.URL.Path == "/project/current" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"project":"codex-prompt-probe","project_source":"config"}`)
+			return
+		}
+		if r.URL.Path == "/prompts" && r.Method == http.MethodPost {
+			posts.Add(1)
+			production.ServeHTTP(w, r)
+			select {
+			case requests <- struct{}{}:
+			default:
+			}
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer fixture.Close()
+	port := strings.TrimPrefix(strings.TrimPrefix(fixture.URL, "http://127.0.0.1:"), "http://localhost:")
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "touch"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const prompt = "capture only for an active host session"
+	payload, err := json.Marshal(map[string]string{"session_id": id, "cwd": root, "prompt": prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bash, filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh"))
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + root, "USERPROFILE=" + root, "APPDATA=" + root, "LOCALAPPDATA=" + root,
+		"TMPDIR=" + root, "TMP=" + root, "TEMP=" + root,
+		"ENGRAM_DATA_DIR=" + root, "ENGRAM_PORT=" + port, "ENGRAM_URL=" + fixture.URL,
+		"CURL_HOME=" + root, "XDG_CONFIG_HOME=" + root,
+	}
+	cmd.Stdin = bytes.NewReader(payload)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hook failed: %v: %s", err, output)
+	}
+	// The hook returns before its detached write. Wait for the active request;
+	// rejected requests get a bounded quiet window after registration completes.
+	if ended || refuseRegistration {
+		select {
+		case <-requests:
+			t.Fatal("prompt POST followed rejected registration")
+		case <-time.After(2 * time.Second):
+		}
+	} else {
+		select {
+		case <-requests:
+		case <-time.After(5 * time.Second):
+			t.Fatal("confirmed prompt POST did not arrive")
+		}
+	}
+	prompts, err := db.RecentPrompts(project, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 1
+	if ended || refuseRegistration {
+		want = 0
+	}
+	if registrations.Load() != 1 || len(prompts) != want || posts.Load() != int32(want) {
+		t.Fatalf("ended=%t refused=%t: registrations=%d, persisted prompts=%d, POST /prompts=%d; want one registration and %d prompts", ended, refuseRegistration, registrations.Load(), len(prompts), posts.Load(), want)
+	}
+	if want == 1 && (prompts[0].SessionID != id || prompts[0].Content != prompt) {
+		t.Fatalf("active prompt = %+v, want session %q and content %q", prompts[0], id, prompt)
+	}
+}
+
+func TestCodexPreToolUseManifestRegistersNativeBinder(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	entries := manifest.Hooks["PreToolUse"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 || entries[0].Matcher != "mcp__engram__mem_*|mcp__plugin_engram_engram__mem_*" || entries[0].Hooks[0].Command != "engram hook codex-pre-tool-use" {
+		t.Fatalf("unexpected Codex PreToolUse registration: %+v", entries)
+	}
+}
 
 func TestCodexRegisteredSessionHandoff(t *testing.T) {
 	if testing.Short() {
@@ -67,8 +224,17 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								}
 							}
 						case "/external/sessions":
+							body, err := io.ReadAll(r.Body)
+							if err != nil {
+								t.Errorf("read registration: %v", err)
+							}
+							if tc.name == "opaque text" {
+								if !bytes.Contains(body, []byte("é")) {
+									t.Errorf("registration body lost UTF-8 bytes for opaque ID: %q", body)
+								}
+							}
 							var payload map[string]string
-							if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							if err := json.Unmarshal(body, &payload); err != nil {
 								t.Errorf("decode registration: %v", err)
 							}
 							requests <- payload
@@ -136,9 +302,20 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						t.Fatal("hook attempted a forbidden executable or transport destination")
 					}
 					output := stdout.String()
-					for _, want := range []string{"ACTIVE PROTOCOL", "Never invent", "mem_session_start"} {
+					for _, want := range []string{"Never invent", "mem_session_start"} {
 						if !strings.Contains(output, want) {
 							t.Errorf("missing instruction %q", want)
+						}
+					}
+					if tc.registered {
+						if !strings.Contains(output, "ACTIVE PROTOCOL") {
+							t.Error("confirmed registration missing active protocol")
+						}
+					} else if event != "compact" {
+						for _, forbidden := range []string{"ACTIVE PROTOCOL", "Call `mem_save`", "Call `mem_session_summary`", "call mem_search"} {
+							if strings.Contains(output, forbidden) {
+								t.Errorf("unconfirmed startup instructs agent memory use: %q", forbidden)
+							}
 						}
 					}
 					if !tc.noProject && !strings.Contains(output, "retained-memory-context") {
@@ -165,14 +342,29 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								t.Errorf("missing identity reuse instruction %q", want)
 							}
 						}
-					} else if !strings.Contains(output, "omit session_id") {
-						t.Error("missing unavailable identity instruction")
+					} else {
+						for _, want := range []string{"Agent-attributed memory writes must stop", "host hook re-registers the same runtime ID", "independent CLI/manual save", "not a substitute for session attribution"} {
+							if !strings.Contains(output, want) {
+								t.Errorf("missing failed registration guidance %q", want)
+							}
+						}
+						if strings.Contains(output, "omit session_id") {
+							t.Error("failure advises omitted-ID agent write")
+						}
 					}
 					if event == "compact" {
 						first := strings.Index(output, "1. FIRST: Call mem_session_summary")
 						then := strings.Index(output, "2. THEN: Call mem_context")
-						if first < 0 || then <= first || (found && strings.Index(output, marker) > first) {
-							t.Error("compaction must receive identity before summary, then recover context")
+						if tc.registered {
+							if first < 0 || then <= first || strings.Index(output, marker) > first {
+								t.Error("confirmed compaction must receive identity before summary, then recover context")
+							}
+						} else {
+							for _, forbidden := range []string{"ACTIVE PROTOCOL", "1. FIRST: Call mem_session_summary", "2. THEN: Call mem_context", "call mem_search", "Call `mem_save`", "Call `mem_session_summary`"} {
+								if strings.Contains(output, forbidden) {
+									t.Errorf("unconfirmed compaction instructs tool use: %q", forbidden)
+								}
+							}
 						}
 					}
 					id, validID := tc.id.(string)
@@ -232,10 +424,10 @@ func codexHandoffEnv(t *testing.T, cwd, serverURL string) []string {
         [ "$#" -ge 2 ] || return 1
         case "$2" in 1|2|3) ;; *) return 1 ;; esac
         shift 2 ;;
-      -X|-H|-d|-w)
+      -X|-H|--data-binary|-w)
         [ "$#" -ge 2 ] || return 1
         case "$1:$2" in
-          '-X:POST'|'-H:Content-Type: application/json'|'-d:{'*|'-w:\n%{http_code}') ;;
+          '-X:POST'|'-H:Content-Type: application/json'|'--data-binary:@-'|'-w:\n%{http_code}') ;;
           *) return 1 ;;
         esac
         shift 2 ;;

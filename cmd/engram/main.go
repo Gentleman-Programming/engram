@@ -145,6 +145,7 @@ var (
 		}
 		return runner.RunAll(ctx, scope)
 	}
+	buildRepairPlan = diagnostic.BuildRepairPlan
 
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
@@ -313,6 +314,14 @@ func (a autosyncManagerAdapter) Status() cloudSyncStatus {
 // This bridges the type gap between packages without creating a circular import.
 type mutationTransportAdapter struct {
 	remote *remote.MutationTransport
+}
+
+func (a *mutationTransportAdapter) RegisterSessionAuthority(sessionID, ownerProject string) error {
+	return a.remote.RegisterSessionAuthority(sessionID, ownerProject)
+}
+
+func (a *mutationTransportAdapter) ClaimPromptPair(sessionID, inboxID, syncID, ownerProject, promptProject string) error {
+	return a.remote.ClaimPromptPair(sessionID, inboxID, syncID, ownerProject, promptProject)
 }
 
 func (a *mutationTransportAdapter) PushMutations(entries []autosync.MutationEntry) (*autosync.PushMutationsResult, error) {
@@ -702,6 +711,28 @@ func main() {
 		return
 	}
 
+	// Help for backup commands must not resolve configuration or open a store.
+	if os.Args[1] == "export" || os.Args[1] == "import" {
+		for _, arg := range os.Args[2:] {
+			if arg != "--help" {
+				continue
+			}
+			if os.Args[1] == "export" {
+				fmt.Println("Usage: engram export [file.json] [--project NAME | --all]\n\nOptions:\n  --project NAME  Export one project (default: current project)\n  --all           Export every project\n  --help          Show this help")
+			} else {
+				fmt.Println("Usage: engram import <file.json>\n\nOptions:\n  --help          Show this help")
+			}
+			return
+		}
+	}
+
+	if os.Args[1] == "serve-background" {
+		if err := cmdServeBackground(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
@@ -722,8 +753,8 @@ func main() {
 		}
 	}
 
-	// Allow overriding data dir via env
-	if dir := os.Getenv("ENGRAM_DATA_DIR"); dir != "" {
+	// Allow overriding data dir via env. Blank values retain the resolved default.
+	if dir := os.Getenv("ENGRAM_DATA_DIR"); strings.TrimSpace(dir) != "" {
 		cfg.DataDir = dir
 	}
 
@@ -797,7 +828,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init":
+	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -826,6 +857,9 @@ func handleConfigFreeCommand(args []string) bool {
 		}
 	case "init":
 		cmdInit()
+		return true
+	case "hook":
+		cmdHook(args[1:])
 		return true
 	}
 	return false
@@ -2495,6 +2529,8 @@ func cmdProjects(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "merge":
+		cmdProjectsMerge(cfg)
 	case "consolidate":
 		cmdProjectsConsolidate(cfg)
 	case "prune":
@@ -2512,9 +2548,74 @@ func cmdProjects(cfg store.Config) {
 
 func printProjectsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
+	fmt.Fprintln(os.Stderr, "       engram projects merge --from <source> --to <canonical> (--dry-run|--apply)")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
 	fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run] [--paths-only]")
 	fmt.Fprintln(os.Stderr, "       engram projects rescue-ownership --project <name> [--session <id>]... [--observation <id>]... [--prompt <id>]...")
+}
+
+func cmdProjectsMerge(cfg store.Config) {
+	var from, to string
+	var dryRun, apply bool
+	seen := map[string]bool{}
+	for i := 3; i < len(os.Args); i++ {
+		flag := os.Args[i]
+		if seen[flag] {
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+		seen[flag] = true
+		switch flag {
+		case "--from", "--to":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "--") {
+				printProjectsUsage()
+				exitFunc(1)
+				return
+			}
+			i++
+			if flag == "--from" {
+				from = os.Args[i]
+			} else {
+				to = os.Args[i]
+			}
+		case "--dry-run":
+			dryRun = true
+		case "--apply":
+			apply = true
+		default:
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" || dryRun == apply {
+		printProjectsUsage()
+		exitFunc(1)
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer func() { _ = s.Close() }() // Closing the command's store is best effort.
+	// Preview and apply share store eligibility; apply revalidates transactionally.
+	preview, err := s.PreviewExplicitProjectMerge(from, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if dryRun {
+		fmt.Printf("[dry-run] Source %q -> target %q: observations %d, sessions %d, prompts %d. Sync identity changes: %t. No changes made. Point-in-time preview; apply revalidates and counts may differ.\n", preview.Source, preview.Canonical, preview.ObservationsUpdated, preview.SessionsUpdated, preview.PromptsUpdated, preview.SyncIdentityChanges)
+		return
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{from}, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Merged source %q into target %q: observations %d, sessions %d, prompts %d. Sync identity may also change.\n", preview.Source, result.Canonical, result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
 }
 
 // cmdProjectsRescueOwnership assigns explicit ownership to legacy rows that
@@ -3616,6 +3717,8 @@ Commands:
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
   projects list      List all projects with observation, session, and prompt counts
+  projects merge --from <source> --to <canonical> (--dry-run|--apply)
+                     Preview or apply an explicit separator-variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
@@ -3626,7 +3729,7 @@ Commands:
                        --paths-only  Limit pruning to project names containing / or \
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
-                     cursor, vscode-copilot, kilocode)
+                     cursor, vscode-copilot, kilocode, kimi, commandcode)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
@@ -3654,7 +3757,8 @@ Commands:
   help               Show this help
 
 Environment:
-  ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
+  ENGRAM_DATA_DIR    Engram CLI data directory. Empty or whitespace-only values use the
+                     platform default; nonblank values are used as provided (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Process-level default project override, applied by every entry point
                      with one precedence rule: explicit request project (engram save --project,

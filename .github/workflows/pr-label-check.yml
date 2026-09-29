@@ -3,6 +3,8 @@ name: PR Label Policy
 on:
   pull_request_target:
     types: [opened, edited, labeled, unlabeled, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -13,28 +15,49 @@ jobs:
     name: Check PR Has type:* Label
     runs-on: ubuntu-latest
     concurrency:
-      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number }}
+      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
     steps:
-      - name: Read current pull request labels
-        id: current-labels
+      - name: Check out trusted base revision
+        if: github.event_name == 'pull_request_target' || github.event_name == 'merge_group'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Validate canonical PR labels
+        if: github.event_name == 'pull_request_target' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const pull = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-            });
-            return pull.data.labels.map((label) => label.name);
-      - name: Check out trusted base revision
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-      - name: Validate canonical PR labels
-        env:
-          PR_LABELS: ${{ steps.current-labels.outputs.result }}
-        run: >-
-          node .github/scripts/label-policy.mjs --target pull-request
-          --labels-json "$PR_LABELS"
+            const { loadLabelPolicy, validateLabels } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/label-policy.mjs`);
+            const policy = loadLabelPolicy();
+            const validate = (pull) => {
+              const errors = validateLabels(policy, pull.labels.map((label) => label.name), 'pull-request').errors;
+              if (errors.length === 0) core.info(`✅ PR #${pull.number} labels pass canonical policy`);
+              return errors;
+            };
+            let failures;
+            if (context.eventName === 'merge_group') {
+              const { aggregatePullRequestResults, resolveAssociatedPullRequests } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/merge-queue.mjs`);
+              try {
+                const { base_ref: baseRef, head_ref: headRef } = context.payload.merge_group;
+                const pulls = await resolveAssociatedPullRequests(github, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  baseRef,
+                  headRef,
+                });
+                failures = await aggregatePullRequestResults(pulls, validate);
+              } catch (err) { core.setFailed(`❌ Could not fetch current pull request metadata: ${err.message}`); return; }
+            } else {
+              let pull;
+              try {
+                pull = (await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                })).data;
+              } catch (err) { core.setFailed(`❌ Could not fetch current pull request metadata: ${err.message}`); return; }
+              failures = validate(pull).map((error) => `PR #${pull.number}: ${error}`);
+            }
+            if (failures.length > 0) core.setFailed('❌ Pull-request label policy failures:\n' + failures.join('\n'));

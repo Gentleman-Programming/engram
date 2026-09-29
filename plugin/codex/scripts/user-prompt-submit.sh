@@ -42,6 +42,7 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   (
     PROJECT=$(resolve_project "$CWD") || exit 0
+    engram_session_handoff "$INPUT" "$PROJECT" "$CWD" >/dev/null || exit 0
     curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
       -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
