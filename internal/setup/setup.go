@@ -1643,36 +1643,26 @@ func installCodex() (*Result, error) {
 		return nil, err
 	}
 
-	// Best-effort: install the Codex plugin (hooks) via the Codex CLI.
-	// Failures here are non-fatal — the MCP TOML is already written and works
-	// without the plugin. The plugin adds hooks (compaction recovery, etc.).
+	// The additive memory protocol requires the plugin hooks. Files already
+	// written remain available for manual recovery if activation fails.
+	const pluginRecovery = "MCP config and instruction files were written, but the Engram plugin was not installed. Ensure codex is in PATH, then run:\n  codex plugin marketplace add " + codexMarketplace + " --ref main\n  codex plugin add engram@engram"
 	codexBin, err := lookPathFn("codex")
 	if err != nil {
-		// codex CLI not in PATH — warn and return success with files written so far.
-		fmt.Fprintf(os.Stderr, "warning: codex CLI not found in PATH — MCP config and instruction files were written,\n")
-		fmt.Fprintf(os.Stderr, "  but the Engram plugin (hooks) was not installed.\n")
-		fmt.Fprintf(os.Stderr, "  To install manually, run:\n")
-		fmt.Fprintf(os.Stderr, "    codex plugin marketplace add %s --ref main\n", codexMarketplace)
-		fmt.Fprintf(os.Stderr, "    codex plugin add engram@engram\n")
-		return &Result{
-			Agent:       "codex",
-			Destination: filepath.Dir(path),
-			Files:       3,
-		}, nil
+		return nil, fmt.Errorf("codex CLI not found in PATH: %w; %s", err, pluginRecovery)
 	}
 
 	// Step 1: add the marketplace (idempotent — tolerate "already" in output).
 	addOut, err := runCommand(codexBin, "plugin", "marketplace", "add", codexMarketplace, "--ref", "main")
 	addOutputStr := strings.TrimSpace(string(addOut))
 	if err != nil && !strings.Contains(strings.ToLower(addOutputStr), "already") {
-		fmt.Fprintf(os.Stderr, "warning: codex plugin marketplace add failed (non-fatal): %s\n", addOutputStr)
+		return nil, fmt.Errorf("codex plugin marketplace add failed: %w (output: %s); %s", err, addOutputStr, pluginRecovery)
 	}
 
 	// Step 2: install the plugin (idempotent — tolerate "already" in output).
 	pluginOut, err := runCommand(codexBin, "plugin", "add", "engram@engram")
 	pluginOutputStr := strings.TrimSpace(string(pluginOut))
 	if err != nil && !strings.Contains(strings.ToLower(pluginOutputStr), "already") {
-		fmt.Fprintf(os.Stderr, "warning: codex plugin add failed (non-fatal): %s\n", pluginOutputStr)
+		return nil, fmt.Errorf("codex plugin add failed: %w (output: %s); %s", err, pluginOutputStr, pluginRecovery)
 	}
 
 	return &Result{
@@ -1825,23 +1815,28 @@ func upsertCodexWindowsHookMarker(content, command string, enabled bool) string 
 }
 
 // removeTopLevelTOMLKey drops any `key = ...` assignment line from the content.
-// Only lines whose first non-space token is exactly the key followed by
-// whitespace or '=' are matched, so keys sharing a prefix (e.g.
-// "model_instructions_file_extra") are left untouched. Like the previous upsert
-// helper it is section-blind: it removes every matching assignment, which is
-// what the Codex config wants since the key is top-level.
+// Match the exact unquoted key with TOML space/tab whitespace before '='.
+// Preserve prefix keys, table entries, and a leading BOM.
 func removeTopLevelTOMLKey(content, key string) string {
+	bom := ""
+	if strings.HasPrefix(content, "\ufeff") {
+		bom, content = "\ufeff", strings.TrimPrefix(content, "\ufeff")
+	}
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 	kept := make([]string, 0, len(lines))
+	inTable := false
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "[") {
+			inTable = true
+		}
+		if !inTable && strings.HasPrefix(trimmed, key) && strings.HasPrefix(strings.TrimLeft(strings.TrimPrefix(trimmed, key), " \t"), "=") {
 			continue
 		}
 		kept = append(kept, line)
 	}
-	return strings.Join(kept, "\n")
+	return bom + strings.Join(kept, "\n")
 }
 
 // ─── Platform paths ──────────────────────────────────────────────────────────
