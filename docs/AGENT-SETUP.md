@@ -437,14 +437,14 @@ Recommended: one command to set up MCP + compaction recovery instructions:
 engram setup codex
 ```
 
-`engram setup codex` now does four things:
+`engram setup codex` does four things:
 
 - Registers `[mcp_servers.engram]` in the active Codex config (`$CODEX_HOME/config.toml` when `CODEX_HOME` is absolute, otherwise `~/.codex/config.toml`; on Windows the default is `%USERPROFILE%\.codex\config.toml`) and pins the current absolute executable path
-- Writes `engram-instructions.md` beside the active config with the Engram Memory Protocol
-- Writes `engram-compact-prompt.md` beside the active config and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
-- Best-effort installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`
+- Writes `engram-instructions.md` and `engram-compact-prompt.md` beside the active config as informational copies of the Memory Protocol
+- Best-effort installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`. The plugin hooks inject the Memory Protocol additively, so this is how Codex actually receives it.
+- Removes legacy `model_instructions_file` / `experimental_compact_prompt_file` keys if a previous Engram version wrote them
 
-> `engram setup codex` writes the Memory Protocol and compaction recovery prompt beside the active Codex config. No additional configuration needed.
+> **Do not set `model_instructions_file` in Codex.** Unlike most instruction mechanisms, that key *replaces* Codex's built-in system instructions instead of adding to them. Pointing it at `engram-instructions.md` wipes Codex's own base prompt (`You are Codex, ...`) and degrades the agent. Earlier Engram versions did this automatically; current versions strip the keys instead. If you set them manually, you are deliberately opting into overriding Codex's base prompt.
 
 On Windows, setup also writes an executable marker at the first line of `config.toml`; the native `UserPromptSubmit` hook reads it from the same active config. If `engram.exe` moves, rerun `engram setup codex` before restarting Codex to refresh both pins.
 
@@ -457,9 +457,6 @@ Manual alternative: add to your active Codex `config.toml` (Windows default: `%U
 If `CODEX_HOME` is set, adjust the instruction-file paths below to that directory.
 
 ```toml
-model_instructions_file = "~/.codex/engram-instructions.md"
-experimental_compact_prompt_file = "~/.codex/engram-compact-prompt.md"
-
 [mcp_servers.engram]
 command = "engram"
 args = ["mcp"]

@@ -1626,8 +1626,12 @@ func installCodex() (*Result, error) {
 	if path == "" {
 		return nil, fmt.Errorf("resolve Codex config path: no absolute CODEX_HOME or user home")
 	}
-	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
-	if err != nil {
+
+	// Write the informational memory-protocol copies. These are reference
+	// artifacts only: Engram deliberately does NOT wire them into
+	// model_instructions_file / experimental_compact_prompt_file (see
+	// injectCodexMemoryConfig).
+	if _, err := writeCodexMemoryInstructionFilesFn(); err != nil {
 		return nil, err
 	}
 
@@ -1635,8 +1639,7 @@ func installCodex() (*Result, error) {
 		return nil, err
 	}
 
-	compactPromptPath := codexCompactPromptPath()
-	if err := injectCodexMemoryConfigFn(path, instructionsPath, compactPromptPath); err != nil {
+	if err := injectCodexMemoryConfigFn(path); err != nil {
 		return nil, err
 	}
 
@@ -1718,7 +1721,20 @@ func writeCodexMemoryInstructionFiles() (string, error) {
 	return instructionsPath, nil
 }
 
-func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath string) error {
+// injectCodexMemoryConfig removes the Codex instruction-override keys that
+// earlier Engram versions wrote into ~/.codex/config.toml.
+//
+// In Codex, `model_instructions_file` REPLACES the built-in system instructions
+// rather than adding to them, and `experimental_compact_prompt_file` likewise
+// overrides the default compaction prompt. Pointing them at the Engram-only
+// files wiped Codex's base prompt ("You are Codex, ...") and degraded the agent.
+// Engram now delivers the Memory Protocol additively through the plugin hooks
+// (SessionStart / UserPromptSubmit / PostCompact) and the engram-memory skill,
+// so it must not set these keys.
+//
+// Stripping them here — rather than merely not writing them — heals configs that
+// older versions already broke: the next `engram setup codex` removes them.
+func injectCodexMemoryConfig(configPath string) error {
 	data, err := readFileFn(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1730,8 +1746,8 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 
 	bom, content := splitCodexBOM(string(data))
 	content = strings.ReplaceAll(content, "\r\n", "\n")
-	content = upsertTopLevelTOMLString(content, "model_instructions_file", instructionsPath)
-	content = upsertTopLevelTOMLString(content, "experimental_compact_prompt_file", compactPromptPath)
+	content = removeTopLevelTOMLKey(content, "model_instructions_file")
+	content = removeTopLevelTOMLKey(content, "experimental_compact_prompt_file")
 
 	if err := writeFileFn(configPath, []byte(bom+content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
@@ -1808,35 +1824,24 @@ func upsertCodexWindowsHookMarker(content, command string, enabled bool) string 
 	return marker + "\n" + body
 }
 
-func upsertTopLevelTOMLString(content, key, value string) string {
+// removeTopLevelTOMLKey drops any `key = ...` assignment line from the content.
+// Only lines whose first non-space token is exactly the key followed by
+// whitespace or '=' are matched, so keys sharing a prefix (e.g.
+// "model_instructions_file_extra") are left untouched. Like the previous upsert
+// helper it is section-blind: it removes every matching assignment, which is
+// what the Codex config wants since the key is top-level.
+func removeTopLevelTOMLKey(content, key string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
-	lineValue := fmt.Sprintf("%s = %q", key, value)
-
-	var cleaned []string
+	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
 			continue
 		}
-		cleaned = append(cleaned, line)
+		kept = append(kept, line)
 	}
-
-	insertAt := len(cleaned)
-	for i, line := range cleaned {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			insertAt = i
-			break
-		}
-	}
-
-	var out []string
-	out = append(out, cleaned[:insertAt]...)
-	out = append(out, lineValue)
-	out = append(out, cleaned[insertAt:]...)
-
-	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
+	return strings.Join(kept, "\n")
 }
 
 // ─── Platform paths ──────────────────────────────────────────────────────────
