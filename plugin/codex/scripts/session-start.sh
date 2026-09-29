@@ -42,7 +42,11 @@ if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
   else
     ENGRAM_SERVE_ERR_LOG="${TMPDIR:-/tmp}/engram-serve.err.log"
   fi
-  ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
+  if [ "${OS:-}" = "Windows_NT" ]; then
+    ENGRAM_CLOUD_AUTOSYNC=1 engram serve-background "$ENGRAM_SERVE_ERR_LOG" || true
+  else
+    ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
+  fi
   sleep 0.5
 fi
 if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then

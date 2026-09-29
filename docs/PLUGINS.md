@@ -28,6 +28,7 @@ Pi and OpenCode activity renews the local runtime lease through their existing s
 - The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
 - The adapter reads the setup-owned absolute pin and invokes its native hook command.
 - This path needs no Git Bash, `jq`, or `curl`.
+- The Git Bash SessionStart adapter starts a missing local server with `engram serve-background LOG_PATH` on Windows. The CLI launches `serve` with detached stdin/stdout and server stderr appended to the selected log; `engram serve` itself remains foreground. An explicit `ENGRAM_URL` leaves server startup to its external owner.
 
 ---
 

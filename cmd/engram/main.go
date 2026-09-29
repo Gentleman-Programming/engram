@@ -718,6 +718,13 @@ func main() {
 		}
 	}
 
+	if os.Args[1] == "serve-background" {
+		if err := cmdServeBackground(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
