@@ -31,7 +31,12 @@ run_analyzer() {
 			if ($2 !~ /^[0-9]+\.[0-9]+(\.[0-9]+)?$/ || (NF > 2 && $3 !~ /^\/\//)) invalid=1
 			version=$2
 		}
-		END { if (count != 1 || invalid) exit 1; print version }
+		END {
+			if (count != 1 || invalid) exit 1
+			parts=split(version, release, ".")
+			if (parts == 2 && (release[1] > 1 || (release[1] == 1 && release[2] >= 21))) version=version ".0"
+			print version
+		}
 	' "${repo_root}/go.mod")"; then
 		printf 'deadcode requires a valid go directive in %s/go.mod (for example, go 1.25.10); fix the module minimum before retrying\n' "${repo_root}" >&2
 		return 1

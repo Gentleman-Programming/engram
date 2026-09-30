@@ -108,6 +108,10 @@ explicit executable override are responsible for its compatible toolchain and
 analyzer behavior. `--compare <baseline> <candidate>` only compares identity
 files and does not invoke Go.
 
+Patchless minimums from Go 1.21 onward select the `.0` release (for example,
+`go 1.24` selects `go1.24.0+auto`). Explicit patches and historical release
+names through Go 1.20 are preserved.
+
 ### Performance Ratchet
 
 Pushes to `main` compare the store search and scan benchmarks with the exact

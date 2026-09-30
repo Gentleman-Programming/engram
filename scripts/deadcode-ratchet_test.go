@@ -23,7 +23,12 @@ func TestDeadcodeRatchetToolchain(t *testing.T) {
 		override, fail, wantErr  bool
 	}{
 		{name: "repository minimum", module: "module fixture\ngo 1.25.10\ntoolchain go1.26.1\n", want: "go1.25.10+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
-		{name: "alternate minimum", module: "module fixture\n go 1.24 // minimum\n", want: "go1.24+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
+		{name: "alternate minimum", module: "module fixture\n go 1.24 // minimum\n", want: "go1.24.0+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
+		{name: "modern naming cutoff", module: "go 1.21\n", want: "go1.21.0+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
+		{name: "historical naming cutoff", module: "go 1.20\n", want: "go1.20+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
+		{name: "older historical release", module: "go 1.19\n", want: "go1.19+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
+		{name: "explicit zero patch", module: "go 1.21.0\n", want: "go1.21.0+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
+		{name: "explicit historical patch", module: "go 1.20.1\n", want: "go1.20.1+auto|run golang.org/x/tools/cmd/deadcode@v0.30.0 ./..."},
 		{name: "missing directive", module: "module fixture\ntoolchain go1.26.1\n", want: "valid go directive", wantErr: true},
 		{name: "malformed directive", module: "module fixture\ngo go1.25.10\n", want: "valid go directive", wantErr: true},
 		{name: "duplicate directive", module: "go 1.25.10\ngo 1.24\n", want: "valid go directive", wantErr: true},
