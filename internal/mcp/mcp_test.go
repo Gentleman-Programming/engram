@@ -7499,6 +7499,51 @@ func TestMemSave_AmbiguousWithInventedProjectRejected(t *testing.T) {
 	}
 }
 
+func TestMemSavePrompt_OrdinaryProjectRetainsSessionAuthority(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	for _, mode := range []string{store.SessionOwnershipShared, store.SessionOwnershipProjectOwned} {
+		for _, choice := range []string{"project-b", "unknown-project"} {
+			for _, reason := range []string{"", project.SourceUserSelectedAfterAmbiguousProject} {
+				t.Run(mode+"/"+choice+"/"+reason, func(t *testing.T) {
+					s := newMCPTestStore(t)
+					if err := s.StartSessionWithOwnershipMode("session-a", "project-a", dir, mode); err != nil {
+						t.Fatalf("start session: %v", err)
+					}
+					if err := s.CreateSession("session-b", "project-b", dir); err != nil {
+						t.Fatalf("back alternate project: %v", err)
+					}
+					h := handleSavePrompt(s, MCPConfig{DefaultProject: "process-project"}, NewSessionActivity(10*time.Minute))
+					res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+						"content": "ordinary prompt retains session authority", "session_id": "session-a",
+						"project": choice, "project_choice_reason": reason,
+					}}})
+					if err != nil || res.IsError {
+						t.Fatalf("save prompt: err=%v result=%v", err, res)
+					}
+					prompts, err := s.RecentPrompts("", 10)
+					if err != nil || len(prompts) != 1 {
+						t.Fatalf("expected one persisted prompt: prompts=%v err=%v", prompts, err)
+					}
+					if prompts[0].Project != "project-a" || prompts[0].SessionID != "session-a" {
+						t.Errorf("persisted prompt project/session = %q/%q, want project-a/session-a", prompts[0].Project, prompts[0].SessionID)
+					}
+					body := callResultJSON(t, res)
+					if body["project"] != "project-a" || body["project_source"] != project.SourceSessionProject {
+						t.Errorf("expected authoritative session envelope, got %v", body)
+					}
+					sess, err := s.GetSession("session-a")
+					if err != nil || sess.Project != "project-a" || sess.OwnershipMode != mode {
+						t.Errorf("session authority changed: session=%v err=%v", sess, err)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestMemSavePrompt_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-prompt-a", "repo-prompt-b"} {

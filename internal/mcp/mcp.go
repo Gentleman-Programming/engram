@@ -1891,6 +1891,17 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		var detRes projectpkg.DetectionResult
 		var err error
 		if strings.TrimSpace(sessionID) != "" {
+			// Ordinary prompts retain session authority. A recovery reason alone
+			// cannot admit an explicit override outside genuine detector ambiguity.
+			if strings.TrimSpace(projectChoiceReason) == projectpkg.SourceUserSelectedAfterAmbiguousProject {
+				detRes, err = resolveWriteProject()
+				if errors.Is(err, projectpkg.ErrInvalidConfig) {
+					return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
+				}
+			}
+			if !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+				projectChoice, projectChoiceReason = "", ""
+			}
 			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, projectChoice, strings.TrimSpace(projectChoice) != "", projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
 		} else {
 			detRes, err = resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
