@@ -362,12 +362,29 @@ test("degraded startup warning ignores normal child exit", async (t) => {
   assert.match(output.output, /readiness/)
 })
 
+const runtimeGlobalsBeforeIsolation = {
+  spawnSync: childProcess.spawnSync,
+  spawn: childProcess.spawn,
+  existsSync: fs.existsSync,
+  fetch: globalThis.fetch,
+}
+
 test("degraded startup warning does not leak across plugin instances", async (t) => {
   await createRuntime(t, { identityLookupFails: true })
-  const healthy = await createRuntime(t)
-  const output = { output: "original" }
-  await healthy.after({ tool: "read", sessionID: "runtime" }, output)
-  assert.equal(output.output, "original")
+  await t.test("healthy instance", async (t) => {
+    const healthy = await createRuntime(t)
+    const output = { output: "original" }
+    await healthy.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.equal(output.output, "original")
+  })
+})
+
+test("runtime mocks restore globals after nested contexts", () => {
+  // This separate test runs after both instance contexts have finished teardown.
+  assert.strictEqual(childProcess.spawnSync, runtimeGlobalsBeforeIsolation.spawnSync)
+  assert.strictEqual(childProcess.spawn, runtimeGlobalsBeforeIsolation.spawn)
+  assert.strictEqual(fs.existsSync, runtimeGlobalsBeforeIsolation.existsSync)
+  assert.strictEqual(globalThis.fetch, runtimeGlobalsBeforeIsolation.fetch)
 })
 
 test("degraded HTTP warning does not conflate expected registration refusal with downtime", async (t) => {
