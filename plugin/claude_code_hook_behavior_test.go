@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1000,7 +1001,7 @@ func TestSessionStartSkipsClaudeMCPRegistration(t *testing.T) {
 
 	run := func(t *testing.T, setupFails bool) ([]string, string) {
 		t.Helper()
-		registrations, contexts := 0, 0
+		var registrations, contexts atomic.Int64
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/health":
@@ -1008,10 +1009,10 @@ func TestSessionStartSkipsClaudeMCPRegistration(t *testing.T) {
 			case "/project/current":
 				_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
 			case "/sessions":
-				registrations++
+				registrations.Add(1)
 				w.WriteHeader(http.StatusCreated)
 			case "/context":
-				contexts++
+				contexts.Add(1)
 				_, _ = io.WriteString(w, `{"context":"isolated session memory"}`)
 			default:
 				http.NotFound(w, r)
@@ -1055,8 +1056,8 @@ func TestSessionStartSkipsClaudeMCPRegistration(t *testing.T) {
 				t.Fatalf("invocation %d missing memory context: %q", i+1, stdout)
 			}
 		}
-		if registrations != 2 || contexts != 2 {
-			t.Fatalf("registrations/context requests = %d/%d, want 2/2", registrations, contexts)
+		if gotRegistrations, gotContexts := registrations.Load(), contexts.Load(); gotRegistrations != 2 || gotContexts != 2 {
+			t.Fatalf("registrations/context requests = %d/%d, want 2/2", gotRegistrations, gotContexts)
 		}
 		return readEngramInvocations(t, logPath), stderr
 	}
