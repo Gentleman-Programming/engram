@@ -10,7 +10,7 @@
 //     the resolved absolute binary path.
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
 //   - Codex: injects MCP registration in ~/.codex/config.toml
-//   - Pi: installs gentle-engram/pi-mcp-adapter packages; native tools own Engram writes
+//   - Pi: installs the gentle-engram package; native tools own Engram writes
 package setup
 
 import (
@@ -103,7 +103,6 @@ const (
 	piPriorGentleEngramPackage       = "npm:gentle-engram@0.1.12"
 	piPredecessorGentleEngramPackage = "npm:gentle-engram@0.1.14"
 	piFormerGentleEngramPackage      = "npm:gentle-engram@0.1.15"
-	piMCPAdapterPackage              = "npm:pi-mcp-adapter"
 )
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -315,9 +314,6 @@ func installPi() (*Result, error) {
 	if _, err := runCommand("pi", "install", piGentleEngramPackage); err != nil {
 		return nil, fmt.Errorf("install %s: %w", piGentleEngramPackage, err)
 	}
-	if _, err := runCommand("pi", "install", piMCPAdapterPackage); err != nil {
-		return nil, fmt.Errorf("install %s: %w", piMCPAdapterPackage, err)
-	}
 
 	agentDir := piAgentDir()
 	settingsPath := filepath.Join(agentDir, "settings.json")
@@ -381,14 +377,6 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		raw, err := jsonMarshalFn(piGentleEngramPackage)
 		if err != nil {
 			return false, fmt.Errorf("marshal Pi package %q: %w", piGentleEngramPackage, err)
-		}
-		packages = append(packages, raw)
-		changed = true
-	}
-	if !rawArrayContainsString(packages, piMCPAdapterPackage) {
-		raw, err := jsonMarshalFn(piMCPAdapterPackage)
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi package %q: %w", piMCPAdapterPackage, err)
 		}
 		packages = append(packages, raw)
 		changed = true
@@ -515,16 +503,6 @@ func readRawArrayField(config map[string]json.RawMessage, key, path string) ([]j
 		return nil, fmt.Errorf("parse %s %q: %w", path, key, err)
 	}
 	return values, nil
-}
-
-func rawArrayContainsString(values []json.RawMessage, target string) bool {
-	for _, value := range values {
-		var decoded string
-		if err := json.Unmarshal(value, &decoded); err == nil && decoded == target {
-			return true
-		}
-	}
-	return false
 }
 
 // ─── OpenCode ────────────────────────────────────────────────────────────────

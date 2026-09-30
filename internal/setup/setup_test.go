@@ -814,7 +814,9 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 1 {
 		t.Fatalf("unexpected install result: %#v", result)
 	}
-	wantCommands := []string{"pi install npm:gentle-engram@0.1.16", "pi install npm:pi-mcp-adapter"}
+	// Pi >= 0.99.0 ships built-in MCP and an installed pi-mcp-adapter replaces it,
+	// so setup must never install the adapter.
+	wantCommands := []string{"pi install npm:gentle-engram@0.1.16"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -829,10 +831,8 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	for _, pkg := range []string{"npm:gentle-engram@0.1.16", "npm:pi-mcp-adapter"} {
-		if !slices.Contains(settings.Packages, pkg) {
-			t.Fatalf("expected settings packages to include %q, got %#v", pkg, settings.Packages)
-		}
+	if want := []string{"npm:gentle-engram@0.1.16"}; !reflect.DeepEqual(settings.Packages, want) {
+		t.Fatalf("expected fresh settings packages %#v without pi-mcp-adapter, got %#v", want, settings.Packages)
 	}
 
 	if _, err := os.Stat(filepath.Join(agentDir, "mcp.json")); !os.IsNotExist(err) {
@@ -993,6 +993,33 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 	}
 	if changed {
 		t.Fatal("expected repeated package migration to leave settings unchanged")
+	}
+}
+
+func TestEnsurePiPackageSettingsDoesNotAddMCPAdapter(t *testing.T) {
+	resetSetupSeams(t)
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.16"]}`), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	original, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	changed, err := ensurePiPackageSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("ensure Pi packages: %v", err)
+	}
+	if changed {
+		t.Fatal("expected settings without pi-mcp-adapter to stay unchanged")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings after ensure: %v", err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("expected settings to stay byte-identical, got %s", after)
 	}
 }
 
