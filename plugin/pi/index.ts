@@ -1383,6 +1383,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_update: Type.Object({
     id: Type.Number({ description: "Observation ID to update" }),
+    expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     title: optionalString("New title"),
     content: optionalString("New content"),
     type: optionalString("New type/category"),
@@ -1391,6 +1392,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_delete: Type.Object({
     id: Type.Number({ description: "Observation ID to delete" }),
+    expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     hard_delete: optionalBoolean("Permanently delete the observation"),
   }),
   mem_suggest_topic_key: Type.Object({
@@ -1593,7 +1595,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       });
     }
     case "mem_update":
-      return fetch(`/observations/${encodeURIComponent(String(params.id))}`, {
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ expected_project: params.expected_project })}`, {
         method: "PATCH",
         body: {
           title: params.title,
@@ -1604,7 +1606,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         },
       });
     case "mem_delete":
-      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ hard: params.hard_delete })}`, { method: "DELETE" });
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ hard: params.hard_delete, expected_project: params.expected_project })}`, { method: "DELETE" });
     case "mem_suggest_topic_key":
       return { topic_key: slugifyTopicKey(params) };
     case "mem_save_prompt": {

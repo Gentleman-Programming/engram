@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -149,7 +150,7 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("seed observation: %v", err)
 				}
-				res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "content": content}}})
+				res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "expected_project": "engram", "content": content}}})
 				if err != nil {
 					t.Fatalf("mem_update: %v", err)
 				}
@@ -221,7 +222,7 @@ func TestMCPTruncationUsesRedactedByteCounts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("seed observation: %v", err)
 				}
-				res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "content": content}}})
+				res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "expected_project": "engram", "content": content}}})
 				if err != nil {
 					t.Fatalf("mem_update: %v", err)
 				}
@@ -873,7 +874,7 @@ func TestForeignSoleRuntimeCandidateFallsBackToManualMCPBinding(t *testing.T) {
 	const (
 		bindingProject = "binding-project"
 		foreignProject = "foreign-project"
-		foreignID = "foreign-runtime-session"
+		foreignID      = "foreign-runtime-session"
 	)
 	t.Setenv("ENGRAM_PROJECT", "")
 	s := newMCPTestStore(t)
@@ -945,7 +946,7 @@ func TestRuntimeSessionBindingConformance(t *testing.T) {
 	var saved []string
 	for _, scenario := range []struct {
 		name, id, project string
-		wantError bool
+		wantError         bool
 	}{
 		{name: "first writer", id: "agent-one", project: projectName},
 		{name: "second writer", id: "agent-two", project: projectName},
@@ -1842,8 +1843,9 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 
 	update := handleUpdate(s, MCPConfig{})
 	updateReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(obsID),
-		"title": "Fix parser panic",
+		"id":               float64(obsID),
+		"expected_project": "engram",
+		"title":            "Fix parser panic",
 	}}}
 	updateRes, err := update(context.Background(), updateReq)
 	if err != nil {
@@ -1867,8 +1869,9 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 
 	deleteHandler := handleDelete(s)
 	delReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":          float64(obsID),
-		"hard_delete": true,
+		"id":               float64(obsID),
+		"expected_project": "engram",
+		"hard_delete":      true,
 	}}}
 	delRes, err := deleteHandler(context.Background(), delReq)
 	if err != nil {
@@ -2317,7 +2320,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 	}
 
 	update := handleUpdate(s, MCPConfig{})
-	missingIDRes, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
+	missingIDRes, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"expected_project": "engram"}}})
 	if err != nil {
 		t.Fatalf("update missing id error: %v", err)
 	}
@@ -2325,7 +2328,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected update missing id to return tool error")
 	}
 
-	noFieldsReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}}
+	noFieldsReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "expected_project": "engram"}}}
 	noFieldsRes, err := update(context.Background(), noFieldsReq)
 	if err != nil {
 		t.Fatalf("update no fields error: %v", err)
@@ -2335,7 +2338,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 	}
 
 	deleteHandler := handleDelete(s)
-	delMissingIDRes, err := deleteHandler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
+	delMissingIDRes, err := deleteHandler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"expected_project": "engram"}}})
 	if err != nil {
 		t.Fatalf("delete missing id error: %v", err)
 	}
@@ -2400,7 +2403,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected search to return tool error when store is closed")
 	}
 
-	updateRes, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
+	updateRes, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "expected_project": "engram", "title": "new"}}})
 	if err != nil {
 		t.Fatalf("closed store update call: %v", err)
 	}
@@ -2408,7 +2411,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected update to return tool error when store is closed")
 	}
 
-	deleteRes, err := handleDelete(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
+	deleteRes, err := handleDelete(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "expected_project": "engram"}}})
 	if err != nil {
 		t.Fatalf("closed store delete call: %v", err)
 	}
@@ -2600,7 +2603,7 @@ func TestHandleUpdateFindReplace(t *testing.T) {
 			t.Fatalf("add observation: %v", err)
 		}
 		h := handleUpdate(s, MCPConfig{DefaultProject: "engram"})
-		result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "old", "replace": "new"}}})
+		result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "expected_project": "engram", "find": "old", "replace": "new"}}})
 		if err != nil || result.IsError {
 			t.Fatalf("find/replace update = %#v, %v", result, err)
 		}
@@ -2608,11 +2611,11 @@ func TestHandleUpdateFindReplace(t *testing.T) {
 		if err != nil || updated.Content != "new new" {
 			t.Fatalf("forwarded content = %#v, err=%v", updated, err)
 		}
-		invalid, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "new"}}})
+		invalid, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "expected_project": "engram", "find": "new"}}})
 		if err != nil || !invalid.IsError || !strings.Contains(callResultText(t, invalid), "find and replace") {
 			t.Fatalf("incomplete pair result = %#v, err=%v", invalid, err)
 		}
-		conflict, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "new", "replace": "old", "content": "other"}}})
+		conflict, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "expected_project": "engram", "find": "new", "replace": "old", "content": "other"}}})
 		if err != nil || !conflict.IsError || !strings.Contains(callResultText(t, conflict), "content") {
 			t.Fatalf("content conflict result = %#v, err=%v", conflict, err)
 		}
@@ -2630,7 +2633,7 @@ func TestHandleUpdateFindReplace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("add observation: %v", err)
 		}
-		result, err := handleUpdate(s, MCPConfig{DefaultProject: "engram"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "find": "old", "replace": "new"}}})
+		result, err := handleUpdate(s, MCPConfig{DefaultProject: "engram"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "expected_project": "other-project", "find": "old", "replace": "new"}}})
 		if err != nil || !result.IsError {
 			t.Fatalf("cross-project replacement = %#v, %v", result, err)
 		}
@@ -2659,12 +2662,13 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 	}
 
 	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":        float64(id),
-		"title":     "Updated",
-		"content":   "Updated content",
-		"type":      "architecture",
-		"scope":     "personal",
-		"topic_key": "architecture/auth-model",
+		"id":               float64(id),
+		"expected_project": "engram",
+		"title":            "Updated",
+		"content":          "Updated content",
+		"type":             "architecture",
+		"scope":            "personal",
+		"topic_key":        "architecture/auth-model",
 	}}})
 	if err != nil {
 		t.Fatalf("update handler error: %v", err)
@@ -2701,8 +2705,9 @@ func TestHandleUpdateRejectsFieldOnlyUpdateFromDifferentDetectedProject(t *testi
 	t.Chdir(cwd)
 
 	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"title": "Updated from another project",
+		"id":               float64(id),
+		"expected_project": "stored-project",
+		"title":            "Updated from another project",
 	}}})
 	if err != nil {
 		t.Fatalf("update handler error: %v", err)
@@ -2769,8 +2774,9 @@ func TestHandleUpdateUsesNonGitDirectoryBasenameProject(t *testing.T) {
 	updatedTitle := "Updated from directory basename project"
 	update := handleUpdate(s, MCPConfig{})
 	res, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"title": updatedTitle,
+		"id":               float64(id),
+		"expected_project": projectName,
+		"title":            updatedTitle,
 	}}})
 	if err != nil {
 		t.Fatalf("update handler error: %v", err)
@@ -2799,7 +2805,7 @@ func TestHandleUpdateUsesNonGitDirectoryBasenameProject(t *testing.T) {
 	}
 	t.Chdir(spoofCwd)
 	res, err = update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(id), "title": "Spoofed update",
+		"id": float64(id), "expected_project": projectName, "title": "Spoofed update",
 	}}})
 	if err != nil || !res.IsError || callResultJSON(t, res)["error_code"] != "project_mismatch" {
 		t.Fatalf("spoof update = %v, %s", err, callResultText(t, res))
@@ -2814,7 +2820,7 @@ func TestHandleUpdateUsesNonGitDirectoryBasenameProject(t *testing.T) {
 		t.Fatalf("clear session directory: %v", err)
 	}
 	res, err = update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(id), "title": "Empty-directory update",
+		"id": float64(id), "expected_project": projectName, "title": "Empty-directory update",
 	}}})
 	if err != nil || !res.IsError || callResultJSON(t, res)["error_code"] != "project_mismatch" {
 		t.Fatalf("empty-directory update = %v, %s", err, callResultText(t, res))
@@ -2846,8 +2852,9 @@ func TestHandleUpdateRejectsNullOwnedObservationWithStructuredMetadata(t *testin
 	}
 
 	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"title": "Updated",
+		"id":               float64(id),
+		"expected_project": "owned-project",
+		"title":            "Updated",
 	}}})
 	if err != nil {
 		t.Fatalf("update handler error: %v", err)
@@ -2924,8 +2931,9 @@ func TestHandleUpdateHonorsProcessDefaultProjectOverride(t *testing.T) {
 	id := seedUpdatableObservationOutsideDetectedProject(t, s)
 
 	res, err := handleUpdate(s, MCPConfig{DefaultProject: "Trusted Project"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"title": "Updated",
+		"id":               float64(id),
+		"expected_project": "Trusted Project",
+		"title":            "Updated",
 	}}})
 	assertUpdateAppliedThroughProcessOverride(t, s, res, err, id)
 }
@@ -2936,8 +2944,9 @@ func TestHandleUpdateHonorsEngramProjectEnvironmentOverride(t *testing.T) {
 	t.Setenv("ENGRAM_PROJECT", "Trusted Project")
 
 	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"title": "Updated",
+		"id":               float64(id),
+		"expected_project": "Trusted Project",
+		"title":            "Updated",
 	}}})
 	assertUpdateAppliedThroughProcessOverride(t, s, res, err, id)
 }
@@ -2948,8 +2957,9 @@ func TestHandleUpdateProcessDefaultProjectBeatsEnvironmentOverride(t *testing.T)
 	t.Setenv("ENGRAM_PROJECT", "env-project")
 
 	res, err := handleUpdate(s, MCPConfig{DefaultProject: "Trusted Project"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"title": "Updated",
+		"id":               float64(id),
+		"expected_project": "Trusted Project",
+		"title":            "Updated",
 	}}})
 	assertUpdateAppliedThroughProcessOverride(t, s, res, err, id)
 }
@@ -9090,10 +9100,116 @@ func TestHandleGetObservation_AmbiguousCwdNilProjectRecoveryEnvelope(t *testing.
 	}
 }
 
-// TestHandleUpdate_AmbiguousUsesStoredProject verifies that field updates by ID
-// are anchored on the record identity: with an ambiguous cwd and an observation
-// that carries a project, mem_update succeeds and persists the change (#1470).
-func TestHandleUpdate_AmbiguousUsesStoredProject(t *testing.T) {
+// Missing expectations are rejected before record lookup or project resolution.
+func TestMutationExpectedProjectSchema(t *testing.T) {
+	srv := NewServer(newMCPTestStore(t))
+	for _, name := range []string{"mem_update", "mem_delete"} {
+		t.Run(name, func(t *testing.T) {
+			tool := srv.GetTool(name)
+			if tool == nil {
+				t.Fatalf("tool %s is not registered", name)
+			}
+			property, ok := tool.Tool.InputSchema.Properties["expected_project"].(map[string]any)
+			if !ok || property["type"] != "string" {
+				t.Fatalf("expected_project schema = %#v", tool.Tool.InputSchema.Properties["expected_project"])
+			}
+			for _, required := range []string{"id", "expected_project"} {
+				found := false
+				for _, field := range tool.Tool.InputSchema.Required {
+					found = found || field == required
+				}
+				if !found {
+					t.Fatalf("%s schema does not require %s", name, required)
+				}
+			}
+		})
+	}
+}
+
+func TestMutationExpectedProjectOwner(t *testing.T) {
+	for _, scope := range []string{"project", "personal", "global"} {
+		for _, operation := range []string{"update", "soft-delete", "hard-delete"} {
+			t.Run(scope+"/"+operation, func(t *testing.T) {
+				s := newMCPTestStore(t)
+				if err := s.CreateSession("guard-session", "owner-project", t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.EnrollProject("owner-project"); err != nil {
+					t.Fatal(err)
+				}
+				id, err := s.AddObservation(store.AddObservationParams{SessionID: "guard-session", Project: "owner-project", Scope: scope, Type: "note", Title: "original", Content: "original"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := s.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mutationsBefore, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				handler := handleUpdate(s, MCPConfig{DefaultProject: "owner-project"})
+				if operation != "update" {
+					handler = handleDelete(s)
+				}
+				call := func(expected any) *mcppkg.CallToolResult {
+					t.Helper()
+					args := map[string]any{"id": float64(id), "expected_project": expected, "content": "changed", "hard_delete": operation == "hard-delete", "project": "not-an-override"}
+					res, err := handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					return res
+				}
+				for _, expected := range []any{"", " \t ", "../owner-project", "owner\x00project", 42, "other-project"} {
+					res := call(expected)
+					if !res.IsError || !strings.Contains(callResultText(t, res), "expected_project") {
+						t.Fatalf("expectation %#v did not reject at the owner guard: %s", expected, callResultText(t, res))
+					}
+					if expected == "other-project" && !strings.Contains(callResultText(t, res), store.ErrObservationProjectMismatch.Error()) {
+						t.Fatalf("mismatch error = %s", callResultText(t, res))
+					}
+					after, err := s.GetObservation(id)
+					if err != nil || !reflect.DeepEqual(before, after) {
+						t.Fatalf("rejection changed record: %#v, %v", after, err)
+					}
+					mutationsAfter, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+					if err != nil || !reflect.DeepEqual(mutationsBefore, mutationsAfter) {
+						t.Fatalf("rejection changed sync mutations: %v", err)
+					}
+				}
+				res := call(" OWNER--PROJECT ")
+				if res.IsError {
+					t.Fatalf("normalized owner rejected: %s", callResultText(t, res))
+				}
+				if operation == "update" {
+					after, err := s.GetObservation(id)
+					if err != nil || after.Content != "changed" || after.RevisionCount != before.RevisionCount+1 || after.Scope != scope || after.Project == nil || *after.Project != "owner-project" {
+						t.Fatalf("matching update = %#v, %v", after, err)
+					}
+				} else if _, err := s.GetObservation(id); err == nil {
+					t.Fatal("matching deletion left a live observation")
+				}
+			})
+		}
+	}
+}
+
+func TestMutationExpectedProjectRequired(t *testing.T) {
+	_, s, _ := newAmbiguousMCPSetup(t)
+	for _, handler := range []server.ToolHandlerFunc{handleUpdate(s, MCPConfig{}), handleDelete(s)} {
+		res, err := handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "changed"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.IsError || !strings.Contains(callResultText(t, res), "expected_project") {
+			t.Fatalf("missing expectation must be rejected explicitly: %s", callResultText(t, res))
+		}
+	}
+}
+
+func TestMutationExpectedProjectDoesNotAuthorizeAmbiguousUpdate(t *testing.T) {
 	_, s, _ := newAmbiguousMCPSetup(t)
 
 	if err := s.CreateSession("sess-upd-stored", "stored-project", "/tmp"); err != nil {
@@ -9113,28 +9229,23 @@ func TestHandleUpdate_AmbiguousUsesStoredProject(t *testing.T) {
 
 	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
-			"id":    float64(obsID),
-			"title": "Updated via stored project",
+			"id":               float64(obsID),
+			"expected_project": "stored-project",
+			"title":            "Updated via stored project",
 		}},
 	})
 	if err != nil {
 		t.Fatalf("update handler error: %v", err)
 	}
-	if res.IsError {
-		t.Fatalf("ambiguous cwd with stored project must succeed; text=%q", callResultText(t, res))
+	if !res.IsError {
+		t.Fatalf("owner assertion must not authorize ambiguous writes; text=%q", callResultText(t, res))
 	}
 	body := callResultJSON(t, res)
-	if got := body["project"]; got != "stored-project" {
-		t.Fatalf("project = %v, want stored-project", got)
-	}
-	if got := body["project_source"]; got != project.SourceStoredProject {
-		t.Fatalf("project_source = %v, want %q", got, project.SourceStoredProject)
-	}
-	if got := body["project_path"]; got != "" {
-		t.Fatalf("project_path = %v, want empty for stored project", got)
+	if got := body["error_code"]; got != "ambiguous_project" {
+		t.Fatalf("error_code = %v, want ambiguous_project", got)
 	}
 	updated, err := s.GetObservation(obsID)
-	if err != nil || updated.Title != "Updated via stored project" {
+	if err != nil || updated.Title != "Original" {
 		t.Fatalf("updated observation = %#v, err=%v", updated, err)
 	}
 }
@@ -9152,8 +9263,9 @@ func TestHandleUpdate_AmbiguousNilProjectRecoveryEnvelope(t *testing.T) {
 
 	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
-			"id":    float64(obsID),
-			"title": "Should not persist",
+			"id":               float64(obsID),
+			"expected_project": "legacy-project",
+			"title":            "Should not persist",
 		}},
 	})
 	if err != nil {
@@ -9181,11 +9293,12 @@ func TestHandleUpdate_AmbiguousOwnershipGuardrails(t *testing.T) {
 		name     string
 		override string
 		blank    bool
+		wantCode string
 	}{
-		{name: "malformed override", override: "../stored-project"},
-		{name: "unknown override", override: "unknown-project"},
-		{name: "known mismatch", override: "repo-a"},
-		{name: "blank stored project", blank: true},
+		{name: "malformed override", override: "../stored-project", wantCode: "invalid_project"},
+		{name: "unknown override", override: "unknown-project", wantCode: "unknown_project"},
+		{name: "known mismatch", override: "repo-a", wantCode: "project_mismatch"},
+		{name: "blank stored project", blank: true, wantCode: "ambiguous_project"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, s, _ := newAmbiguousMCPSetup(t)
@@ -9212,14 +9325,26 @@ func TestHandleUpdate_AmbiguousOwnershipGuardrails(t *testing.T) {
 			t.Setenv("ENGRAM_PROJECT", tt.override)
 			res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
 				Params: mcppkg.CallToolParams{Arguments: map[string]any{
-					"id": float64(id), "title": "Must not persist", "project": "stored-project",
+					"id": float64(id), "expected_project": "stored-project", "title": "Must not persist", "project": "stored-project",
 				}},
 			})
 			if err != nil || !res.IsError {
 				t.Fatalf("guarded update: err=%v, result=%#v", err, res)
 			}
-			if tt.name == "known mismatch" && callResultJSON(t, res)["error_code"] != "project_mismatch" {
-				t.Fatalf("expected ownership mismatch: %s", callResultText(t, res))
+			body := callResultJSON(t, res)
+			if body["error_code"] != tt.wantCode {
+				t.Fatalf("error_code = %v, want %s: %s", body["error_code"], tt.wantCode, callResultText(t, res))
+			}
+			available, present := body["available_projects"]
+			if !present {
+				t.Fatalf("missing available project metadata: %s", callResultText(t, res))
+			}
+			if tt.wantCode == "invalid_project" {
+				if available != nil {
+					t.Fatalf("invalid override must retain null project metadata: %#v", available)
+				}
+			} else if _, ok := available.([]any); !ok {
+				t.Fatalf("available_projects = %#v, want array", available)
 			}
 			obs, err := s.GetObservation(id)
 			if err != nil || obs.Title != "Original" {
@@ -10987,8 +11112,9 @@ func TestHandleUpdateRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 		title := title
 		t.Run("blank title", func(t *testing.T) {
 			res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-				"id":    float64(id),
-				"title": title,
+				"id":               float64(id),
+				"expected_project": "engram",
+				"title":            title,
 			}}})
 			if err != nil {
 				t.Fatalf("handler error: %v", err)
@@ -11433,8 +11559,9 @@ func TestHandleUpdateGlobalScope(t *testing.T) {
 
 	h := handleUpdate(s, MCPConfig{DefaultProject: "update-proj"})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(id),
-		"scope": "global",
+		"id":               float64(id),
+		"expected_project": "update-proj",
+		"scope":            "global",
 	}}})
 	if err != nil {
 		t.Fatalf("handleUpdate error: %v", err)

@@ -6,6 +6,17 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 
+test("observation mutations require explicit expected owner and forward it", () => {
+  for (const name of ["mem_update", "mem_delete"]) {
+    const schema = source.split(`${name}: Type.Object({`)[1].split("\n  }),")[0];
+    assert.match(schema, /expected_project: Type\.String\(/);
+    assert.doesNotMatch(schema, /expected_project: optionalString/);
+    const handler = source.split(`case "${name}":`)[1].split("\n    case ")[0];
+    assert.match(handler, /expected_project: params\.expected_project/);
+    assert.doesNotMatch(handler, /expected_project: (activeProject|resolvedProject)/);
+  }
+});
+
 function extractFunctionBody(name, marker) {
   const signatureIndex = source.indexOf(`function ${name}`);
   assert.notEqual(signatureIndex, -1, `${name} signature not found`);

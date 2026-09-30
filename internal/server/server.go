@@ -789,10 +789,11 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.store.UpdateObservation(id, body)
+	obs, err := s.store.UpdateObservationForProject(id, r.URL.Query().Get("expected_project"), body)
 	if err != nil {
 		switch {
-		case errors.Is(err, store.ErrObservationTitleRequired),
+		case errors.Is(err, store.ErrExpectedProjectRequired),
+			errors.Is(err, store.ErrObservationTitleRequired),
 			errors.Is(err, store.ErrObservationContentRequired),
 			errors.Is(err, store.ErrObservationFindReplacePairRequired),
 			errors.Is(err, store.ErrObservationFindReplaceContentConflict),
@@ -800,6 +801,8 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
 			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationProjectMismatch):
+			jsonError(w, http.StatusConflict, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())
 		}
@@ -889,8 +892,12 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	hard := queryBool(r, "hard", false)
-	if err := s.store.DeleteObservation(id, hard); err != nil {
+	if err := s.store.DeleteObservationForProject(id, r.URL.Query().Get("expected_project"), hard); err != nil {
 		switch {
+		case errors.Is(err, store.ErrExpectedProjectRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationProjectMismatch):
+			jsonError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
 		default:

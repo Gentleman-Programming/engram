@@ -72,6 +72,8 @@ var (
 	// adopt a write's project because it already parents records owned by a
 	// different one. Guessing there would split a record from its session.
 	ErrProjectOwnershipAmbiguous                = errors.New("session project ownership is ambiguous")
+	ErrExpectedProjectRequired                  = errors.New("expected_project must be a valid non-empty project name")
+	ErrObservationProjectMismatch               = errors.New("expected_project does not match observation owner")
 	ErrObservationProjectImmutable              = errors.New("observation project cannot be reassigned")
 	ErrObservationTitleRequired                 = errors.New("observation title is required")
 	ErrObservationContentRequired               = errors.New("observation content is required")
@@ -4622,7 +4624,41 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 	return &o, nil
 }
 
+// ValidateExpectedProject validates an explicit caller-owned assertion, never a default.
+func ValidateExpectedProject(expected string) (string, error) {
+	result, err := projectpkg.Resolve(projectpkg.ResolutionOptions{Mode: projectpkg.ResolutionExplicit, Explicit: expected})
+	project := result.Project
+	if err != nil || project == "" {
+		return "", ErrExpectedProjectRequired
+	}
+	return project, nil
+}
+
+func checkExpectedObservationProject(obs *Observation, expected *string) error {
+	if expected == nil {
+		return nil
+	}
+	owner, _ := NormalizeProject(derefString(obs.Project))
+	if owner != *expected {
+		return ErrObservationProjectMismatch
+	}
+	return nil
+}
+
+// UpdateObservationForProject atomically asserts stored ownership and updates the row.
+func (s *Store) UpdateObservationForProject(id int64, expected string, p UpdateObservationParams) (*Observation, error) {
+	project, err := ValidateExpectedProject(expected)
+	if err != nil {
+		return nil, err
+	}
+	return s.updateObservation(id, p, &project)
+}
+
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
+	return s.updateObservation(id, p, nil)
+}
+
+func (s *Store) updateObservation(id int64, p UpdateObservationParams, expected *string) (*Observation, error) {
 	// Admission runs before the transaction so a rejected update opens no
 	// transaction, touches no row and enqueues no sync mutation. The title is
 	// checked post-strip so redaction cannot smuggle an empty one through.
@@ -4649,7 +4685,14 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
+		if errors.Is(err, sql.ErrNoRows) && expected != nil {
+			return ErrObservationNotFound
+		}
 		if err != nil {
+			return err
+		}
+
+		if err := checkExpectedObservationProject(obs, expected); err != nil {
 			return err
 		}
 
@@ -4772,7 +4815,20 @@ func replaceObservationContent(content, find, replacement string, max int) (stri
 	return result, result == content, nil
 }
 
+// DeleteObservationForProject asserts ownership before soft or hard deletion in the same transaction.
+func (s *Store) DeleteObservationForProject(id int64, expected string, hardDelete bool) error {
+	project, err := ValidateExpectedProject(expected)
+	if err != nil {
+		return err
+	}
+	return s.deleteObservation(id, hardDelete, &project)
+}
+
 func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
+	return s.deleteObservation(id, hardDelete, nil)
+}
+
+func (s *Store) deleteObservation(id int64, hardDelete bool, expected *string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		var (
 			obs *Observation
@@ -4787,6 +4843,10 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 			return ErrObservationNotFound
 		}
 		if err != nil {
+			return err
+		}
+
+		if err := checkExpectedObservationProject(obs, expected); err != nil {
 			return err
 		}
 

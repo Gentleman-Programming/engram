@@ -1666,7 +1666,7 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 		t.Fatalf("expected 400 for invalid observation id, got %d", getBadIDRec.Code)
 	}
 
-	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999", strings.NewReader(`{"title":"updated"}`))
+	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999?expected_project=engram", strings.NewReader(`{"title":"updated"}`))
 	updateNotFoundReq.Header.Set("Content-Type", "application/json")
 	updateNotFoundRec := httptest.NewRecorder()
 	h.ServeHTTP(updateNotFoundRec, updateNotFoundReq)
@@ -1750,8 +1750,8 @@ func TestWriteHandlersRejectWhitespaceOnlyRequiredFields(t *testing.T) {
 
 	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":" \t\n ","content":"Invalid observation","project":"engram"}`, store.ErrObservationTitleRequired)
 	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":"Valid title","content":" \t\n ","project":"engram"}`, store.ErrObservationContentRequired)
-	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"title":" \t\n "}`, store.ErrObservationTitleRequired)
-	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"content":" \t\n "}`, store.ErrObservationContentRequired)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", observationID), `{"title":" \t\n "}`, store.ErrObservationTitleRequired)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", observationID), `{"content":" \t\n "}`, store.ErrObservationContentRequired)
 	assertBadRequest(http.MethodPost, "/prompts", `{"session_id":"s-whitespace","content":" \t\n ","project":"engram"}`, store.ErrPromptContentRequired)
 
 	var observationCount, promptCount int
@@ -4228,6 +4228,71 @@ func TestHandleAddObservationBlankTitleNotMaskedBySessionError(t *testing.T) {
 	}
 }
 
+func TestObservationExpectedProjectPreservesImmutableBodyProject(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("immutable-owner", "owner", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "immutable-owner", Project: "owner", Type: "note", Title: "original", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=owner", id), strings.NewReader(`{"project":"other","content":"changed"}`)))
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), store.ErrObservationProjectImmutable.Error()) {
+		t.Fatalf("immutable project response = %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.GetObservation(id)
+	if err != nil || after.Project == nil || *after.Project != "owner" || after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+		t.Fatalf("immutable rejection changed record: %#v, %v", after, err)
+	}
+}
+
+func TestObservationExpectedProject(t *testing.T) {
+	for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+		for _, tc := range []struct {
+			name, query string
+			status      int
+		}{
+			{"missing", "", http.StatusBadRequest},
+			{"blank", "?expected_project=%20", http.StatusBadRequest},
+			{"invalid", "?expected_project=../owner", http.StatusBadRequest},
+			{"mismatch", "?expected_project=other", http.StatusConflict},
+		} {
+			t.Run(method+"/"+tc.name, func(t *testing.T) {
+				st := newServerTestStore(t)
+				if err := st.CreateSession("expected-owner", "owner", t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
+				id, err := st.AddObservation(store.AddObservationParams{SessionID: "expected-owner", Project: "owner", Type: "note", Title: "original", Content: "original"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := st.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := httptest.NewRecorder()
+				New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(method, fmt.Sprintf("/observations/%d%s", id, tc.query), strings.NewReader(`{"content":"changed"}`)))
+				if rec.Code != tc.status {
+					t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+				}
+				after, err := st.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+					t.Fatal("rejected mutation changed observation")
+				}
+			})
+		}
+	}
+}
+
 func TestHandleUpdateObservationFindReplace(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
@@ -4241,7 +4306,7 @@ func TestHandleUpdateObservationFindReplace(t *testing.T) {
 	}
 
 	replace := httptest.NewRecorder()
-	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
+	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
 	if replace.Code != http.StatusOK {
 		t.Fatalf("replacement PATCH = %d: %s", replace.Code, replace.Body.String())
 	}
@@ -4255,14 +4320,14 @@ func TestHandleUpdateObservationFindReplace(t *testing.T) {
 
 	for _, body := range []string{`{"find":"new"}`, `{"find":"new","replace":"old","content":"other"}`} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(body)))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("invalid replacement PATCH %s = %d: %s", body, rec.Code, rec.Body.String())
 		}
 	}
 
 	missing := httptest.NewRecorder()
-	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"find":"old","replace":"new"}`)))
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999?expected_project=engram", strings.NewReader(`{"find":"old","replace":"new"}`)))
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing replacement PATCH = %d: %s", missing.Code, missing.Body.String())
 	}
@@ -4312,7 +4377,7 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 	for _, title := range []string{"", " \t\n "} {
 		title := title
 		t.Run("blank title", func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
+			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -4342,7 +4407,7 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 		t.Fatalf("expected no onWrite calls for rejected updates, got %d", writeCount.Load())
 	}
 
-	req := httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"title":"updated"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/observations/999999?expected_project=engram", strings.NewReader(`{"title":"updated"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {

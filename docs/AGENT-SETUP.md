@@ -228,9 +228,11 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 
 **Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`, `mem_get_observation`) accept an optional `project` override validated against known projects. Omit it to use the process override or cwd detection. For `mem_get_observation`, `project` selects response-envelope context only; the observation is still retrieved by ID without ownership filtering.
 
-`mem_get_observation` and `mem_update` operate by observation ID and are anchored on the record itself: only when cwd detection is ambiguous and the observation has a nonblank stored project do they fall back to that project (`project_source: "stored_project"`, `project_path: ""`). The stored project identifies the record's owner, not a verified repository path. This ID-anchored read/write exception does not require ambiguous-project recovery; the recovery flow above still applies to writes that create a new record with no anchored project.
+`mem_get_observation` retains its read-only stored-owner fallback: only when cwd detection is ambiguous and the observation has a nonblank stored project does it use that project (`project_source: "stored_project"`, `project_path: ""`). This identifies the record's owner, not a verified repository path, and does not bypass malformed or unknown explicit/process overrides.
 
-The exception does not bypass invalid or unknown process-level project overrides or `mem_get_observation` per-call project overrides, missing/blank stored projects, or `mem_update` ownership checks against a known current project. Existing session ownership protections remain unchanged. An update payload's `project` is not a project-resolution override and cannot authorize an otherwise rejected update.
+`mem_update` and `mem_delete` require caller-supplied `expected_project`, including for personal/global scopes. Never fetch the target to fill a missing assertion. The normalized stored owner is checked atomically with the mutation. Native `mem_update` also retains known-current/process ownership checks and rejects ambiguous cwd rather than using a stored-owner write fallback. The assertion is not a recovery token or permission to bypass context rules; existing recovery and session ownership protections remain unchanged.
+
+This is an intentional compatibility break for clients omitting `expected_project`. The in-repository Pi schema and forwarding require it; external gentle-engram relays need separate adaptation.
 
 ---
 

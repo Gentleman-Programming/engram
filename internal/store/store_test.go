@@ -67,6 +67,92 @@ func (s *firstNextBlockingScanner) Next() bool {
 	return next
 }
 
+func TestObservationExpectedProjectGuard(t *testing.T) {
+	for _, scope := range []string{"project", "personal", "global"} {
+		for _, operation := range []string{"update", "soft-delete", "hard-delete"} {
+			t.Run(scope+"/"+operation, func(t *testing.T) {
+				s := newTestStore(t)
+				if err := s.CreateSession("owner-session", "owner--project", t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
+				enrollTestProject(t, s, "owner-project")
+				id, err := s.AddObservation(AddObservationParams{SessionID: "owner-session", Project: "owner-project", Scope: scope, Type: "note", Title: "original", Content: "original"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := s.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mutate := func(expected string) error {
+					if operation == "update" {
+						content := "changed"
+						_, err := s.UpdateObservationForProject(id, expected, UpdateObservationParams{Content: &content})
+						return err
+					}
+					return s.DeleteObservationForProject(id, expected, operation == "hard-delete")
+				}
+				for _, tc := range []struct {
+					expected string
+					want     error
+				}{
+					{"", ErrExpectedProjectRequired},
+					{" \t ", ErrExpectedProjectRequired},
+					{"../owner-project", ErrExpectedProjectRequired},
+					{"owner\x00project", ErrExpectedProjectRequired},
+					{"other-project", ErrObservationProjectMismatch},
+				} {
+					if err := mutate(tc.expected); !errors.Is(err, tc.want) {
+						t.Fatalf("expectation %q: error = %v, want %v", tc.expected, err, tc.want)
+					}
+					after, err := s.GetObservation(id)
+					if err != nil || !reflect.DeepEqual(before, after) {
+						t.Fatalf("rejected mutation changed record: %#v, %v", after, err)
+					}
+					mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+					if err != nil || !reflect.DeepEqual(mutationsBefore, mutationsAfter) {
+						t.Fatalf("rejected mutation changed sync queue: %v", err)
+					}
+				}
+				if err := mutate(" OWNER--PROJECT "); err != nil {
+					t.Fatalf("matching normalized owner: %v", err)
+				}
+				if operation == "update" {
+					after, err := s.GetObservation(id)
+					if err != nil || after.Content != "changed" || after.RevisionCount != before.RevisionCount+1 || derefString(after.Project) != "owner-project" {
+						t.Fatalf("matching update = %#v, %v", after, err)
+					}
+				} else {
+					if _, err := s.GetObservation(id); err == nil {
+						t.Fatal("matching deletion left a live observation")
+					}
+					if operation == "soft-delete" {
+						if err := s.DeleteObservationForProject(id, "other-project", true); !errors.Is(err, ErrObservationProjectMismatch) {
+							t.Fatalf("hard deletion of tombstoned record bypassed owner: %v", err)
+						}
+						if err := s.DeleteObservationForProject(id, "owner-project", true); err != nil {
+							t.Fatalf("matching hard deletion of tombstoned record: %v", err)
+						}
+					}
+				}
+			})
+		}
+	}
+	s := newTestStore(t)
+	if _, err := s.UpdateObservationForProject(999, "owner", UpdateObservationParams{}); !errors.Is(err, ErrObservationNotFound) {
+		t.Fatalf("missing update error = %v", err)
+	}
+	for _, hard := range []bool{false, true} {
+		if err := s.DeleteObservationForProject(999, "owner", hard); !errors.Is(err, ErrObservationNotFound) {
+			t.Fatalf("missing delete error = %v", err)
+		}
+	}
+}
+
 func TestStoreDataDir(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
