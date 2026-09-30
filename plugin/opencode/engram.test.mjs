@@ -40,6 +40,12 @@ function sdkLookup(sessions) {
 function httpResponse(data = { id: "runtime", status: "created" }, ok = true, onJSON, jsonError) {
   return {
     ok,
+    status: ok ? 200 : 500,
+    async text() {
+      onJSON?.()
+      if (jsonError) return "{broken"
+      return JSON.stringify(data)
+    },
     async json() {
       onJSON?.()
       if (jsonError) throw jsonError
@@ -117,6 +123,8 @@ async function createRuntime(t, {
 	manifestExists = false,
   identityLookupFails = false,
   emitSpawnError = false,
+  emitSpawnExit = false,
+  spawnExit = [1, null],
   installBun = true,
   configuredEngramURL,
   realServerFetch = false,
@@ -174,9 +182,11 @@ async function createRuntime(t, {
   })
   childProcess.spawn = (command, args, options) => {
     let errorListener
+    let exitListener
     const child = {
       events: [],
       on(event, listener) {
+        if (event === "exit") exitListener = listener
         if (event === "error" && typeof listener === "function") {
           this.events.push(event)
           errorListener = listener
@@ -185,6 +195,7 @@ async function createRuntime(t, {
       },
       unref() {
         this.events.push("unref")
+        if (emitSpawnExit) queueMicrotask(() => exitListener?.(...spawnExit))
         if (emitSpawnError) queueMicrotask(() => {
           this.events.push("error:emitted")
           errorListener?.(new Error("simulated spawn failure"))
@@ -218,7 +229,7 @@ async function createRuntime(t, {
     if (realServerFetch) return originalFetch(url, init)
     if (path.startsWith("/sessions/") && path.endsWith("/end")) {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
-      return httpResponse({})
+      return httpResponse({ id: decodeURIComponent(path.split("/")[2]), status: "completed" })
     }
     if (path.startsWith("/sessions/") && nudgeSessionResponse) return httpResponse(nudgeSessionResponse)
     if (path === "/observations" && (nudgeObservationsResponse !== undefined || nudgeObservationsError)) {
@@ -281,6 +292,109 @@ async function createRuntime(t, {
 		spawns,
 		startupEvents,
   }
+}
+
+for (const body of ["", "   ", "{broken", "null", "{}", '{"id":"wrong","status":"completed"}', '{"id":"runtime","status":"ok"}']) {
+  test(`session end acknowledgement rejects ${JSON.stringify(body)} and retries`, async (t) => {
+    const runtime = await createRuntime(t, { sessionEndResponse: (count) => count === 1
+      ? { ok: true, status: 200, async text() { return body }, async json() { return JSON.parse(body) } }
+      : httpResponse({ id: "runtime", status: "completed" }) })
+    await runtime.event("session.created", session("runtime"))
+    await runtime.event("session.deleted", session("runtime"))
+    await runtime.event("session.deleted", session("runtime"))
+    assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 2)
+    await runtime.event("session.deleted", session("runtime"))
+    assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 2)
+  })
+}
+
+for (const failure of ["HTTP", "transport"]) {
+  test(`session end acknowledgement retains ${failure} failure for disposal retry`, async (t) => {
+    const runtime = await createRuntime(t, { sessionEndResponse: (count) => {
+      if (count > 1) return httpResponse({ id: "runtime", status: "completed" })
+      if (failure === "transport") throw new Error("private transport detail")
+      return httpResponse({}, false)
+    } })
+    await runtime.event("session.created", session("runtime"))
+    await runtime.event("session.deleted", session("runtime"))
+    await runtime.dispose()
+    assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 2)
+  })
+}
+
+for (const kind of ["error", "exit", "signal"]) {
+  test(`degraded startup warning retains asynchronous serve ${kind}`, async (t) => {
+    const runtime = await createRuntime(t, { healthOK: false, emitSpawnError: kind === "error", emitSpawnExit: kind !== "error", spawnExit: kind === "signal" ? [null, "SIGTERM"] : [1, null] })
+    const output = { output: "original" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.match(output.output, /Engram degraded.*startup/)
+    assert.equal(output.output.match(/Engram degraded/g).length, 1)
+    assert.ok(output.output.length < 400)
+    const next = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, next)
+    assert.doesNotMatch(next.output, /startup/)
+  })
+  test(`degraded import warning retains observable ${kind}`, async (t) => {
+    const runtime = await createRuntime(t, { manifestExists: true, emitSpawnError: kind === "error", emitSpawnExit: kind !== "error", spawnExit: kind === "signal" ? [null, "SIGTERM"] : [1, null] })
+    const output = { output: "original" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.match(output.output, /Engram degraded.*import/)
+    assert.equal(output.output.match(/Engram degraded/g).length, 1)
+    assert.ok(output.output.length < 400)
+    const next = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, next)
+    assert.equal(next.output, "next")
+  })
+}
+
+test("degraded import warning ignores normal child exit", async (t) => {
+  const runtime = await createRuntime(t, { manifestExists: true, emitSpawnExit: true, spawnExit: [0, null] })
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.equal(output.output, "original")
+})
+
+test("degraded startup warning ignores normal child exit", async (t) => {
+  const runtime = await createRuntime(t, { healthOK: false, emitSpawnExit: true, spawnExit: [0, null] })
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.doesNotMatch(output.output, /startup/)
+  assert.match(output.output, /readiness/)
+})
+
+test("degraded startup warning does not leak across plugin instances", async (t) => {
+  await createRuntime(t, { identityLookupFails: true })
+  const healthy = await createRuntime(t)
+  const output = { output: "original" }
+  await healthy.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.equal(output.output, "original")
+})
+
+test("degraded HTTP warning does not conflate expected registration refusal with downtime", async (t) => {
+  const runtime = await createRuntime(t, { registrationResponse: () => registrationFailure("session_project_conflict") })
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.equal(output.output, "original")
+})
+
+for (const category of ["startup", "import", "transport", "HTTP"]) {
+  test(`degraded ${category} warning is retained and deduplicated`, async (t) => {
+    const runtime = await createRuntime(t, category === "startup" ? { identityLookupFails: true }
+      : category === "import" ? { manifestExists: true, emitSpawnError: true } : {})
+    if (category === "transport") globalThis.fetch = async () => { throw new Error("private path") }
+    if (category === "HTTP") globalThis.fetch = async () => httpResponse({}, false)
+    const unknown = { output: 42 }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, unknown)
+    assert.equal(unknown.output, 42)
+    const output = { output: "original", metadata: { keep: true } }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.match(output.output, /Engram degraded/)
+    assert.doesNotMatch(output.output, /private path/)
+    assert.deepEqual(output.metadata, { keep: true })
+    const again = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, again)
+    assert.equal(again.output, "next")
+  })
 }
 
 function registrationFailure(code) {
@@ -1324,7 +1438,7 @@ test("failed root session end retries on a duplicate deletion without confirming
   const runtime = await createRuntime(t, {
     sessionEndResponse: (attempt) => attempt === 1
       ? httpResponse({ error: "unavailable" }, false)
-      : httpResponse({}),
+      : httpResponse({ id: "root", status: "completed" }),
   })
   await runtime.event("session.created", session("root"))
   await runtime.event("session.deleted", { id: "root" })
@@ -1377,7 +1491,7 @@ test("plugin disposal closes registered roots, not children, and waits for sessi
   await end.started
   await Promise.resolve()
   assert.equal(settled, false)
-  end.resolve(httpResponse({}))
+  end.resolve(httpResponse({ id: rootID, status: "completed" }))
   await pending
 
   const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))

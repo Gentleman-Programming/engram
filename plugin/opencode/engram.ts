@@ -27,7 +27,6 @@ const ENGRAM_PORT = parseInt(optionalEnvironmentValue(process.env.ENGRAM_PORT) ?
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL)
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
-let localReady = CONFIGURED_ENGRAM_URL !== undefined
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
 const ENGRAM_TOOLS = new Set([
@@ -148,6 +147,11 @@ Do not skip step 1. Without it, everything done before compaction is lost from m
 
 // ─── HTTP Client ─────────────────────────────────────────────────────────────
 
+type DegradedReason = "readiness" | "startup" | "import" | "transport" | "HTTP" | "parse" | "acknowledgement"
+
+function createEngramClient(warn: (reason: DegradedReason) => void) {
+let localReady = CONFIGURED_ENGRAM_URL !== undefined
+
 async function engramFetch(
   path: string,
   opts: { method?: string; body?: any } = {}
@@ -170,12 +174,23 @@ async function engramFetchResult(
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       signal: AbortSignal.timeout(3000),
     })
-    if (!res.ok && !readRefusal) return { ok: false, status: res.status, body: null }
-    let body: any = {}
-    try { body = await res.json() } catch {}
+    if (!res.ok && !readRefusal) {
+      warn("HTTP")
+      return { ok: false, status: res.status, body: null }
+    }
+    let body: any
+    try {
+      const text = await res.text()
+      body = text.trim() ? JSON.parse(text) : {}
+    } catch {
+      warn("parse")
+      return { ok: false, status: res.status, body: null }
+    }
+    if (!res.ok && !(readRefusal && res.status === 409 &&
+        ["session_project_conflict", "session_already_ended"].includes(body?.code))) warn("HTTP")
     return { ok: res.ok, status: res.status, body }
   } catch {
-    // Engram server not running — silently fail
+    warn("transport")
     return null
   }
 }
@@ -207,6 +222,7 @@ async function ensureLocalReady(): Promise<boolean> {
       localReady = false
     }
   }
+  if (!localReady) warn("readiness")
   return localReady
 }
 
@@ -228,6 +244,10 @@ async function resolveProjectName(directory: string): Promise<{ project: string;
     project: "unknown",
     error: `gentle-engram could not resolve a safe project identity.${reason}${choices} Retry when project resolution is available.`,
   }
+}
+
+return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning,
+  get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
 function truncate(str: string, max: number): string {
@@ -281,9 +301,25 @@ export function shouldNudgeForObservations(
 // Hidden hooks-object key through which the V2 adapter reaches the shared prompt
 // capture. A symbol keeps it out of the V1 hook names OpenCode enumerates.
 const CAPTURE_PROMPT = Symbol("engram.capturePrompt")
+const DELIVER_WARNING = Symbol("engram.deliverWarning")
 type CapturePrompt = (sourceSessionID: string, content: string, sourceInboxID?: string) => Promise<void>
 
 export const Engram: Plugin = async (ctx) => {
+  // Finite categories bound deduplication and pending memory per instance.
+  const seenWarnings = new Set<DegradedReason>()
+  const pendingWarnings = new Set<DegradedReason>()
+  const warn = (reason: DegradedReason): void => {
+    if (seenWarnings.has(reason)) return
+    seenWarnings.add(reason)
+    pendingWarnings.add(reason)
+  }
+  const client = createEngramClient(warn)
+  const { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning } = client
+  const deliverWarning = (append: (text: string) => boolean): void => {
+    if (!pendingWarnings.size) return
+    const text = `Engram degraded (${[...pendingWarnings].join(", ")}); automatic memory operations may be incomplete. Verify Engram availability before relying on persistence.`
+    if (append(text)) pendingWarnings.clear()
+  }
 	let project = "unknown"
 	let projectResolutionError = ""
 	let projectResolutionGeneration = 0
@@ -384,7 +420,10 @@ export const Engram: Plugin = async (ctx) => {
 
     const close = Promise.all([...(cleanupSessions.get(sessionId) ?? [])].map(async (effectiveID) => {
       const acknowledgement = await engramFetch(`/sessions/${encodeURIComponent(effectiveID)}/end`, { method: "POST" })
-      if (acknowledgement === null) return false
+      if (acknowledgement?.id !== effectiveID || acknowledgement?.status !== "completed") {
+        warn("acknowledgement")
+        return false
+      }
       cleanupSessions.get(sessionId)?.delete(effectiveID)
       return true
     })).then((acknowledgements) => {
@@ -620,18 +659,20 @@ export const Engram: Plugin = async (ctx) => {
   // Try to start engram server if not running
 	try {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
-		localReady = await isEngramRunning(expectedID)
-		if (!localReady && !CONFIGURED_ENGRAM_URL) {
+		client.localReady = await isEngramRunning(expectedID)
+		if (!client.localReady && !CONFIGURED_ENGRAM_URL) {
       const serverChild = spawn(ENGRAM_BIN, ["serve"], {
         detached: true,
         stdio: "ignore",
       })
-      serverChild.on("error", () => {})
+      serverChild.on("error", () => warn("startup"))
+      serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
       serverChild.unref()
 			await new Promise((r) => setTimeout(r, 500))
-			localReady = await isEngramRunning(expectedID)
+			client.localReady = await isEngramRunning(expectedID)
 		}
-	} catch {}
+    if (!client.localReady) warn("readiness")
+	} catch { warn("startup") }
 
 	if (await ensureResolvedProject()) {
 		// Auto-import: if .engram/manifest.json exists in the project repo,
@@ -646,20 +687,22 @@ export const Engram: Plugin = async (ctx) => {
           detached: true,
           stdio: "ignore",
         })
-        importChild.on("error", () => {})
+        importChild.on("error", () => warn("import"))
+        importChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("import") })
         importChild.unref()
 			}
 		} catch {
-			// Manifest doesn't exist or binary not found — silently skip
+      warn("import")
 		}
 	}
 
   return {
     [CAPTURE_PROMPT]: capturePrompt,
+    [DELIVER_WARNING]: deliverWarning,
 
 		dispose: async () => {
       disposed = true
-			if (!localReady) return
+			if (!client.localReady) return
       // Every registration attempt owns an Engram lifecycle (#1131), including
       // children misregistered before their parentID was known.
       await Promise.all([...registrationAttempts].map(closeKnownSession))
@@ -760,6 +803,7 @@ export const Engram: Plugin = async (ctx) => {
     },
 
     "tool.execute.after": async (input, output) => {
+      try {
       if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) return
 
       // input.sessionID comes from OpenCode — always available
@@ -784,6 +828,13 @@ export const Engram: Plugin = async (ctx) => {
             },
           })
         }
+      }
+      } finally {
+        deliverWarning((text) => {
+          if (typeof output?.output !== "string") return false
+          output.output += `\n\n${text}`
+          return true
+        })
       }
     },
 
@@ -830,13 +881,15 @@ export const Engram: Plugin = async (ctx) => {
             signal: AbortSignal.timeout(200),
           })
           if (sessionRes.ok) {
-            const sessionData = await sessionRes.json()
+            let sessionData: any
+            try { sessionData = await sessionRes.json() } catch { warn("parse"); return }
             const startedAt: string = sessionData?.started_at ?? ""
             if (startedAt) {
               sessionStartEpoch = toEpochSecs(startedAt)
             }
-          }
+          } else warn("HTTP")
         } catch {
+          warn("transport")
           // Server unreachable or timed out — skip nudge
           return
         }
@@ -852,9 +905,10 @@ export const Engram: Plugin = async (ctx) => {
           )
           if (obsRes.ok) {
             observationsResponseOK = true
-            obsData = await obsRes.json()
-          }
+            try { obsData = await obsRes.json() } catch { warn("parse"); return }
+          } else warn("HTTP")
         } catch {
+          warn("transport")
           // Server unreachable or timed out — skip nudge
           return
         }
@@ -1070,6 +1124,19 @@ async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
       const tool = call.tool === "subagent" ? "Task" : call.tool
       const output = call.status === "completed" ? v2ToolResultText(call.result) : ""
       await hooks["tool.execute.after"]({ tool, sessionID: call.sessionID, callID: call.id }, output)
+      if (call.status !== "completed") return
+      hooks[DELIVER_WARNING]((text: string) => {
+        const result = call.result
+        if (!result || typeof result !== "object") return false
+        if (typeof result.content === "string") {
+          call.result = { ...result, content: `${result.content}\n\n${text}` }
+        } else if (Array.isArray(result.content) && result.content.every((part: any) =>
+          part && (part.type === "text" && typeof part.text === "string" ||
+            part.type === "file" && typeof part.uri === "string" && typeof part.mime === "string"))) {
+          call.result = { ...result, content: [...result.content, { type: "text", text }] }
+        } else return false
+        return true
+      })
     }))
 
     listening = (async () => {
