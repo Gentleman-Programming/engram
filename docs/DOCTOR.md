@@ -30,6 +30,47 @@ engram doctor repair --project engram --check invalid_session_identity --replace
 engram doctor repair --project engram --check invalid_session_identity --replacement-id canonical-session --apply
 ```
 
+## Explicit legacy empty prompt discard
+
+This separate command discards **one exact prompt identity**, not a project or bulk backlog. It is not part of generic `doctor repair`:
+
+```bash
+engram doctor discard-empty-prompt --project PROJECT --seq SEQ [--dry-run|--apply --backup PATH] [--json]
+```
+
+Both project and a positive int64 journal sequence are required. Explicit projects use the usual strict CLI normalization; selection must still match that project's prompt. Omitted mode is **dry-run**. `--dry-run` and `--apply` are mutually exclusive. Apply requires an explicit unused backup filename whose parent directory already exists; `--backup` without apply is rejected. Unknown arguments, repeated flags and malformed sequences fail closed. `--help` does not open the database.
+
+### Review before applying
+
+1. Run the existing diagnosis and inspect `checks[].findings[].evidence`. For a pending blank prompt upsert, evidence includes `seq`, `project`, `entity`, `op`, `entity_key` and `missing_fields`. Choose the exact `entity: "prompt"`, `op: "upsert"` finding with missing content. Do not confuse a sequence with a canonical prompt ID. Diagnosis alone does not establish discard eligibility.
+2. Preview that exact sequence and review the identity, all `sequences`, and planned effects. The following examples assume the selected finding belongs to `project` and reports sequence `2`; replace them with the reviewed evidence. Test examples on a synthetic fixture/backup clone, never by experimenting on the production database.
+3. Only after accepting irreversible local content retirement, apply with a new backup filename in an existing trusted directory.
+
+```bash
+engram doctor --project project --check sync_mutation_required_fields --json
+engram doctor discard-empty-prompt --project project --seq 2 --json
+engram doctor discard-empty-prompt --project project --seq 2 --dry-run
+engram doctor discard-empty-prompt --project project --seq 2 --apply --backup /trusted/existing-directory/unused.db --json
+```
+
+Preview creates no backup and calls no mutation API (normal Store opening/initialization still applies). Apply independently replans the current database, keeps that same in-memory Store-bound plan, and delegates preflight, backup and transactional revalidation to the Store. A preview from an earlier process is workflow guidance, **not frozen authorization** for later state.
+
+### Eligibility and effects
+
+Initial support requires an enrolled project, an exact pending unacknowledged local default-cloud prompt upsert, and consistent canonical/session/sync/inbox identities. Canonical, frozen and historical content must all be irrecoverably blank. Unenrolled projects (`not_enrolled`), recoverable content (`recoverable_content`), unsupported or inconsistent lineage, missing/ambiguous identity and conflicting tombstones are blocked; do not auto-enroll or discard valid historical content to bypass a blocker.
+
+The selected sequence identifies the prompt; `sequences` can enumerate multiple eligible blank upserts for that same identity. Apply backs up current WAL-inclusive state first, then atomically supersedes those original journal rows with audit evidence, creates a prompt tombstone, removes the canonical prompt and FTS entry, and queues one later valid prompt delete. Original journal sequences, payloads, occurrence/ack/provenance are preserved; no acknowledgement is fabricated and no cursor is reset.
+
+The separate snake_case report includes `status`, `project`, `selected_seq`, `prompt_id`, `sync_id`, `session_id`, `source_inbox_id`, `sequences`, `planned_effects`, `tombstone`, `delete_queued`, `delete_seq`, `backup_path` and `remote_confirmation`. It exposes no private plan snapshot or database contents. Preview reports `status: "dry_run"`, no applied tombstone/delete and an empty backup path. Its planned effects are `supersede_exact_blank_upserts`, `create_prompt_tombstone`, `delete_canonical_prompt_and_fts`, and `enqueue_one_prompt_delete`. Successful apply reports **`status: "delete_queued"`**, the original superseded `sequences`, new `delete_seq`, successful backup path and `backup_path_meaning: "successful backup"`. `remote_confirmation` is always false; readable output explicitly states **NO REMOTE CONFIRMATION**.
+
+Errors return nonzero and include `blocker: {"code": "...", "detail": "..."}`; with `--json`, stdout is a single parseable report without status chatter. If apply returns a nonempty `backup_path` on error, `backup_path_meaning` describes an **INTENDED destination** which may contain a backup or empty reservation, not proof of a valid backup. Failed publication can leave a replacement at that path. The command never unlinks it on rollback/errors. Check the actual file before treating it as recovery evidence. A collision or missing parent is rejected without overwriting existing bytes. Repeating an already-applied selection currently fails with `ambiguous_canonical` because the canonical prompt is gone; it is not idempotent success and queues no duplicate delete.
+
+### Trust, concurrency and rollback boundary
+
+Operate only in a trusted database namespace and process. Private snapshot safety assumes trusted directory permissions and, on Windows, appropriately inherited ACLs; this is not protection against malicious same-identity/admin tampering. Backup destination parents must also be trusted. Local transaction revalidation does not fence exporters or other devices: **an older in-flight send or another device can write afterward**. A queued delete is neither remote delivery confirmation nor a permanent-absence guarantee.
+
+Database changes roll back together if apply fails; an already-created backup/reservation remains. To undo a successful local discard, stop all Engram processes and manually restore a verified backup with normal SQLite/WAL recovery precautions. Restoring local data cannot retract a delete already sent remotely. Re-run diagnosis after apply: other unrelated invalid mutations may remain.
+
 ## MCP
 
 Agents can call `mem_doctor` with the same contract as `engram doctor --json`:

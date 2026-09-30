@@ -14,6 +14,10 @@ import (
 )
 
 func cmdDoctor(cfg store.Config) {
+	if len(os.Args) > 2 && os.Args[2] == "discard-empty-prompt" {
+		cmdDoctorDiscardEmptyPrompt(cfg)
+		return
+	}
 	if len(os.Args) > 2 && os.Args[2] == "repair" {
 		cmdDoctorRepair(cfg)
 		return
@@ -118,6 +122,7 @@ func cmdDoctor(cfg store.Config) {
 }
 
 func printDoctorUsage() {
+	_, _ = fmt.Fprintln(os.Stdout, discardPromptUsage)
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
