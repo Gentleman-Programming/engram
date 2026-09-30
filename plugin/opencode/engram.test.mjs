@@ -91,6 +91,7 @@ function buildEnsureResolvedProjectForTest(resolveProjectName) {
     let project = "unknown"
     let projectResolutionError = ""
     let projectResolutionGeneration = 0
+    let projectAmbiguous = false
     let localReady = true; const ctx = { directory: "/work/engram" }
 		async function ensureLocalReady() { return localReady }
     async function ensureResolvedProject() {${body}}
@@ -137,6 +138,7 @@ async function createRuntime(t, {
     sessionEndResponse,
     contextResponse,
     nudgeSessionResponse,
+    recoveryResponse,
     nudgeObservationsResponse,
     nudgeObservationsError,
 } = {}) {
@@ -231,6 +233,7 @@ async function createRuntime(t, {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
       return httpResponse({ id: decodeURIComponent(path.split("/")[2]), status: "completed" })
     }
+    if (path.startsWith("/sessions/") && recoveryResponse) return recoveryResponse(path)
     if (path.startsWith("/sessions/") && nudgeSessionResponse) return httpResponse(nudgeSessionResponse)
     if (path === "/observations" && (nudgeObservationsResponse !== undefined || nudgeObservationsError)) {
       return httpResponse(nudgeObservationsResponse, true, undefined, nudgeObservationsError)
@@ -697,6 +700,83 @@ test("project identity delegates Windows paths and worktrees to the canonical se
 		}
     })
   }
+})
+
+test("ambiguous recovery unavailable acknowledgement never registers or captures", async (t) => {
+  const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] }, recoveryResponse: () => { throw new Error("HTTP store unavailable") } })
+  await runtime.before({ tool: "mem_save", sessionID: "root" }, { args: { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+  await runtime.after({ tool: "mem_save", sessionID: "root" }, { output: "saved" })
+  await runtime.chat({ sessionID: "root" }, { message: {}, parts: [{ type: "text", text: "Automatic prompt must not bypass unavailable acknowledgement" }] })
+  await runtime.after({ tool: "Task", sessionID: "root" }, "Passive content".repeat(10))
+  await runtime.compact({ sessionID: "root" }, { context: [] })
+  assert.equal(runtime.requests.some(({ method }) => method === "POST"), false)
+  assert.equal(runtime.requests.some(({ path }) => path === "/context/compaction"), false)
+})
+
+test("ambiguous recovery preserves resumed effective identity and explicit arguments", async (t) => {
+  let registrations = 0
+  const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] },
+    recoveryResponse: (path) => httpResponse({ id: decodeURIComponent(path.split("/")[2]), project: "repo-a", ownership_mode: "project_owned" }),
+    registrationResponse: () => ++registrations === 1 ? httpResponse({ id: "root:resume:2", status: "created" }) : httpResponse({}, false) })
+  const selection = { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" }
+  await runtime.before({ tool: "mem_save", sessionID: "root" }, { args: { ...selection } })
+  await runtime.after({ tool: "mem_save", sessionID: "root" }, { output: "saved" })
+  await runtime.chat({ sessionID: "root" }, { message: {}, parts: [{ type: "text", text: "Resume the acknowledged runtime root" }] })
+  assert.equal(runtime.requests.find(({ path }) => path === "/prompts")?.body.session_id, "root:resume:2")
+  const output = { args: { ...selection, session_id: "invented" } }
+  await runtime.before({ tool: "mem_save", sessionID: "root" }, output)
+  assert.deepEqual(output.args, { ...selection, session_id: "root:resume:2" })
+})
+
+test("ambiguous recovery authorization stays isolated to each runtime root", async (t) => {
+  const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] }, recoveryResponse: (path) => { const id = decodeURIComponent(path.split("/")[2]); return httpResponse({ id, project: id === "root-a" ? "repo-a" : "repo-b", ownership_mode: "project_owned" }) }, contextResponse: () => httpResponse({ context: "root context" }) })
+  await runtime.before({ tool: "mem_save", sessionID: "root-a" }, { args: { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+  await runtime.after({ tool: "mem_save", sessionID: "root-a" }, { output: "saved" })
+  const start = runtime.requests.length
+  await runtime.chat({ sessionID: "root-b" }, { message: {}, parts: [{ type: "text", text: "Unselected root must not capture this prompt" }] })
+  await runtime.after({ tool: "Task", sessionID: "root-b" }, "Passive content".repeat(10))
+  await runtime.compact({ sessionID: "root-b" }, { context: [] })
+  assert.equal(runtime.requests.slice(start).some(({ path, method }) => method === "POST" || path === "/context/compaction"), false)
+  await runtime.chat({ sessionID: "root-a" }, { message: {}, parts: [{ type: "text", text: "Selected root may capture its own prompt" }] })
+  assert.equal(runtime.requests.find(({ path }) => path === "/prompts")?.body.project, "repo-a")
+  await runtime.after({ tool: "Task", sessionID: "root-a" }, "Own passive output".repeat(10))
+  assert.equal(runtime.requests.find(({ path }) => path === "/observations/passive")?.body.project, "repo-a")
+  const context = { context: [] }
+  await runtime.compact({ sessionID: "root-a" }, context)
+  assert.match(context.context.join("\n"), /Use project: 'repo-a'/)
+  await runtime.before({ tool: "mem_save", sessionID: "root-b" }, { args: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "second-token" } })
+  await runtime.after({ tool: "mem_save", sessionID: "root-b" }, { output: "saved" })
+  await runtime.chat({ sessionID: "root-b" }, { message: {}, parts: [{ type: "text", text: "Separately selected root can capture its own prompt" }] })
+  assert.equal(runtime.requests.filter(({ path }) => path === "/prompts").at(-1).body.project, "repo-b")
+})
+
+test("ambiguous recovery requires matching HTTP association before automatic capture", async (t) => {
+  for (const scenario of [
+    { name: "missing", ack: {}, capture: false },
+    { name: "different store project", ack: { id: "runtime", project: "other", ownership_mode: "project_owned" }, capture: false },
+    { name: "terminal", ack: { id: "runtime", project: "repo-b", ownership_mode: "project_owned", ended_at: "2026-01-01" }, capture: false },
+    { name: "matching", ack: { id: "runtime", project: "repo-b", ownership_mode: "project_owned" }, capture: true },
+  ]) await t.test(scenario.name, async (t) => {
+    const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] }, nudgeSessionResponse: scenario.ack })
+    await runtime.before({ tool: "mem_save", sessionID: "runtime" }, { args: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+    await runtime.after({ tool: "mem_save", sessionID: "runtime" }, { output: "saved" })
+    await runtime.chat({ sessionID: "runtime" }, { message: {}, parts: [{ type: "text", text: "Automatic prompt after explicit recovery" }] })
+    assert.equal(runtime.requests.some(({ path }) => path === "/prompts"), scenario.capture)
+    if (!scenario.capture) assert.equal(runtime.requests.some(({ path }) => path === "/sessions"), false)
+  })
+})
+
+test("ambiguous recovery explicit writes retain selection and runtime identity", async (t) => {
+  const runtime = await createRuntime(t, {
+    projectCurrentResponse: { project: "", project_source: "ambiguous", available_projects: ["repo-a", "repo-b"], error_hint: "ambiguous project" },
+    sessions: new Map([["runtime", session("runtime")]]),
+  })
+  const output = { args: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "mcp-token", session_id: "invented" } }
+  await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
+  assert.deepEqual(output.args, { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "mcp-token", session_id: "runtime" })
+  assert.equal(runtime.requests.some(({ path }) => path === "/sessions"), false)
+  await runtime.chat({ sessionID: "runtime" }, { message: {}, parts: [{ type: "text", text: "Long automatic prompt must remain disabled" }] })
+  assert.equal(runtime.requests.some(({ path }) => path === "/prompts"), false)
 })
 
 test("project identity resolution failures fail closed for automatic writes", async (t) => {

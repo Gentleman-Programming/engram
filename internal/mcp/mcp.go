@@ -15,6 +15,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,7 +36,7 @@ import (
 )
 
 const (
-	sourceProcessOverride         = projectpkg.SourceProcessOverride
+	sourceProcessOverride        = projectpkg.SourceProcessOverride
 	sessionIDPropertyDescription = "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed."
 )
 
@@ -1890,7 +1891,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		var detRes projectpkg.DetectionResult
 		var err error
 		if strings.TrimSpace(sessionID) != "" {
-			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, "", false, "", sessionID, nil, cfg.DefaultProject)
+			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, projectChoice, strings.TrimSpace(projectChoice) != "", projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
 		} else {
 			detRes, err = resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
 		}
@@ -2919,7 +2920,30 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	if trimmedSessionID != "" {
 		sess, err := s.GetSession(trimmedSessionID)
 		if err != nil {
-			return projectpkg.DetectionResult{}, &unknownSessionError{SessionID: trimmedSessionID}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return projectpkg.DetectionResult{}, err
+			}
+			// Only genuine detector ambiguity admits an unregistered runtime ID.
+			// A bare explicit project (even an existing bucket) cannot bootstrap it.
+			res, detErr := resolveWriteProject()
+			if !errors.Is(detErr, projectpkg.ErrAmbiguousProject) {
+				return projectpkg.DetectionResult{}, &unknownSessionError{SessionID: trimmedSessionID}
+			}
+			if trimmedReason != projectpkg.SourceUserSelectedAfterAmbiguousProject || trimmedProjectChoice == "" {
+				return res, detErr
+			}
+			res, detErr = resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
+			if detErr != nil {
+				return res, detErr
+			}
+			project, normalizeErr := normalizeExplicitWriteProject(res.Project)
+			if normalizeErr != nil {
+				return res, normalizeErr
+			}
+			if err := s.StartSessionWithOwnershipMode(trimmedSessionID, project, res.Path, store.SessionOwnershipProjectOwned); err != nil {
+				return res, err
+			}
+			return res, nil
 		}
 		sessionProject, err = normalizeExplicitWriteProject(sess.Project)
 		if err != nil {
@@ -2963,6 +2987,9 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 			return projectpkg.DetectionResult{}, err
 		}
 
+		if errors.Is(cwdErr, projectpkg.ErrAmbiguousProject) && trimmedReason == projectpkg.SourceUserSelectedAfterAmbiguousProject {
+			return resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
+		}
 		exists, err := s.ProjectExists(project)
 		if err != nil {
 			return projectpkg.DetectionResult{}, err
@@ -3203,6 +3230,7 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 	if err != nil {
 		return ""
 	}
+	matchedPath := ""
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -3217,13 +3245,17 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 		if _, err := os.Stat(filepath.Join(childPath, ".git")); err != nil {
 			continue
 		}
-		absChild, err := filepath.Abs(childPath)
+		absChild, err := filepath.EvalSymlinks(childPath)
 		if err != nil {
-			return childPath
+			return ""
 		}
-		return absChild
+		absChild, err = filepath.Abs(absChild)
+		if err != nil || matchedPath != "" {
+			return ""
+		}
+		matchedPath = absChild
 	}
-	return ""
+	return matchedPath
 }
 
 // resolveReadProject validates an optional project override against the store.
@@ -3426,6 +3458,9 @@ func readProjectErrorResult(activity *SessionActivity, res projectpkg.DetectionR
 		)
 	} else {
 		result = writeProjectErrorResult(activity, defaultSessionID(""), res, err)
+	}
+	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		addErrorMetadata(result, map[string]any{"hint": "Ask the user to choose a project, then retry the same read tool with its project filter; alternatively cd into the target repo or configure repo .engram/config.json. Do not retry a write tool to recover this read."})
 	}
 	addErrorMetadata(result, map[string]any{
 		"project":        res.Project,

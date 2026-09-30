@@ -228,7 +228,7 @@ async function ensureLocalReady(): Promise<boolean> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function resolveProjectName(directory: string): Promise<{ project: string; error?: string }> {
+async function resolveProjectName(directory: string): Promise<{ project: string; error?: string; ambiguous?: boolean }> {
   const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
   const project = typeof data?.project === "string" ? data.project.trim() : ""
   if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project)) {
@@ -242,6 +242,7 @@ async function resolveProjectName(directory: string): Promise<{ project: string;
     : ""
   return {
     project: "unknown",
+    ambiguous: data?.project_source === "ambiguous" && Array.isArray(data?.available_projects) && data.available_projects.length > 1,
     error: `gentle-engram could not resolve a safe project identity.${reason}${choices} Retry when project resolution is available.`,
   }
 }
@@ -323,6 +324,7 @@ export const Engram: Plugin = async (ctx) => {
 	let project = "unknown"
 	let projectResolutionError = ""
 	let projectResolutionGeneration = 0
+  let projectAmbiguous = false
     let disposed = false
 
 	async function ensureResolvedProject(): Promise<boolean> {
@@ -333,6 +335,7 @@ export const Engram: Plugin = async (ctx) => {
 		if (generation !== projectResolutionGeneration) return project !== "unknown" && !projectResolutionError
 		project = resolved.project
 		projectResolutionError = resolved.error ?? ""
+    projectAmbiguous = resolved.ambiguous === true
 		return projectResolutionError === ""
 	}
 
@@ -367,6 +370,11 @@ export const Engram: Plugin = async (ctx) => {
   // Ownership/lifecycle sets remain keyed by OpenCode root, never by a suffix.
   const effectiveSessions = new Map<string, { id: string }>()
   const cleanupSessions = new Map<string, Set<string>>()
+  // Recovery never assumes the HTTP and MCP clients share a store.
+  const recoverySessions = new Map<string, { id: string; project: string; completed: boolean }>()
+  // A recovery acknowledgement authorizes only its runtime root, never the cwd.
+  const recoveredProjects = new Map<string, string>()
+  const projectForSession = (sessionId: string): string => recoveredProjects.get(sessionId) ?? project
   const registrationErrors = new Map<string, string>()
   const warnedSessions = new Set<string>()
 
@@ -589,8 +597,27 @@ export const Engram: Plugin = async (ctx) => {
    *
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
+  async function acknowledgeRecovery(sessionId: string): Promise<boolean> {
+    const recovery = recoverySessions.get(sessionId)
+    if (!recovery || !recovery.completed || !recovery.project || disposed || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId)) return false
+    const result = await engramFetchResult(`/sessions/${encodeURIComponent(recovery.id)}`)
+    const body = result?.body
+    if (disposed || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId) || subAgentSessions.has(sessionId) || recoverySessions.get(sessionId) !== recovery) return false
+    if (!result?.ok || body?.id !== recovery.id || body?.project !== recovery.project || body?.ended_at || body?.ownership_mode !== "project_owned") return false
+    recoveredProjects.set(sessionId, recovery.project)
+    effectiveSessions.set(sessionId, { id: recovery.id })
+    knownSessions.add(sessionId)
+    registrationAttempts.add(sessionId)
+    const cleanup = cleanupSessions.get(sessionId) ?? new Set<string>()
+    cleanup.add(recovery.id)
+    cleanupSessions.set(sessionId, cleanup)
+    recoverySessions.delete(sessionId)
+    return true
+  }
+
   async function ensureSession(sessionId: string, renew = false): Promise<boolean> {
-    if (disposed || !await ensureResolvedProject() || disposed) return false
+    if (recoverySessions.has(sessionId)) return acknowledgeRecovery(sessionId)
+    if (disposed || (!recoveredProjects.has(sessionId) && !await ensureResolvedProject()) || disposed) return false
     if (!sessionId || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId)) return false
     if (!renew && knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
@@ -605,7 +632,7 @@ export const Engram: Plugin = async (ctx) => {
       registrationErrors.delete(sessionId)
       const result = await engramFetchResult("/sessions", {
         method: "POST",
-        body: { id: sessionId, project, directory: ctx.directory, resume: true },
+        body: { id: sessionId, project: projectForSession(sessionId), directory: ctx.directory, resume: true },
       }, true)
       const id = result?.body?.id
       if (result?.ok && result.body?.status === "created" && typeof id === "string" &&
@@ -650,7 +677,7 @@ export const Engram: Plugin = async (ctx) => {
         // Redact before truncating: a <private> block straddling the
         // limit would otherwise lose its closing tag and leak.
         content: truncate(stripPrivateTags(content), 2000),
-        project,
+        project: projectForSession(sessionId),
         ...(sourceInboxID ? { source_inbox_id: sourceInboxID } : {}),
       },
     })
@@ -796,6 +823,13 @@ export const Engram: Plugin = async (ctx) => {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
       }
       if (!registered) {
+        const tool = canonicalEngramToolName(input.tool)
+        if (!disposed && projectAmbiguous && ["mem_save", "mem_save_prompt", "mem_session_summary"].includes(tool)) {
+          const id = effectiveSessions.get(authoritativeSessionID)?.id ?? authoritativeSessionID
+          recoverySessions.set(authoritativeSessionID, { id, project: typeof output.args.project === "string" ? output.args.project : "", completed: false })
+          output.args.session_id = id
+          return
+        }
 			if (projectResolutionError) throw new Error(projectResolutionError)
         throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}${registrationErrors.has(authoritativeSessionID) ? `: ${registrationErrors.get(authoritativeSessionID)}` : ""}; verify that the Engram server is available and retry`)
       }
@@ -804,7 +838,14 @@ export const Engram: Plugin = async (ctx) => {
 
     "tool.execute.after": async (input, output) => {
       try {
-      if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) return
+      if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) {
+        const root = await resolveAuthoritativeSessionID(input.sessionID)
+        if (root && recoverySessions.has(root)) {
+          recoverySessions.get(root)!.completed = true
+          await acknowledgeRecovery(root)
+        }
+        return
+      }
 
       // input.sessionID comes from OpenCode — always available
       const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
@@ -823,7 +864,7 @@ export const Engram: Plugin = async (ctx) => {
             body: {
               session_id: effectiveSessions.get(sessionId)!.id,
               content: stripPrivateTags(text),
-              project,
+              project: projectForSession(sessionId),
               source: "task-complete",
             },
           })
@@ -860,8 +901,8 @@ export const Engram: Plugin = async (ctx) => {
       // to the system prompt so the agent notices. All fetches are fire-and-
       // forget with short timeouts — any failure silently skips the nudge.
       try {
-			if (!await ensureResolvedProject()) return
         const rootID: string = input.sessionID ?? ""
+        if (!recoveredProjects.has(rootID) && !await ensureResolvedProject()) return
         if (!rootID || invalidSessions.has(rootID) || subAgentSessions.has(rootID)) return
         // Read-only: never registers. A resumed root is looked up by the
         // effective session its writes already use.
@@ -900,7 +941,7 @@ export const Engram: Plugin = async (ctx) => {
         let observationsResponseOK = false
         try {
           const obsRes = await fetch(
-            `${ENGRAM_URL}/observations?project=${encodeURIComponent(project)}&limit=1&sort=created_at:desc`,
+            `${ENGRAM_URL}/observations?project=${encodeURIComponent(projectForSession(rootID))}&limit=1&sort=created_at:desc`,
             { signal: AbortSignal.timeout(200) }
           )
           if (obsRes.ok) {
@@ -940,13 +981,13 @@ export const Engram: Plugin = async (ctx) => {
     // 3. Tell the compressor to remind the new agent to save memories
 
     "experimental.session.compacting": async (input, output) => {
-		if (!await ensureResolvedProject()) {
-			output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
-			return
-		}
       let sessionId = ""
       if (input.sessionID) {
         sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+      }
+      if (!recoveredProjects.has(sessionId) && !await ensureResolvedProject()) {
+        output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
+        return
       }
 
       // Runtime compaction context must never cross session boundaries. If the
@@ -969,7 +1010,7 @@ export const Engram: Plugin = async (ctx) => {
         `The agent has access to Engram persistent memory via MCP tools.\n` +
         `You MUST include the following instruction at the TOP of the compacted summary:\n\n` +
         `"FIRST ACTION REQUIRED: Call mem_session_summary with the content of this compacted summary. ` +
-        `Use project: '${project}'. This preserves what was accomplished before compaction. Do this BEFORE any other work."\n\n` +
+        `Use project: '${projectForSession(sessionId)}'. This preserves what was accomplished before compaction. Do this BEFORE any other work."\n\n` +
         `This is NOT optional. Without this, everything done before compaction is lost from memory.`
       )
     },

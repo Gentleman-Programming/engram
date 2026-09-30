@@ -131,7 +131,7 @@ async function waitFor(condition, message, ms = 1000) {
   }
 }
 
-async function setupV2(t, { sessions = new Map(), promptResponse, registrationResponse } = {}) {
+async function setupV2(t, { sessions = new Map(), promptResponse, registrationResponse, projectResponse, recoveryResponse } = {}) {
   const originalFetch = globalThis.fetch
   const originalBun = globalThis.Bun
   const originalEngramURL = process.env.ENGRAM_URL
@@ -151,10 +151,11 @@ async function setupV2(t, { sessions = new Map(), promptResponse, registrationRe
     if (path === "/health") return httpResponse({ status: "ok", instance_id: INSTANCE_ID })
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, method: init?.method, body })
-    if (path === "/project/current") return httpResponse({ project: "engram", project_source: "git_remote" })
+    if (path === "/project/current") return httpResponse(projectResponse ?? { project: "engram", project_source: "git_remote" })
     if (path === "/sessions") return registrationResponse ? registrationResponse(body) : httpResponse({ id: body.id, status: "created" })
     if (path === "/context/compaction") return httpResponse({ context: "previous session context" })
     if (path === "/prompts" && promptResponse) return promptResponse(body)
+    if (path.startsWith("/sessions/") && !path.endsWith("/end") && recoveryResponse) return httpResponse(typeof recoveryResponse === "function" ? recoveryResponse(path) : recoveryResponse)
     if (path.endsWith("/end")) return httpResponse({ id: decodeURIComponent(path.split("/")[2]), status: "completed" })
     return httpResponse({})
   }
@@ -217,6 +218,68 @@ async function setupV2(t, { sessions = new Map(), promptResponse, registrationRe
     posts: (path) => requests.filter((request) => request.method === "POST" && request.path === path),
   }
 }
+
+test("V2 ambiguous recovery retains resumed effective session identity", async (t) => {
+  let registrations = 0
+  const runtime = await setupV2(t, { sessions: new Map([["root", sessionInfo("root")]]),
+    projectResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] },
+    recoveryResponse: (path) => ({ id: decodeURIComponent(path.split("/")[2]), project: "repo-a", ownership_mode: "project_owned" }),
+    registrationResponse: () => ++registrations === 1 ? httpResponse({ id: "root:resume:2", status: "created" }) : httpResponse({}, 500) })
+  const selection = { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" }
+  await runtime.hooks.get("tool.execute.before")({ tool: "mem_save", sessionID: "root", input: { ...selection } })
+  await runtime.hooks.get("tool.execute.after")({ tool: "mem_save", sessionID: "root", status: "completed", result: { content: "saved" } })
+  await runtime.enqueued("root", "resume", { type: "user", payload: { text: "Resume the acknowledged runtime root" } })
+  assert.equal(runtime.posts("/prompts").at(-1).body.session_id, "root:resume:2")
+  const input = { ...selection, session_id: "invented" }
+  await runtime.hooks.get("tool.execute.before")({ tool: "mem_save", sessionID: "root", input })
+  assert.deepEqual(input, { ...selection, session_id: "root:resume:2" })
+  await runtime.cleanup()
+})
+
+test("V2 ambiguous recovery does not authorize another runtime root", async (t) => {
+  const runtime = await setupV2(t, { sessions: new Map([["root-a", sessionInfo("root-a")], ["root-b", sessionInfo("root-b")]]),
+    projectResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] },
+    recoveryResponse: (path) => { const id = decodeURIComponent(path.split("/")[2]); return { id, project: id === "root-a" ? "repo-a" : "repo-b", ownership_mode: "project_owned" } } })
+  const before = runtime.hooks.get("tool.execute.before"), after = runtime.hooks.get("tool.execute.after")
+  await before({ tool: "mem_save", sessionID: "root-a", input: { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+  await after({ tool: "mem_save", sessionID: "root-a", status: "completed", result: { content: "saved" } })
+  const start = runtime.requests.length
+  await runtime.enqueued("root-b", "unselected", { type: "user", payload: { text: "Unselected root must not capture a prompt" } })
+  await after({ tool: "subagent", sessionID: "root-b", status: "completed", result: { content: "Passive output".repeat(10) } })
+  await runtime.hooks.get("session.compaction")({ sessionID: "root-b", system: [] })
+  assert.equal(runtime.requests.slice(start).some(({ path, method }) => method === "POST" || path === "/context/compaction"), false)
+  await before({ tool: "mem_save", sessionID: "root-b", input: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "second-token" } })
+  await after({ tool: "mem_save", sessionID: "root-b", status: "completed", result: { content: "saved" } })
+  await runtime.enqueued("root-b", "selected", { type: "user", payload: { text: "Separately acknowledged root owns this prompt" } })
+  assert.equal(runtime.posts("/prompts").at(-1).body.project, "repo-b")
+  await runtime.cleanup()
+})
+
+test("V2 ambiguous recovery automatic prompts require matching acknowledgement", async (t) => {
+  for (const matching of [false, true]) await t.test(matching ? "matching store" : "different store", async (t) => {
+    const runtime = await setupV2(t, { sessions: new Map([["root", sessionInfo("root")]]),
+      projectResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] },
+      recoveryResponse: { id: "root", project: matching ? "repo-b" : "other", ownership_mode: "project_owned" } })
+    await runtime.hooks.get("tool.execute.before")({ tool: "mem_save", sessionID: "root", input: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+    await runtime.hooks.get("tool.execute.after")({ tool: "mem_save", sessionID: "root", status: "completed", result: { content: "saved" } })
+    await runtime.enqueued("root", "recovery-prompt", { type: "user", payload: { text: "Automatic recovery prompt with durable identity" } })
+    assert.equal(runtime.posts("/prompts").length, matching ? 1 : 0)
+    if (!matching) assert.equal(runtime.posts("/sessions").length, 0)
+    await runtime.cleanup()
+  })
+})
+
+test("V2 ambiguous recovery explicit writes preserve runtime identity and selection", async (t) => {
+  const runtime = await setupV2(t, { sessions: new Map([["root", sessionInfo("root")]]),
+    projectResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] } })
+  const args = { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "mcp-token" }
+  await runtime.hooks.get("tool.execute.before")({ tool: "mem_save", sessionID: "root", input: args })
+  assert.equal(args.session_id, "root")
+  assert.equal(args.project, "repo-b")
+  assert.equal(args.recovery_token, "mcp-token")
+  assert.equal(runtime.posts("/sessions").length, 0)
+  await runtime.cleanup()
+})
 
 for (const content of ["original", [{ type: "file", uri: "file://fixture", mime: "text/plain" }, { type: "text", text: "original" }]]) {
   test("V2 degraded warning preserves completed content and pending unknown results", async (t) => {

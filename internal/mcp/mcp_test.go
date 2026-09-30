@@ -873,7 +873,7 @@ func TestForeignSoleRuntimeCandidateFallsBackToManualMCPBinding(t *testing.T) {
 	const (
 		bindingProject = "binding-project"
 		foreignProject = "foreign-project"
-		foreignID = "foreign-runtime-session"
+		foreignID      = "foreign-runtime-session"
 	)
 	t.Setenv("ENGRAM_PROJECT", "")
 	s := newMCPTestStore(t)
@@ -945,7 +945,7 @@ func TestRuntimeSessionBindingConformance(t *testing.T) {
 	var saved []string
 	for _, scenario := range []struct {
 		name, id, project string
-		wantError bool
+		wantError         bool
 	}{
 		{name: "first writer", id: "agent-one", project: projectName},
 		{name: "second writer", id: "agent-two", project: projectName},
@@ -6477,6 +6477,320 @@ func TestMemSave_AmbiguousEnvelope(t *testing.T) {
 	token, ok := body["recovery_token"].(string)
 	if !ok || token == "" {
 		t.Fatalf("expected ambiguous_project error to include recovery_token, got %v", body)
+	}
+}
+
+func TestAmbiguousRecoveryTokenBindings(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"token-a", "token-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	projects := []string{"token-a", "token-b"}
+	t.Run("concurrent different choices", func(t *testing.T) {
+		a := NewSessionActivity(time.Minute)
+		token := a.IssueAmbiguousProjectRecoveryToken("root", projects, parent)
+		results := make(chan bool, 2)
+		for _, choice := range projects {
+			go func(choice string) {
+				results <- a.ValidateAmbiguousProjectRecoveryToken("root", token, choice, projects, parent)
+			}(choice)
+		}
+		first, second := <-results, <-results
+		if first == second {
+			t.Fatal("exactly one concurrent choice must succeed")
+		}
+	})
+	for _, scenario := range []string{"wrong session", "wrong context", "changed candidates", "invalid choice", "expired", "changed choice", "same choice"} {
+		t.Run(scenario, func(t *testing.T) {
+			a := NewSessionActivity(time.Minute)
+			now := time.Now()
+			a.now = func() time.Time { return now }
+			token := a.IssueAmbiguousProjectRecoveryToken("root", projects, parent)
+			if token == "" {
+				t.Fatal("missing token")
+			}
+			id, path, choice := "root", parent, "token-a"
+			candidates := projects
+			want := false
+			switch scenario {
+			case "wrong session":
+				id = "other"
+			case "wrong context":
+				path = t.TempDir()
+			case "changed candidates":
+				candidates = []string{"token-a"}
+			case "invalid choice":
+				choice = "invented"
+			case "expired":
+				now = now.Add(ambiguousProjectRecoveryTTL)
+			case "changed choice", "same choice":
+				if !a.ValidateAmbiguousProjectRecoveryToken(id, token, choice, candidates, path) {
+					t.Fatal("first choice refused")
+				}
+				if scenario == "changed choice" {
+					choice = "token-b"
+				} else {
+					want = true
+				}
+			}
+			if got := a.ValidateAmbiguousProjectRecoveryToken(id, token, choice, candidates, path); got != want {
+				t.Fatalf("valid=%v want=%v", got, want)
+			}
+		})
+	}
+}
+
+func TestAmbiguousRecoveryRejectsDuplicateCandidatePaths(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"duplicate", "Duplicate", "other"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	lower, err := os.Stat(filepath.Join(parent, "duplicate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper, err := os.Stat(filepath.Join(parent, "Duplicate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(lower, upper) {
+		t.Skip("filesystem cannot represent case-distinct candidate paths")
+	}
+	a := NewSessionActivity(time.Minute)
+	if token := a.IssueAmbiguousProjectRecoveryToken("root", []string{"duplicate", "other"}, parent); token != "" {
+		t.Fatal("duplicate paths issued authority")
+	}
+}
+
+func TestUnknownSessionWithoutAmbiguityCannotBootstrap(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	t.Chdir(root)
+	s := newMCPTestStore(t)
+	_, err := resolveSaveWriteProject(s, "known", true, project.SourceUserSelectedAfterAmbiguousProject, "runtime", func(project.DetectionResult, string) (bool, bool) { return true, true })
+	var unknown *unknownSessionError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("expected unknown session, got %v", err)
+	}
+	if _, err := s.GetSession("runtime"); err == nil {
+		t.Fatal("registered nonambiguous session")
+	}
+}
+
+func TestAmbiguousRecoveryPreservesExistingSessionState(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"state-a", "state-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+	for _, scenario := range []string{"ended", "different owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			owner := "state-a"
+			if scenario == "different owner" {
+				owner = "state-b"
+			}
+			if err := s.StartSessionWithOwnershipMode("root", owner, filepath.Join(parent, owner), store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "ended" {
+				if err := s.EndSession("root", "terminal summary"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := s.GetSession("root")
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeJSON, err := json.Marshal(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := NewSessionActivity(time.Minute)
+			token := a.IssueAmbiguousProjectRecoveryToken("root", []string{"state-a", "state-b"}, parent)
+			validate := func(res project.DetectionResult, choice string) (bool, bool) {
+				return true, a.ValidateAmbiguousProjectRecoveryToken("root", token, choice, res.AvailableProjects, res.Path)
+			}
+			_, err = resolveSaveWriteProject(s, "state-a", true, project.SourceUserSelectedAfterAmbiguousProject, "root", validate)
+			if scenario == "different owner" && err == nil {
+				t.Fatal("different owner accepted")
+			}
+			after, err := s.GetSession("root")
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterJSON, err := json.Marshal(after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(beforeJSON) != string(afterJSON) {
+				t.Fatalf("session state changed: before=%s after=%s", beforeJSON, afterJSON)
+			}
+		})
+	}
+}
+
+func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"same-a", "same-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+	s := newMCPTestStore(t)
+	a := NewSessionActivity(time.Minute)
+	token := a.IssueAmbiguousProjectRecoveryToken("root", []string{"same-a", "same-b"}, parent)
+	validate := func(res project.DetectionResult, choice string) (bool, bool) {
+		return true, a.ValidateAmbiguousProjectRecoveryToken("root", token, choice, res.AvailableProjects, res.Path)
+	}
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := resolveSaveWriteProject(s, "same-a", true, project.SourceUserSelectedAfterAmbiguousProject, "root", validate)
+			results <- err
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	sess, err := s.GetSession("root")
+	if err != nil || sess.Project != "same-a" || sess.OwnershipMode != store.SessionOwnershipProjectOwned || sess.Directory != filepath.Join(parent, "same-a") {
+		t.Fatalf("incorrect converged association: %#v %v", sess, err)
+	}
+}
+
+func TestAmbiguousRecoveryReadHintKeepsSameReadTool(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"read-a", "read-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+	res, err := resolveWriteProject()
+	if !errors.Is(err, project.ErrAmbiguousProject) {
+		t.Fatalf("expected ambiguity, got %v", err)
+	}
+	body := callResultJSON(t, readProjectErrorResult(NewSessionActivity(time.Minute), res, err))
+	hint, ok := body["hint"].(string)
+	if !ok || !strings.Contains(hint, "retry the same read tool") || strings.Contains(hint, "mem_save") {
+		t.Fatalf("incorrect read guidance: %v", body)
+	}
+	if body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil || body["project_source"] != "ambiguous" {
+		t.Fatalf("missing compatible structured ambiguity: %v", body)
+	}
+}
+
+func TestAmbiguousUnknownSessionRecoveryWriteTools(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"write-a", "write-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+	for _, tool := range []string{"save", "prompt", "summary"} {
+		t.Run(tool, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			a := NewSessionActivity(time.Minute)
+			h := handleSave(s, MCPConfig{}, a)
+			if tool == "prompt" {
+				h = handleSavePrompt(s, MCPConfig{}, a)
+			}
+			if tool == "summary" {
+				h = handleSessionSummary(s, MCPConfig{}, a)
+			}
+			args := map[string]any{"session_id": "runtime", "title": "recovery test", "type": "manual", "content": "Recovery tool regression"}
+			call := func() *mcppkg.CallToolResult {
+				r, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			body := callResultJSON(t, call())
+			token, ok := body["recovery_token"].(string)
+			if !ok || token == "" {
+				t.Fatalf("no recovery authority: %v", body)
+			}
+			args["project"], args["project_choice_reason"], args["recovery_token"] = "write-a", project.SourceUserSelectedAfterAmbiguousProject, "invalid"
+			if r := call(); !r.IsError {
+				t.Fatal("invalid token accepted")
+			}
+			if _, err := s.GetSession("runtime"); err == nil {
+				t.Fatal("invalid token registered session")
+			}
+			args["recovery_token"] = token
+			if r := call(); r.IsError {
+				t.Fatalf("valid recovery failed: %s", callResultText(t, r))
+			}
+			args["project"] = "write-b"
+			if r := call(); !r.IsError {
+				t.Fatal("changed choice accepted")
+			}
+		})
+	}
+}
+
+func TestMemSave_AmbiguousUnknownSessionRecovery(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"recovery-a", "recovery-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(time.Minute)
+	h := handleSave(s, MCPConfig{}, activity)
+	args := map[string]any{"title": "runtime recovery", "content": "selected by user", "type": "manual", "session_id": "runtime-root"}
+	call := func() *mcppkg.CallToolResult {
+		r, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	initial := call()
+	body := callResultJSON(t, initial)
+	if body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil {
+		t.Fatalf("expected runtime-bound ambiguity, got %v", body)
+	}
+	if _, err := s.GetSession("runtime-root"); err == nil {
+		t.Fatal("ambiguity registered session")
+	}
+	args["project"] = "recovery-b"
+	args["project_choice_reason"] = project.SourceUserSelectedAfterAmbiguousProject
+	args["recovery_token"] = body["recovery_token"]
+	if r := call(); r.IsError {
+		t.Fatalf("recovery failed: %s", callResultText(t, r))
+	}
+	sess, err := s.GetSession("runtime-root")
+	if err != nil || sess.Project != "recovery-b" || sess.Directory != filepath.Join(parent, "recovery-b") {
+		t.Fatalf("wrong recovered association: %#v %v", sess, err)
 	}
 }
 
