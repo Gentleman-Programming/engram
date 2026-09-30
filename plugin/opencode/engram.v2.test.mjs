@@ -332,6 +332,62 @@ test("V2 session.created binds root sessions but never child sessions", async (t
   assert.equal(runtime.posts("/sessions/ses_root/end").length, 1)
 })
 
+test("V2 session.updated closes a late-attributed child exactly once", async (t) => {
+  const runtime = await setupV2(t)
+  t.after(() => runtime.cleanup())
+  await runtime.created("ses_child")
+  assert.equal(runtime.posts("/sessions").length, 1)
+
+  const update = {
+    type: "session.updated",
+    data: { sessionID: "ses_child", parentID: "ses_root", projectID: PROJECT_ID },
+  }
+  await runtime.events.emit(update)
+  assert.equal(runtime.posts("/sessions/ses_child/end").length, 1)
+  await runtime.events.emit(update)
+  await runtime.created("ses_child", "ses_root")
+  await runtime.enqueued("ses_child", "child-inbox", userItem("A delegated prompt must remain excluded"))
+  await runtime.deleted("ses_child")
+  await runtime.cleanup()
+  assert.equal(runtime.posts("/sessions/ses_child/end").length, 1)
+  assert.equal(runtime.posts("/sessions").length, 1)
+  assert.equal(runtime.posts("/prompts").length, 0)
+})
+
+test("V2 root updates do not register duplicates or unknown roots", async (t) => {
+  const runtime = await setupV2(t)
+  t.after(() => runtime.cleanup())
+  await runtime.created("ses_root")
+  for (const sessionID of ["ses_root", "ses_root", "ses_unknown"]) {
+    await runtime.events.emit({ type: "session.updated", data: { sessionID, projectID: PROJECT_ID } })
+  }
+  assert.deepEqual(runtime.posts("/sessions").map(({ body }) => body.id), ["ses_root"])
+  assert.equal(runtime.requests.filter(({ path }) => path.endsWith("/end")).length, 0)
+})
+
+test("V2 ignores malformed and foreign session updates without closing roots", async (t) => {
+  const runtime = await setupV2(t)
+  t.after(() => runtime.cleanup())
+  await runtime.created("ses_root")
+  for (const data of [
+    undefined,
+    {},
+    { sessionID: 42, parentID: "parent", projectID: PROJECT_ID },
+    { sessionID: "", parentID: "parent", projectID: PROJECT_ID },
+    { sessionID: "ses_root", parentID: 42, projectID: PROJECT_ID },
+    { sessionID: "ses_root", parentID: "parent" },
+    { sessionID: "ses_root", parentID: "parent", projectID: "other-project" },
+    { sessionID: "ses_root", parentID: "parent", projectID: PROJECT_ID, location: { directory: "/work/other" } },
+    { sessionID: "ses_unknown", parentID: "parent", projectID: PROJECT_ID },
+  ]) {
+    await runtime.events.emit({ type: "session.updated", data })
+  }
+  assert.equal(runtime.posts("/sessions").length, 1)
+  assert.equal(runtime.requests.filter(({ path }) => path.endsWith("/end")).length, 0)
+  await runtime.events.emit({ type: "session.updated", data: { sessionID: "ses_root", parentID: "parent", projectID: PROJECT_ID } })
+  assert.equal(runtime.posts("/sessions/ses_root/end").length, 1, "valid updates still work after malformed events")
+})
+
 test("V2 ignores other locations and leaves unrelated tool input untouched", async (t) => {
   const runtime = await setupV2(t)
   await runtime.events.emit({

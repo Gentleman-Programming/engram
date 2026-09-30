@@ -1027,7 +1027,7 @@ function v2ToolResultText(result: any): string {
 function v1SessionEvent(event: any, directory: string): any {
   const data = event?.data
   if (typeof data?.sessionID !== "string") return undefined
-  if (event.type === "session.created") {
+  if (event.type === "session.created" || event.type === "session.updated") {
     // The V2 server is shared across locations; V1 only saw its own instance.
     if (data.location?.directory && data.location.directory !== directory) return undefined
     return { type: event.type, properties: { info: { id: data.sessionID, parentID: data.parentID, projectID: data.projectID } } }

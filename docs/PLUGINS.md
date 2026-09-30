@@ -53,6 +53,8 @@ Both OpenCode majors register or renew with one `POST /sessions` using the root 
 
 Automatic OpenCode memory operations remain fail-open. Readiness, server/import launch, transport, malformed-response, HTTP, and invalid session-end acknowledgement failures queue privacy-safe `Engram degraded` warnings for the next supported tool result. Each reason is reported once per plugin instance; pending warnings survive unsupported results. V1 string output and V2 completed string/text-or-file content are supported; tool errors and unknown result shapes are left untouched. Warnings contain no paths, raw errors, or response payloads. They do not promise automatic restart, backoff, or recovery. Expected session registration conflicts retain their specific refusal diagnostics rather than being labeled server-down.
 
+The V2 adapter forwards `session.updated` as well as `session.created`, allowing the shared handler to close a prior root registration if an update later supplies `parentID`. This behavior is covered by deterministic adapter tests; delayed parent attribution has not been verified in a live V2 runtime.
+
 Session closure is confirmed only when the response contains the matching effective session ID and `status: completed`. Empty, malformed, mismatched, and failed responses retain cleanup eligibility for existing lifecycle retries.
 
 ### What the Plugin Does
