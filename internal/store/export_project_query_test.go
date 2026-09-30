@@ -40,7 +40,7 @@ func TestExportProjectQueriesUseProjectIndexes(t *testing.T) {
 	}
 	assertExportQueryUsesIndex(t, s, captured, "SELECT id, ifnull(project, ''), directory", "idx_sessions_project")
 	assertExportQueryUsesIndex(t, s, captured, "SELECT "+observationSelectColumns, "idx_obs_project")
-	assertExportQueryUsesIndex(t, s, captured, "SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts", "idx_prompts_project")
+	assertExportQueryUsesIndex(t, s, captured, "SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at, ifnull(source_inbox_id, '') FROM user_prompts", "idx_prompts_project")
 }
 
 func assertExportQueryUsesIndex(t *testing.T, s *Store, queries []exportedQuery, prefix, index string) {

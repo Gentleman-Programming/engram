@@ -3,9 +3,11 @@ package cloudstore
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -807,6 +809,81 @@ func TestInsertMutationBatchFailureIdentifiesFailingEntryAndRollsBack(t *testing
 	}
 	if !errors.Is(entryErr, cause) {
 		t.Fatal("expected wrapped cause to remain discoverable with errors.Is")
+	}
+}
+
+type replayIndexDriver struct {
+	indexErr error
+	inserts  int
+}
+
+type replayIndexConn struct{ state *replayIndexDriver }
+type replayIndexRows struct {
+	payload []byte
+	done    bool
+}
+
+func (d *replayIndexDriver) Open(string) (driver.Conn, error) { return &replayIndexConn{state: d}, nil }
+func (d *replayIndexDriver) Connect(context.Context) (driver.Conn, error) {
+	return d.Open("")
+}
+func (d *replayIndexDriver) Driver() driver.Driver { return d }
+func (c *replayIndexConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepare")
+}
+func (c *replayIndexConn) Close() error { return nil }
+func (c *replayIndexConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("unexpected transaction")
+}
+func (c *replayIndexConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if !strings.Contains(query, "SELECT payload::text FROM cloud_chunks") {
+		return nil, fmt.Errorf("unexpected query: %s", query)
+	}
+	return &replayIndexRows{payload: []byte(`{"sessions":[{"id":"s-1"}]}`)}, nil
+}
+func (c *replayIndexConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if !strings.Contains(query, "INSERT INTO cloud_project_sessions") {
+		return nil, fmt.Errorf("unexpected exec: %s", query)
+	}
+	c.state.inserts++
+	if c.state.indexErr != nil {
+		return nil, c.state.indexErr
+	}
+	return driver.RowsAffected(0), nil
+}
+func (r *replayIndexRows) Columns() []string { return []string{"payload"} }
+func (r *replayIndexRows) Close() error      { return nil }
+func (r *replayIndexRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.payload
+	return nil
+}
+
+func TestWriteChunkReplayIndexFailure(t *testing.T) {
+	cause := errors.New("session index unavailable")
+	for _, tt := range []struct {
+		name     string
+		indexErr error
+	}{
+		{name: "index failure", indexErr: cause},
+		{name: "healthy replay"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &replayIndexDriver{indexErr: tt.indexErr}
+			db := sql.OpenDB(state)
+			t.Cleanup(func() { _ = db.Close() })
+			payload := []byte(`{"sessions":[{"id":"s-1"}]}`)
+			err := (&CloudStore{db: db}).WriteChunk(context.Background(), "project", chunkIDFromPayload(payload), "tester", "", payload)
+			if !errors.Is(err, tt.indexErr) || (tt.indexErr != nil && !strings.Contains(err.Error(), `index session "s-1"`)) {
+				t.Fatalf("replay error = %v, want index error %v", err, tt.indexErr)
+			}
+			if state.inserts != 1 {
+				t.Fatalf("index insert count = %d, want 1", state.inserts)
+			}
+		})
 	}
 }
 

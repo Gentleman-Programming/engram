@@ -513,6 +513,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Project       string `json:"project"`
 		Directory     string `json:"directory"`
 		OwnershipMode string `json:"ownership_mode"`
+		Resume        bool   `json:"resume"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -527,7 +528,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = store.SessionOwnershipShared
 	}
-	if err := s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+	effectiveID := body.ID
+	var err error
+	if body.Resume {
+		effectiveID, err = s.store.ResumeSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
+	} else {
+		err = s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
+	}
+	if err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {
 		case errors.Is(err, store.ErrSessionAlreadyEnded):
@@ -551,7 +559,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.notifyWrite()
-	jsonResponse(w, http.StatusCreated, map[string]string{"id": body.ID, "status": "created"})
+	ack := map[string]string{"id": effectiveID, "status": "created"}
+	if effectiveID != body.ID {
+		ack["resumed_from"] = body.ID
+	}
+	jsonResponse(w, http.StatusCreated, ack)
 }
 
 func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
@@ -777,10 +789,11 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.store.UpdateObservation(id, body)
+	obs, err := s.store.UpdateObservationForProject(id, r.URL.Query().Get("expected_project"), body)
 	if err != nil {
 		switch {
-		case errors.Is(err, store.ErrObservationTitleRequired),
+		case errors.Is(err, store.ErrExpectedProjectRequired),
+			errors.Is(err, store.ErrObservationTitleRequired),
 			errors.Is(err, store.ErrObservationContentRequired),
 			errors.Is(err, store.ErrObservationFindReplacePairRequired),
 			errors.Is(err, store.ErrObservationFindReplaceContentConflict),
@@ -788,6 +801,9 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
 			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationProjectMismatch),
+			errors.Is(err, store.ErrObservationProjectImmutable):
+			jsonError(w, http.StatusConflict, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())
 		}
@@ -877,8 +893,12 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	hard := queryBool(r, "hard", false)
-	if err := s.store.DeleteObservation(id, hard); err != nil {
+	if err := s.store.DeleteObservationForProject(id, r.URL.Query().Get("expected_project"), hard); err != nil {
 		switch {
+		case errors.Is(err, store.ErrExpectedProjectRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationProjectMismatch):
+			jsonError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
 		default:
@@ -1051,11 +1071,13 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.store.AddPrompt(body)
+	id, inserted, err := s.store.AddPromptWithResult(body)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPromptContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrPromptInboxDeleted):
+			jsonError(w, http.StatusConflict, err.Error())
 		case writeOwnershipError(w, body.SessionID, err):
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())
@@ -1063,7 +1085,9 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifyWrite()
+	if inserted {
+		s.notifyWrite()
+	}
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 
@@ -1244,6 +1268,31 @@ func clampContextBytes(v int) int {
 	return v
 }
 
+// contextBytesQuery caps positive decimal budgets before converting to int,
+// including values beyond the native integer range.
+func contextBytesQuery(r *http.Request) int {
+	v := r.URL.Query().Get("max_bytes")
+	if v == "" {
+		return 0
+	}
+	if v[0] == '+' {
+		v = v[1:]
+	}
+	if v == "" {
+		return 0
+	}
+	budget := 0
+	for _, digit := range v {
+		if digit < '0' || digit > '9' {
+			return 0
+		}
+		if budget <= contextMaxBytes {
+			budget = budget*10 + int(digit-'0')
+		}
+	}
+	return clampContextBytes(budget)
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -1262,7 +1311,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
 	// pass through untouched so all three states survive.
 	opts := store.ContextOptions{
-		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
+		MaxBytes:     contextBytesQuery(r),
 		Observations: clampContextLimit(queryInt(r, "observations", 0)),
 		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
 		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),

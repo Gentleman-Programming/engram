@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -337,7 +336,8 @@ func TestInstallCodexWindowsPreservesLeadingBOM(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
 	runtimeGOOS = "windows"
-	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	lookPathFn = func(string) (string, error) { return "mock-codex", nil }
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
 	osExecutable = func() (string, error) { return `C:\Engram\engram.exe`, nil }
 	configPath := codexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -370,7 +370,8 @@ func TestInstallCodexWindowsWritesOneCanonicalHookMarker(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
 	runtimeGOOS = "windows"
-	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	lookPathFn = func(string) (string, error) { return "mock-codex", nil }
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
 
 	first := `C:\Program Files\Engram\工具\engram.exe`
 	second := `C:\Program Files\Engram Next\工具\engram.exe`
@@ -483,6 +484,8 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
 	runtimeGOOS = "linux"
+	lookPathFn = func(string) (string, error) { return "mock-codex", nil }
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
 
 	configPath := codexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -548,23 +551,11 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 		if !strings.Contains(text, `args = ["mcp", "--tools=agent"]`) {
 			t.Fatalf("expected engram args in config, got:\n%s", text)
 		}
-		instructionsPath := codexInstructionsPath()
-		if !strings.Contains(text, fmt.Sprintf("model_instructions_file = %q", instructionsPath)) {
-			t.Fatalf("expected model_instructions_file in config, got:\n%s", text)
+		if strings.Contains(text, "model_instructions_file") {
+			t.Fatalf("did not expect model_instructions_file (it replaces Codex's built-in prompt), got:\n%s", text)
 		}
-		compactPromptPath := codexCompactPromptPath()
-		if !strings.Contains(text, fmt.Sprintf("experimental_compact_prompt_file = %q", compactPromptPath)) {
-			t.Fatalf("expected compact prompt file key in config, got:\n%s", text)
-		}
-		firstSection := strings.Index(text, "[profile]")
-		if firstSection == -1 {
-			t.Fatalf("expected [profile] section in config")
-		}
-		if idx := strings.Index(text, "model_instructions_file"); idx == -1 || idx > firstSection {
-			t.Fatalf("expected model_instructions_file to be top-level before sections, got:\n%s", text)
-		}
-		if idx := strings.Index(text, "experimental_compact_prompt_file"); idx == -1 || idx > firstSection {
-			t.Fatalf("expected compact prompt key to be top-level before sections, got:\n%s", text)
+		if strings.Contains(text, "experimental_compact_prompt_file") {
+			t.Fatalf("did not expect experimental_compact_prompt_file, got:\n%s", text)
 		}
 		return text
 	}
@@ -600,6 +591,76 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 
 // TestInstallCodexPluginCLIPresent verifies that when the codex CLI is in PATH,
 // installCodex() runs marketplace add + plugin add with the correct arguments.
+func assertCodexPluginSetupError(t *testing.T, result *Result, err error, reason string) {
+	t.Helper()
+	if result != nil || err == nil {
+		t.Fatalf("expected nil result and partial setup error, got %#v, %v", result, err)
+	}
+	for _, want := range []string{reason, "MCP config and instruction files were written", "plugin was not installed", "codex plugin marketplace add " + codexMarketplace + " --ref main", "codex plugin add engram@engram"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+	for _, path := range []string{codexConfigPath(), codexInstructionsPath(), codexCompactPromptPath()} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("partial setup file %s missing: %v", path, statErr)
+		}
+	}
+}
+
+func TestInstallCodexPluginFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		failCall int
+		want     string
+	}{
+		{"marketplace failure", 1, "marketplace add failed"},
+		{"plugin failure", 2, "plugin add failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			useIsolatedProfile(t)
+			lookPathFn = func(string) (string, error) { return "mock-codex", nil }
+			calls := 0
+			failure := errors.New("mock command failure")
+			runCommand = func(name string, args ...string) ([]byte, error) {
+				calls++
+				if calls == tt.failCall {
+					return []byte("mock diagnostic"), failure
+				}
+				return []byte("ok"), nil
+			}
+			result, err := Install("codex")
+			assertCodexPluginSetupError(t, result, err, tt.want)
+			if err != nil && (!errors.Is(err, failure) || !strings.Contains(err.Error(), "mock diagnostic")) {
+				t.Errorf("command cause/output missing: %v", err)
+			}
+			if calls != tt.failCall {
+				t.Errorf("got %d commands, want %d", calls, tt.failCall)
+			}
+		})
+	}
+}
+
+func TestRemoveTopLevelTOMLKeyWhitespace(t *testing.T) {
+	for _, key := range []string{"model_instructions_file", "experimental_compact_prompt_file"} {
+		for _, whitespace := range []string{"", " ", "\t", " \t "} {
+			t.Run(key+strconv.Quote(whitespace), func(t *testing.T) {
+				preserved := key + "_extra = \"keep\"\nother = \"keep\"\n[profile]\n" + key + "\t= \"table value\"\n"
+				input := "\ufeff" + key + whitespace + "= \"legacy\"\n" + preserved
+				want := "\ufeff" + preserved
+				got := removeTopLevelTOMLKey(input, key)
+				if got != want {
+					t.Fatalf("got %q, want %q", got, want)
+				}
+				if again := removeTopLevelTOMLKey(got, key); again != got {
+					t.Fatalf("not idempotent: %q", again)
+				}
+			})
+		}
+	}
+}
+
 func TestInstallCodexPluginCLIPresent(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
@@ -656,8 +717,8 @@ func TestInstallCodexPluginCLIPresent(t *testing.T) {
 	}
 }
 
-// TestInstallCodexPluginCLIAbsent verifies that when the codex CLI is not in
-// PATH, installCodex() does not fail — MCP config is still written and Files==3.
+// TestInstallCodexPluginCLIAbsent verifies partial setup fails honestly when
+// the Codex CLI is unavailable, while preserving the files already written.
 func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
@@ -671,15 +732,7 @@ func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 	}
 
 	result, err := Install("codex")
-	if err != nil {
-		t.Fatalf("Install(codex) should succeed even without codex CLI, got: %v", err)
-	}
-	if result.Agent != "codex" {
-		t.Fatalf("unexpected agent: %q", result.Agent)
-	}
-	if result.Files != 3 {
-		t.Fatalf("expected 3 files written, got %d", result.Files)
-	}
+	assertCodexPluginSetupError(t, result, err, "codex CLI not found")
 
 	// Verify the TOML config was still written.
 	configPath := codexConfigPath()
@@ -758,10 +811,12 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install(pi) failed: %v", err)
 	}
-	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 2 {
+	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 1 {
 		t.Fatalf("unexpected install result: %#v", result)
 	}
-	wantCommands := []string{"pi install npm:gentle-engram@0.1.16", "pi install npm:pi-mcp-adapter"}
+	// Pi >= 0.99.0 ships built-in MCP and an installed pi-mcp-adapter replaces it,
+	// so setup must never install the adapter.
+	wantCommands := []string{"pi install npm:gentle-engram@0.1.16"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -776,33 +831,12 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	for _, pkg := range []string{"npm:gentle-engram@0.1.16", "npm:pi-mcp-adapter"} {
-		if !slices.Contains(settings.Packages, pkg) {
-			t.Fatalf("expected settings packages to include %q, got %#v", pkg, settings.Packages)
-		}
+	if want := []string{"npm:gentle-engram@0.1.16"}; !reflect.DeepEqual(settings.Packages, want) {
+		t.Fatalf("expected fresh settings packages %#v without pi-mcp-adapter, got %#v", want, settings.Packages)
 	}
 
-	mcpRaw, err := os.ReadFile(filepath.Join(agentDir, "mcp.json"))
-	if err != nil {
-		t.Fatalf("read mcp: %v", err)
-	}
-	var mcpConfig struct {
-		MCPServers map[string]struct {
-			Command     string   `json:"command"`
-			Args        []string `json:"args"`
-			Lifecycle   string   `json:"lifecycle"`
-			DirectTools bool     `json:"directTools"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(mcpRaw, &mcpConfig); err != nil {
-		t.Fatalf("parse mcp: %v", err)
-	}
-	server, ok := mcpConfig.MCPServers["engram"]
-	if !ok {
-		t.Fatalf("expected mcpServers.engram in %#v", mcpConfig.MCPServers)
-	}
-	if server.Command != exe || !reflect.DeepEqual(server.Args, []string{"mcp", "--tools=agent"}) || server.Lifecycle != "lazy" || server.DirectTools {
-		t.Fatalf("unexpected engram MCP server: %#v", server)
+	if _, err := os.Stat(filepath.Join(agentDir, "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("fresh setup created mcp.json: %v", err)
 	}
 }
 
@@ -873,232 +907,54 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	}
 }
 
-// TestEnsurePiMCPConfigRepairsDeadEngramCommand covers the narrow
-// revalidation of a pre-existing mcpServers.engram entry (issue #1423): only a
-// dead absolute command is repaired; live absolute commands and missing or
-// relative commands are preserved untouched, and a missing entry keeps the
-// current creation behavior.
-func TestEnsurePiMCPConfigRepairsDeadEngramCommand(t *testing.T) {
-	writeExe := func(t *testing.T, dir string) string {
-		t.Helper()
-		exe := filepath.Join(dir, "engram-bin")
-		if err := os.WriteFile(exe, []byte("engram"), 0755); err != nil {
-			t.Fatalf("write executable: %v", err)
-		}
-		return exe
+// Existing Pi MCP entries remain byte-identical, and absent entries are not created.
+func TestWarnPiMCPConfigPreservesExistingAndDoesNotCreate(t *testing.T) {
+	cases := []struct {
+		name, original string
+	}{
+		{"absent", ""},
+		{"unrelated server", `{"mcpServers":{"other":{"command":"other"}}}`},
+		{"existing Engram and unrelated server", `{"mcpServers":{"engram":{"command":"/missing/engram"},"other":{"command":"other"}}}`},
 	}
-	assertCanonicalCommand := func(t *testing.T, got, exe string) {
-		t.Helper()
-		want, err := filepath.EvalSymlinks(exe)
-		if err != nil {
-			t.Fatalf("canonicalize expected executable: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mcp.json")
+			if tc.original != "" {
+				if err := os.WriteFile(path, []byte(tc.original), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := warnPiMCPConfig(path); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if tc.original == "" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("created mcp.json: %v", err)
+				}
+				return
+			}
+			if err != nil || string(data) != tc.original {
+				t.Fatalf("changed config: %s, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestWarnPiMCPConfigRejectsMalformedConfig(t *testing.T) {
+	for _, contents := range []string{`{`, `{"mcpServers":[]}`} {
+		path := filepath.Join(t.TempDir(), "mcp.json")
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatal(err)
 		}
-		if got != want {
-			t.Fatalf("expected canonical command %q, got %q", want, got)
+		if err := warnPiMCPConfig(path); err == nil {
+			t.Fatalf("expected malformed config error for %q", contents)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != contents {
+			t.Fatalf("malformed config modified: %s, %v", data, err)
 		}
 	}
-
-	t.Run("dead absolute command is repaired", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		deadCommand := filepath.Join(agentDir, "installs", "engram", "2.1.0", "engram")
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp","--tools=agent"],"lifecycle":"lazy","directTools":false},"other":{"command":"other"}}}`, deadCommand)
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if !changed {
-			t.Fatalf("expected ensurePiMCPConfig to repair the dead engram command")
-		}
-
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after repair: %v", err)
-		}
-		var cfg struct {
-			MCPServers map[string]struct {
-				Command     string   `json:"command"`
-				Args        []string `json:"args"`
-				Lifecycle   string   `json:"lifecycle"`
-				DirectTools bool     `json:"directTools"`
-			} `json:"mcpServers"`
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			t.Fatalf("parse mcp after repair: %v", err)
-		}
-		entry, ok := cfg.MCPServers["engram"]
-		if !ok {
-			t.Fatalf("expected engram entry after repair, got %s", data)
-		}
-		assertCanonicalCommand(t, entry.Command, exe)
-		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
-			t.Fatalf("expected args/lifecycle/directTools to be preserved, got %#v", entry)
-		}
-		other, ok := cfg.MCPServers["other"]
-		if !ok || other.Command != "other" {
-			t.Fatalf("expected unrelated server to be preserved, got %#v", cfg.MCPServers["other"])
-		}
-	})
-
-	t.Run("non-not-exist stat error leaves the entry untouched", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		recordedCommand := filepath.Join(agentDir, "installs", "engram", "2.1.0", "engram")
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp"],"lifecycle":"lazy","directTools":false}}}`, recordedCommand)
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-		statFn = func(name string) (os.FileInfo, error) {
-			return nil, &os.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave the engram command untouched on a non-not-exist stat error")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("live absolute command is preserved byte-for-byte", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-		original := fmt.Sprintf(`{"mcpServers":{"engram":{"command":%q,"args":["mcp"],"lifecycle":"eager"},"other":{"command":"other"}}}`, exe)
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave a live engram command untouched")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("relative command is never modified", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		original := `{"mcpServers":{"engram":{"command":"engram","args":["mcp"]}}}`
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave a relative command untouched")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("missing command field is never modified", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		original := `{"mcpServers":{"engram":{"args":["mcp"]}}}`
-		if err := os.WriteFile(mcpPath, []byte(original), 0644); err != nil {
-			t.Fatalf("write mcp: %v", err)
-		}
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if changed {
-			t.Fatalf("expected ensurePiMCPConfig to leave an entry without command untouched")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after no-op: %v", err)
-		}
-		if string(data) != original {
-			t.Fatalf("expected config to stay byte-identical, got %s", data)
-		}
-	})
-
-	t.Run("missing entry keeps creation behavior", func(t *testing.T) {
-		resetSetupSeams(t)
-		agentDir := t.TempDir()
-		mcpPath := filepath.Join(agentDir, "mcp.json")
-
-		exe := writeExe(t, agentDir)
-		osExecutable = func() (string, error) { return exe, nil }
-
-		changed, err := ensurePiMCPConfig(mcpPath)
-		if err != nil {
-			t.Fatalf("ensurePiMCPConfig failed: %v", err)
-		}
-		if !changed {
-			t.Fatalf("expected ensurePiMCPConfig to create the engram entry")
-		}
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Fatalf("read mcp after creation: %v", err)
-		}
-		var cfg struct {
-			MCPServers map[string]struct {
-				Command     string   `json:"command"`
-				Args        []string `json:"args"`
-				Lifecycle   string   `json:"lifecycle"`
-				DirectTools bool     `json:"directTools"`
-			} `json:"mcpServers"`
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			t.Fatalf("parse mcp after creation: %v", err)
-		}
-		entry, ok := cfg.MCPServers["engram"]
-		if !ok {
-			t.Fatalf("expected engram entry after creation, got %s", data)
-		}
-		assertCanonicalCommand(t, entry.Command, exe)
-		if !reflect.DeepEqual(entry.Args, []string{"mcp", "--tools=agent"}) || entry.Lifecycle != "lazy" || entry.DirectTools {
-			t.Fatalf("expected default args/lifecycle/directTools, got %#v", entry)
-		}
-	})
 }
 
 func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) {
@@ -1137,6 +993,33 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 	}
 	if changed {
 		t.Fatal("expected repeated package migration to leave settings unchanged")
+	}
+}
+
+func TestEnsurePiPackageSettingsDoesNotAddMCPAdapter(t *testing.T) {
+	resetSetupSeams(t)
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.16"]}`), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	original, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	changed, err := ensurePiPackageSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("ensure Pi packages: %v", err)
+	}
+	if changed {
+		t.Fatal("expected settings without pi-mcp-adapter to stay unchanged")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings after ensure: %v", err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("expected settings to stay byte-identical, got %s", after)
 	}
 }
 
@@ -1326,9 +1209,9 @@ func TestInstallPiWritesNpmCommandWhenMiseDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install(pi) failed: %v", err)
 	}
-	// settings.json changed (packages + npmCommand) + mcp.json
-	if result.Files != 2 {
-		t.Fatalf("expected 2 files written, got %d", result.Files)
+	// Only settings.json changed (packages + npmCommand).
+	if result.Files != 1 {
+		t.Fatalf("expected 1 file written, got %d", result.Files)
 	}
 
 	raw, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
@@ -2908,7 +2791,7 @@ func TestInstallCodexErrorPropagation(t *testing.T) {
 		resetSetupSeams(t)
 		writeCodexMemoryInstructionFilesFn = func() (string, error) { return "/tmp/instructions", nil }
 		injectCodexMCPFn = func(string, string) error { return nil }
-		injectCodexMemoryConfigFn = func(string, string, string) error { return errors.New("memory config failed") }
+		injectCodexMemoryConfigFn = func(string) error { return errors.New("memory config failed") }
 
 		_, err := installCodex()
 		if err == nil || !strings.Contains(err.Error(), "memory config failed") {
@@ -3134,16 +3017,16 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			t.Fatalf("make config path directory: %v", err)
 		}
 
-		err := injectCodexMemoryConfig(configPath, "/tmp/instructions.md", "/tmp/compact.md")
+		err := injectCodexMemoryConfig(configPath)
 		if err == nil || !strings.Contains(err.Error(), "read config") {
 			t.Fatalf("expected read config error, got %v", err)
 		}
 	})
 
-	t.Run("injectCodexMemoryConfig creates missing config", func(t *testing.T) {
+	t.Run("injectCodexMemoryConfig creates missing config without override keys", func(t *testing.T) {
 		configPath := filepath.Join(t.TempDir(), "config.toml")
 
-		err := injectCodexMemoryConfig(configPath, "/tmp/instructions.md", "/tmp/compact.md")
+		err := injectCodexMemoryConfig(configPath)
 		if err != nil {
 			t.Fatalf("injectCodexMemoryConfig failed: %v", err)
 		}
@@ -3153,11 +3036,41 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			t.Fatalf("read config: %v", err)
 		}
 		text := string(raw)
-		if !strings.Contains(text, "model_instructions_file = \"/tmp/instructions.md\"") {
-			t.Fatalf("expected model_instructions_file in config, got:\n%s", text)
+		if strings.Contains(text, "model_instructions_file") {
+			t.Fatalf("did not expect model_instructions_file in config, got:\n%s", text)
 		}
-		if !strings.Contains(text, "experimental_compact_prompt_file = \"/tmp/compact.md\"") {
-			t.Fatalf("expected compact prompt file in config, got:\n%s", text)
+		if strings.Contains(text, "experimental_compact_prompt_file") {
+			t.Fatalf("did not expect experimental_compact_prompt_file in config, got:\n%s", text)
+		}
+	})
+
+	t.Run("injectCodexMemoryConfig strips legacy override keys", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.toml")
+		legacy := "model = \"gpt-5\"\n" +
+			"model_instructions_file = \"/home/u/.codex/engram-instructions.md\"\n" +
+			"experimental_compact_prompt_file = \"/home/u/.codex/engram-compact-prompt.md\"\n" +
+			"\n[projects.\"/tmp/x\"]\ntrust_level = \"trusted\"\n"
+		if err := os.WriteFile(configPath, []byte(legacy), 0644); err != nil {
+			t.Fatalf("seed config: %v", err)
+		}
+
+		if err := injectCodexMemoryConfig(configPath); err != nil {
+			t.Fatalf("injectCodexMemoryConfig failed: %v", err)
+		}
+
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config: %v", err)
+		}
+		text := string(raw)
+		if strings.Contains(text, "model_instructions_file") || strings.Contains(text, "experimental_compact_prompt_file") {
+			t.Fatalf("expected legacy override keys removed, got:\n%s", text)
+		}
+		if !strings.Contains(text, "model = \"gpt-5\"") {
+			t.Fatalf("expected unrelated top-level key preserved, got:\n%s", text)
+		}
+		if !strings.Contains(text, "trust_level = \"trusted\"") {
+			t.Fatalf("expected section content preserved, got:\n%s", text)
 		}
 	})
 
@@ -3168,7 +3081,7 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			return errors.New("write config boom")
 		}
 
-		err := injectCodexMemoryConfig(configPath, "/tmp/instructions.md", "/tmp/compact.md")
+		err := injectCodexMemoryConfig(configPath)
 		if err == nil || !strings.Contains(err.Error(), "write config") {
 			t.Fatalf("expected write config error, got %v", err)
 		}
@@ -3357,6 +3270,7 @@ func TestAdditionalHelperBranches(t *testing.T) {
 		if err := os.WriteFile(blocked, []byte("x"), 0644); err != nil {
 			t.Fatalf("write home file: %v", err)
 		}
+		t.Setenv("CODEX_HOME", "")
 		userHomeDir = func() (string, error) { return blocked, nil }
 		runtimeGOOS = "linux"
 

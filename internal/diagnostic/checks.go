@@ -19,6 +19,7 @@ const (
 	CheckSyncTargetClosedSpace            = "sync_target_closed_space"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
 	CheckOrphanedObservationSession       = "orphaned_observation_session"
+	CheckOrphanedPendingRelations         = "orphaned_pending_relations"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
@@ -34,12 +35,20 @@ const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_ident
 // targets.
 const ReasonForeignSyncTarget = "foreign_sync_target"
 
+// orphanedPendingRelationSampleLimit bounds how many candidate relations the
+// store's bounded diagnostic read returns to the aggregate doctor finding, so
+// a large legacy backlog cannot flood diagnostic output. The full candidate
+// set is re-derived by the repair plan and apply path from the same store
+// evidence.
+const orphanedPendingRelationSampleLimit = 10
+
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type SyncTargetClosedSpaceCheck struct{}
 type InvalidSessionIdentityCheck struct{}
 type OrphanedObservationSessionCheck struct{}
+type OrphanedPendingRelationsCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 type AmbiguousActiveRuntimeSessionsCheck struct{}
@@ -54,6 +63,7 @@ func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationR
 func (SyncTargetClosedSpaceCheck) Code() string      { return CheckSyncTargetClosedSpace }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
 func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
+func (OrphanedPendingRelationsCheck) Code() string   { return CheckOrphanedPendingRelations }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
@@ -724,6 +734,45 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"orphaned_session_references_evaluated": len(evidence)}, findings), nil
+}
+
+// Run reports legacy pending relations whose source AND target observations
+// are absent from the active observation set. Such rows can never show a title
+// in `engram conflicts show` and no verdict can ever be recorded against them,
+// so they only inflate the pending backlog. The listing is deliberately
+// unscoped even when scope.Project is set: a relation with both endpoints
+// absent belongs to no project, so a project-scoped query could never return
+// the rows it exists to surface (the same reasoning as
+// UnownedSessionProjectCheck).
+func (c OrphanedPendingRelationsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListOrphanedPendingRelationEvidenceBounded(orphanedPendingRelationSampleLimit)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, 1)
+	if evidence.CandidateCount > 0 {
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: CheckOrphanedPendingRelations,
+			Message:    fmt.Sprintf("%d pending relation(s) reference missing observations on both endpoints and can never be judged.", evidence.CandidateCount),
+			Why:        "A pending relation without an active source or target observation shows no titles and no verdict can ever be recorded against it, so it only inflates the pending backlog; reclassifying it into the audited `orphaned` disposition preserves the row as history without fabricating a verdict.",
+			Evidence: mustJSON(map[string]any{
+				"candidate_count":      evidence.CandidateCount,
+				"one_endpoint_missing": evidence.OneEndpointMissing,
+				"live_pending":         evidence.LivePending,
+				"sample":               evidence.Sample,
+			}),
+			SafeNextStep:         "Review the sample, then run `engram doctor repair --check orphaned_pending_relations --dry-run`; apply reclassifies only these rows into the audited `orphaned` disposition after creating a SQLite backup.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{
+		"candidate_count":      evidence.CandidateCount,
+		"one_endpoint_missing": evidence.OneEndpointMissing,
+		"live_pending":         evidence.LivePending,
+	}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

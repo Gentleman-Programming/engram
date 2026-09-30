@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -103,7 +104,7 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckAmbiguousActiveRuntimeSessions, CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
+	want := []string{CheckAmbiguousActiveRuntimeSessions, CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckOrphanedPendingRelations, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -373,6 +374,145 @@ func TestOrphanedObservationSessionCheckPropagatesStoreFailure(t *testing.T) {
 	}
 	if report.Status == StatusOK || len(report.Checks) != 0 {
 		t.Fatalf("report=%+v, want no clean report", report)
+	}
+}
+
+func TestOrphanedPendingRelationsCheckIsOKWhenNoCandidates(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("ses-healthy", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "ses-healthy", Type: "decision", Title: "live", Content: "content", Project: "engram", Scope: "project"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 0 {
+		t.Fatalf("report=%+v, want healthy check without findings", report)
+	}
+}
+
+func TestOrphanedPendingRelationsCheckWarnsWithCountsAndBoundedSample(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("ses-1455", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	obsSyncID := func(title string) string {
+		t.Helper()
+		id, err := s.AddObservation(store.AddObservationParams{SessionID: "ses-1455", Type: "decision", Title: title, Content: "content for " + title, Project: "engram", Scope: "project"})
+		if err != nil {
+			t.Fatalf("AddObservation %q: %v", title, err)
+		}
+		var syncID string
+		if err := s.DB().QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, id).Scan(&syncID); err != nil {
+			t.Fatalf("read observation sync_id: %v", err)
+		}
+		return syncID
+	}
+	liveSrc := obsSyncID("live source")
+	liveTgt := obsSyncID("live target")
+	oneEndpointTgt := obsSyncID("one endpoint target")
+	seedDiagnosticRelation(t, s, "rel-live", liveSrc, liveTgt, "pending")
+	seedDiagnosticRelation(t, s, "rel-one-missing", "missing-obs", oneEndpointTgt, "pending")
+	seedDiagnosticRelation(t, s, "rel-orphan", "missing-src", "missing-tgt", "pending")
+	seedDiagnosticRelation(t, s, "rel-legacy", "missing-src2", "missing-tgt2", "orphaned")
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 {
+		t.Fatalf("report=%+v, want one warning check", report)
+	}
+	check := report.Checks[0]
+	if check.CheckID != CheckOrphanedPendingRelations || check.ReasonCode != CheckOrphanedPendingRelations || check.Severity != SeverityWarning {
+		t.Fatalf("check=%+v", check)
+	}
+	if len(check.Findings) != 1 {
+		t.Fatalf("findings=%d, want one aggregate finding with counts", len(check.Findings))
+	}
+	finding := check.Findings[0]
+	if finding.CheckID != CheckOrphanedPendingRelations || finding.ReasonCode != CheckOrphanedPendingRelations || finding.Severity != SeverityWarning || !finding.RequiresConfirmation {
+		t.Fatalf("finding=%+v", finding)
+	}
+	var evidence struct {
+		CandidateCount     int `json:"candidate_count"`
+		OneEndpointMissing int `json:"one_endpoint_missing"`
+		LivePending        int `json:"live_pending"`
+		Sample             []struct {
+			SyncID string `json:"sync_id"`
+		} `json:"sample"`
+	}
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence.CandidateCount != 1 || evidence.OneEndpointMissing != 1 || evidence.LivePending != 1 {
+		t.Fatalf("evidence=%+v, want one candidate plus untouched one-missing and live counts", evidence)
+	}
+	if len(evidence.Sample) != 1 || evidence.Sample[0].SyncID != "rel-orphan" {
+		t.Fatalf("sample=%+v, want the both-endpoints-missing relation", evidence.Sample)
+	}
+	for _, want := range []string{"engram doctor repair --check orphaned_pending_relations", "--dry-run", "orphaned"} {
+		if !strings.Contains(finding.SafeNextStep, want) {
+			t.Fatalf("SafeNextStep=%q, want %q", finding.SafeNextStep, want)
+		}
+	}
+}
+
+// TestOrphanedPendingRelationsCheckBoundedSampleUnderLargeBacklog proves the
+// doctor check keeps its output shape on a backlog larger than the sample
+// limit: the finding and metadata carry the TOTAL candidate count while the
+// embedded evidence sample stays bounded and id-ordered.
+func TestOrphanedPendingRelationsCheckBoundedSampleUnderLargeBacklog(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	for i := 0; i < 12; i++ {
+		seedDiagnosticRelation(t, s, fmt.Sprintf("rel-orphan-%02d", i), fmt.Sprintf("missing-src-%02d", i), fmt.Sprintf("missing-tgt-%02d", i), "pending")
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v, want one warning check with one aggregate finding", report)
+	}
+	finding := report.Checks[0].Findings[0]
+	var evidence struct {
+		CandidateCount int `json:"candidate_count"`
+		Sample         []struct {
+			SyncID string `json:"sync_id"`
+		} `json:"sample"`
+	}
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence.CandidateCount != 12 {
+		t.Fatalf("candidate_count=%d, want the full backlog size 12", evidence.CandidateCount)
+	}
+	if len(evidence.Sample) != 10 {
+		t.Fatalf("sample size=%d, want the bounded 10", len(evidence.Sample))
+	}
+	if evidence.Sample[0].SyncID != "rel-orphan-00" || evidence.Sample[9].SyncID != "rel-orphan-09" {
+		t.Fatalf("sample=%+v, want the id-ordered head of the candidate list", evidence.Sample)
+	}
+	if !strings.Contains(finding.Message, "12 pending relation(s)") {
+		t.Fatalf("Message=%q, want the full backlog count", finding.Message)
+	}
+}
+
+// seedDiagnosticRelation inserts a memory_relations row with an arbitrary
+// judgment status so tests can model legacy rows the public API never writes.
+func seedDiagnosticRelation(t *testing.T, s *store.Store, syncID, sourceID, targetID, status string) {
+	t.Helper()
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, datetime('now'), datetime('now'))
+	`, syncID, sourceID, targetID, status); err != nil {
+		t.Fatalf("seed relation %q: %v", syncID, err)
 	}
 }
 

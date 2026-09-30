@@ -246,6 +246,16 @@ engram sync --cloud --project my-project
 
 ---
 
+## Confirm one prompt source (human-token only)
+
+For an existing local prompt, use its **exact** sync ID and explicitly assert the owner project:
+
+```bash
+engram cloud attest-prompt-source --sync-id <exact-sync-id> --owner-project <owner-project>
+```
+
+Review the observed session, source inbox, prompt project, sync ID, and live/deleted kind alongside the separately labeled human-asserted owner. Type `yes` to send that tuple; `no`, invalid input, or a missing/ambiguous local preview sends nothing. A configured human bearer token is required; the remote service enforces both project grants. Only a successful remote attestation with a positive ID is recorded locally against the effective validated cloud endpoint. This command does not import, pull, or delete data.
+
 ## Common Failure Reasons
 
 | Reason code | Meaning |

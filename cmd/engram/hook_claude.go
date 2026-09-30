@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // claudeEngramWriteAndSessionTools is the complete set of Engram MCP tools
@@ -55,15 +61,97 @@ func cmdHook(args []string) {
 	if args[0] == "codex-pre-tool-use" {
 		response = claudePreToolUseDeny("cannot read authoritative Codex hook input")
 		if err == nil {
-			response = transformCodexPreToolUse(input)
+			response = guardCodexPreToolUse(input)
 		}
 	} else if err == nil {
-		response = transformClaudePreToolUse(input)
+		response = guardClaudePreToolUse(input)
 	}
 	if err := claudeHookOutput(response); err != nil {
 		exitFunc(1)
 		return
 	}
+}
+
+// guardClaudePreToolUse confirms the host session before binding a mutating tool.
+// Read-only and non-Engram calls never contact the server.
+func guardClaudePreToolUse(input []byte) []byte {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(input, &payload) != nil || payload == nil {
+		return claudePreToolUseDeny("malformed authoritative Claude hook input")
+	}
+	tool, ok := claudeHookRequiredString(payload, "tool_name")
+	if !ok {
+		return claudePreToolUseDeny("authoritative Claude tool_name is required")
+	}
+	if !isClaudeEngramWriteOrSessionTool(tool) {
+		return transformClaudePreToolUse(input)
+	}
+	id, idOK := claudeHookRequiredString(payload, "session_id")
+	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
+	if !idOK || !cwdOK || !confirmClaudeSession(id, cwd) {
+		return claudePreToolUseDeny("Claude host session registration could not be confirmed")
+	}
+	return transformClaudePreToolUse(input)
+}
+
+func confirmClaudeSession(id, cwd string) bool {
+	return confirmHookSession(id, cwd, true)
+}
+
+func confirmHookSession(id, cwd string, projectOwned bool) bool {
+	base := strings.TrimSpace(os.Getenv("ENGRAM_URL"))
+	client := &http.Client{}
+	if base == "" {
+		if socket := strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")); socket != "" {
+			base = "http://localhost"
+			client.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+			}}
+		} else {
+			port := strings.TrimSpace(os.Getenv("ENGRAM_PORT"))
+			n, err := strconv.Atoi(port)
+			if port == "" {
+				n = 7437
+			} else if err != nil || n < 1 || n > 65535 {
+				return false
+			}
+			base = fmt.Sprintf("http://127.0.0.1:%d", n)
+		}
+	}
+	base = strings.TrimRight(base, "/")
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	var authority json.RawMessage
+	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
+		return false
+	}
+	project, ok := codexProjectAuthority(authority)
+	if !ok {
+		return false
+	}
+	registration := map[string]string{"id": id, "project": project, "directory": cwd}
+	if projectOwned {
+		registration["ownership_mode"] = "project_owned"
+	}
+	body, _ := json.Marshal(registration)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/sessions", strings.NewReader(string(body)))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		return false
+	}
+	var result struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	return json.NewDecoder(resp.Body).Decode(&result) == nil && result.ID == id && result.Status == "created"
 }
 
 // transformClaudePreToolUse consumes Claude Code's authoritative PreToolUse
@@ -109,6 +197,27 @@ func transformClaudePreToolUse(input []byte) []byte {
 	}
 
 	return claudePreToolUseResponse(updatedInput)
+}
+
+// guardCodexPreToolUse confirms only mutating Engram calls against the host session.
+func guardCodexPreToolUse(input []byte) []byte {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(input, &payload) != nil || payload == nil {
+		return claudePreToolUseDeny("malformed authoritative Codex hook input")
+	}
+	tool, ok := claudeHookRequiredString(payload, "tool_name")
+	if !ok {
+		return claudePreToolUseDeny("authoritative Codex tool_name is required")
+	}
+	if !isClaudeEngramWriteOrSessionTool(tool) {
+		return transformCodexPreToolUse(input)
+	}
+	id, idOK := claudeHookRequiredString(payload, "session_id")
+	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
+	if !idOK || !cwdOK || !confirmHookSession(id, cwd, false) {
+		return claudePreToolUseDeny("Codex host session registration could not be confirmed")
+	}
+	return transformCodexPreToolUse(input)
 }
 
 // Codex requires an explicit allow alongside updatedInput for MCP argument rewrites.

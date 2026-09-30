@@ -1676,37 +1676,130 @@ func (sy *Syncer) chunkTrackingTargetKey(project string) string {
 	return cloudTargetKey(projectName)
 }
 
+// orderMutationsForApply groups one pulled chunk's mutations into the phases
+// the store's foreign keys require: session upserts first (observations and
+// relations reference them), then other upserts, then relation upserts, then
+// non-session deletes, and finally session deletes.
+//
+// A session delete whose entity is upserted again later in the SAME chunk
+// (issue #1494: one chunk carrying create, delete, recreate, attach) cannot
+// wait for the final phase: by then the recreated session owns observations
+// again and the delete fails the foreign key, rolling the chunk back on every
+// import pass. Such a superseded delete instead rides at its original
+// relative position among its entity's upserts, so the chunk replays the
+// source's history in order and converges to the source's final state.
+// Deletes whose entity no later upsert recreates keep the final phase:
+// nothing in the chunk re-owns what they remove.
 func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation {
 	if len(mutations) <= 1 {
 		return mutations
 	}
-	sessionUpserts := make([]store.SyncMutation, 0, len(mutations))
-	otherUpserts := make([]store.SyncMutation, 0, len(mutations))
-	relationUpserts := make([]store.SyncMutation, 0, len(mutations))
-	otherDeletes := make([]store.SyncMutation, 0, len(mutations))
-	sessionDeletes := make([]store.SyncMutation, 0, len(mutations))
+	type indexedMutation struct {
+		mutation store.SyncMutation
+		index    int
+	}
+	sessionUpserts := make([]indexedMutation, 0, len(mutations))
+	otherUpserts := make([]indexedMutation, 0, len(mutations))
+	relationUpserts := make([]indexedMutation, 0, len(mutations))
+	otherDeletes := make([]indexedMutation, 0, len(mutations))
+	sessionDeletes := make([]indexedMutation, 0, len(mutations))
 
-	for _, mutation := range mutations {
+	for index, mutation := range mutations {
+		indexed := indexedMutation{mutation: mutation, index: index}
 		switch {
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert:
-			sessionUpserts = append(sessionUpserts, mutation)
+			sessionUpserts = append(sessionUpserts, indexed)
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpDelete:
-			sessionDeletes = append(sessionDeletes, mutation)
+			sessionDeletes = append(sessionDeletes, indexed)
 		case mutation.Op == store.SyncOpDelete:
-			otherDeletes = append(otherDeletes, mutation)
+			otherDeletes = append(otherDeletes, indexed)
 		case mutation.Entity == store.SyncEntityRelation:
-			relationUpserts = append(relationUpserts, mutation)
+			relationUpserts = append(relationUpserts, indexed)
 		default:
-			otherUpserts = append(otherUpserts, mutation)
+			otherUpserts = append(otherUpserts, indexed)
+		}
+	}
+
+	// relocateAt maps each session delete to the session-upsert slot of the
+	// first upsert of the same entity that FOLLOWS it in the chunk's original
+	// order, or -1 when no later upsert recreates the deleted session. The
+	// sessionUpserts bucket preserves original order, so the first follower
+	// by bucket slot is also the first by arrival.
+	relocateAt := make([]int, len(sessionDeletes))
+	for deletePos, deleted := range sessionDeletes {
+		relocateAt[deletePos] = -1
+		for upsertPos, upsert := range sessionUpserts {
+			if upsert.index > deleted.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(deleted.mutation) {
+				relocateAt[deletePos] = upsertPos
+				break
+			}
 		}
 	}
 
 	ordered := make([]store.SyncMutation, 0, len(mutations))
-	ordered = append(ordered, sessionUpserts...)
-	ordered = append(ordered, otherUpserts...)
-	ordered = append(ordered, relationUpserts...)
-	ordered = append(ordered, otherDeletes...)
-	ordered = append(ordered, sessionDeletes...)
+	// A relocated session delete must not overtake deletes that preceded it
+	// in the chunk's original order: a child that still references the session
+	// (an observation hard delete, a relation delete) has to die first, or the
+	// sessions foreign key rejects the chunk while the child row exists
+	// (PR #1520 review). The drain is a monotonic cursor over the original
+	// order, so every preceding delete rides ahead of the session delete it
+	// protects, and the remaining deletes keep their phase.
+	otherDeleteCursor := 0
+	// A drained delete must not invert against its own entity's history: a
+	// same-identity non-session upsert that preceded the delete in the
+	// chunk's original order rides ahead of it, so the delete still lands on
+	// the upsert's result and the chunk converges to the source's final state
+	// instead of resurrecting the entity in a later phase.
+	otherUpsertEmitted := make([]bool, len(otherUpserts))
+	relationUpsertEmitted := make([]bool, len(relationUpserts))
+	drainPrecedingDeletes := func(limit int) {
+		for otherDeleteCursor < len(otherDeletes) && otherDeletes[otherDeleteCursor].index < limit {
+			drained := otherDeletes[otherDeleteCursor]
+			for upsertSlot, upsert := range otherUpserts {
+				if !otherUpsertEmitted[upsertSlot] && upsert.index < drained.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(drained.mutation) {
+					ordered = append(ordered, upsert.mutation)
+					otherUpsertEmitted[upsertSlot] = true
+				}
+			}
+			for upsertSlot, upsert := range relationUpserts {
+				if !relationUpsertEmitted[upsertSlot] && upsert.index < drained.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(drained.mutation) {
+					ordered = append(ordered, upsert.mutation)
+					relationUpsertEmitted[upsertSlot] = true
+				}
+			}
+			ordered = append(ordered, drained.mutation)
+			otherDeleteCursor++
+		}
+	}
+	for upsertPos, upsert := range sessionUpserts {
+		for deletePos, deleted := range sessionDeletes {
+			if relocateAt[deletePos] == upsertPos {
+				drainPrecedingDeletes(deleted.index)
+				ordered = append(ordered, deleted.mutation)
+			}
+		}
+		ordered = append(ordered, upsert.mutation)
+	}
+	for upsertSlot, mutation := range otherUpserts {
+		if otherUpsertEmitted[upsertSlot] {
+			continue
+		}
+		ordered = append(ordered, mutation.mutation)
+	}
+	for upsertSlot, mutation := range relationUpserts {
+		if relationUpsertEmitted[upsertSlot] {
+			continue
+		}
+		ordered = append(ordered, mutation.mutation)
+	}
+	for ; otherDeleteCursor < len(otherDeletes); otherDeleteCursor++ {
+		ordered = append(ordered, otherDeletes[otherDeleteCursor].mutation)
+	}
+	for deletePos, deleted := range sessionDeletes {
+		if relocateAt[deletePos] == -1 {
+			ordered = append(ordered, deleted.mutation)
+		}
+	}
 	return ordered
 }
 
@@ -2382,6 +2475,11 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 	selectedMutations := make([]store.SyncMutation, 0, len(mutations))
 
 	for _, mutation := range mutations {
+		if mutation.Project == "" && mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
+			if owner, present := sessionProjectByID[mutation.EntityKey]; present && owner == project {
+				return nil, nil, fmt.Errorf("blank-project session mutation seq=%d entity_key=%q requires cloud upgrade diagnosis and repair before export", mutation.Seq, mutation.EntityKey)
+			}
+		}
 		mutationProject := resolveMutationProject(mutation, sessionProjectByID)
 		if mutationProject != project {
 			if mutationProject != "" {
@@ -2403,6 +2501,9 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 			default:
 				continue
 			}
+		}
+		if mutation.Project == "" && mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
+			return nil, nil, fmt.Errorf("blank-project session mutation seq=%d entity_key=%q has no authoritative local session in project %q; run cloud upgrade doctor", mutation.Seq, mutation.EntityKey, project)
 		}
 		seqs = append(seqs, mutation.Seq)
 		selectedMutations = append(selectedMutations, mutation)
