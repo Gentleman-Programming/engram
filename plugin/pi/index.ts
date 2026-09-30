@@ -211,6 +211,11 @@ interface ContextResponse {
 }
 
 interface SessionContext {
+  hasUI?: boolean;
+  ui?: {
+    notify?: (message: string, severity: "warning") => void;
+    setStatus?: (key: string, text: string | undefined) => void;
+  };
   cwd: string;
   sessionManager: {
     getSessionId(): string | undefined;
@@ -218,10 +223,7 @@ interface SessionContext {
   };
 }
 
-type MemoryToolContext = SessionContext & {
-  hasUI?: boolean;
-  ui?: { setStatus?: (key: string, text: string | undefined) => void };
-};
+type MemoryToolContext = SessionContext;
 
 interface AgentStartEvent {
   systemPrompt: string;
@@ -393,26 +395,30 @@ function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher
   };
 }
 
-// warnEngramFailure reports a background capture failure on stderr. These calls
-// are best-effort by design, but discarding them without a trace means a user
-// whose memories stopped being saved — an unowned session rejecting writes, for
-// example — has no signal at all that anything is wrong.
-function warnEngramFailure(path: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+// Diagnostics belong to the capture's context, never the latest active session.
+// Pi owns terminal rendering; RPC also supports notify through its UI protocol.
+function warnEngramFailure(path: string, error: unknown, ctx?: SessionContext): void {
   try {
-    process.stderr.write(`[engram] background capture to ${redactUrlPath(path)} failed: ${message}\n`);
+    const message = redactPrivateTags(error instanceof Error ? error.message : String(error));
+    const warning = `[engram] background capture to ${redactUrlPath(path)} failed: ${message}`;
+    if (ctx?.hasUI) {
+      // A disposed or incomplete UI must not fall back to raw terminal output.
+      ctx.ui?.notify?.(warning, "warning");
+      return;
+    }
+    process.stderr.write(`${warning}\n`);
   } catch {
     // Diagnostics must never break the caller.
   }
 }
 
-async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}, ctx?: SessionContext): Promise<TResponse | null> {
   try {
     const result = await engramFetchResult<TResponse>(path, opts);
-    if (result.transportFailure) warnEngramFailure(path, new Error(unreachableMessage(result.transportFailure)));
+    if (result.transportFailure) warnEngramFailure(path, new Error(unreachableMessage(result.transportFailure)), ctx);
     return result.data;
   } catch (error) {
-    warnEngramFailure(path, error);
+    warnEngramFailure(path, error, ctx);
     return null;
   }
 }
@@ -457,12 +463,12 @@ function projectCurrentUnsupportedError(cwd: string): CurrentProjectResponse {
   };
 }
 
-async function ensureSessionBestEffort(sessionId: string, sessionProject = project, renew = false): Promise<boolean> {
+async function ensureSessionBestEffort(sessionId: string, sessionProject = project, renew = false, ctx?: SessionContext): Promise<boolean> {
   try {
     await ensureSession(sessionId, sessionProject, engramFetch, renew);
     return true;
   } catch (error) {
-    warnSessionProjectConflictOnce(error);
+    warnSessionProjectConflictOnce(error, ctx);
     return false;
   }
 }
@@ -1006,12 +1012,12 @@ function sessionProjectConflict(sessionId: string, sessionProject: string): Sess
     : undefined;
 }
 
-function warnSessionProjectConflictOnce(error: unknown): void {
+function warnSessionProjectConflictOnce(error: unknown, ctx?: SessionContext): void {
   if (!(error instanceof SessionProjectConflictError)) return;
   const key = `${error.sessionId}\u0000${error.ownerProject}\u0000${error.requestedProject}`;
   if (warnedSessionProjectConflicts.has(key)) return;
   warnedSessionProjectConflicts.add(key);
-  warnEngramFailure("/sessions", error);
+  warnEngramFailure("/sessions", error, ctx);
 }
 
 const EFFECTIVE_SESSION_ENTRY = "engram-effective-session";
@@ -1485,7 +1491,7 @@ function queryString(params: Record<string, unknown>): string {
   return encoded ? `?${encoded}` : "";
 }
 
-async function archiveCompactionSummary(sessionId: string, summary: string): Promise<string> {
+async function archiveCompactionSummary(sessionId: string, summary: string, ctx?: SessionContext): Promise<string> {
   try {
     if (soleActiveRuntimeSessionID() !== sessionId) return ArchiveOutcome.Unavailable;
     const result = await engramFetchResult("/observations", {
@@ -1502,16 +1508,16 @@ async function archiveCompactionSummary(sessionId: string, summary: string): Pro
     });
     return result.transportFailure?.outcome === "unknown" ? ArchiveOutcome.Unknown : ArchiveOutcome.Confirmed;
   } catch (error) {
-    warnEngramFailure("/observations", error);
+    warnEngramFailure("/observations", error, ctx);
     return ArchiveOutcome.Failed;
   }
 }
 
-async function loadCompactionRecoveryContext(sessionId: string): Promise<string | undefined> {
+async function loadCompactionRecoveryContext(sessionId: string, ctx?: SessionContext): Promise<string | undefined> {
   try {
     return (await engramFetchResult<ContextResponse>(`/context/compaction${queryString({ session_id: sessionId })}`)).data?.context;
   } catch (error) {
-    warnEngramFailure("/context/compaction", error);
+    warnEngramFailure("/context/compaction", error, ctx);
     return undefined;
   }
 }
@@ -1892,6 +1898,7 @@ export default function registerEngram(pi: ExtensionAPI) {
           const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
             `/sessions/${encodeURIComponent(sessionId)}/end`,
             { method: "POST", body: { summary: "" } },
+            ctx,
           ), persistedPending);
           if (persistedPending && ended !== null && ended !== undefined) {
             pi.appendEntry?.(EFFECTIVE_SESSION_ENTRY, {
@@ -1901,7 +1908,7 @@ export default function registerEngram(pi: ExtensionAPI) {
         });
       }
     } catch (error) {
-      warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error);
+      warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error, ctx);
     }
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
@@ -1933,16 +1940,16 @@ export default function registerEngram(pi: ExtensionAPI) {
     try {
       effectiveID = await registerEffectiveSession(observedSessionContexts.get(sessionId) || { cwd: directory, sessionManager: { getSessionId: () => sessionId } }, project, pi.appendEntry?.bind(pi));
     } catch (error) {
-      warnEngramFailure("/sessions", error);
+      warnEngramFailure("/sessions", error, observed);
       return;
     }
     if (soleActiveRuntimeSessionID() !== sessionId || knownSessions.has(`\u0000closing:${effectiveID}`)) return;
 
     let outcome: string;
-    try { open(); outcome = await archiveCompactionSummary(effectiveID, summary); }
+    try { open(); outcome = await archiveCompactionSummary(effectiveID, summary, observed); }
     catch { outcome = ArchiveOutcome.Unavailable; }
     const context = !knownSessions.has(`\u0000closing:${effectiveID}`) && soleActiveRuntimeSessionID() === sessionId
-      ? await loadCompactionRecoveryContext(effectiveID)
+      ? await loadCompactionRecoveryContext(effectiveID, observed)
       : undefined;
     pendingRecoveryNotice = { sessionId, content: buildRecoveryNotice(project, context, outcome) };
   });
@@ -1968,7 +1975,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (sessionId && finalContent && finalContent.length > 10) {
       let effectiveID: string;
       try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
-      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error); else warnEngramFailure("/sessions", error); return { systemPrompt }; }
+      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return { systemPrompt }; }
       if (knownSessions.has(`\u0000closing:${effectiveID}`)) return { systemPrompt };
       const body: PromptBody = {
         session_id: effectiveID,
@@ -1978,7 +1985,7 @@ export default function registerEngram(pi: ExtensionAPI) {
         project,
       };
       if (state && (state.closing || state.epoch !== epoch)) return { systemPrompt };
-      await bestEffortEngramFetch("/prompts", { method: "POST", body });
+      await bestEffortEngramFetch("/prompts", { method: "POST", body }, ctx);
     }
 
     return { systemPrompt };
@@ -1997,7 +2004,7 @@ export default function registerEngram(pi: ExtensionAPI) {
 
     let effectiveID: string;
     try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
-    catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error); else warnEngramFailure("/sessions", error); return; }
+    catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return; }
     if (knownSessions.has(`\u0000closing:${effectiveID}`)) return;
     toolCounts.set(effectiveID, (toolCounts.get(effectiveID) ?? 0) + 1);
 
@@ -2017,6 +2024,6 @@ export default function registerEngram(pi: ExtensionAPI) {
       source: toolName,
     };
     if (state && (state.closing || state.epoch !== epoch)) return;
-    await bestEffortEngramFetch("/observations/passive", { method: "POST", body });
+    await bestEffortEngramFetch("/observations/passive", { method: "POST", body }, ctx);
   });
 }
