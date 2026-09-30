@@ -295,7 +295,11 @@ func (s *Store) validateLegacyDiscardPlanTx(tx *sql.Tx, plan LegacyEmptyPromptDi
 	}
 	current, err := s.planLegacyPromptDiscardTx(tx, plan.Project, plan.SelectedSeq)
 	if err != nil {
-		return discardBlocked("stale_plan", "current eligibility changed: "+err.Error())
+		var blocker *LegacyEmptyPromptDiscardBlocker
+		if errors.As(err, &blocker) {
+			return discardBlocked("stale_plan", "current eligibility changed: "+err.Error())
+		}
+		return err
 	}
 	if !reflect.DeepEqual(current, plan) {
 		return discardBlocked("stale_plan", "snapshot or public plan fields changed")

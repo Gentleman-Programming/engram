@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	sqlite "modernc.org/sqlite"
 )
 
 func discardExec(t *testing.T, s *Store, q string, args ...any) {
@@ -394,6 +396,60 @@ func TestLegacyEmptyPromptDiscardRollback(t *testing.T) {
 				t.Fatalf("rollback not exercised: %+v %v", result, err)
 			}
 			discardUnchanged(t, s, before)
+		})
+	}
+}
+
+func TestLegacyEmptyPromptDiscardRevalidationErrors(t *testing.T) {
+	for _, phase := range []string{"preflight", "post-backup"} {
+		t.Run(phase, func(t *testing.T) {
+			s, seq := discardFixture(t)
+			plan, err := s.PlanLegacyEmptyPromptDiscard("project", seq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := discardSnapshot(t, s)
+			// Preserve all rows while making the enrollment query fail in
+			// replanning, rather than manufacturing a domain ineligibility.
+			breakQuery := func() {
+				discardExec(t, s, `ALTER TABLE sync_enrolled_projects RENAME COLUMN project TO unavailable_project`)
+			}
+			backedUp := false
+			original := s.hooks.exec
+			s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+				result, err := original(db, query, args...)
+				if err == nil && query == `VACUUM INTO ?` {
+					backedUp = true
+					breakQuery()
+				}
+				return result, err
+			}
+			if phase == "preflight" {
+				breakQuery()
+			}
+			path := filepath.Join(t.TempDir(), "revalidation.db")
+			result, err := s.ApplyLegacyEmptyPromptDiscard(plan, path)
+			discardExec(t, s, `ALTER TABLE sync_enrolled_projects RENAME COLUMN unavailable_project TO project`)
+			discardUnchanged(t, s, before)
+			if result.Status != "" || result.DeleteSeq != 0 || len(result.Sequences) != 0 {
+				t.Fatalf("failure reported discard effects: %+v", result)
+			}
+			if phase == "post-backup" {
+				info, statErr := os.Stat(path)
+				if !backedUp || result.BackupPath != path || statErr != nil || info.Size() == 0 {
+					t.Fatalf("transactional revalidation not reached: backedUp=%v result=%+v stat=%v", backedUp, result, statErr)
+				}
+			} else if _, statErr := os.Lstat(path); backedUp || result.BackupPath != "" || !os.IsNotExist(statErr) {
+				t.Fatalf("preflight failure created backup: backedUp=%v result=%+v stat=%v", backedUp, result, statErr)
+			}
+			var blocker *LegacyEmptyPromptDiscardBlocker
+			if errors.As(err, &blocker) {
+				t.Errorf("SQL revalidation error became domain blocker: %v", err)
+			}
+			var sqlErr *sqlite.Error
+			if !errors.As(err, &sqlErr) || sqlErr.Code() != 1 || !strings.Contains(sqlErr.Error(), "no such column: project") {
+				t.Fatalf("SQL revalidation error lost concrete type or cause: %T %v", err, err)
+			}
 		})
 	}
 }
