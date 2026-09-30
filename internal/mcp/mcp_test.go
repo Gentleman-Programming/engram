@@ -8971,6 +8971,7 @@ func TestHandleContext_EnvelopeProjectMatchesQueryProject(t *testing.T) {
 // parent path, a fresh store, and its data dir (for raw-DB fixtures).
 func newAmbiguousMCPSetup(t *testing.T) (string, *store.Store, string) {
 	t.Helper()
+	t.Setenv("ENGRAM_PROJECT", "")
 	parent := t.TempDir()
 	for _, name := range []string{"repo-a", "repo-b"} {
 		child := filepath.Join(parent, name)
