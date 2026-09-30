@@ -98,10 +98,11 @@ the same change. Do not update a baseline merely to accept new debt.
 The default analyzer runs with command-scoped `GOTOOLCHAIN=go<version>+auto`,
 where `<version>` comes from the `go` directive in the repository's `go.mod`,
 not its optional `toolchain` directive or your ambient `GOTOOLCHAIN`. Go may
-automatically download that toolchain (or a newer required toolchain); use a Go
-launcher that supports toolchain selection and allow download access or provide
-the toolchain locally. Missing or invalid module minimums and analyzer/toolchain
-failures stop the check; a failed analyzer never refreshes the baseline.
+automatically download that toolchain (or a newer required toolchain); the default
+analyzer requires a Go 1.21 or newer launcher for toolchain selection. Allow
+download access or provide the toolchain locally. Missing or invalid module
+minimums and analyzer/toolchain failures stop the check; a failed analyzer never
+refreshes the baseline.
 
 `DEADCODE_RATCHET_ANALYZER` bypasses this selection entirely: owners of that
 explicit executable override are responsible for its compatible toolchain and
