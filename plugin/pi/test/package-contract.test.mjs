@@ -146,7 +146,7 @@ test("pi-engram init adds the current package and help names its install command
 	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
 	try {
 		const output = runCli(agentDir, "init");
-		assert.deepEqual(readPackages(agentDir), [MCP_ADAPTER_PACKAGE, PACKAGE_NAME]);
+		assert.deepEqual(readPackages(agentDir), [PACKAGE_NAME]);
 		assert.match(output, new RegExp(`Added ${PACKAGE_NAME} in settings\\.json`));
 		assert.match(runCli(agentDir), new RegExp(`pi install ${PACKAGE_NAME}`));
 	} finally {
@@ -159,11 +159,29 @@ test("pi-engram init does not register Engram MCP on a fresh profile", () => {
 	try {
 		const output = runCli(agentDir, "init", "--force");
 		assert.equal(existsSync(join(agentDir, "mcp.json")), false);
-		assert.deepEqual(readPackages(agentDir), [MCP_ADAPTER_PACKAGE, PACKAGE_NAME]);
+		assert.deepEqual(readPackages(agentDir), [PACKAGE_NAME]);
 		assert.ok(output.includes("Pi-native mem_* tools"));
 		const help = runCli(agentDir, "--help");
 		assert.match(help, /settings\.json/);
 		assert.doesNotMatch(help, /Creates Pi's Engram MCP config/);
+		assert.doesNotMatch(help, /pi-mcp-adapter/);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+// Pi >= 0.99.0 ships built-in MCP; an installed pi-mcp-adapter replaces it, so init
+// must never add the adapter. An existing entry is left alone for the user to manage.
+test("pi-engram init does not add pi-mcp-adapter and keeps an existing entry", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
+	try {
+		const output = runCli(agentDir, "init");
+		assert.ok(!readPackages(agentDir).includes(MCP_ADAPTER_PACKAGE));
+		assert.doesNotMatch(output, /pi-mcp-adapter/);
+
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [MCP_ADAPTER_PACKAGE, PACKAGE_NAME] }));
+		runCli(agentDir, "init");
+		assert.deepEqual(readPackages(agentDir), [MCP_ADAPTER_PACKAGE, PACKAGE_NAME]);
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });
 	}

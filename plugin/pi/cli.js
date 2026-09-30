@@ -13,14 +13,14 @@ const LEGACY_PACKAGE_NAMES = new Set([
   "npm:gentle-engram@0.1.15",
   "npm:gentle-engram@0.1.16",
 ]);
-const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const HELP = `pi-engram
 
 Usage:
   pi-engram init [--force]
 
-Ensures pi-mcp-adapter and gentle-engram are declared in settings.json.
-Does not create or modify Pi MCP config. Install the extension with:
+Ensures gentle-engram is declared in settings.json.
+Does not create or modify Pi MCP config and does not add an MCP adapter
+extension (Pi's built-in MCP reads mcp.json). Install the extension with:
 pi install ${PACKAGE_NAME}
 `;
 
@@ -40,17 +40,6 @@ function readJsonObject(filePath) {
 function writeJsonObject(filePath, data) {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
-}
-
-function ensurePackage(settingsPath, packageName) {
-  const settings = readJsonObject(settingsPath);
-  const packages = Array.isArray(settings.packages) ? settings.packages : [];
-  if (!packages.includes(packageName)) {
-    settings.packages = [...packages, packageName];
-    writeJsonObject(settingsPath, settings);
-    return true;
-  }
-  return false;
 }
 
 function ensureEngramPackage(settingsPath) {
@@ -98,12 +87,10 @@ function init() {
   const settingsPath = join(agentDir, "settings.json");
   const mcpPath = join(agentDir, "mcp.json");
 
-  const adapterChanged = ensurePackage(settingsPath, MCP_ADAPTER_PACKAGE);
   const packageChanged = ensureEngramPackage(settingsPath);
   warnExistingEngramMcp(mcpPath);
 
   console.log(`Pi agent dir: ${agentDir}`);
-  console.log(`${adapterChanged ? "Added" : "Kept"} ${MCP_ADAPTER_PACKAGE} in settings.json`);
   console.log(`${packageChanged ? "Added" : "Kept"} ${PACKAGE_NAME} in settings.json`);
   console.log("Pi-native mem_* tools own agent writes; no Engram MCP registration is created.");
   console.log("Set ENGRAM_URL for an existing engram serve instance, or ENGRAM_BIN for a custom engram binary path.");

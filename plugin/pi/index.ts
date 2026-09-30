@@ -3,7 +3,7 @@
  *
  * Thin adapter that connects Pi session events to an Engram HTTP server.
  * Persistence remains owned by the Engram Go binary (`engram serve`). MCP tools
- * are configured separately through pi-mcp-adapter and `engram mcp`.
+ * are configured separately through Pi's built-in MCP (`mcp.json`) and `engram mcp`.
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
