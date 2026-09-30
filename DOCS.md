@@ -343,7 +343,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `DELETE /observations/{id}?expected_project=X` — Delete observation (`&hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
-  - Both PATCH and DELETE require an explicit `expected_project` owner assertion: missing, blank, or invalid names return `400`; normalized owner mismatch returns `409` without changing the observation, revision, or sync queue. Personal/global scopes do not bypass ownership. The assertion and mutation run in one store transaction; project metadata remains immutable.
+  - Both PATCH and DELETE require an explicit `expected_project` owner assertion: missing, blank, or invalid names return `400`; normalized owner mismatch or immutable project reassignment through PATCH returns `409` without changing the observation, revision, or sync queue. Personal/global scopes do not bypass ownership. The assertion and mutation run in one store transaction; project metadata remains immutable.
 - `POST /topic-keys/suggest` — Suggest a stable topic key using the same heuristic as `mem_suggest_topic_key`. Body: `{type?, title?, content?}`. Returns `{topic_key}`.
   - At least one of `title` or `content` must be non-empty; invalid JSON or missing suggestion input returns `400`
 

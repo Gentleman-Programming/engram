@@ -801,7 +801,8 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
 			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, store.ErrObservationProjectMismatch):
+		case errors.Is(err, store.ErrObservationProjectMismatch),
+			errors.Is(err, store.ErrObservationProjectImmutable):
 			jsonError(w, http.StatusConflict, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())

@@ -4243,7 +4243,7 @@ func TestObservationExpectedProjectPreservesImmutableBodyProject(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=owner", id), strings.NewReader(`{"project":"other","content":"changed"}`)))
-	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), store.ErrObservationProjectImmutable.Error()) {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), store.ErrObservationProjectImmutable.Error()) {
 		t.Fatalf("immutable project response = %d: %s", rec.Code, rec.Body.String())
 	}
 	after, err := st.GetObservation(id)
