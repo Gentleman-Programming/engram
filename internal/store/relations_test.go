@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -2170,5 +2172,439 @@ func TestExportRelationMutations_ExcludesOrphaned(t *testing.T) {
 		if m.EntityKey == relSyncID {
 			t.Errorf("orphaned relation %q must not appear in ExportRelationMutations", relSyncID)
 		}
+	}
+}
+
+// ─── Orphaned pending relations (engram#1455) ────────────────────────────────
+
+// TestListOrphanedPendingRelationEvidence verifies the doctor evidence reports
+// pending relations whose source AND target observations are both absent as
+// candidates, counts one-endpoint-missing and live pending rows separately,
+// and ignores rows already carrying a terminal disposition.
+func TestListOrphanedPendingRelationEvidence(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, liveSrc := addTestObsSession(t, s, "ses-rel", "live source", "decision", "alpha", "project")
+	_, liveTgt := addTestObsSession(t, s, "ses-rel", "live target", "decision", "alpha", "project")
+	_, oneEndpointTgt := addTestObsSession(t, s, "ses-rel", "one endpoint target", "decision", "alpha", "project")
+
+	liveRel := insertRelationWithStatus(t, s, liveSrc, liveTgt, "pending")
+	oneMissingRel := insertRelationWithStatus(t, s, "missing-obs", oneEndpointTgt, "pending")
+	orphanRel := insertRelationWithStatus(t, s, "missing-src", "missing-tgt", "pending")
+	legacyOrphanedRel := insertRelationWithStatus(t, s, "missing-src2", "missing-tgt2", "orphaned")
+
+	report, err := s.ListOrphanedPendingRelationEvidence()
+	if err != nil {
+		t.Fatalf("ListOrphanedPendingRelationEvidence: %v", err)
+	}
+	if len(report.Candidates) != 1 {
+		t.Fatalf("candidates=%+v, want only the both-endpoints-missing relation %q", report.Candidates, orphanRel)
+	}
+	candidate := report.Candidates[0]
+	if candidate.SyncID != orphanRel || candidate.SourceID != "missing-src" || candidate.TargetID != "missing-tgt" {
+		t.Fatalf("candidate=%+v, want sync_id=%q source=%q target=%q", candidate, orphanRel, "missing-src", "missing-tgt")
+	}
+	var wantID int64
+	if err := s.db.QueryRow(`SELECT id FROM memory_relations WHERE sync_id = ?`, orphanRel).Scan(&wantID); err != nil {
+		t.Fatalf("read candidate relation id: %v", err)
+	}
+	if candidate.ID != wantID {
+		t.Fatalf("candidate id=%d, want %d", candidate.ID, wantID)
+	}
+	if report.OneEndpointMissing != 1 {
+		t.Fatalf("one_endpoint_missing=%d, want 1 (relation %q)", report.OneEndpointMissing, oneMissingRel)
+	}
+	if report.LivePending != 1 {
+		t.Fatalf("live_pending=%d, want 1 (relation %q)", report.LivePending, liveRel)
+	}
+	_ = legacyOrphanedRel
+}
+
+// TestListOrphanedPendingRelationEvidenceTreatsSoftDeletedEndpointAsAbsent
+// proves the absence predicate matches the conflicts LEFT JOIN: an endpoint
+// whose only observation row is soft-deleted counts as absent, so a pending
+// relation soft-deleted on both ends becomes a reclassification candidate.
+func TestListOrphanedPendingRelationEvidenceTreatsSoftDeletedEndpointAsAbsent(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, src := addTestObsSession(t, s, "ses-rel", "soft source", "decision", "alpha", "project")
+	_, tgt := addTestObsSession(t, s, "ses-rel", "soft target", "decision", "alpha", "project")
+	rel := insertRelationWithStatus(t, s, src, tgt, "pending")
+
+	report, err := s.ListOrphanedPendingRelationEvidence()
+	if err != nil {
+		t.Fatalf("ListOrphanedPendingRelationEvidence: %v", err)
+	}
+	if len(report.Candidates) != 0 || report.LivePending != 1 {
+		t.Fatalf("pre-delete report=%+v, want live pending with no candidates", report)
+	}
+
+	if _, err := s.db.Exec(`UPDATE observations SET deleted_at = datetime('now') WHERE sync_id IN (?, ?)`, src, tgt); err != nil {
+		t.Fatalf("soft-delete endpoints: %v", err)
+	}
+
+	report, err = s.ListOrphanedPendingRelationEvidence()
+	if err != nil {
+		t.Fatalf("post-delete ListOrphanedPendingRelationEvidence: %v", err)
+	}
+	if len(report.Candidates) != 1 || report.Candidates[0].SyncID != rel {
+		t.Fatalf("post-delete candidates=%+v, want relation %q", report.Candidates, rel)
+	}
+	if report.LivePending != 0 {
+		t.Fatalf("post-delete live_pending=%d, want 0", report.LivePending)
+	}
+}
+
+// TestReclassifyOrphanedPendingRelationsReclassifiesOnlyBothEndpointOrphans
+// proves the apply path reclassifies exactly the pending rows whose endpoints
+// are both absent, leaves one-endpoint-missing and live pending rows untouched,
+// preserves audit evidence with a SQLite backup, and fans out no sync journal
+// mutations — matching the existing hard-delete orphaning writers.
+func TestReclassifyOrphanedPendingRelationsReclassifiesOnlyBothEndpointOrphans(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, liveSrc := addTestObsSession(t, s, "ses-rel", "live source", "decision", "alpha", "project")
+	_, liveTgt := addTestObsSession(t, s, "ses-rel", "live target", "decision", "alpha", "project")
+	_, oneEndpointTgt := addTestObsSession(t, s, "ses-rel", "one endpoint target", "decision", "alpha", "project")
+
+	liveRel := insertRelationWithStatus(t, s, liveSrc, liveTgt, "pending")
+	oneMissingRel := insertRelationWithStatus(t, s, "missing-obs", oneEndpointTgt, "pending")
+	orphanRel := insertRelationWithStatus(t, s, "missing-src", "missing-tgt", "pending")
+
+	result, err := s.ReclassifyOrphanedPendingRelations()
+	if err != nil {
+		t.Fatalf("ReclassifyOrphanedPendingRelations: %v", err)
+	}
+	if result.CandidatesAtApply != 1 || result.Reclassified != 1 || result.OneEndpointMissing != 1 || result.LivePending != 1 {
+		t.Fatalf("result=%+v, want one reclassified candidate with untouched one-missing and live counts", result)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("apply must surface a SQLite backup path")
+	}
+	if _, err := os.Stat(result.BackupPath); err != nil {
+		t.Fatalf("backup file missing: %v", err)
+	}
+
+	assertRelationStatus := func(relSyncID, want string) {
+		t.Helper()
+		var status string
+		if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, relSyncID).Scan(&status); err != nil {
+			t.Fatalf("read status of %q: %v", relSyncID, err)
+		}
+		if status != want {
+			t.Fatalf("relation %q status=%q, want %q", relSyncID, status, want)
+		}
+	}
+	assertRelationStatus(orphanRel, JudgmentStatusOrphaned)
+	assertRelationStatus(oneMissingRel, JudgmentStatusPending)
+	assertRelationStatus(liveRel, JudgmentStatusPending)
+
+	// The existing orphaning writers (hard-delete and project hard-delete) emit
+	// a plain UPDATE with no sync mutation; this repair must match that exactly.
+	var mutations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ?`, SyncEntityRelation).Scan(&mutations); err != nil {
+		t.Fatalf("count relation mutations: %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("reclassification emitted %d sync mutation(s), want 0", mutations)
+	}
+}
+
+// TestReclassifyOrphanedPendingRelationsSkipsRowJudgedAfterEstimate proves the
+// predicate is revalidated inside the apply transaction: a pending row that a
+// reviewer judges between the evidence listing and the apply is never
+// reclassified behind their verdict.
+func TestReclassifyOrphanedPendingRelationsSkipsRowJudgedAfterEstimate(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	firstRel := insertRelationWithStatus(t, s, "missing-src-a", "missing-tgt-a", "pending")
+	secondRel := insertRelationWithStatus(t, s, "missing-src-b", "missing-tgt-b", "pending")
+
+	estimate, err := s.ListOrphanedPendingRelationEvidence()
+	if err != nil {
+		t.Fatalf("estimate: %v", err)
+	}
+	if len(estimate.Candidates) != 2 {
+		t.Fatalf("estimate candidates=%d, want 2", len(estimate.Candidates))
+	}
+
+	if _, err := s.db.Exec(`UPDATE memory_relations SET judgment_status = 'judged', updated_at = datetime('now') WHERE sync_id = ?`, firstRel); err != nil {
+		t.Fatalf("judge row between estimate and apply: %v", err)
+	}
+
+	result, err := s.ReclassifyOrphanedPendingRelations()
+	if err != nil {
+		t.Fatalf("ReclassifyOrphanedPendingRelations: %v", err)
+	}
+	if result.CandidatesAtApply != 1 || result.Reclassified != 1 {
+		t.Fatalf("result=%+v, want only the still-pending row reclassified", result)
+	}
+	var firstStatus, secondStatus string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, firstRel).Scan(&firstStatus); err != nil {
+		t.Fatalf("read judged row: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, secondRel).Scan(&secondStatus); err != nil {
+		t.Fatalf("read reclassified row: %v", err)
+	}
+	if firstStatus != JudgmentStatusJudged || secondStatus != JudgmentStatusOrphaned {
+		t.Fatalf("statuses first=%q second=%q, want judged/orphaned", firstStatus, secondStatus)
+	}
+}
+
+// TestReclassifyOrphanedPendingRelationsIsIdempotent proves a second apply is
+// a no-op: already-reclassified rows are no longer pending, so the predicate
+// matches nothing.
+func TestReclassifyOrphanedPendingRelationsIsIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	orphanRel := insertRelationWithStatus(t, s, "missing-src", "missing-tgt", "pending")
+
+	first, err := s.ReclassifyOrphanedPendingRelations()
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if first.Reclassified != 1 {
+		t.Fatalf("first apply=%+v, want one reclassification", first)
+	}
+
+	second, err := s.ReclassifyOrphanedPendingRelations()
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if second.CandidatesAtApply != 0 || second.Reclassified != 0 {
+		t.Fatalf("second apply=%+v, want noop", second)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, orphanRel).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != JudgmentStatusOrphaned {
+		t.Fatalf("status=%q, want orphaned", status)
+	}
+}
+
+// TestListOrphanedPendingRelationEvidenceBounded proves the bounded diagnostic
+// read reports the TOTAL candidate count while returning only the first `limit`
+// evidence rows, keeps the one-endpoint-missing and live-pending counts, and
+// leaves the full candidate read untouched for the repair planner.
+func TestListOrphanedPendingRelationEvidenceBounded(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, liveSrc := addTestObsSession(t, s, "ses-rel", "live source", "decision", "alpha", "project")
+	_, liveTgt := addTestObsSession(t, s, "ses-rel", "live target", "decision", "alpha", "project")
+	_, oneEndpointTgt := addTestObsSession(t, s, "ses-rel", "one endpoint target", "decision", "alpha", "project")
+
+	for i := 0; i < 12; i++ {
+		insertRelationWithStatus(t, s, fmt.Sprintf("missing-src-%02d", i), fmt.Sprintf("missing-tgt-%02d", i), "pending")
+	}
+	liveRel := insertRelationWithStatus(t, s, liveSrc, liveTgt, "pending")
+	oneMissingRel := insertRelationWithStatus(t, s, "missing-obs", oneEndpointTgt, "pending")
+
+	bounded, err := s.ListOrphanedPendingRelationEvidenceBounded(10)
+	if err != nil {
+		t.Fatalf("ListOrphanedPendingRelationEvidenceBounded: %v", err)
+	}
+	if bounded.CandidateCount != 12 {
+		t.Fatalf("candidate_count=%d, want the TOTAL candidate count 12", bounded.CandidateCount)
+	}
+	if len(bounded.Sample) != 10 {
+		t.Fatalf("sample size=%d, want the bounded 10", len(bounded.Sample))
+	}
+	if bounded.Sample[0].SourceID != "missing-src-00" || bounded.Sample[9].SourceID != "missing-src-09" {
+		t.Fatalf("sample=%+v, want the id-ordered head of the candidate list", bounded.Sample)
+	}
+	if bounded.OneEndpointMissing != 1 {
+		t.Fatalf("one_endpoint_missing=%d, want 1 (relation %q)", bounded.OneEndpointMissing, oneMissingRel)
+	}
+	if bounded.LivePending != 1 {
+		t.Fatalf("live_pending=%d, want 1 (relation %q)", bounded.LivePending, liveRel)
+	}
+
+	// A limit larger than the backlog returns every candidate.
+	all, err := s.ListOrphanedPendingRelationEvidenceBounded(200)
+	if err != nil {
+		t.Fatalf("ListOrphanedPendingRelationEvidenceBounded(200): %v", err)
+	}
+	if all.CandidateCount != 12 || len(all.Sample) != 12 {
+		t.Fatalf("bounded(200)=%+v, want all 12 candidates", all)
+	}
+
+	// The full candidate read is unchanged: same rows, same order.
+	full, err := s.ListOrphanedPendingRelationEvidence()
+	if err != nil {
+		t.Fatalf("ListOrphanedPendingRelationEvidence: %v", err)
+	}
+	if len(full.Candidates) != 12 {
+		t.Fatalf("full candidates=%d, want 12", len(full.Candidates))
+	}
+	for i := range all.Sample {
+		if full.Candidates[i] != all.Sample[i] {
+			t.Fatalf("full candidate[%d]=%+v, want %+v", i, full.Candidates[i], all.Sample[i])
+		}
+	}
+
+	// A healthy store reports zero candidates with an empty sample.
+	healthy := newTestStore(t)
+	empty, err := healthy.ListOrphanedPendingRelationEvidenceBounded(10)
+	if err != nil {
+		t.Fatalf("empty store ListOrphanedPendingRelationEvidenceBounded: %v", err)
+	}
+	if empty.CandidateCount != 0 || len(empty.Sample) != 0 {
+		t.Fatalf("empty store bounded read=%+v, want zero candidates with no sample", empty)
+	}
+}
+
+// TestReclassifyOrphanedPendingRelationsBacksUpUnderWriterLock proves the
+// SQLite writer lock is acquired BEFORE the pre-apply backup is taken, so no
+// concurrent write can land between the snapshot and the reclassification it
+// protects. The store pool is single-connection, so the backup must come from
+// a separate database handle while the lock is held; the hook event order is
+// the observable contract.
+func TestReclassifyOrphanedPendingRelationsBacksUpUnderWriterLock(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	orphanRel := insertRelationWithStatus(t, s, "missing-src", "missing-tgt", "pending")
+
+	var events []string
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "VACUUM INTO") {
+			events = append(events, "backup")
+		}
+		return db.Exec(query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = originalExec })
+	originalBeginTx := s.hooks.beginTx
+	s.hooks.beginTx = func(db *sql.DB) (*sql.Tx, error) {
+		tx, err := originalBeginTx(db)
+		if err == nil {
+			events = append(events, "begin_write_tx")
+		}
+		return tx, err
+	}
+	t.Cleanup(func() { s.hooks.beginTx = originalBeginTx })
+
+	result, err := s.ReclassifyOrphanedPendingRelations()
+	if err != nil {
+		t.Fatalf("ReclassifyOrphanedPendingRelations: %v", err)
+	}
+	if result.Reclassified != 1 || result.BackupPath == "" {
+		t.Fatalf("result=%+v, want one reclassification with a backup", result)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, orphanRel).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != JudgmentStatusOrphaned {
+		t.Fatalf("status=%q, want orphaned", status)
+	}
+
+	beginIndex, backupIndex := -1, -1
+	for i, event := range events {
+		switch event {
+		case "begin_write_tx":
+			if beginIndex == -1 {
+				beginIndex = i
+			}
+		case "backup":
+			if backupIndex == -1 {
+				backupIndex = i
+			}
+		}
+	}
+	if beginIndex == -1 || backupIndex == -1 {
+		t.Fatalf("events=%v, want both a writer transaction and a backup", events)
+	}
+	if beginIndex > backupIndex {
+		t.Fatalf("events=%v, want the writer lock acquired BEFORE the backup snapshot so no concurrent write can land between snapshot and apply", events)
+	}
+}
+
+// TestReclassifyOrphanedPendingRelationsBackupFailureLeavesRowPending proves
+// a backup failure under the held writer lock aborts the whole apply: the
+// method returns the error and the candidate row stays pending, never
+// reclassified without its audited snapshot.
+func TestReclassifyOrphanedPendingRelationsBackupFailureLeavesRowPending(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	orphanRel := insertRelationWithStatus(t, s, "missing-src", "missing-tgt", "pending")
+
+	originalExec := s.hooks.exec
+	wantErr := errors.New("vacuum into failed")
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "VACUUM INTO") {
+			return nil, wantErr
+		}
+		return db.Exec(query, args...)
+	}
+	t.Cleanup(func() { s.hooks.exec = originalExec })
+
+	if _, err := s.ReclassifyOrphanedPendingRelations(); !errors.Is(err, wantErr) {
+		t.Fatalf("error=%v, want %v", err, wantErr)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, orphanRel).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != JudgmentStatusPending {
+		t.Fatalf("status=%q, want pending after a failed apply", status)
+	}
+}
+
+// TestReclassifyOrphanedPendingRelationsBackupReflectsPreApplyState proves the
+// surfaced backup is a PRE-apply snapshot: the reclassified rows are still
+// `pending` inside the backup file while the main store shows `orphaned`.
+// This pins the requirement that the snapshot must never be taken after (or
+// inside) the apply transaction.
+func TestReclassifyOrphanedPendingRelationsBackupReflectsPreApplyState(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-rel", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	orphanRel := insertRelationWithStatus(t, s, "missing-src", "missing-tgt", "pending")
+
+	result, err := s.ReclassifyOrphanedPendingRelations()
+	if err != nil {
+		t.Fatalf("ReclassifyOrphanedPendingRelations: %v", err)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("apply must surface a SQLite backup path")
+	}
+	var mainStatus string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, orphanRel).Scan(&mainStatus); err != nil {
+		t.Fatalf("read main store status: %v", err)
+	}
+	if mainStatus != JudgmentStatusOrphaned {
+		t.Fatalf("main store status=%q, want orphaned", mainStatus)
+	}
+
+	backupDB, err := sql.Open("sqlite", result.BackupPath)
+	if err != nil {
+		t.Fatalf("open backup file: %v", err)
+	}
+	t.Cleanup(func() { _ = backupDB.Close() })
+	var backupStatus string
+	if err := backupDB.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, orphanRel).Scan(&backupStatus); err != nil {
+		t.Fatalf("read backup file status: %v", err)
+	}
+	if backupStatus != JudgmentStatusPending {
+		t.Fatalf("backup file status=%q, want the pre-apply pending state", backupStatus)
 	}
 }

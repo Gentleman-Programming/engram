@@ -130,6 +130,8 @@ For lifecycle review, `mem_review` keeps the collapsed output explicit without e
 
 Normal memory activity also updates the status bar with short progress/result text such as `🧠 engram · search…` and `🧠 engram · ✓ 4 results`. The extension does not use notifications for normal memory operations.
 
+Background capture failures use warning notifications in the owning Pi UI (interactive or RPC), rather than writing directly over the terminal editor. Print/JSON mode and calls without a UI context retain stderr diagnostics. If UI notification delivery fails, the diagnostic is safely discarded without falling back to terminal output or interrupting capture. Warnings are not injected into the model conversation; repeated session-project conflicts still warn only once per ownership conflict.
+
 When a tool call fails because Engram cannot determine which project to use, the status bar shows an actionable label instead of the generic `error`:
 
 | Status bar label           | Meaning                                                                                               |

@@ -122,7 +122,7 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")
-	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair, and "+diagnostic.CheckOrphanedPendingRelations+", which spans all projects because both-endpoints-absent relations belong to no project.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
 	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
@@ -131,7 +131,7 @@ func printDoctorRepairUsage() {
 	_, _ = fmt.Fprintln(os.Stdout, "usage: engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")
-	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair, and "+diagnostic.CheckOrphanedPendingRelations+", which spans all projects because both-endpoints-absent relations belong to no project.")
 	_, _ = fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
 	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
@@ -213,7 +213,7 @@ func cmdDoctorRepair(cfg store.Config) {
 	project, _ = store.NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	check = strings.TrimSpace(check)
-	if project == "" && check != diagnostic.CheckSyncMutationRequiredFields {
+	if project == "" && check != diagnostic.CheckSyncMutationRequiredFields && check != diagnostic.CheckOrphanedPendingRelations {
 		failDoctorRepair("--project is required")
 		return
 	}
@@ -370,6 +370,26 @@ func cmdDoctorRepair(cfg store.Config) {
 				plan.Counts.SessionsApplied++
 				plan.Counts.ObservationsApplied += action.ObservationCount
 			}
+		}
+		writeDoctorRepairJSON(plan)
+		return
+	}
+	if check == diagnostic.CheckOrphanedPendingRelations {
+		// Orphaned pending relations belong to no project (both endpoints are
+		// absent), so any --project value is accepted but cannot scope them.
+		if mode == diagnostic.RepairModeApply && plan.OrphanedPendingRelations != nil && len(plan.OrphanedPendingRelations.Candidates) > 0 {
+			result, err := s.ReclassifyOrphanedPendingRelations()
+			if err != nil {
+				failDoctorRepair(err.Error())
+				return
+			}
+			if result.Reclassified > 0 {
+				plan.Status = "applied"
+			} else {
+				plan.Status = "noop"
+			}
+			plan.Counts.RelationsApplied = result.Reclassified
+			plan.BackupPath = result.BackupPath
 		}
 		writeDoctorRepairJSON(plan)
 		return

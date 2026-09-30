@@ -1874,7 +1874,7 @@ test("session compaction strictly registers before forwarding its summary", () =
   const compactHandler = source.slice(compactStart, compactEnd);
 
   const registration = compactHandler.indexOf("await registerEffectiveSession(");
-  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(effectiveID, summary);");
+  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(effectiveID, summary, observed);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
@@ -2164,18 +2164,18 @@ test("mem_stats explicitly requests its global aggregate contract", () => {
   assert.match(source, /case "mem_stats":[\s\S]*fetch\(`\/stats\$\{queryString\(\{ all_projects: true \}\)\}`\)/);
 });
 
-test("best-effort capture failures are surfaced instead of silently discarded", () => {
-  // A passive capture that the server rejects (for example because the parent
-  // session carries no project ownership) must not vanish: the operator has no
-  // other signal that memories stopped being saved.
-  assert.match(source, /function warnEngramFailure\(/);
-  assert.match(source, /process\.stderr\.write/);
-  assert.match(
-    source,
-    /async function bestEffortEngramFetch[\s\S]*catch \(error\) \{[\s\S]*warnEngramFailure\(path, error\)/,
-  );
-  assert.doesNotMatch(
-    source,
-    /async function bestEffortEngramFetch[\s\S]{0,200}catch \{\s*\n\s*return null;/,
-  );
+test("background diagnostics remain safe when formatting or delivery fails", () => {
+  const body = extractFunctionBody("warnEngramFailure", "{\n  try");
+  const stderr = [];
+  const warn = new Function("process", "redactPrivateTags", "redactUrlPath", `
+    return function(path, error, ctx) { ${body} };
+  `)({ stderr: { write: (text) => stderr.push(text) } }, (text) => text.replace(/<private>.*?<\/private>/g, "[REDACTED]"), (path) => path);
+  const notifications = [];
+  warn("/prompts", new Error("hidden <private>secret</private>"), {
+    hasUI: true, ui: { notify: (...args) => notifications.push(args) },
+  });
+  assert.deepEqual(notifications, [["[engram] background capture to /prompts failed: hidden [REDACTED]", "warning"]]);
+  assert.doesNotThrow(() => warn("/prompts", { toString() { throw new Error("format failed"); } }));
+  assert.doesNotThrow(() => warn("/prompts", "failure", { hasUI: true, ui: {} }));
+  assert.equal(stderr.length, 0);
 });

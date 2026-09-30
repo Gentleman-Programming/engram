@@ -263,14 +263,16 @@ func cmdConflictsStats(cfg store.Config) {
 		fmt.Println("  No relations found.")
 	} else {
 		fmt.Println("  By judgment_status:")
-		// Print in a stable order: pending, accepted, rejected, then others.
-		for _, status := range []string{"pending", "accepted", "rejected"} {
+		// Print in a stable order: pending, accepted, rejected, orphaned, then
+		// others. Orphaned gets an explicit label so the audited disposition is
+		// visible deterministically when > 0.
+		for _, status := range []string{"pending", "accepted", "rejected", "orphaned"} {
 			if n, ok := stats.ByJudgmentStatus[status]; ok {
 				fmt.Printf("    %-12s %d\n", status+":", n)
 			}
 		}
 		for status, n := range stats.ByJudgmentStatus {
-			if status != "pending" && status != "accepted" && status != "rejected" {
+			if status != "pending" && status != "accepted" && status != "rejected" && status != "orphaned" {
 				fmt.Printf("    %-12s %d\n", status+":", n)
 			}
 		}

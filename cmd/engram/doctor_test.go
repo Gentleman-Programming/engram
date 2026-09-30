@@ -1755,3 +1755,127 @@ func TestCmdDoctorLocalOnlyInstallIsNotBlockedByPendingMutations(t *testing.T) {
 		t.Fatalf("local-only doctor must not suggest cloud enrollment: %s", stdout)
 	}
 }
+
+// TestCmdDoctorOrphanedPendingRelationsRepairFullFlow proves the full
+// plan/dry-run/apply flow for the orphaned-pending-relations repair: only the
+// pending row whose endpoints are both absent is reclassified into the audited
+// `orphaned` disposition, one-endpoint-missing and live pending rows are
+// untouched, apply creates a SQLite backup on disk and emits no relation sync
+// mutation, and the idempotent rerun reports a noop. --project is optional for
+// this check because both-endpoints-absent rows belong to no project.
+func TestCmdDoctorOrphanedPendingRelationsRepairFullFlow(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := db.Exec(`
+		PRAGMA foreign_keys = OFF;
+		INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at)
+			VALUES ('ses-1455', 'engram', 'project_owned', '/work/engram', '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES
+			('sync-live-src', 'ses-1455', 'decision', 'live source', 'content', 'engram', 'project', 'sync-live-src', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+			('sync-live-tgt', 'ses-1455', 'decision', 'live target', 'content', 'engram', 'project', 'sync-live-tgt', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+			('sync-one-tgt', 'ses-1455', 'decision', 'one endpoint target', 'content', 'engram', 'project', 'sync-one-tgt', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+			VALUES
+			('rel-orphan', 'missing-src', 'missing-tgt', 'pending', 'pending', '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+			('rel-one-missing', 'missing-obs', 'sync-one-tgt', 'pending', 'pending', '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+			('rel-live', 'sync-live-src', 'sync-live-tgt', 'pending', 'pending', '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+			('rel-legacy-orphaned', 'missing-src2', 'missing-tgt2', 'pending', 'orphaned', '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed orphaned pending relations: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seeded database: %v", err)
+	}
+
+	runRepair := func(mode string) map[string]any {
+		t.Helper()
+		withArgs(t, "engram", "doctor", "repair", "--check", "orphaned_pending_relations", mode)
+		stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+		if stderr != "" {
+			t.Fatalf("%s stderr=%q", mode, stderr)
+		}
+		return decodeRepairPlan(t, stdout)
+	}
+	assertStatuses := func(wantOrphan, wantOneMissing, wantLive, wantLegacy string) {
+		t.Helper()
+		probe, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+		if err != nil {
+			t.Fatalf("probe open: %v", err)
+		}
+		defer func() {
+			if err := probe.Close(); err != nil {
+				t.Errorf("close probe: %v", err)
+			}
+		}()
+		for rel, want := range map[string]string{"rel-orphan": wantOrphan, "rel-one-missing": wantOneMissing, "rel-live": wantLive, "rel-legacy-orphaned": wantLegacy} {
+			var status string
+			if err := probe.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, rel).Scan(&status); err != nil {
+				t.Fatalf("read %q: %v", rel, err)
+			}
+			if status != want {
+				t.Fatalf("relation %q status=%q, want %q", rel, status, want)
+			}
+		}
+	}
+
+	for _, mode := range []string{"--plan", "--dry-run"} {
+		plan := runRepair(mode)
+		wantStatus := "planned"
+		if mode == "--dry-run" {
+			wantStatus = "dry_run"
+		}
+		if plan["status"] != wantStatus {
+			t.Fatalf("%s plan=%v", mode, plan)
+		}
+		if plan["counts"].(map[string]any)["relations_planned"] != float64(1) {
+			t.Fatalf("%s counts=%v", mode, plan["counts"])
+		}
+		evidence := plan["orphaned_pending_relations"].(map[string]any)
+		if len(evidence["candidates"].([]any)) != 1 {
+			t.Fatalf("%s evidence=%v", mode, evidence)
+		}
+	}
+	assertStatuses("pending", "pending", "pending", "orphaned")
+
+	applied := runRepair("--apply")
+	if applied["status"] != "applied" || applied["counts"].(map[string]any)["relations_applied"] != float64(1) {
+		t.Fatalf("apply=%v", applied)
+	}
+	if applied["backup_path"] == "" {
+		t.Fatal("apply must report a backup path")
+	}
+	if _, err := os.Stat(applied["backup_path"].(string)); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	assertStatuses("orphaned", "pending", "pending", "orphaned")
+
+	probe, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("mutation probe open: %v", err)
+	}
+	var mutations int
+	if err := probe.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = 'relation'`).Scan(&mutations); err != nil {
+		_ = probe.Close()
+		t.Fatalf("count relation mutations: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close mutation probe: %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("apply emitted %d relation sync mutation(s), want 0", mutations)
+	}
+
+	rerun := runRepair("--apply")
+	if rerun["status"] != "noop" || rerun["counts"].(map[string]any)["relations_applied"] != float64(0) {
+		t.Fatalf("rerun=%v", rerun)
+	}
+	assertStatuses("orphaned", "pending", "pending", "orphaned")
+}

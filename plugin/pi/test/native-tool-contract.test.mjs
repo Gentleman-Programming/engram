@@ -49,6 +49,132 @@ async function loadPluginHarness(sandbox, appendEntry) {
   return { registeredTools, eventHandlers };
 }
 
+// Mode labels model documented hasUI capabilities; this is not a live RPC client test.
+for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwing-notifier", "missing-notifier", "incomplete-ui"]) {
+  test(`background warning routing: ${scenario}`, async () => {
+    const originalFetch = globalThis.fetch;
+    const originalUrl = process.env.ENGRAM_URL;
+    const originalWrite = process.stderr.write;
+    const stderr = [];
+    const notifications = [];
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
+    const gate = deferred();
+    const started = deferred();
+    globalThis.fetch = async (url) => {
+      const path = new URL(url).pathname;
+      if (path === "/project/current") return new Response('{"project":"engram"}');
+      if (path === "/prompts") {
+        started.resolve();
+        await gate.promise;
+        if (scenario === "rpc-transport") throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+        return new Response('{"error":"capture rejected"}', { status: 503 });
+      }
+      return new Response('{}');
+    };
+    try {
+      await withPluginSandbox("engram-pi-warning-", async ({ sandbox }) => {
+        const { eventHandlers } = await loadPluginHarness(sandbox);
+        const ctx = runtimeContext("warning-owner");
+        ctx.mode = scenario.startsWith("rpc") ? "rpc" : scenario === "json" ? "json" : scenario === "print" ? "print" : "tui";
+        ctx.hasUI = !["print", "json", "missing-notifier"].includes(scenario);
+        ctx.ui.notify = (message, severity) => {
+          notifications.push([message, severity]);
+          if (scenario === "throwing-notifier") throw new Error("UI disposed");
+        };
+        if (["missing-notifier", "incomplete-ui"].includes(scenario)) delete ctx.ui.notify;
+        const capture = eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "a sufficiently long captured prompt" }, ctx);
+        await started.promise;
+        // Another session event must not steal the suspended capture's diagnostic UI.
+        const unrelated = runtimeContext("unrelated-session");
+        unrelated.hasUI = true;
+        unrelated.ui.notify = () => assert.fail("warning reached unrelated session");
+        await eventHandlers.get("session_start")({}, unrelated);
+        gate.resolve();
+        const result = await capture;
+        assert.doesNotMatch(result.systemPrompt, /capture rejected|outcome is unknown/);
+        const headless = ["print", "json", "missing-notifier"].includes(scenario);
+        assert.equal(stderr.length, headless ? 1 : 0);
+        assert.equal(notifications.length, headless || scenario === "incomplete-ui" ? 0 : 1);
+        if (scenario === "incomplete-ui") return;
+        const message = headless ? stderr[0] : notifications[0][0];
+        assert.match(message, /background capture to \/prompts failed/);
+        assert.match(message, scenario === "rpc-transport" ? /outcome is unknown/ : /capture rejected/);
+        if (!headless) assert.equal(notifications[0][1], "warning");
+      });
+    } finally {
+      gate.resolve();
+      globalThis.fetch = originalFetch;
+      process.stderr.write = originalWrite;
+      if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    }
+  });
+}
+
+for (const failure of ["shutdown", "archive", "recovery"]) {
+  test(`lifecycle UI warning uses owning context: ${failure}`, async () => {
+    const originalFetch = globalThis.fetch;
+    const originalUrl = process.env.ENGRAM_URL;
+    const originalWrite = process.stderr.write;
+    const stderr = [];
+    const notifications = [];
+    const calls = [];
+    const sessionId = `warning-${failure}`;
+    const failedPath = failure === "shutdown" ? `/sessions/${sessionId}/end`
+      : failure === "archive" ? "/observations" : "/context/compaction";
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
+    globalThis.fetch = async (url, init = {}) => {
+      const request = new URL(url);
+      calls.push({ path: request.pathname, method: init.method ?? "GET", query: request.searchParams, body: init.body ? JSON.parse(init.body) : undefined });
+      if (request.pathname === failedPath) return new Response(JSON.stringify({ error: `${failure} rejected` }), { status: 503 });
+      if (request.pathname === "/project/current") return new Response('{"project":"engram"}');
+      if (request.pathname === "/context/compaction") return new Response('{"context":"recovery context"}');
+      return new Response('{"id":1,"status":"created"}');
+    };
+    try {
+      await withPluginSandbox("engram-pi-lifecycle-warning-", async ({ sandbox }) => {
+        const { eventHandlers } = await loadPluginHarness(sandbox);
+        const owner = runtimeContext(sessionId);
+        owner.hasUI = true;
+        owner.ui.notify = (message, severity) => notifications.push([message, severity]);
+        await eventHandlers.get("session_start")({}, owner);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "register this owning session first" }, owner);
+        if (failure === "shutdown") {
+          await eventHandlers.get("session_shutdown")({}, owner);
+          await eventHandlers.get("session_shutdown")({}, owner);
+          assert.equal(calls.filter(({ path }) => path === failedPath).length, 1, "cleanup prevents repeated terminal delivery");
+        } else {
+          // Pi can supply a stale compaction context: only the observed identity owns diagnostics.
+          const stale = runtimeContext("stale-unrelated-session");
+          stale.hasUI = true;
+          stale.ui.notify = () => assert.fail("compaction warning reached stale UI");
+          await eventHandlers.get("session_compact")({ compactionEntry: { summary: "preserve this compacted summary" } }, stale);
+          const archives = calls.filter(({ path }) => path === "/observations");
+          assert.equal(archives.length, 1, "archive is never retried");
+          assert.equal(archives[0].body.session_id, sessionId);
+          const recovery = calls.find(({ path }) => path === "/context/compaction");
+          assert.equal(recovery.query.get("session_id"), sessionId);
+          const next = await eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, owner);
+          assert.match(next.systemPrompt, failure === "archive" ? /FIRST ACTION REQUIRED/ : /already saved/);
+          assert.doesNotMatch(next.systemPrompt, /archive rejected|recovery rejected/);
+          const consumed = await eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, owner);
+          assert.doesNotMatch(consumed.systemPrompt, /FIRST ACTION REQUIRED|already saved/);
+        }
+        assert.equal(stderr.length, 0);
+        assert.equal(notifications.length, 1);
+        assert.equal(notifications[0][1], "warning");
+        assert.ok(notifications[0][0].includes(`background capture to ${failedPath} failed`));
+        assert.match(notifications[0][0], new RegExp(`${failure} rejected`));
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.stderr.write = originalWrite;
+      if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    }
+  });
+}
+
 function runtimeContext(sessionId) {
   return {
     cwd: ROOT,
@@ -298,6 +424,9 @@ test("one Pi runtime session cannot capture prompts or passive observations acro
       const memSavePrompt = registeredTools.get("mem_save_prompt");
       const sessionId = "cross-project-runtime-session";
       const ctx = runtimeContext(sessionId);
+      const notifications = [];
+      ctx.hasUI = true;
+      ctx.ui.notify = (message, severity) => notifications.push([message, severity]);
 
       const firstPrompt = await memSavePrompt.execute(
         "project-a-first-prompt",
@@ -344,8 +473,10 @@ test("one Pi runtime session cannot capture prompts or passive observations acro
         0,
         "passive capture must be suppressed for the cross-project conflict",
       );
-      assert.equal(warnings.length, 1, "repeated passive events must not repeat the same conflict warning");
-      assert.match(warnings[0], /fresh Pi session/i);
+      assert.equal(warnings.length, 0, "UI conflicts must not write to stderr");
+      assert.equal(notifications.length, 1, "repeated passive events must not repeat the same conflict warning");
+      assert.equal(notifications[0][1], "warning");
+      assert.match(notifications[0][0], /fresh Pi session/i);
     });
   } finally {
     globalThis.fetch = originalFetch;
