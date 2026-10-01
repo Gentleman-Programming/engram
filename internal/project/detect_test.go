@@ -60,23 +60,21 @@ func TestExtractRepoName(t *testing.T) {
 			want: "my-project",
 		},
 		{
-			// #1583: Azure DevOps renders spaces in repo names as %20; the
-			// decoded name is the project identity, not the encoded spelling.
+			// Preserve the spelling used by existing detected project buckets.
 			name: "Azure DevOps HTTPS remote with encoded space",
 			url:  "https://org.visualstudio.com/My%20Project/_git/My%20Project",
-			want: "My Project",
+			want: "My%20Project",
 		},
 		{
 			name: "Azure DevOps SSH v3 remote with encoded space",
 			url:  "git@ssh.dev.azure.com:v3/org/My%20Project/Repo/My%20Project",
-			want: "My Project",
+			want: "My%20Project",
 		},
 		{
-			// Mirrors the enroll CLI's single PathUnescape policy
-			// (cmd/engram/cloud.go): a double-encoded name decodes exactly once.
-			name: "Double-encoded name decodes once",
+			// Detection does not decode even one layer.
+			name: "Double-encoded name stays literal",
 			url:  "https://host/group/my%2520repo.git",
-			want: "my%20repo",
+			want: "my%2520repo",
 		},
 		{
 			name: "Invalid percent escape stays raw",
@@ -167,12 +165,7 @@ func TestDetectProject_GitRemote_HTTPS(t *testing.T) {
 	}
 }
 
-// TestDetectProject_GitRemote_PercentEncoded is the regression for #1583: a
-// remote whose repo name is percent-encoded (Azure DevOps renders spaces as
-// %20) must resolve to the DECODED project identity, because `engram cloud
-// enroll` path-unescapes its argument once (cmd/engram/cloud.go). Detection
-// and enrollment must converge on one canonical name ("my project") instead
-// of forking my%20project vs "my project" and blocking sync.
+// Detection preserves encoded names; cloud selection can opt into literal input.
 func TestDetectProject_GitRemote_PercentEncoded(t *testing.T) {
 	dir := t.TempDir()
 	initGit(t, dir)
@@ -184,8 +177,25 @@ func TestDetectProject_GitRemote_PercentEncoded(t *testing.T) {
 	}
 
 	got := DetectProject(dir)
-	if got != "my project" {
-		t.Errorf("DetectProject percent-encoded remote = %q; want %q", got, "my project")
+	if got != "my%20project" {
+		t.Errorf("DetectProject percent-encoded remote = %q; want %q", got, "my%20project")
+	}
+}
+
+func TestDetectProjectFull_LiteralRemoteNames(t *testing.T) {
+	for _, remote := range []string{"https://host/team/my%2520repo.git", "https://host/team/my%2Frepo.git", "https://host/team/my%5Crepo.git", filepath.ToSlash(filepath.Join(t.TempDir(), "my%20repo.git"))} {
+		t.Run(remote, func(t *testing.T) {
+			dir := t.TempDir()
+			initGit(t, dir)
+			if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
+				t.Fatalf("remote: %v: %s", err, out)
+			}
+			want := strings.ToLower(strings.TrimSuffix(filepath.Base(remote), ".git"))
+			res := DetectProjectFull(dir)
+			if res.Error != nil || res.Source != SourceGitRemote || res.Project != want {
+				t.Fatalf("detection = %+v, want literal %q", res, want)
+			}
+		})
 	}
 }
 

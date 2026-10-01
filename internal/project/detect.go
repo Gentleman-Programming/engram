@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	neturl "net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -572,16 +571,6 @@ func extractRepoName(url string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	name := strings.TrimSpace(parts[len(parts)-1])
-	// The repo name inside a remote URL is percent-encoded: Azure DevOps
-	// renders spaces as %20 (#1583). Decode it exactly once, mirroring the
-	// single PathUnescape `engram cloud enroll` applies to its argument
-	// (cmd/engram/cloud.go), so detection and enrollment converge on one
-	// canonical project identity instead of my%20project vs "my project".
-	// A name with an invalid escape (a literal percent) was never encoded:
-	// keep it raw.
-	if decoded, err := neturl.PathUnescape(name); err == nil {
-		name = decoded
-	}
-	return name
+	name := parts[len(parts)-1]
+	return strings.TrimSpace(name)
 }
