@@ -13727,11 +13727,9 @@ func TestMergeProjectsByNameRefusesReservedInboxTarget(t *testing.T) {
 	seedLegacyMergeRecords(t, s, "acme-api")
 
 	_, err := s.MergeProjectsByName("acme-api", "inbox")
-	if err == nil {
-		t.Fatal("MergeProjectsByName accepted the reserved inbox project as a merge destination")
-	}
-	if !strings.Contains(err.Error(), "reserved inbox project cannot be a merge destination") {
-		t.Fatalf("MergeProjectsByName(%q, %q) error = %v, want %q", "acme-api", "inbox", err, "reserved inbox project cannot be a merge destination")
+	const wantErr = "reserved inbox project cannot be a merge destination"
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("MergeProjectsByName(%q, %q) error = %v, want exact %q", "acme-api", "inbox", err, wantErr)
 	}
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acme-api'`).Scan(&count); err != nil || count != 1 {
