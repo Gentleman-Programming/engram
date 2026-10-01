@@ -60,6 +60,30 @@ func TestExtractRepoName(t *testing.T) {
 			want: "my-project",
 		},
 		{
+			// #1583: Azure DevOps renders spaces in repo names as %20; the
+			// decoded name is the project identity, not the encoded spelling.
+			name: "Azure DevOps HTTPS remote with encoded space",
+			url:  "https://org.visualstudio.com/My%20Project/_git/My%20Project",
+			want: "My Project",
+		},
+		{
+			name: "Azure DevOps SSH v3 remote with encoded space",
+			url:  "git@ssh.dev.azure.com:v3/org/My%20Project/Repo/My%20Project",
+			want: "My Project",
+		},
+		{
+			// Mirrors the enroll CLI's single PathUnescape policy
+			// (cmd/engram/cloud.go): a double-encoded name decodes exactly once.
+			name: "Double-encoded name decodes once",
+			url:  "https://host/group/my%2520repo.git",
+			want: "my%20repo",
+		},
+		{
+			name: "Invalid percent escape stays raw",
+			url:  "https://host/user/100%.git",
+			want: "100%",
+		},
+		{
 			name: "Empty URL returns empty",
 			url:  "",
 			want: "",
@@ -140,6 +164,28 @@ func TestDetectProject_GitRemote_HTTPS(t *testing.T) {
 	got := DetectProject(dir)
 	if got != "engram" {
 		t.Errorf("DetectProject HTTPS remote = %q; want %q", got, "engram")
+	}
+}
+
+// TestDetectProject_GitRemote_PercentEncoded is the regression for #1583: a
+// remote whose repo name is percent-encoded (Azure DevOps renders spaces as
+// %20) must resolve to the DECODED project identity, because `engram cloud
+// enroll` path-unescapes its argument once (cmd/engram/cloud.go). Detection
+// and enrollment must converge on one canonical name ("my project") instead
+// of forking my%20project vs "my project" and blocking sync.
+func TestDetectProject_GitRemote_PercentEncoded(t *testing.T) {
+	dir := t.TempDir()
+	initGit(t, dir)
+
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"https://org.visualstudio.com/My%20Project/_git/My%20Project")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	got := DetectProject(dir)
+	if got != "my project" {
+		t.Errorf("DetectProject percent-encoded remote = %q; want %q", got, "my project")
 	}
 }
 
