@@ -25,6 +25,6 @@ Close the three CodeRabbit actionable findings on PR #1500: non-directory root c
 
 ## Tasks
 
-- [ ] T1 — Regular-file-root error test (no RED: coverage pin on existing behavior). Route: delegated (writer; mcplogs_test.go).
-- [ ] T2 — Monotonic close-event update with RED→GREEN regression test. Route: delegated (writer; mcplogs.go + mcplogs_test.go).
-- [ ] T3 — Oversized-line-surviving reader with RED→GREEN test. Route: delegated (writer; mcplogs.go + mcplogs_test.go).
+- [x] T1 — Regular-file-root error test (no RED: coverage pin on existing behavior). Route: delegated (writer; mcplogs_test.go). Commit: `1f7a7ee`.
+- [x] T2 — Monotonic close-event update with RED→GREEN regression test. Route: delegated (writer; mcplogs.go + mcplogs_test.go). Commit: `1f7a7ee`.
+- [x] T3 — Oversized-line-surviving reader with RED→GREEN test. Route: delegated (writer; mcplogs.go + mcplogs_test.go). Commit: `1f7a7ee`.
