@@ -12,7 +12,9 @@ package mcplogs
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -109,25 +111,35 @@ func scanFile(path, server string, groups map[string]*SessionLifecycle) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		var line logLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
+	// bufio.Reader instead of bufio.Scanner: scanner tokens are capped, so one
+	// oversized line would abort the whole scan via ErrTooLong and discard
+	// every lifecycle parsed so far. ReadString tolerates lines of any size;
+	// malformed or oversized lines are skipped by the json.Unmarshal failure
+	// path below.
+	reader := bufio.NewReader(f)
+	for {
+		raw, readErr := reader.ReadString('\n')
+		line := strings.TrimSuffix(raw, "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if line != "" {
+			var entry logLine
+			if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.SessionID != "" && entry.Debug != "" {
+				key := server + "\x00" + entry.SessionID
+				group := groups[key]
+				if group == nil {
+					group = &SessionLifecycle{Server: server, SessionID: entry.SessionID}
+					groups[key] = group
+				}
+				applyLine(group, entry)
+			}
 		}
-		if line.SessionID == "" || line.Debug == "" {
-			continue
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil // final line without trailing newline was still processed
+			}
+			return readErr
 		}
-		key := server + "\x00" + line.SessionID
-		group := groups[key]
-		if group == nil {
-			group = &SessionLifecycle{Server: server, SessionID: line.SessionID}
-			groups[key] = group
-		}
-		applyLine(group, line)
 	}
-	return scanner.Err()
 }
 
 func applyLine(group *SessionLifecycle, line logLine) {
@@ -140,9 +152,12 @@ func applyLine(group *SessionLifecycle, line logLine) {
 	case closePattern.MatchString(debug):
 		if m := closePattern.FindStringSubmatch(debug); len(m) == 2 {
 			if secs, err := strconv.Atoi(m[1]); err == nil {
-				group.HasClose = true
-				group.ClosedAfterSec = secs
-				group.ClosedAt = at
+				// Log fragments may arrive out of order; keep the newest close.
+				if !group.HasClose || at.After(group.ClosedAt) {
+					group.HasClose = true
+					group.ClosedAfterSec = secs
+					group.ClosedAt = at
+				}
 			}
 		}
 	case clearPattern.MatchString(debug):

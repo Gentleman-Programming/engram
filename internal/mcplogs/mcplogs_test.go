@@ -3,6 +3,7 @@ package mcplogs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,6 +11,17 @@ import (
 func TestScanRejectsMissingRoot(t *testing.T) {
 	if _, err := ScanLifecycles(filepath.Join("testdata", "does-not-exist")); err == nil {
 		t.Fatal("ScanLifecycles on missing root must fail")
+	}
+}
+
+func TestScanRejectsRegularFileRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "not-a-directory.jsonl")
+	if err := os.WriteFile(root, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScanLifecycles(root); err == nil {
+		t.Fatal("ScanLifecycles on regular-file root must fail")
 	}
 }
 
@@ -43,6 +55,72 @@ func TestParseSurvivesMalformedLines(t *testing.T) {
 	}
 	if !lc.ClearedCache || lc.EverConnected {
 		t.Errorf("cleared=%v everConnected=%v, want true/false", lc.ClearedCache, lc.EverConnected)
+	}
+}
+
+// TestScanKeepsNewestCloseEvent writes one session's close events in reverse
+// chronological order: the later file line carries the earlier timestamp, so
+// the lifecycle must keep the newest close timestamp and its duration.
+func TestScanKeepsNewestCloseEvent(t *testing.T) {
+	dir := t.TempDir()
+	serverDir := filepath.Join(dir, "mcp-logs-engram")
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := func(debug, ts, session string) string {
+		return `{"debug":"` + debug + `","timestamp":"` + ts + `","sessionId":"` + session + `","cwd":"/tmp"}` + "\n"
+	}
+	content :=
+		line("connection closed after 7s (cleanly)", "2026-09-27T09:00:09.000Z", "s1") +
+			line("connection closed after 2s (cleanly)", "2026-09-27T09:00:02.000Z", "s1")
+	if err := os.WriteFile(filepath.Join(serverDir, "s1.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lifecycles, err := ScanLifecycles(dir)
+	if err != nil {
+		t.Fatalf("ScanLifecycles: %v", err)
+	}
+	if len(lifecycles) != 1 {
+		t.Fatalf("got %d lifecycles, want 1: %v", len(lifecycles), lifecycles)
+	}
+	lc := lifecycles[0]
+	wantAt := time.Date(2026, 9, 27, 9, 0, 9, 0, time.UTC)
+	if !lc.HasClose || !lc.ClosedAt.Equal(wantAt) || lc.ClosedAfterSec != 7 {
+		t.Fatalf("close = %v/%v/%ds, want newest close true/%v/7", lc.HasClose, lc.ClosedAt, lc.ClosedAfterSec, wantAt)
+	}
+}
+
+// TestScanSurvivesOversizedLine writes a valid record, one malformed line
+// longer than the old 1MB scanner cap, and a valid record for a different
+// session: the whole scan must succeed and yield both lifecycles.
+func TestScanSurvivesOversizedLine(t *testing.T) {
+	dir := t.TempDir()
+	serverDir := filepath.Join(dir, "mcp-logs-engram")
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := func(debug, ts, session string) string {
+		return `{"debug":"` + debug + `","timestamp":"` + ts + `","sessionId":"` + session + `","cwd":"/tmp"}` + "\n"
+	}
+	oversized := strings.Repeat("garbage-not-json", 70*1024) // ~1.1MB, single line
+	content := line("Starting connection with timeout of 30000ms", "2026-09-27T09:00:00.000Z", "s1") +
+		oversized + "\n" +
+		line("Successfully connected", "2026-09-27T09:00:01.000Z", "s2")
+	if err := os.WriteFile(filepath.Join(serverDir, "sessions.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lifecycles, err := ScanLifecycles(dir)
+	if err != nil {
+		t.Fatalf("ScanLifecycles with oversized line: %v", err)
+	}
+	if len(lifecycles) != 2 {
+		t.Fatalf("got %d lifecycles, want 2: %v", len(lifecycles), lifecycles)
+	}
+	if got := lifecycles[0]; got.Server != "engram" || got.SessionID != "s1" || len(got.Starts) != 1 {
+		t.Errorf("lifecycle[0] = %s/%s starts=%d, want engram/s1 starts=1", got.Server, got.SessionID, len(got.Starts))
+	}
+	if got := lifecycles[1]; got.Server != "engram" || got.SessionID != "s2" || !got.EverConnected {
+		t.Errorf("lifecycle[1] = %s/%s connected=%v, want engram/s2 connected=true", got.Server, got.SessionID, got.EverConnected)
 	}
 }
 
