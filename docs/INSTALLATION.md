@@ -250,4 +250,5 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Kilo Code | `~/.config/kilo/opencode.json` + `~/.config/kilo/AGENTS.md` | `%USERPROFILE%\.config\kilo\...` |
 | Kimi Code | `~/.kimi-code/mcp.json` + `~/.kimi-code/AGENTS.md` | `%USERPROFILE%\.kimi-code\...` |
 | CommandCode | `~/.commandcode/mcp.json` + `~/.commandcode/AGENTS.md` | `%USERPROFILE%\.commandcode\mcp.json` + `%USERPROFILE%\.commandcode\AGENTS.md` |
+| Cline | `~/.cline/data/settings/cline_mcp_settings.json` + `~/.cline/rules/engram.md` | `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json` + `%USERPROFILE%\.cline\rules\engram.md` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |
