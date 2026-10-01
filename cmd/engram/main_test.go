@@ -1061,7 +1061,7 @@ func TestCmdSaveUsesDetectionSeamAndPrintsNormalizationWarning(t *testing.T) {
 	withArgs(t, "engram", "save", "resolved-title", "resolved-content")
 
 	originalDetectProjectFull := detectProjectFull
-	detectProjectFull = func(gotCWD string) project.DetectionResult {
+	detectProjectFull = func(gotCWD string, _ project.DetectionOptions) project.DetectionResult {
 		if gotCWD != actualCWD {
 			t.Fatalf("detection cwd = %q, want %q", gotCWD, actualCWD)
 		}
@@ -3024,7 +3024,7 @@ func TestCmdSyncUsesFullProjectDetection(t *testing.T) {
 	// Stub full detection so sync preserves fail-closed automatic Git detection.
 	old := detectProjectFull
 	t.Cleanup(func() { detectProjectFull = old })
-	detectProjectFull = func(dir string) project.DetectionResult {
+	detectProjectFull = func(dir string, _ project.DetectionOptions) project.DetectionResult {
 		return project.DetectionResult{Project: "git-detected-project", Source: project.SourceGitRemote, Path: dir}
 	}
 
@@ -3068,7 +3068,7 @@ func TestCmdSyncFailsClosedWhenFullProjectDetectionFails(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			detectProjectFull = func(string) project.DetectionResult { return tt.detect }
+			detectProjectFull = func(string, project.DetectionOptions) project.DetectionResult { return tt.detect }
 			exportCalled := false
 			syncExport = func(*engramsync.Syncer, string, string) (*engramsync.SyncResult, error) {
 				exportCalled = true

@@ -922,6 +922,19 @@ func assertDoctorRepairProject(t *testing.T, cfg store.Config, sessionID, wantPr
 func TestCmdDoctorJSONSingleCheckAndProjectScope(t *testing.T) {
 	cfg := testConfig(t)
 	otherRepo := newDoctorGitRepo(t, "other")
+	// This check exercises established Git authority. An unbound candidate is
+	// deliberately no longer created or trusted by a diagnostic scan.
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := s.DetectProject(otherRepo)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != nil {
+		t.Fatal(res.Error)
+	}
 	seedDoctorSession(t, cfg, "manual-save-engram", "engram", otherRepo)
 	seedDoctorSession(t, cfg, "manual-save-other", "other", otherRepo)
 	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "session_project_directory_mismatch")

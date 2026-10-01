@@ -3798,7 +3798,7 @@ func TestMemDoctorOmittedProjectUsesAutoDetectedScope(t *testing.T) {
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
 	t.Chdir(dir)
-	detected, err := resolveWriteProject()
+	detected, err := resolveWriteProject(newMCPTestStore(t))
 	if err != nil {
 		t.Fatalf("resolveWriteProject: %v", err)
 	}
@@ -5163,7 +5163,7 @@ func TestSessionEndFailsClosedWhenRepositoryBindingUnavailable(t *testing.T) {
 	initTestGitRepo(t, dir)
 	t.Chdir(dir)
 
-	initial, err := resolveWriteProject()
+	initial, err := resolveWriteProject(newMCPTestStore(t))
 	if err != nil {
 		t.Fatalf("create repository binding: %v", err)
 	}
@@ -6696,7 +6696,7 @@ func TestAmbiguousRecoveryReadHintKeepsSameReadTool(t *testing.T) {
 		initTestGitRepo(t, child)
 	}
 	t.Chdir(parent)
-	res, err := resolveWriteProject()
+	res, err := resolveWriteProject(newMCPTestStore(t))
 	if !errors.Is(err, project.ErrAmbiguousProject) {
 		t.Fatalf("expected ambiguity, got %v", err)
 	}
@@ -8012,7 +8012,7 @@ func TestResolveWriteProject_AutoDetects(t *testing.T) {
 	initTestGitRepo(t, dir)
 	t.Chdir(dir)
 
-	res, err := resolveWriteProject()
+	res, err := resolveWriteProject(newMCPTestStore(t))
 	if err != nil {
 		t.Fatalf("resolveWriteProject: %v", err)
 	}
@@ -8040,7 +8040,7 @@ func TestResolveWriteProject_UsesConfigFromRepoRootSubdir(t *testing.T) {
 	}
 	t.Chdir(subdir)
 
-	res, err := resolveWriteProject()
+	res, err := resolveWriteProject(newMCPTestStore(t))
 	if err != nil {
 		t.Fatalf("resolveWriteProject: %v", err)
 	}
@@ -8060,7 +8060,7 @@ func TestResolveWriteProject_InvalidConfigFailsClearly(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	_, err := resolveWriteProject()
+	_, err := resolveWriteProject(newMCPTestStore(t))
 	if !errors.Is(err, project.ErrInvalidConfig) || !strings.Contains(err.Error(), "project_name") {
 		t.Fatalf("expected clear invalid config project_name error, got %v", err)
 	}
@@ -8162,7 +8162,7 @@ func TestResolveWriteProject_AmbiguousError(t *testing.T) {
 	}
 	t.Chdir(parent)
 
-	_, err := resolveWriteProject()
+	_, err := resolveWriteProject(newMCPTestStore(t))
 	if !errors.Is(err, project.ErrAmbiguousProject) {
 		t.Errorf("expected ErrAmbiguousProject, got %v", err)
 	}
@@ -10966,7 +10966,7 @@ func TestHandleContextPersonalScopeIgnoresCWDProject(t *testing.T) {
 // handleSessionSummary writes under that project instead of falling back to cwd
 // detection. Mirrors TestProcessOverrideSaveHandlerWritesToDefaultProject for save.
 func TestSessionSummary_ProcessOverrideWritesToDefaultProject(t *testing.T) {
-	// Use a temp dir that has no git repo — without the fix, resolveWriteProject()
+	// Use a temp dir that has no git repo — without the fix, resolveWriteProject(newMCPTestStore(t))
 	// would return an error or a wrong project; with the fix it uses the override.
 	dir := t.TempDir()
 	t.Chdir(dir)

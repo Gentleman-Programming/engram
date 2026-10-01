@@ -98,10 +98,16 @@ var (
 		return mcpserver.NewStdioServer(server).Listen(ctx, stdin, stdout)
 	}
 
-	// detectProject is injectable for testing; wraps project.DetectProject.
-	detectProject = project.DetectProject
+	// Sync-status inspection must not establish a project identity.
+	detectProject = func(dir string) string {
+		res := project.DetectProjectFullWithOptions(dir, project.DetectionOptions{InspectOnly: true})
+		if res.Error != nil || res.Source == project.SourceUnboundGit {
+			return ""
+		}
+		return res.Project
+	}
 	// detectProjectFull is injectable for commands that require unambiguous identity.
-	detectProjectFull = project.DetectProjectFull
+	detectProjectFull = project.DetectProjectFullWithOptions
 
 	newTUIModel   = func(s *store.Store) tui.Model { return tui.New(s, version) }
 	newTeaProgram = tea.NewProgram
@@ -192,7 +198,9 @@ var (
 // Explicit and process-level values must already exist; cwd detection remains
 // valid before a repository has written its first memory.
 func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
-	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, func(dir string) project.DetectionResult {
+		return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+	})
 }
 
 func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOverrides bool) (string, error) {
@@ -235,10 +243,6 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 		return "", err
 	}
 	return result.Project, nil
-}
-
-func detectProjectForSync(dir string) project.DetectionResult {
-	return detectProjectFull(dir)
 }
 
 type cloudSyncStatus struct {
@@ -1426,6 +1430,23 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	// Reject malformed overrides/config and repository ambiguity before opening
+	// SQLite, without creating a Git identity during this preflight.
+	_, preflightErr := project.Resolve(project.ResolutionOptions{
+		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true})
+		},
+	})
+	if preflightErr != nil {
+		fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", preflightErr))
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
 	// The shared resolver preserves save's legitimate creation contract for an
 	// explicit name or a newly detected cwd, while rejecting malformed overrides.
 	rawProjectName := projectName
@@ -1433,7 +1454,9 @@ func cmdSave(cfg store.Config) {
 		Mode:      project.ResolutionCurrent,
 		Explicit:  projectName,
 		Directory: cwd,
-		Detect:    detectProjectFull,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
 		if resolveErr != nil {
@@ -1461,11 +1484,6 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	s, err := storeNew(cfg)
-	if err != nil {
-		fatal(err)
-	}
-	defer s.Close()
 	sessionID := "manual-save-" + projectName
 	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
@@ -2113,7 +2131,7 @@ func cmdSync(cfg store.Config) {
 	// Sync is project-scoped unless --all is explicit. Route its omitted project
 	// through the same process-override-before-cwd resolver as other CLI paths.
 	if !doAll {
-		resolved, resolveErr := resolveCLIProjectWithDetector(s, project, false, detectProjectForSync)
+		resolved, resolveErr := resolveCLIProject(s, project, false)
 		if resolveErr != nil {
 			fatal(resolveErr)
 			return
@@ -2868,7 +2886,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		res := detectProjectFull(cwd)
+		res := detectProjectFull(cwd, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
 		if res.Error != nil {
 			fatal(res.Error)
 			return
