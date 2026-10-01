@@ -599,19 +599,9 @@ func installOpenCode() (*Result, error) {
 func injectOpenCodeTUIPlugin() error {
 	configPath := openCodeTUIConfigPath()
 
-	var config map[string]json.RawMessage
-	data, err := readFileFn(configPath)
+	config, err := readOpenCodeJSONCConfig(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			config = make(map[string]json.RawMessage)
-		} else {
-			return fmt.Errorf("read config: %w", err)
-		}
-	} else {
-		cleaned := stripJSONC(data)
-		if err := json.Unmarshal(cleaned, &config); err != nil {
-			return fmt.Errorf("parse config: %w", err)
-		}
+		return err
 	}
 
 	var plugins []string
@@ -634,16 +624,7 @@ func injectOpenCodeTUIPlugin() error {
 	}
 	config["plugin"] = json.RawMessage(pluginsJSON)
 
-	output, err := jsonMarshalIndentFn(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	if err := writeFileFn(configPath, output, 0644); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	return nil
+	return writeOpenCodeJSONCConfig(configPath, config)
 }
 
 // injectOpenCodeMCP adds the engram MCP server entry to opencode.json.
@@ -653,19 +634,9 @@ func injectOpenCodeMCP() error {
 	configPath := openCodeConfigPath()
 
 	// Read existing config (or start with empty object)
-	var config map[string]json.RawMessage
-	data, err := readFileFn(configPath)
+	config, err := readOpenCodeJSONCConfig(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			config = make(map[string]json.RawMessage)
-		} else {
-			return fmt.Errorf("read config: %w", err)
-		}
-	} else {
-		cleaned := stripJSONC(data)
-		if err := json.Unmarshal(cleaned, &config); err != nil {
-			return fmt.Errorf("parse config: %w", err)
-		}
+		return err
 	}
 
 	// Parse or create the "mcp" block
@@ -686,12 +657,7 @@ func injectOpenCodeMCP() error {
 	// Add engram MCP entry (agent profile — only tools agents need).
 	// Use resolveEngramCommand() so Windows users (and headless Linux setups
 	// where PATH is not inherited) get the absolute binary path.
-	engramEntry := map[string]interface{}{
-		"type":    "local",
-		"command": []string{resolveEngramCommand(), "mcp", "--tools=agent"},
-		"enabled": true,
-	}
-	entryJSON, err := jsonMarshalFn(engramEntry)
+	entryJSON, err := jsonMarshalFn(mcpEntry(opencodeObject))
 	if err != nil {
 		return fmt.Errorf("marshal engram entry: %w", err)
 	}
@@ -704,16 +670,32 @@ func injectOpenCodeMCP() error {
 	}
 	config["mcp"] = json.RawMessage(mcpJSON)
 
-	// Write config back with indentation
+	return writeOpenCodeJSONCConfig(configPath, config)
+}
+
+func readOpenCodeJSONCConfig(path string) (map[string]json.RawMessage, error) {
+	data, err := readFileFn(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]json.RawMessage), nil
+		}
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(stripJSONC(data), &config); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	return config, nil
+}
+
+func writeOpenCodeJSONCConfig(path string, config map[string]json.RawMessage) error {
 	output, err := jsonMarshalIndentFn(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-
-	if err := writeFileFn(configPath, output, 0644); err != nil {
+	if err := writeFileFn(path, output, 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-
 	return nil
 }
 

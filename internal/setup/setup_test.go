@@ -1436,6 +1436,173 @@ func TestInstallOpenCodeBothInjectionFailuresAreNonFatal(t *testing.T) {
 	}
 }
 
+func TestOpenCodeJSONCCharacterization(t *testing.T) {
+	for _, agent := range []struct {
+		name, file, section, noop string
+		inject                    func() error
+	}{
+		{"MCP", "opencode.jsonc", "mcp", `{"mcp":{"engram":{"command":["custom"],"enabled":false}}}`, injectOpenCodeMCP},
+		{"TUI", "tui.jsonc", "plugin", `{"plugin":["existing","opencode-subagent-statusline"]}`, injectOpenCodeTUIPlugin},
+	} {
+		t.Run(agent.name, func(t *testing.T) {
+			for _, scenario := range []string{"noop", "precision", "read", "parse", "section", "entry", "block", "marshal", "write", "root null", "section null"} {
+				t.Run(scenario, func(t *testing.T) {
+					if agent.name == "TUI" && scenario == "entry" {
+						t.Skip("TUI has no entry serialization")
+					}
+					resetSetupSeams(t)
+					useIsolatedProfile(t)
+					path := filepath.Join(openCodeConfigDir(), agent.file)
+					if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+						t.Fatal(err)
+					}
+					original := `{/* keep */ "opaque":9007199254740993}`
+					switch scenario {
+					case "noop":
+						original = "// preserve bytes\n" + agent.noop
+					case "parse":
+						original = "{"
+					case "section":
+						original = `{"` + agent.section + `":42}`
+					case "root null":
+						original = "null"
+					case "section null":
+						original = `{"` + agent.section + `":null}`
+					}
+					if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+						t.Fatal(err)
+					}
+					before, err := os.Stat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cause := &os.PathError{Op: "characterize", Path: path, Err: os.ErrPermission}
+					prefix := ""
+					marshals, indents, writes, resolutions := 0, 0, 0, 0
+					osExecutable = func() (string, error) {
+						resolutions++
+						return "", errors.New("use bare fallback")
+					}
+					readFileFn = func(got string) ([]byte, error) {
+						if got != path {
+							t.Fatalf("read destination %q, want %q", got, path)
+						}
+						if scenario == "read" {
+							return nil, cause
+						}
+						return os.ReadFile(got)
+					}
+					jsonMarshalFn = func(v any) ([]byte, error) {
+						marshals++
+						if scenario == "entry" || scenario == "block" && (agent.name == "TUI" || marshals == 2) {
+							return nil, cause
+						}
+						return json.Marshal(v)
+					}
+					jsonMarshalIndentFn = func(v any, p, indent string) ([]byte, error) {
+						indents++
+						if p != "" || indent != "  " {
+							t.Fatalf("unexpected indentation %q %q", p, indent)
+						}
+						if scenario == "marshal" {
+							return nil, cause
+						}
+						return json.MarshalIndent(v, p, indent)
+					}
+					writeFileFn = func(got string, data []byte, mode os.FileMode) error {
+						writes++
+						if got != path || mode != 0644 || bytes.HasSuffix(data, []byte("\n")) {
+							t.Fatalf("unexpected persistence: %q %o %q", got, mode, data)
+						}
+						if scenario == "write" {
+							return cause
+						}
+						return os.WriteFile(got, data, mode)
+					}
+					panicked := false
+					func() {
+						defer func() { panicked = recover() != nil }()
+						err = agent.inject()
+					}()
+					wantPanic := scenario == "root null" || scenario == "section null" && agent.name == "MCP"
+					if panicked != wantPanic {
+						t.Fatalf("panic = %v, want %v", panicked, wantPanic)
+					}
+					switch scenario {
+					case "read", "parse", "marshal", "write":
+						prefix = scenario + " config: "
+					case "section":
+						prefix = "parse " + agent.section + " block: "
+					case "entry":
+						prefix = "marshal engram entry: "
+					case "block":
+						prefix = "marshal " + agent.section + " block: "
+					}
+					if prefix != "" {
+						if err == nil || !strings.HasPrefix(err.Error(), prefix) || strings.Count(err.Error(), prefix) != 1 {
+							t.Fatalf("want once-only %q, got %v", prefix, err)
+						}
+						if scenario == "parse" {
+							var typed *json.SyntaxError
+							if !errors.As(err, &typed) {
+								t.Fatalf("syntax cause lost: %v", err)
+							}
+						} else if scenario == "section" {
+							var typed *json.UnmarshalTypeError
+							if !errors.As(err, &typed) {
+								t.Fatalf("type cause lost: %v", err)
+							}
+						} else {
+							var typed *os.PathError
+							if !errors.Is(err, cause) || !errors.Is(err, os.ErrPermission) || !errors.As(err, &typed) || typed != cause {
+								t.Fatalf("wrapped cause lost: %v", err)
+							}
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					data, readErr := os.ReadFile(path)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					changed := scenario == "precision" || scenario == "section null" && agent.name == "TUI"
+					if !changed {
+						after, statErr := os.Stat(path)
+						if statErr != nil || !os.SameFile(before, after) || string(data) != original {
+							t.Fatalf("pre-persistence file changed: %q, %v", data, statErr)
+						}
+					}
+					if scenario == "noop" && (marshals != 0 || indents != 0 || writes != 0 || resolutions != 0) {
+						t.Fatalf("noop work: marshal=%d indent=%d write=%d resolve=%d", marshals, indents, writes, resolutions)
+					}
+					if scenario == "precision" {
+						var config map[string]json.RawMessage
+						if err := json.Unmarshal(data, &config); err != nil {
+							t.Fatal(err)
+						}
+						if string(config["opaque"]) != "9007199254740993" || writes != 1 {
+							t.Fatalf("opaque integer/persistence lost: %s writes=%d", data, writes)
+						}
+						if agent.name == "MCP" {
+							var servers map[string]json.RawMessage
+							if err := json.Unmarshal(config["mcp"], &servers); err != nil {
+								t.Fatal(err)
+							}
+							var compact bytes.Buffer
+							if err := json.Compact(&compact, servers["engram"]); err != nil {
+								t.Fatal(err)
+							}
+							if compact.String() != `{"command":["engram","mcp","--tools=agent"],"enabled":true,"type":"local"}` || resolutions != 1 {
+								t.Fatalf("builder payload/resolution changed: %s calls=%d", servers["engram"], resolutions)
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestInjectOpenCodeMCPPreservesExistingAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
 	home := useTestHome(t)
