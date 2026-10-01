@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
@@ -659,18 +660,18 @@ func TestClaudeShellLifecyclePersistsOnlyLiveHostWrites(t *testing.T) {
 	hosts := []string{"shell-host-one", "shell-host-two"}
 	const endedHost = "shell-host-ended"
 	production := server.New(db, 0).Handler()
-	var registrations, conflicts int
+	var registrations, conflicts atomic.Int64
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/project/current" {
 			_, _ = io.WriteString(w, `{"project":"same-worktree","project_source":"config"}`)
 			return
 		}
 		if r.URL.Path == "/sessions" && r.Method == http.MethodPost {
-			registrations++
+			registrations.Add(1)
 			capture := &statusCapture{ResponseWriter: w}
 			production.ServeHTTP(capture, r)
 			if capture.status == http.StatusConflict {
-				conflicts++
+				conflicts.Add(1)
 			}
 			return
 		}
@@ -715,8 +716,8 @@ func TestClaudeShellLifecyclePersistsOnlyLiveHostWrites(t *testing.T) {
 			t.Fatalf("SessionStart %s did not persist live session: %+v, %v", host, row, err)
 		}
 	}
-	if registrations != 2 || conflicts != 0 {
-		t.Fatalf("initial registrations = %d, conflicts = %d", registrations, conflicts)
+	if registered, conflicted := registrations.Load(), conflicts.Load(); registered != 2 || conflicted != 0 {
+		t.Fatalf("initial registrations = %d, conflicts = %d", registered, conflicted)
 	}
 	oldStdin, oldOutput := os.Stdin, claudeHookOutput
 	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
@@ -761,8 +762,8 @@ func TestClaudeShellLifecyclePersistsOnlyLiveHostWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	start(endedHost)
-	if registrations != 7 || conflicts != 1 {
-		t.Fatalf("registrations = %d, production 409s = %d", registrations, conflicts)
+	if registered, conflicted := registrations.Load(), conflicts.Load(); registered != 7 || conflicted != 1 {
+		t.Fatalf("registrations = %d, production 409s = %d", registered, conflicted)
 	}
 	decision, bound := preToolUse(endedHost, "must not persist")
 	if decision != "deny" || bound != nil || dispatches != 4 {
