@@ -313,6 +313,7 @@ func TestCmdMCPStdioFinalToolCallDrainsBeforeEOFShutdown(t *testing.T) {
 func TestCmdMCPStdioSIGTERMRunsGracefulShutdown(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
+	serveMCP = runMCPStdio
 	stubExitWithPanic(t)
 	stubMCPStdioLifecycle(t)
 	enableAutosyncEnv(t)

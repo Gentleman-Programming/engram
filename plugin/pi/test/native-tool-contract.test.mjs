@@ -3277,6 +3277,100 @@ test("shutdown stops passive capture after registration", async () => {
   }
 });
 
+test("structured system prompt options receive memory instructions and the one-shot recovery notice", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "pi" } },
+    { method: "POST", path: "/sessions", body: { status: "created" } },
+    { method: "POST", path: "/observations", body: { id: 1 } },
+    { method: "GET", path: "/context/compaction", body: { context: "exact-session context" } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-append-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const beforeAgentStart = eventHandlers.get("before_agent_start");
+      const sessionId = "append-owner";
+      await eventHandlers.get("session_start")({}, runtimeContext(sessionId));
+
+      // Pi clones these options per run, so mutating them is how text reaches every turn,
+      // including turns that skip before_agent_start; a returned systemPrompt would be forced.
+      const options = { appendSystemPrompt: "existing" };
+      const first = await beforeAgentStart(
+        { systemPrompt: "base", systemPromptOptions: options, prompt: "a sufficiently long captured prompt" },
+        runtimeContext(sessionId),
+      );
+      assert.equal(first, undefined, "no forced systemPrompt replacement is returned");
+      assert.match(options.appendSystemPrompt, /^existing\n\n## Engram Persistent Memory — Protocol/);
+      assert.ok(calls.some((call) => call.method === "POST" && call.path === "/prompts"), "prompt capture still runs");
+
+      const repeated = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: options }, runtimeContext(sessionId));
+      assert.equal(repeated, undefined);
+      assert.equal(options.appendSystemPrompt.split("## Engram Persistent Memory — Protocol").length, 2, "memory block is appended once");
+
+      const empty = {};
+      await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: empty, prompt: "hi" }, runtimeContext(sessionId));
+      assert.match(empty.appendSystemPrompt, /^## Engram Persistent Memory — Protocol/, "empty append text gets no leading separator");
+
+      await eventHandlers.get("session_compact")({ compactionEntry: { summary: "compacted summary" } }, runtimeContext(sessionId));
+      const recoveryOptions = { appendSystemPrompt: "" };
+      const recovered = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: recoveryOptions }, runtimeContext(sessionId));
+      assert.equal(recovered, undefined);
+      assert.match(recoveryOptions.appendSystemPrompt, /## Engram Persistent Memory — Protocol[\s\S]*\n\n[\s\S]*already saved/);
+      assert.equal(recoveryOptions.appendSystemPrompt.split("already saved").length, 2, "recovery notice lands once");
+
+      const consumedOptions = { appendSystemPrompt: "" };
+      const consumed = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: consumedOptions }, runtimeContext(sessionId));
+      assert.equal(consumed, undefined);
+      assert.doesNotMatch(consumedOptions.appendSystemPrompt, /already saved/, "recovery notice is consumed");
+      assert.match(consumedOptions.appendSystemPrompt, /## Engram Persistent Memory — Protocol/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("structured system prompt options suppress the replacement on early-return paths", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "pi" } },
+    { method: "POST", path: "/sessions", status: 503, body: { error: "registration rejected" } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-append-early-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("append-early");
+      ctx.hasUI = true;
+      ctx.ui.notify = () => {};
+      await eventHandlers.get("session_start")({}, ctx);
+      const options = { appendSystemPrompt: "existing" };
+      const failed = await eventHandlers.get("before_agent_start")(
+        { systemPrompt: "base", systemPromptOptions: options, prompt: "a prompt that must not follow failed registration" },
+        ctx,
+      );
+      assert.equal(failed, undefined, "failed registration returns no replacement");
+      assert.match(options.appendSystemPrompt, /^existing\n\n## Engram Persistent Memory — Protocol/);
+
+      // A null options value is not an object to mutate, so the legacy replacement stays.
+      const legacy = await eventHandlers.get("before_agent_start")({ systemPrompt: "base", systemPromptOptions: null }, ctx);
+      assert.match(legacy.systemPrompt, /^base\n\n## Engram Persistent Memory — Protocol/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("compaction timeout does not repeat its archive and queues verification guidance", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

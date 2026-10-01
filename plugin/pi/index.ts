@@ -227,6 +227,14 @@ type MemoryToolContext = SessionContext;
 interface AgentStartEvent {
   systemPrompt: string;
   prompt?: string;
+  // Present on Pi versions that expose structured, per-run cloned prompt options.
+  systemPromptOptions?: { appendSystemPrompt?: string } | null;
+}
+
+function appendPromptSection(options: { appendSystemPrompt?: string }, section: string): void {
+  const existing = options.appendSystemPrompt ?? "";
+  if (existing.includes(section)) return;
+  options.appendSystemPrompt = existing.length > 0 ? `${existing}\n\n${section}` : section;
 }
 
 interface ToolEndEvent {
@@ -824,6 +832,9 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 
     try {
       proc = spawn(ENGRAM_BIN, ["serve"], {
+        // Opt into cloud autosync like the Claude Code and Codex launchers; the
+        // server skips it on its own when no cloud server or token is configured.
+        env: { ...process.env, ENGRAM_CLOUD_AUTOSYNC: "1" },
         windowsHide: true,
         detached: true,
         stdio: "ignore",
@@ -1984,24 +1995,30 @@ export default function registerEngram(pi: ExtensionAPI) {
     const sessionId = observeRuntimeSessionID(ctx);
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     const epoch = state?.epoch;
+    // A returned systemPrompt becomes a forced prompt that turns skipping this hook never see
+    // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
+    const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
+    if (options) appendPromptSection(options, MEMORY_INSTRUCTIONS);
     if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
-      systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
+      if (options) appendPromptSection(options, pendingRecoveryNotice.content);
+      else systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
       pendingRecoveryNotice = undefined;
     }
+    const result = options ? undefined : { systemPrompt };
     // The mem_* tools stay registered whether or not startup succeeded, so the agent still
     // needs the memory protocol; only the server-backed work below is skipped.
-    if (!(await initOnceForHook(ctx.cwd))) return { systemPrompt };
+    if (!(await initOnceForHook(ctx.cwd))) return result;
     await refreshProjectDetection(ctx.cwd);
 
     const finalContent = event.prompt?.trim();
     if ((projectDetectionPending || projectResolutionError) && sessionId && finalContent && finalContent.length > 10) {
-      return { systemPrompt };
+      return result;
     }
     if (sessionId && finalContent && finalContent.length > 10) {
       let effectiveID: string;
       try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
-      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return { systemPrompt }; }
-      if (knownSessions.has(`\u0000closing:${effectiveID}`)) return { systemPrompt };
+      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return result; }
+      if (knownSessions.has(`\u0000closing:${effectiveID}`)) return result;
       const body: PromptBody = {
         session_id: effectiveID,
         // Redact before truncating: a <private> block straddling the limit
@@ -2009,11 +2026,11 @@ export default function registerEngram(pi: ExtensionAPI) {
         content: truncate(stripPrivateTags(finalContent), 2000),
         project,
       };
-      if (state && (state.closing || state.epoch !== epoch)) return { systemPrompt };
+      if (state && (state.closing || state.epoch !== epoch)) return result;
       await bestEffortEngramFetch("/prompts", { method: "POST", body }, ctx);
     }
 
-    return { systemPrompt };
+    return result;
   });
 
   pi.on("tool_execution_end", async (event: ToolEndEvent, ctx: SessionContext) => {
