@@ -24,3 +24,6 @@ Close the single CodeRabbit actionable finding on PR #1452: `MergeProjectsByName
 ## Tasks
 
 - [x] T1 — Reserved-inbox destination guard in `MergeProjectsByName` with RED→GREEN tests. Route: delegated (writer; store.go + store_test.go). Commit: `aa0bff5`.
+
+Follow-up: CodeRabbit re-review (23:45) confirmed the guard and asked for
+an exact-match error assertion. Tightened in `2a0eda0`; focused test green, gofmt/vet clean.
