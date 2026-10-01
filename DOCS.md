@@ -790,6 +790,36 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 - `engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below
 
+Cloud enrollment, unenrollment, and explicit cloud sync project inputs decode one
+layer of URL path encoding by default (for example, `my%20project` selects
+`my project`; `my%2520project` selects `my%20project`). Use `--literal-project`
+to skip that decoding when percent sequences are part of the stored name.
+Project normalization still applies. Literal plus signs remain plus signs in
+both modes; malformed percent escapes are accepted only in literal mode.
+
+```bash
+engram cloud enroll --literal-project 'my%20project'
+engram cloud status --project 'my%20project'
+engram sync --cloud --literal-project --project 'my%20project'
+engram sync --cloud --status --literal-project --project 'my%20project'
+engram sync --cloud --import --literal-project --project 'my%20project'
+engram cloud unenroll 'my%20project' --literal-project
+```
+
+`cloud status --project` already accepts literal names and needs no modifier.
+For sync, the modifier requires an explicit non-empty `--project` and cloud
+mode (`--cloud` or `ENGRAM_CLOUD_SYNC=true`); it cannot be combined with `--all`.
+For enroll/unenroll it may appear before or after the single project argument.
+Use `--` before positional names beginning with a hyphen (or named `help`),
+for example `engram cloud enroll --literal-project -- -project` and
+`engram cloud unenroll --literal-project -- -project`. Flags must precede `--`.
+For sync, address leading-hyphen names with `--project=-project`, for example
+`engram sync --cloud --status --literal-project --project=-project`.
+This is input selection only: existing enrollments are not migrated or merged,
+and unenrolling a literal name leaves a separately enrolled decoded name intact.
+Detection retains percent-encoded project names; no identity migration occurs.
+Copy the detected name with `--literal-project` to select that same stored bucket.
+
 `engram sync --cloud --import --project <project>` runs in the foreground and prints plain-text import progress that is safe for non-interactive logs. It emits an initial snapshot, bounded event-count-throttled updates, and a final `100%` / `0 pending` snapshot before the normal import summary. Each snapshot includes local, remote, and pending chunk counts; percentage is based on the pending work captured at import start, so retries do not inflate completion.
 
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
