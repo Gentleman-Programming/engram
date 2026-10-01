@@ -12,7 +12,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > - `engram setup ...` installs MCP/plugin integrations only; it does **not** auto-run `engram cloud config/enroll/upgrade`.
 > - Cloud onboarding contract remains CLI-first until script-level cloud flows are explicitly implemented.
 
-If a generic MCP client retains an absolute Engram executable path after you move or replace the binary, run `engram doctor` to identify the affected client, then run `engram setup <agent>` with the new binary to refresh its Engram registration. Doctor is read-only and does not flag bare custom commands or missing registrations. Setup preserves unrelated MCP server entries.
+If a generic MCP client retains an absolute Engram executable path after you move or replace the binary, run `engram doctor` to identify the affected client, then run `engram setup <agent>` with the new binary to refresh its Engram registration (Pi is an exception: its Engram MCP entry is user-owned and must be updated manually). Doctor is read-only and does not flag bare custom commands or missing registrations. Setup preserves unrelated MCP server entries.
 
 ## Quick Reference
 
@@ -35,7 +35,7 @@ If a generic MCP client retains an absolute Engram executable path after you mov
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` configures the
-> supported MCP registration and Memory Protocol idempotently. Claude Code is the
+> supported integration and Memory Protocol idempotently. Pi uses native tools instead of registering Engram MCP; Claude Code is the
 > exception to direct config writes: its CLI owns user-scope MCP registration. The
 > per-agent sections below describe each integration's authoritative owner and
 > manual equivalent.
@@ -56,13 +56,15 @@ marketplace plugin, it warns without changing the selected mode; session-only
 
 ## Pi
 
-Install Engram's Pi package, the MCP adapter, and Pi MCP config:
+Install Engram's Pi-native package:
 
 ```bash
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.16` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved unless their absolute command path no longer exists; setup repairs those entries with the current Engram command. Other filesystem errors leave the entry unchanged.
+`engram setup pi` runs `pi install npm:gentle-engram@0.2.0`, then ensures Pi settings contain that package, replacing earlier `0.1.8`, `0.1.11`, `0.1.12`, `0.1.14`, `0.1.15`, and `0.1.16` pins when present. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. Earlier `0.1.16` `pi-engram init` still registers Engram MCP and must not be used for native-only setup; version `0.2.0` init does not create or change `mcp.json` and warns about an existing `mcpServers.engram` entry. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
+
+Pi 0.99.0 and later ship built-in MCP (`mcp.json`, `/mcp`, `pi mcp add`); an installed `pi-mcp-adapter` replaces that built-in support, so neither `engram setup pi` nor `pi-engram init` adds it. An existing adapter entry in `settings.json` is left untouched.
 
 For versioned mise installations, setup selects the shim directory from an absolute `MISE_SHIMS_DIR`, the effective absolute `shims_dir` reported by `mise settings get shims_dir` (including global config), or the mise data directory's default `shims` folder, in that order. Invalid settings output or an unavailable mise CLI leaves the default directory as the fallback. If the shim is missing from the selected directory, the caller uses its existing executable/PATH fallback policy; setup never writes mise warnings as the Engram MCP command.
 
@@ -71,9 +73,7 @@ When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also
 Manual equivalent:
 
 ```bash
-pi install npm:gentle-engram@0.1.16
-pi install npm:pi-mcp-adapter
-pi-engram init
+pi install npm:gentle-engram@0.2.0
 ```
 
 Restart Pi after installation.
@@ -81,7 +81,7 @@ Restart Pi after installation.
 The package has two paths:
 
 - **HTTP event capture**: the Pi extension sends prompts, summaries, passive task learnings, and compact Pi-native `mem_*` tool calls to `engram serve`.
-- **MCP gateway**: `pi-mcp-adapter` exposes Engram's MCP surface by launching `engram mcp --tools=agent` and is also used by other Pi MCP integrations such as Notion.
+- **Other MCP servers**: use Pi's built-in MCP (`mcp.json`) for servers such as Notion. Deliberate standalone/direct MCP clients can still launch `engram mcp` separately; do not register it in Pi for native-only agent writes. Earlier `0.1.16` init still registers Engram MCP; `0.2.0` init does not create or change `mcp.json`.
 
 Use an existing Engram HTTP server:
 
@@ -102,7 +102,7 @@ Use a custom Engram binary for MCP tools and local auto-start:
 ENGRAM_BIN=/path/to/engram pi
 ```
 
-If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi with `spawn engram ENOENT`.
+If the binary is missing, Pi-native local server startup reports an error without crashing Pi.
 
 ### Project auto-detection (important)
 
@@ -229,6 +229,12 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 
 **Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`, `mem_get_observation`) accept an optional `project` override validated against known projects. Omit it to use the process override or cwd detection. For `mem_get_observation`, `project` selects response-envelope context only; the observation is still retrieved by ID without ownership filtering.
 
+`mem_get_observation` retains its read-only stored-owner fallback: only when cwd detection is ambiguous and the observation has a nonblank stored project does it use that project (`project_source: "stored_project"`, `project_path: ""`). This identifies the record's owner, not a verified repository path, and does not bypass malformed or unknown explicit/process overrides.
+
+`mem_update` and `mem_delete` require caller-supplied `expected_project`, including for personal/global scopes. Never fetch the target to fill a missing assertion. The normalized stored owner is checked atomically with the mutation. Native `mem_update` also retains known-current/process ownership checks and rejects ambiguous cwd rather than using a stored-owner write fallback. The assertion is not a recovery token or permission to bypass context rules; existing recovery and session ownership protections remain unchanged.
+
+This is an intentional compatibility break for clients omitting `expected_project`. The in-repository Pi schema and forwarding require it; external gentle-engram relays need separate adaptation.
+
 ---
 
 ## OpenCode
@@ -329,6 +335,8 @@ claude mcp add --transport stdio --scope user engram -- <absolute-engram-path> m
 ```
 
 Claude rejects an existing user-scope server with the same name rather than overwriting it. To remove the registration later, run `claude mcp remove engram --scope user`.
+
+With the Claude plugin, the host `PreToolUse` hook denies Engram write/session tools when host-session registration cannot be confirmed (including an explicitly malformed `ENGRAM_PORT`); it does not silently use the default port. Direct/manual MCP calls do not pass through this hook and retain the generic MCP handler's behavior, including writes to an ended session ID. Disabling or bypassing hooks, or a host hook timeout, cannot provide this hook-level guarantee.
 
 With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
 
@@ -436,27 +444,26 @@ Recommended: one command to set up MCP + compaction recovery instructions:
 engram setup codex
 ```
 
-`engram setup codex` now does four things:
+`engram setup codex` does four things:
 
 - Registers `[mcp_servers.engram]` in the active Codex config (`$CODEX_HOME/config.toml` when `CODEX_HOME` is absolute, otherwise `~/.codex/config.toml`; on Windows the default is `%USERPROFILE%\.codex\config.toml`) and pins the current absolute executable path
-- Writes `engram-instructions.md` beside the active config with the Engram Memory Protocol
-- Writes `engram-compact-prompt.md` beside the active config and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
-- Best-effort installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`
+- Writes `engram-instructions.md` and `engram-compact-prompt.md` beside the active config as informational copies of the Memory Protocol
+- Installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`. The plugin hooks inject the Memory Protocol additively, so this is how Codex actually receives it. If the CLI is missing or either command fails, setup returns an error, not complete success. The MCP config and informational instruction files remain written, but plugin activation is incomplete. Ensure `codex` is in `PATH`, resolve the reported command error, and run both commands above manually (or rerun `engram setup codex`), then restart Codex. Do not wire the informational files into prompt override keys as a workaround.
+- Removes legacy `model_instructions_file` / `experimental_compact_prompt_file` keys if a previous Engram version wrote them
 
-> `engram setup codex` writes the Memory Protocol and compaction recovery prompt beside the active Codex config. No additional configuration needed.
+> **Do not set `model_instructions_file` in Codex.** Unlike most instruction mechanisms, that key *replaces* Codex's built-in system instructions instead of adding to them. Pointing it at `engram-instructions.md` wipes Codex's own base prompt (`You are Codex, ...`) and degrades the agent. Earlier Engram versions did this automatically; current versions strip the keys instead. If you set them manually, you are deliberately opting into overriding Codex's base prompt.
 
 On Windows, setup also writes an executable marker at the first line of `config.toml`; the native `UserPromptSubmit` hook reads it from the same active config. If `engram.exe` moves, rerun `engram setup codex` before restarting Codex to refresh both pins.
 
-The Codex plugin passes the exact runtime `session_id` into model context only after the server confirms registration. Startup, resume, clear, and post-compaction hooks instruct the model to reuse that binding for memory writes and retain it across compaction. Its `PreToolUse` hook also rewrites supported Engram MCP write/session-tool arguments to the host-provided session ID (`id` for session start/end), preserving other arguments; malformed calls are denied when the hook runs. Codex requires `permissionDecision: "allow"` with `updatedInput` for successful MCP rewrites. This hook is best-effort: Codex may skip hooks when untrusted or timed out, and specialized tool paths may bypass it. It does not protect bare MCP or other agents. If SessionStart registration fails, its model instructions do not supply a confirmed ID; the model must not invent one. When PreToolUse does run, it still binds supported writes to the host's runtime ID, but the server rejects that explicit ID if it has not been registered. A skipped hook does not provide this binding. Post-compaction uses the same explicit `ENGRAM_URL` (or local `ENGRAM_PORT`) as startup.
+The Codex plugin passes the exact runtime `session_id` into model context only after the server confirms registration. On confirmed registration, startup, resume, clear, and post-compaction hooks instruct the model to reuse that binding for memory writes and retain it across compaction. On failed or unconfirmed registration, those hooks withhold the active memory-tool protocol while preserving the handoff warning, any fetched context, and the compacted summary for the current task. Stop agent-attributed memory writes until the host hook re-registers the same runtime ID on startup or resume; do not invent an ID or retry MCP writes without `session_id`.
+
+When Codex `PreToolUse` runs for a classified Engram MCP write/session tool, it confirms the current project for the host cwd and requires a matching successful registration before allowing and binding the host ID (`id` for session start/end). Registration retains shared ownership, including cross-project writes. Supported namespaced calls such as `mcp__plugin_engram_engram__mem_save` are bound too; other arguments are preserved. Failed or ended registration and malformed calls are denied without updated input, and an explicitly malformed `ENGRAM_PORT` never falls back to the default. Successful rewrites require `permissionDecision: "allow"` with `updatedInput`. This hook is best-effort: skipped, bypassed, or timed-out hooks provide no guarantee, and no claim is made for every Codex prompt pathway. Direct/manual MCP calls remain independent of the hook and retain generic MCP behavior (including ended-session writes); independent CLI/manual saves cannot substitute for agent session attribution. Post-compaction uses the same explicit `ENGRAM_URL` (or local `ENGRAM_PORT`) as startup.
 
 Manual alternative: add to your active Codex `config.toml` (Windows default: `%USERPROFILE%\.codex\config.toml`). On Windows, run `engram setup codex` to pin the MCP and native hook executable to its current absolute path:
 
 If `CODEX_HOME` is set, adjust the instruction-file paths below to that directory.
 
 ```toml
-model_instructions_file = "~/.codex/engram-instructions.md"
-experimental_compact_prompt_file = "~/.codex/engram-compact-prompt.md"
-
 [mcp_servers.engram]
 command = "engram"
 args = ["mcp"]

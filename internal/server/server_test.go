@@ -21,10 +21,141 @@ import (
 	"testing"
 	"time"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	_ "modernc.org/sqlite"
 )
+
+func TestCreateSessionResume(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	post := func(body string, code int, id, from string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		if rec.Code != code {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		var ack map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+			t.Fatal(err)
+		}
+		if code == 201 && (ack["id"] != id || ack["status"] != "created" || ack["resumed_from"] != from) {
+			t.Fatalf("ack: %v", ack)
+		}
+		if code == 409 && ack["code"] != "session_already_ended" {
+			t.Fatal(ack)
+		}
+	}
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root", "")
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root", "")
+	if err := st.EndSession("root", ""); err != nil {
+		t.Fatal(err)
+	}
+	post(`{"id":"root","project":"engram"}`, 409, "", "")
+	post(`{"id":"root","project":"engram","resume":false}`, 409, "", "")
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root:resume:2", "root")
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root:resume:2", "root")
+	if err := st.EndSession("root:resume:2", ""); err != nil {
+		t.Fatal(err)
+	}
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root:resume:3", "root")
+	post(`{"id":"root","project":"engram","resume":"yes"}`, 400, "", "")
+}
+
+func TestCreateSessionResumeConflict(t *testing.T) {
+	for _, mode := range []string{store.SessionOwnershipShared, store.SessionOwnershipProjectOwned} {
+		t.Run(mode, func(t *testing.T) {
+			st := newServerTestStore(t)
+			srv := New(st, 0)
+			if err := st.StartSession("root", "engram", "/work"); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.EndSession("root", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.StartSessionWithOwnershipMode("root:resume:2", "foreign", "/work", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"id":"root","project":"engram","resume":true,"ownership_mode":%q}`, mode))))
+			var ack map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != 409 || ack["code"] != "session_project_conflict" || ack["session_id"] != "root:resume:2" || ack["owner_project"] != "foreign" || ack["requested_project"] != "engram" {
+				t.Fatalf("conflict: %d %v", rec.Code, ack)
+			}
+			if _, err := st.GetSession("root:resume:3"); err == nil {
+				t.Fatal("advanced past conflict")
+			}
+		})
+	}
+}
+
+func TestCreateSessionResumeEndedRootProjectConflict(t *testing.T) {
+	for _, mode := range []string{store.SessionOwnershipProjectOwned, store.SessionOwnershipShared} {
+		for _, continuation := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/continuation=%v", mode, continuation), func(t *testing.T) {
+				st := newServerTestStore(t)
+				if err := st.StartSessionWithOwnershipMode("root", "project-a", "/work", store.SessionOwnershipProjectOwned); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.EndSession("root", "done"); err != nil {
+					t.Fatal(err)
+				}
+				if continuation {
+					if err := st.StartSessionWithOwnershipMode("root:resume:2", "project-b", "/work", mode); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rec := httptest.NewRecorder()
+				New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"id":"root","project":"project-b","resume":true,"ownership_mode":%q}`, mode))))
+				var ack map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+					t.Fatal(err)
+				}
+				if rec.Code != http.StatusConflict || ack["code"] != "session_project_conflict" || ack["session_id"] != "root" || ack["owner_project"] != "project-a" || ack["requested_project"] != "project-b" {
+					t.Fatalf("root conflict: %d %v", rec.Code, ack)
+				}
+				if !continuation {
+					if _, err := st.GetSession("root:resume:2"); err == nil {
+						t.Fatal("created continuation despite root conflict")
+					}
+				}
+				if _, err := st.GetSession("root:resume:3"); err == nil {
+					t.Fatal("advanced past root conflict")
+				}
+			})
+		}
+	}
+}
+
+func TestCreateSessionResumeConcurrent(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	if err := st.StartSession("root", "engram", "/work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EndSession("root", ""); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan bool, 16)
+	for i := 0; i < 16; i++ {
+		go func() {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"root","project":"engram","resume":true}`)))
+			var ack map[string]string
+			err := json.Unmarshal(rec.Body.Bytes(), &ack)
+			done <- err == nil && rec.Code == 201 && ack["id"] == "root:resume:2" && ack["resumed_from"] == "root"
+		}()
+	}
+	for i := 0; i < 16; i++ {
+		if !<-done {
+			t.Error("concurrent request did not converge")
+		}
+	}
+}
 
 type stubListener struct{}
 
@@ -589,32 +720,50 @@ func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 	for _, tc := range []struct {
 		id        string
 		directory string
+		omit      bool
 	}{
 		{id: "nested-trailing", directory: nested + string(os.PathSeparator)},
 		{id: "nested-relative", directory: filepath.Join("nested", "child")},
-		{id: "omitted-directory"},
+		{id: "omitted-directory", omit: true},
+		{id: "empty-directory"},
+		{id: "whitespace-directory", directory: " \t\n "},
 	} {
-		t.Run(tc.id, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			body := fmt.Sprintf(`{"id":%q,"project":"engram"`, tc.id)
-			if tc.directory != "" {
-				body += fmt.Sprintf(`,"directory":%q`, tc.directory)
-			}
-			body += `}`
-			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
-			h.ServeHTTP(rec, req)
-			if rec.Code != http.StatusCreated {
-				t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
-			}
+		for _, resume := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/resume=%t", tc.id, resume), func(t *testing.T) {
+				id := fmt.Sprintf("%s-%t", tc.id, resume)
+				rec := httptest.NewRecorder()
+				body := fmt.Sprintf(`{"id":%q,"project":"engram","resume":%t}`, id, resume)
+				if !tc.omit {
+					body = strings.TrimSuffix(body, "}") + fmt.Sprintf(`,"directory":%q}`, tc.directory)
+				}
+				req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusCreated {
+					t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
+				}
 
-			session, err := st.GetSession(tc.id)
-			if err != nil {
-				t.Fatalf("get session: %v", err)
-			}
-			if want := projectpkg.RuntimeWorktreeDirectory(root); session.Directory != want {
-				t.Fatalf("stored directory = %q, want worktree root %q", session.Directory, want)
-			}
-		})
+				session, err := st.GetSession(id)
+				if err != nil {
+					t.Fatalf("get session: %v", err)
+				}
+				// Ordinary registrations retain runtime cwd normalization, including blank input.
+				want := projectpkg.RuntimeWorktreeDirectory(root)
+				if session.Directory != want {
+					t.Errorf("stored directory = %q, want %q", session.Directory, want)
+				}
+				candidates, err := st.ActiveRuntimeSessions("engram", root)
+				if err != nil {
+					t.Fatalf("active runtime sessions: %v", err)
+				}
+				found := false
+				for _, candidate := range candidates {
+					found = found || candidate == id
+				}
+				if found != (want != "") {
+					t.Errorf("runtime candidate = %t, want %t (candidates: %v)", found, want != "", candidates)
+				}
+			})
+		}
 	}
 }
 
@@ -1535,7 +1684,7 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 		t.Fatalf("expected 400 for invalid observation id, got %d", getBadIDRec.Code)
 	}
 
-	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999", strings.NewReader(`{"title":"updated"}`))
+	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999?expected_project=engram", strings.NewReader(`{"title":"updated"}`))
 	updateNotFoundReq.Header.Set("Content-Type", "application/json")
 	updateNotFoundRec := httptest.NewRecorder()
 	h.ServeHTTP(updateNotFoundRec, updateNotFoundReq)
@@ -1619,8 +1768,8 @@ func TestWriteHandlersRejectWhitespaceOnlyRequiredFields(t *testing.T) {
 
 	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":" \t\n ","content":"Invalid observation","project":"engram"}`, store.ErrObservationTitleRequired)
 	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":"Valid title","content":" \t\n ","project":"engram"}`, store.ErrObservationContentRequired)
-	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"title":" \t\n "}`, store.ErrObservationTitleRequired)
-	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"content":" \t\n "}`, store.ErrObservationContentRequired)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", observationID), `{"title":" \t\n "}`, store.ErrObservationTitleRequired)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", observationID), `{"content":" \t\n "}`, store.ErrObservationContentRequired)
 	assertBadRequest(http.MethodPost, "/prompts", `{"session_id":"s-whitespace","content":" \t\n ","project":"engram"}`, store.ErrPromptContentRequired)
 
 	var observationCount, promptCount int
@@ -2085,6 +2234,85 @@ func TestSyncStatusResolvesProjectSelectors(t *testing.T) {
 	assertCode(request("/sync/status?all_projects=true"), http.StatusBadRequest, "unsupported_project_scope")
 	if provider.calls != calls {
 		t.Fatalf("ambiguous or unsupported selectors must not consult provider: calls=%d want %d", provider.calls, calls)
+	}
+}
+
+func TestPromptInboxIdentityHTTP(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	var writes atomic.Int32
+	srv.SetOnWrite(func() { writes.Add(1) })
+	if err := st.CreateSession("inbox-http", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	request := func(body string) (int, string) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(body)))
+		return rec.Code, rec.Body.String()
+	}
+	payload := `{"session_id":"inbox-http","project":"engram","content":"same","source_inbox_id":"a"}`
+	code, first := request(payload)
+	if code != http.StatusCreated || writes.Load() != 1 {
+		t.Fatalf("first: %d %s writes=%d", code, first, writes.Load())
+	}
+	var created struct {
+		ID     int64  `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(first), &created); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if created.ID <= 0 || created.Status != "saved" {
+		t.Fatalf("first response: id=%d status=%q body=%s", created.ID, created.Status, first)
+	}
+	code, replay := request(payload)
+	if code != http.StatusCreated || replay != first || writes.Load() != 1 {
+		t.Fatalf("replay: %d %s writes=%d", code, replay, writes.Load())
+	}
+	code, rejected := request(`{"session_id":"inbox-http","project":"other","content":"same","source_inbox_id":"a"}`)
+	var rejection map[string]string
+	if err := json.Unmarshal([]byte(rejected), &rejection); err != nil {
+		t.Fatalf("decode wrong-project response: %v", err)
+	}
+	if code != http.StatusBadRequest || rejection["code"] != "session_project_mismatch" ||
+		rejection["error"] != "session project does not match requested project" || writes.Load() != 1 {
+		t.Fatalf("wrong project: %d %s writes=%d", code, rejected, writes.Load())
+	}
+}
+
+func TestPromptInboxDeletedReplayHTTP(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	if err := st.CreateSession("deleted-http", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddPrompt(store.AddPromptParams{SessionID: "deleted-http", Project: "engram", Content: "same", SourceInboxID: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeletePrompt(id); err != nil {
+		t.Fatal(err)
+	}
+	var writes atomic.Int32
+	srv.SetOnWrite(func() { writes.Add(1) })
+	var before, after int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"deleted-http","project":"engram","content":"same","source_inbox_id":"one"}`)))
+	if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), `"id"`) || writes.Load() != 0 {
+		t.Fatalf("replay: status=%d body=%s writes=%d", rec.Code, rec.Body.String(), writes.Load())
+	}
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&after); err != nil || after != before {
+		t.Fatalf("mutations %d -> %d: %v", before, after, err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"deleted-http","project":"engram","content":"same","source_inbox_id":"two"}`)))
+	if rec.Code != http.StatusCreated || writes.Load() != 1 {
+		t.Fatalf("new ID: status=%d body=%s writes=%d", rec.Code, rec.Body.String(), writes.Load())
 	}
 }
 
@@ -4018,6 +4246,71 @@ func TestHandleAddObservationBlankTitleNotMaskedBySessionError(t *testing.T) {
 	}
 }
 
+func TestObservationExpectedProjectPreservesImmutableBodyProject(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("immutable-owner", "owner", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "immutable-owner", Project: "owner", Type: "note", Title: "original", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=owner", id), strings.NewReader(`{"project":"other","content":"changed"}`)))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), store.ErrObservationProjectImmutable.Error()) {
+		t.Fatalf("immutable project response = %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.GetObservation(id)
+	if err != nil || after.Project == nil || *after.Project != "owner" || after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+		t.Fatalf("immutable rejection changed record: %#v, %v", after, err)
+	}
+}
+
+func TestObservationExpectedProject(t *testing.T) {
+	for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+		for _, tc := range []struct {
+			name, query string
+			status      int
+		}{
+			{"missing", "", http.StatusBadRequest},
+			{"blank", "?expected_project=%20", http.StatusBadRequest},
+			{"invalid", "?expected_project=../owner", http.StatusBadRequest},
+			{"mismatch", "?expected_project=other", http.StatusConflict},
+		} {
+			t.Run(method+"/"+tc.name, func(t *testing.T) {
+				st := newServerTestStore(t)
+				if err := st.CreateSession("expected-owner", "owner", t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
+				id, err := st.AddObservation(store.AddObservationParams{SessionID: "expected-owner", Project: "owner", Type: "note", Title: "original", Content: "original"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := st.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := httptest.NewRecorder()
+				New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(method, fmt.Sprintf("/observations/%d%s", id, tc.query), strings.NewReader(`{"content":"changed"}`)))
+				if rec.Code != tc.status {
+					t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+				}
+				after, err := st.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+					t.Fatal("rejected mutation changed observation")
+				}
+			})
+		}
+	}
+}
+
 func TestHandleUpdateObservationFindReplace(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
@@ -4031,7 +4324,7 @@ func TestHandleUpdateObservationFindReplace(t *testing.T) {
 	}
 
 	replace := httptest.NewRecorder()
-	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
+	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
 	if replace.Code != http.StatusOK {
 		t.Fatalf("replacement PATCH = %d: %s", replace.Code, replace.Body.String())
 	}
@@ -4045,14 +4338,14 @@ func TestHandleUpdateObservationFindReplace(t *testing.T) {
 
 	for _, body := range []string{`{"find":"new"}`, `{"find":"new","replace":"old","content":"other"}`} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(body)))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("invalid replacement PATCH %s = %d: %s", body, rec.Code, rec.Body.String())
 		}
 	}
 
 	missing := httptest.NewRecorder()
-	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"find":"old","replace":"new"}`)))
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999?expected_project=engram", strings.NewReader(`{"find":"old","replace":"new"}`)))
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing replacement PATCH = %d: %s", missing.Code, missing.Body.String())
 	}
@@ -4102,7 +4395,7 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 	for _, title := range []string{"", " \t\n "} {
 		title := title
 		t.Run("blank title", func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
+			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -4132,7 +4425,7 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 		t.Fatalf("expected no onWrite calls for rejected updates, got %d", writeCount.Load())
 	}
 
-	req := httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"title":"updated"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/observations/999999?expected_project=engram", strings.NewReader(`{"title":"updated"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {

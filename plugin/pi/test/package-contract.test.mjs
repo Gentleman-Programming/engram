@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,7 +22,10 @@ const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8"
 
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15"];
+test("next Pi package release is 0.2.0", () => {
+	assert.equal(pkg.version, "0.2.0");
+});
+const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RELEASE_CONTRACT_PATH = fileURLToPath(new URL("./release-contract.mjs", import.meta.url));
@@ -71,6 +74,20 @@ function peerRangeAllows(range, version) {
 	if (minor !== floorMinor) return minor > floorMinor;
 	return patch >= floorPatch;
 }
+
+// Regression contract for #1557: TypeBox is provided by the Pi host.
+test("typebox is not a hard or optional dependency", () => {
+	assert.equal(pkg.dependencies?.typebox, undefined, "the Pi host must provide typebox, not a hard dependency");
+	assert.equal(pkg.optionalDependencies?.typebox, undefined, "optional dependencies would still install a separate typebox copy");
+});
+
+test("typebox is declared as a wildcard peer dependency", () => {
+	assert.equal(pkg.peerDependencies?.typebox, "*", "typebox must accept the Pi host's version without a package-owned constraint");
+});
+
+test("typebox peer dependency is optional", () => {
+	assert.equal(pkg.peerDependenciesMeta?.typebox?.optional, true, "npm must not auto-install a separate typebox peer");
+});
 
 test("pi-tui is not a hard dependency", () => {
 	assert.equal(
@@ -129,7 +146,7 @@ test("pi-engram init adds the current package and help names its install command
 	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
 	try {
 		const output = runCli(agentDir, "init");
-		assert.deepEqual(readPackages(agentDir), [MCP_ADAPTER_PACKAGE, PACKAGE_NAME]);
+		assert.deepEqual(readPackages(agentDir), [PACKAGE_NAME]);
 		assert.match(output, new RegExp(`Added ${PACKAGE_NAME} in settings\\.json`));
 		assert.match(runCli(agentDir), new RegExp(`pi install ${PACKAGE_NAME}`));
 	} finally {
@@ -137,41 +154,63 @@ test("pi-engram init adds the current package and help names its install command
 	}
 });
 
-test("pi-engram init launcher treats blank ENGRAM_BIN as unset without changing its MCP shape", () => {
+test("pi-engram init does not register Engram MCP on a fresh profile", () => {
 	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
 	try {
-		runCli(agentDir, "init");
-		const server = JSON.parse(readFileSync(join(agentDir, "mcp.json"), "utf8")).mcpServers.engram;
-		assert.deepEqual(server, mcpTemplate.mcpServers.engram, "the published template must match the generated launcher");
-		assert.deepEqual(
-			{ command: server.command, lifecycle: server.lifecycle, directTools: server.directTools },
-			{ command: "node", lifecycle: "lazy", directTools: false },
-		);
-		assert.equal(server.args.length, 2);
-		assert.equal(server.args[0], "-e");
-		assert.match(server.args[1], /spawn\(bin, \['mcp', '--tools=agent'\], \{ stdio: 'inherit' \}\)/);
-
-		const launcherPrefix = server.args[1].slice(0, server.args[1].indexOf("const child = spawn"));
-		assert.notEqual(launcherPrefix, server.args[1], "launcher must select a binary before spawning it");
-		const selectBin = (engramBin) => Function("require", "process", `${launcherPrefix}; return bin;`)(
-			(moduleName) => {
-				assert.equal(moduleName, "node:child_process");
-				return { spawn() {} };
-			},
-			{ env: engramBin === undefined ? {} : { ENGRAM_BIN: engramBin } },
-		);
-
-		assert.equal(selectBin(undefined), "engram", "an absent ENGRAM_BIN falls back to engram");
-		assert.equal(selectBin(""), "engram", "an empty ENGRAM_BIN falls back to engram");
-		assert.equal(selectBin(" \t "), "engram", "a whitespace-only ENGRAM_BIN falls back to engram");
-		assert.equal(
-			selectBin("  /custom/engram  "),
-			"  /custom/engram  ",
-			"a nonblank ENGRAM_BIN is preserved exactly rather than trimmed",
-		);
+		const output = runCli(agentDir, "init", "--force");
+		assert.equal(existsSync(join(agentDir, "mcp.json")), false);
+		assert.deepEqual(readPackages(agentDir), [PACKAGE_NAME]);
+		assert.ok(output.includes("Pi-native mem_* tools"));
+		const help = runCli(agentDir, "--help");
+		assert.match(help, /settings\.json/);
+		assert.doesNotMatch(help, /Creates Pi's Engram MCP config/);
+		assert.doesNotMatch(help, /pi-mcp-adapter/);
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });
 	}
+});
+
+// Pi >= 0.99.0 ships built-in MCP; an installed pi-mcp-adapter replaces it, so init
+// must never add the adapter. An existing entry is left alone for the user to manage.
+test("pi-engram init does not add pi-mcp-adapter and keeps an existing entry", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
+	try {
+		const output = runCli(agentDir, "init");
+		assert.ok(!readPackages(agentDir).includes(MCP_ADAPTER_PACKAGE));
+		assert.doesNotMatch(output, /pi-mcp-adapter/);
+
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [MCP_ADAPTER_PACKAGE, PACKAGE_NAME] }));
+		runCli(agentDir, "init");
+		assert.deepEqual(readPackages(agentDir), [MCP_ADAPTER_PACKAGE, PACKAGE_NAME]);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("published legacy Pi MCP template retains its opt-in launcher and ENGRAM_BIN fallback", () => {
+	const server = mcpTemplate.mcpServers.engram;
+	assert.deepEqual(
+		{ command: server.command, lifecycle: server.lifecycle, directTools: server.directTools },
+		{ command: "node", lifecycle: "lazy", directTools: false },
+	);
+	assert.equal(server.args.length, 2);
+	assert.equal(server.args[0], "-e");
+	assert.match(server.args[1], /spawn\(bin, \['mcp', '--tools=agent'\], \{ stdio: 'inherit' \}\)/);
+
+	const launcherPrefix = server.args[1].slice(0, server.args[1].indexOf("const child = spawn"));
+	assert.notEqual(launcherPrefix, server.args[1], "launcher must select a binary before spawning it");
+	const selectBin = (engramBin) => Function("require", "process", `${launcherPrefix}; return bin;`)(
+		(moduleName) => {
+			assert.equal(moduleName, "node:child_process");
+			return { spawn() {} };
+		},
+		{ env: engramBin === undefined ? {} : { ENGRAM_BIN: engramBin } },
+	);
+
+	assert.equal(selectBin(undefined), "engram", "an absent ENGRAM_BIN falls back to engram");
+	assert.equal(selectBin(""), "engram", "an empty ENGRAM_BIN falls back to engram");
+	assert.equal(selectBin(" \t "), "engram", "a whitespace-only ENGRAM_BIN falls back to engram");
+	assert.equal(selectBin("  /custom/engram  "), "  /custom/engram  ", "a nonblank ENGRAM_BIN is preserved exactly");
 });
 
 test("pi-engram init replaces legacy package entries without disturbing other packages", () => {
@@ -187,6 +226,15 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 		const output = runCli(agentDir, "init");
 		assert.deepEqual(readPackages(agentDir), ["npm:existing", PACKAGE_NAME, MCP_ADAPTER_PACKAGE]);
 		assert.match(output, new RegExp(`Added ${PACKAGE_NAME} in settings\\.json`));
+		assert.equal(readFileSync(join(agentDir, "mcp.json"), "utf8"), originalMcp);
+		const warning = spawnSync(process.execPath, [CLI_PATH, "init", "--force"], {
+			encoding: "utf8",
+			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+		});
+		assert.equal(warning.status, 0, warning.stderr);
+		for (const expected of [join(agentDir, "mcp.json"), "mcpServers.engram", "remove", "restart/reload", "not guaranteed"]) {
+			assert.ok(warning.stderr.includes(expected), warning.stderr);
+		}
 		assert.equal(readFileSync(join(agentDir, "mcp.json"), "utf8"), originalMcp);
 
 		const settingsAfterMigration = readFileSync(join(agentDir, "settings.json"), "utf8");

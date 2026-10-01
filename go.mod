@@ -1,4 +1,4 @@
-module github.com/Gentleman-Programming/engram/v2
+module github.com/Gentleman-Programming/engram/v3
 
 go 1.25.10
 

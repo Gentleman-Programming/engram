@@ -12,7 +12,12 @@ async function scenario(headersFirst, delayMs = 3500) {
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
     if (path === "/project/current") { response.end(JSON.stringify({ project: "pi" })); return; }
-    if (path === "/sessions") { response.end(JSON.stringify({ status: "created" })); return; }
+    if (path === "/sessions") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      response.end(JSON.stringify({ id: JSON.parse(body).id, status: "created" }));
+      return;
+    }
     if (path === "/observations") {
       requests++;
       for await (const _chunk of request) { /* Ensure the server receives the complete write. */ }

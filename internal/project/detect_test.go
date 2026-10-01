@@ -60,6 +60,28 @@ func TestExtractRepoName(t *testing.T) {
 			want: "my-project",
 		},
 		{
+			// Preserve the spelling used by existing detected project buckets.
+			name: "Azure DevOps HTTPS remote with encoded space",
+			url:  "https://org.visualstudio.com/My%20Project/_git/My%20Project",
+			want: "My%20Project",
+		},
+		{
+			name: "Azure DevOps SSH v3 remote with encoded space",
+			url:  "git@ssh.dev.azure.com:v3/org/My%20Project/Repo/My%20Project",
+			want: "My%20Project",
+		},
+		{
+			// Detection does not decode even one layer.
+			name: "Double-encoded name stays literal",
+			url:  "https://host/group/my%2520repo.git",
+			want: "my%2520repo",
+		},
+		{
+			name: "Invalid percent escape stays raw",
+			url:  "https://host/user/100%.git",
+			want: "100%",
+		},
+		{
 			name: "Empty URL returns empty",
 			url:  "",
 			want: "",
@@ -140,6 +162,40 @@ func TestDetectProject_GitRemote_HTTPS(t *testing.T) {
 	got := DetectProject(dir)
 	if got != "engram" {
 		t.Errorf("DetectProject HTTPS remote = %q; want %q", got, "engram")
+	}
+}
+
+// Detection preserves encoded names; cloud selection can opt into literal input.
+func TestDetectProject_GitRemote_PercentEncoded(t *testing.T) {
+	dir := t.TempDir()
+	initGit(t, dir)
+
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"https://org.visualstudio.com/My%20Project/_git/My%20Project")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	got := DetectProject(dir)
+	if got != "my%20project" {
+		t.Errorf("DetectProject percent-encoded remote = %q; want %q", got, "my%20project")
+	}
+}
+
+func TestDetectProjectFull_LiteralRemoteNames(t *testing.T) {
+	for _, remote := range []string{"https://host/team/my%2520repo.git", "https://host/team/my%2Frepo.git", "https://host/team/my%5Crepo.git", filepath.ToSlash(filepath.Join(t.TempDir(), "my%20repo.git"))} {
+		t.Run(remote, func(t *testing.T) {
+			dir := t.TempDir()
+			initGit(t, dir)
+			if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
+				t.Fatalf("remote: %v: %s", err, out)
+			}
+			want := strings.ToLower(strings.TrimSuffix(filepath.Base(remote), ".git"))
+			res := DetectProjectFull(dir)
+			if res.Error != nil || res.Source != SourceGitRemote || res.Project != want {
+				t.Fatalf("detection = %+v, want literal %q", res, want)
+			}
+		})
 	}
 }
 
@@ -1147,6 +1203,60 @@ func TestDetectProject_AmbiguousEmpty(t *testing.T) {
 	got := DetectProject(parent)
 	if got == "" {
 		t.Error("DetectProject must not return empty string on ambiguous cwd")
+	}
+}
+
+func TestDetectProjectFull_AmbiguousChildrenStableOrder(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		if err := os.MkdirAll(filepath.Join(parent, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		entries []os.DirEntry
+	}{
+		{name: "forward", entries: entries},
+		{name: "reversed", entries: []os.DirEntry{entries[1], entries[0]}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldReadDir, oldNow := childScanReadDir, childScanNow
+			t.Cleanup(func() {
+				childScanReadDir = oldReadDir
+				childScanNow = oldNow
+			})
+			base := time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC)
+			childScanNow = func() time.Time { return base }
+			reads := 0
+			childScanReadDir = func(_ *os.File, count int) ([]os.DirEntry, error) {
+				if count != 1 {
+					t.Fatalf("ReadDir count = %d, want 1", count)
+				}
+				if reads == len(tc.entries) {
+					t.Fatal("child scan continued after the second repository")
+					return nil, io.EOF
+				}
+				entry := tc.entries[reads]
+				reads++
+				return []os.DirEntry{entry}, nil
+			}
+
+			res := DetectProjectFull(parent)
+			if !errors.Is(res.Error, ErrAmbiguousProject) {
+				t.Fatalf("Error = %v, want ErrAmbiguousProject", res.Error)
+			}
+			if want := []string{"repo-a", "repo-b"}; !reflect.DeepEqual(res.AvailableProjects, want) {
+				t.Fatalf("AvailableProjects = %q, want %q", res.AvailableProjects, want)
+			}
+			if reads != 2 {
+				t.Fatalf("ReadDir calls = %d, want 2", reads)
+			}
+		})
 	}
 }
 

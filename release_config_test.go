@@ -51,6 +51,25 @@ func TestReleaseChecksModuleMetadataWithoutMutatingTaggedSources(t *testing.T) {
 	}
 }
 
+// modulePath must carry the major-version suffix of the release line so that
+// `go install <modulePath>/cmd/engram@latest` resolves the tagged release.
+const modulePath = "github.com/Gentleman-Programming/engram/v3"
+
+func TestModulePathMatchesReleaseMajorVersion(t *testing.T) {
+	root := releaseConfigRepoRoot(t)
+	goMod := strings.ReplaceAll(releaseConfigFile(t, filepath.Join(root, "go.mod")), "\r\n", "\n")
+	firstLine, _, _ := strings.Cut(goMod, "\n")
+	if want := "module " + modulePath; firstLine != want {
+		t.Fatalf("go.mod module line = %q, want %q", firstLine, want)
+	}
+
+	install := "go install " + modulePath + "/cmd/engram@latest"
+	installation := releaseConfigFile(t, filepath.Join(root, "docs", "INSTALLATION.md"))
+	if strings.Count(installation, install) < 2 {
+		t.Fatalf("docs/INSTALLATION.md must document %q for both Windows and macOS/Linux", install)
+	}
+}
+
 // releaseWorkflowGoreleaserJob extracts this repository's one top-level job.
 // It deliberately is not a YAML parser: the exact job text is the contract.
 func releaseWorkflowGoreleaserJob(workflow string) (string, bool) {
