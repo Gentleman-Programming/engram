@@ -1542,17 +1542,18 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 						if err == nil || !strings.HasPrefix(err.Error(), prefix) || strings.Count(err.Error(), prefix) != 1 {
 							t.Fatalf("want once-only %q, got %v", prefix, err)
 						}
-						if scenario == "parse" {
+						switch scenario {
+						case "parse":
 							var typed *json.SyntaxError
 							if !errors.As(err, &typed) {
 								t.Fatalf("syntax cause lost: %v", err)
 							}
-						} else if scenario == "section" {
+						case "section":
 							var typed *json.UnmarshalTypeError
 							if !errors.As(err, &typed) {
 								t.Fatalf("type cause lost: %v", err)
 							}
-						} else {
+						default:
 							var typed *os.PathError
 							if !errors.Is(err, cause) || !errors.Is(err, os.ErrPermission) || !errors.As(err, &typed) || typed != cause {
 								t.Fatalf("wrapped cause lost: %v", err)
