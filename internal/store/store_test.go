@@ -13591,18 +13591,28 @@ func TestMergeProjectsStillRejectsNormalizationDivergentPair(t *testing.T) {
 	}
 }
 
-// Regression pin for the explicit by-name merge: MergeExplicitProjectVariants
-// must keep refusing pairs whose spellings have different lengths, such as
-// acmeapi (7) → acme-api (8), which is not a corresponding '-'/'_' swap.
-func TestExplicitMergeProjectsRejectsLengthMismatchPair(t *testing.T) {
+// Regression pin after #1457 landed on main: MergeExplicitProjectVariants
+// admits pairs whose spellings differ only by inserted or removed '-'/'_'
+// separators, so the #1296 pair acmeapi (7) → acme-api (8) merges instead of
+// being rejected. Two contracts are pinned: the separator-deletion pair
+// moves the seeded records, and a length mismatch that is NOT separator-only
+// (acmeapix → acme-api) still rejects with the normalization error.
+func TestExplicitMergeProjectsAdmitsSeparatorDeletionPair(t *testing.T) {
 	s := newTestStore(t)
 	seedLegacyMergeRecords(t, s, "acmeapi")
-	if _, err := s.MergeExplicitProjectVariants([]string{"acmeapi"}, "acme-api"); err == nil || !strings.Contains(err.Error(), "must normalize") {
-		t.Fatalf("MergeExplicitProjectVariants error = %v, want length-mismatch rejection for acmeapi → acme-api", err)
+	result, err := s.MergeExplicitProjectVariants([]string{"acmeapi"}, "acme-api")
+	if err != nil {
+		t.Fatalf("MergeExplicitProjectVariants: %v", err)
+	}
+	if result.ObservationsUpdated != 1 || result.SessionsUpdated != 1 {
+		t.Fatalf("merge result = %+v, want 1 observation and 1 session moved", result)
 	}
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("source observations after rejection = %d, err %v", count, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("source observations after merge = %d, err %v", count, err)
+	}
+	if _, err := s.MergeExplicitProjectVariants([]string{"acmeapix"}, "acme-api"); err == nil || !strings.Contains(err.Error(), "must normalize") {
+		t.Fatalf("MergeExplicitProjectVariants error = %v, want normalization rejection for acmeapix → acme-api", err)
 	}
 }
 
