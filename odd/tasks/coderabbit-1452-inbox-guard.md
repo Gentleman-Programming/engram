@@ -23,4 +23,4 @@ Close the single CodeRabbit actionable finding on PR #1452: `MergeProjectsByName
 
 ## Tasks
 
-- [ ] T1 — Reserved-inbox destination guard in `MergeProjectsByName` with RED→GREEN tests. Route: delegated (writer; store.go + store_test.go).
+- [x] T1 — Reserved-inbox destination guard in `MergeProjectsByName` with RED→GREEN tests. Route: delegated (writer; store.go + store_test.go). Commit: `aa0bff5`.
