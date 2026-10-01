@@ -29,7 +29,7 @@ func TestLiteralDetectedProjectPreservesStoredHistoryWithoutBinding(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.CreateSession("legacy", "my%20project", dir); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestLiteralCloudProjectTargetIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.EnrollProject("my%20project"); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestLiteralCloudProjectTargetIsolation(t *testing.T) {
 			return
 		}
 		queries <- r.URL.Query().Get("project")
-		fmt.Fprint(w, `{"version":1,"chunks":[{"id":"literal-chunk"}]}`)
+		_, _ = fmt.Fprint(w, `{"version":1,"chunks":[{"id":"literal-chunk"}]}`)
 	}))
 	defer server.Close()
 	t.Setenv("ENGRAM_CLOUD_SERVER", server.URL)
@@ -149,7 +149,7 @@ func TestLiteralCloudProjectCommands(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			if err := s.EnrollProject("my project"); err != nil {
 				t.Fatal(err)
 			}
@@ -251,7 +251,7 @@ func TestCloudCLIProjectInputUsesSinglePathUnescape(t *testing.T) {
 			if err != nil {
 				t.Fatalf("store.New: %v", err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			enrolled, err := s.IsProjectEnrolled(tt.want)
 			if err != nil {
 				t.Fatalf("IsProjectEnrolled(%q): %v", tt.want, err)
