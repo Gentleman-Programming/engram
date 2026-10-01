@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // ─── Phase Constants ─────────────────────────────────────────────────────────
@@ -490,9 +490,7 @@ func (m *Manager) safeRun(ctx context.Context) {
 			stack := string(debug.Stack())
 			log.Printf("[autosync] PANIC in cycle: %v\n%s", r, stack)
 			m.mu.Lock()
-			m.status.Phase = PhaseBackoff
-			m.status.ReasonCode = "internal_error"
-			m.status.ReasonMessage = fmt.Sprintf("panic: %v", r)
+			m.setCycleStatusLocked(PhaseBackoff, "internal_error", fmt.Sprintf("panic: %v", r))
 			m.status.ConsecutiveFailures++
 			bu := time.Now().Add(m.computeBackoff(m.status.ConsecutiveFailures))
 			m.status.BackoffUntil = &bu
@@ -950,10 +948,21 @@ func (m *Manager) pullWithSyncState(ctx context.Context, preserveSyncState bool)
 
 // ─── State Tracking ──────────────────────────────────────────────────────────
 
+// setCycleStatusLocked keeps the upgrade pause authoritative until resume.
+// Callers hold m.mu; admitted cycles still record and persist their outcomes.
+func (m *Manager) setCycleStatusLocked(phase, reasonCode, reasonMessage string) {
+	if m.disabled {
+		return
+	}
+	m.status.Phase = phase
+	m.status.ReasonCode = reasonCode
+	m.status.ReasonMessage = reasonMessage
+}
+
 func (m *Manager) setPhase(phase string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.status.Phase = phase
+	m.setCycleStatusLocked(phase, m.status.ReasonCode, m.status.ReasonMessage)
 }
 
 // recordFailureWithReason records a failure with an explicit reason code.
@@ -964,18 +973,16 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	failures := m.status.ConsecutiveFailures + 1
 	m.status.ConsecutiveFailures = failures
 	m.status.LastError = msg
-	m.status.ReasonCode = reasonCode
-	m.status.ReasonMessage = msg
 
 	backoff := m.computeBackoff(failures)
 	bu := time.Now().Add(backoff)
 	m.status.BackoffUntil = &bu
 
+	phase := PhasePullFailed
 	if m.status.Phase == PhasePushing {
-		m.status.Phase = PhasePushFailed
-	} else {
-		m.status.Phase = PhasePullFailed
+		phase = PhasePushFailed
 	}
+	m.setCycleStatusLocked(phase, reasonCode, msg)
 	m.mu.Unlock()
 
 	if reasonAware, ok := m.store.(reasonAwareFailureStore); ok {
@@ -987,10 +994,8 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 
 func (m *Manager) recordBlocked(msg, reasonCode string) {
 	m.mu.Lock()
-	m.status.Phase = PhasePushFailed
+	m.setCycleStatusLocked(PhasePushFailed, reasonCode, msg)
 	m.status.LastError = msg
-	m.status.ReasonCode = reasonCode
-	m.status.ReasonMessage = msg
 	m.status.BackoffUntil = nil
 	m.mu.Unlock()
 
@@ -1004,13 +1009,11 @@ func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) error {
 
 	now := time.Now()
 	m.mu.Lock()
-	m.status.Phase = PhasePushFailed
+	m.setCycleStatusLocked(PhasePushFailed, reasonCode, msg)
 	m.status.ConsecutiveFailures = 0
 	m.status.LastError = msg
 	m.status.BackoffUntil = nil
 	m.status.LastSyncAt = &now
-	m.status.ReasonCode = reasonCode
-	m.status.ReasonMessage = msg
 	m.mu.Unlock()
 	return nil
 }
@@ -1018,13 +1021,11 @@ func (m *Manager) recordBlockedAfterSuccess(msg, reasonCode string) error {
 func (m *Manager) recordSuccess() {
 	now := time.Now()
 	m.mu.Lock()
-	m.status.Phase = PhaseHealthy
+	m.setCycleStatusLocked(PhaseHealthy, "", "")
 	m.status.ConsecutiveFailures = 0
 	m.status.LastError = ""
 	m.status.BackoffUntil = nil
 	m.status.LastSyncAt = &now
-	m.status.ReasonCode = ""
-	m.status.ReasonMessage = ""
 	m.mu.Unlock()
 
 	_ = m.store.MarkSyncHealthy(m.cfg.TargetKey)

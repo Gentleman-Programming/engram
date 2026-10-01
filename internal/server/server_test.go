@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -720,32 +720,50 @@ func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 	for _, tc := range []struct {
 		id        string
 		directory string
+		omit      bool
 	}{
 		{id: "nested-trailing", directory: nested + string(os.PathSeparator)},
 		{id: "nested-relative", directory: filepath.Join("nested", "child")},
-		{id: "omitted-directory"},
+		{id: "omitted-directory", omit: true},
+		{id: "empty-directory"},
+		{id: "whitespace-directory", directory: " \t\n "},
 	} {
-		t.Run(tc.id, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			body := fmt.Sprintf(`{"id":%q,"project":"engram"`, tc.id)
-			if tc.directory != "" {
-				body += fmt.Sprintf(`,"directory":%q`, tc.directory)
-			}
-			body += `}`
-			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
-			h.ServeHTTP(rec, req)
-			if rec.Code != http.StatusCreated {
-				t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
-			}
+		for _, resume := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/resume=%t", tc.id, resume), func(t *testing.T) {
+				id := fmt.Sprintf("%s-%t", tc.id, resume)
+				rec := httptest.NewRecorder()
+				body := fmt.Sprintf(`{"id":%q,"project":"engram","resume":%t}`, id, resume)
+				if !tc.omit {
+					body = strings.TrimSuffix(body, "}") + fmt.Sprintf(`,"directory":%q}`, tc.directory)
+				}
+				req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusCreated {
+					t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
+				}
 
-			session, err := st.GetSession(tc.id)
-			if err != nil {
-				t.Fatalf("get session: %v", err)
-			}
-			if want := projectpkg.RuntimeWorktreeDirectory(root); session.Directory != want {
-				t.Fatalf("stored directory = %q, want worktree root %q", session.Directory, want)
-			}
-		})
+				session, err := st.GetSession(id)
+				if err != nil {
+					t.Fatalf("get session: %v", err)
+				}
+				// Ordinary registrations retain runtime cwd normalization, including blank input.
+				want := projectpkg.RuntimeWorktreeDirectory(root)
+				if session.Directory != want {
+					t.Errorf("stored directory = %q, want %q", session.Directory, want)
+				}
+				candidates, err := st.ActiveRuntimeSessions("engram", root)
+				if err != nil {
+					t.Fatalf("active runtime sessions: %v", err)
+				}
+				found := false
+				for _, candidate := range candidates {
+					found = found || candidate == id
+				}
+				if found != (want != "") {
+					t.Errorf("runtime candidate = %t, want %t (candidates: %v)", found, want != "", candidates)
+				}
+			})
+		}
 	}
 }
 

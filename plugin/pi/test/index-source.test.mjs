@@ -100,7 +100,7 @@ function buildEngramFetchForTest({
   const body = extractFunctionBody("engramFetchResult", "{\n  const method")
     .replace("let res: Response;", "let res;")
     .replace("let data: unknown = null;", "let data = null;")
-    .replace("return engramFetchResult<TResponse>(path, opts);", "return engramFetchResult(path, opts);")
+    .replace("return engramFetchResult<TResponse>(path, opts, false);", "return engramFetchResult(path, opts, false);")
     .replace("return { data: data as TResponse };", "return { data };");
   const factory = new Function(
     "fetch",
@@ -147,7 +147,7 @@ function buildEngramFetchForTest({
     function unreachableMessage() {
       return "gentle-engram could not reach the Engram HTTP server";
     }
-    const engramFetchResult = async function engramFetchResult(path, opts = {}) {
+    const engramFetchResult = async function engramFetchResult(path, opts = {}, allowGuardedRecovery = true) {
       ${body}
     };
     const engramFetch = async (path, opts = {}) => (await engramFetchResult(path, opts)).data;
@@ -465,6 +465,7 @@ function buildEnsureSessionForTest(engramFetch) {
 function buildProjectDetectionBoundaryForTest() {
   const safeProjectBody = extractFunctionBody("isSafeDetectedProject", "{\n  const candidate");
   const applyBody = extractFunctionBody("applyDetectedProject", "{\n  if (!detected)");
+  const messageBody = extractFunctionBody("projectResolutionMessage", "{\n  const choices");
   const requireBody = extractFunctionBody("requireResolvedProject", "{\n  if (projectResolutionError)");
   const factory = new Function(`
     let project = "fallback-project";
@@ -475,6 +476,9 @@ function buildProjectDetectionBoundaryForTest() {
     }
     function applyDetectedProject(detected) {
       ${applyBody}
+    }
+    function projectResolutionMessage(detected, listChoices = false) {
+      ${messageBody}
     }
     function requireResolvedProject() {
       ${requireBody}
@@ -524,7 +528,7 @@ test("optional Engram environment values treat blank strings as unset without re
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
   assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)[\s\S]*session_id: summarySessionId[\s\S]*project: activeProject/);
-  assert.match(source, /const registeredSessionForWrite = async \(sessionProject: string\) => registerEffectiveSession\(ctx, sessionProject, appendEntry, fetch\)/);
+  assert.match(source, /const registeredSessionForWrite = async \(sessionProject: string\) => \{[\s\S]*: registerEffectiveSession\(ctx, sessionProject, appendEntry, fetch\);/);
   assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist\)/);
 });
 

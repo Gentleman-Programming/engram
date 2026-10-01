@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // ─── Fakes ───────────────────────────────────────────────────────────────────
@@ -1879,32 +1879,141 @@ func TestManagerRunPanicRecovery(t *testing.T) {
 
 // ─── StopForUpgrade / ResumeAfterUpgrade (REQ-208) ───────────────────────────
 
+type upgradeBarrierTransport struct {
+	CloudTransport
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	panicOnPull bool
+	pullCalls   int32
+}
+
+func (tr *upgradeBarrierTransport) PullMutations(since int64, limit int) (*PullMutationsResponse, error) {
+	atomic.AddInt32(&tr.pullCalls, 1)
+	tr.once.Do(func() { close(tr.entered) })
+	<-tr.release
+	if tr.panicOnPull {
+		panic("upgrade pull panic")
+	}
+	return tr.CloudTransport.PullMutations(since, limit)
+}
+
+func waitUpgradeCycle(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upgrade cycle watchdog expired")
+	}
+}
+
+func assertUpgradePaused(t *testing.T, mgr *Manager, paused Status) {
+	t.Helper()
+	got := mgr.Status()
+	if got.Phase != PhaseDisabled || got.ReasonCode != paused.ReasonCode || got.ReasonMessage != paused.ReasonMessage {
+		t.Errorf("pause overwritten: phase=%q reason=%q message=%q; want disabled reason=%q message=%q",
+			got.Phase, got.ReasonCode, got.ReasonMessage, paused.ReasonCode, paused.ReasonMessage)
+	}
+}
+
 func TestManagerStopForUpgradeHaltsCycle(t *testing.T) {
-	ls := newFakeLocalStore()
-	tr := newFakeTransport()
-	cfg := DefaultConfig()
-	cfg.DebounceDuration = 10 * time.Millisecond
-	cfg.PollInterval = 10 * time.Millisecond
-
-	mgr := New(ls, tr, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
-	time.Sleep(20 * time.Millisecond)
-
-	if err := mgr.StopForUpgrade("test-project"); err != nil {
-		t.Fatalf("StopForUpgrade: %v", err)
+	for _, outcome := range []string{"success", "failure", "blocked-after-success", "panic"} {
+		t.Run(outcome, func(t *testing.T) {
+			ls := newFakeLocalStore()
+			base := newFakeTransport()
+			if outcome == "failure" {
+				base.pullErr = errors.New("upgrade pull failure")
+			}
+			if outcome == "blocked-after-success" {
+				ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{{Project: "unenrolled", Count: 1}}
+			}
+			tr := &upgradeBarrierTransport{CloudTransport: base, entered: make(chan struct{}), release: make(chan struct{}), panicOnPull: outcome == "panic"}
+			mgr := New(ls, tr, DefaultConfig())
+			done := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(tr.release) }) }
+			go func() { defer close(done); mgr.safeRun(context.Background()) }()
+			t.Cleanup(func() { release(); waitUpgradeCycle(t, done) })
+			waitUpgradeCycle(t, tr.entered)
+			if err := mgr.StopForUpgrade("test-project"); err != nil {
+				t.Fatal(err)
+			}
+			paused := mgr.Status()
+			if paused.Phase != PhaseDisabled || paused.ReasonCode != constants.ReasonPaused || !strings.Contains(paused.ReasonMessage, "test-project") {
+				t.Fatalf("unexpected pause: %+v", paused)
+			}
+			for _, phase := range []string{PhasePushing, PhasePulling, PhaseBackoff} {
+				mgr.setPhase(phase)
+				assertUpgradePaused(t, mgr, paused)
+			}
+			release()
+			waitUpgradeCycle(t, done)
+			assertUpgradePaused(t, mgr, paused)
+			switch outcome {
+			case "success":
+				if ls.healthyCalls != 1 {
+					t.Error("admitted success was not persisted")
+				}
+			case "failure":
+				if ls.failureReason != "transport_failed" {
+					t.Error("admitted failure was not persisted")
+				}
+			case "blocked-after-success":
+				if ls.blockedAfterSuccessCalls != 1 {
+					t.Error("admitted blocked outcome was not persisted")
+				}
+			case "panic":
+				if mgr.Status().ConsecutiveFailures != 1 {
+					t.Error("panic failure count was lost")
+				}
+			}
+			before := atomic.LoadInt32(&tr.pullCalls)
+			mgr.safeRun(context.Background())
+			if atomic.LoadInt32(&tr.pullCalls) != before {
+				t.Error("disabled cycle reached transport")
+			}
+			assertUpgradePaused(t, mgr, paused)
+			ls.mu.Lock()
+			if ls.leaseOwner != mgr.cfg.LeaseOwner {
+				t.Error("admitted cycle's lease was released")
+			}
+			ls.mu.Unlock()
+			if outcome == "success" {
+				if err := mgr.ResumeAfterUpgrade("test-project"); err != nil {
+					t.Fatal(err)
+				}
+				mgr.safeRun(context.Background())
+				if atomic.LoadInt32(&tr.pullCalls) != before+1 || mgr.Status().Phase != PhaseHealthy {
+					t.Error("resume did not permit transport after admitted cycle completed")
+				}
+			}
+		})
 	}
-	if mgr.Status().Phase != PhaseDisabled {
-		t.Fatalf("expected PhaseDisabled, got %q", mgr.Status().Phase)
-	}
+}
 
-	before := atomic.LoadInt32(&tr.pullCalls)
-	time.Sleep(50 * time.Millisecond)
-	after := atomic.LoadInt32(&tr.pullCalls)
-
-	if after > before+1 {
-		t.Fatalf("cycles continued after StopForUpgrade: before=%d after=%d", before, after)
+func TestManagerStopForUpgradeTransitions(t *testing.T) {
+	for _, transition := range []struct {
+		name  string
+		apply func(*Manager)
+	}{
+		{"pushing", func(m *Manager) { m.setPhase(PhasePushing) }},
+		{"pulling", func(m *Manager) { m.setPhase(PhasePulling) }},
+		{"backoff", func(m *Manager) { m.setPhase(PhaseBackoff) }},
+		{"blocked", func(m *Manager) { m.recordBlocked("blocked", "policy_forbidden") }},
+	} {
+		t.Run(transition.name, func(t *testing.T) {
+			ls := newFakeLocalStore()
+			mgr := New(ls, newFakeTransport(), DefaultConfig())
+			if err := mgr.StopForUpgrade("test-project"); err != nil {
+				t.Fatal(err)
+			}
+			paused := mgr.Status()
+			transition.apply(mgr)
+			assertUpgradePaused(t, mgr, paused)
+			if transition.name == "blocked" && ls.blockedReason != "policy_forbidden" {
+				t.Error("blocked outcome was not persisted")
+			}
+		})
 	}
 }
 
@@ -1912,27 +2021,30 @@ func TestManagerStopForUpgradeRetainsLease(t *testing.T) {
 	ls := newFakeLocalStore()
 	tr := newFakeTransport()
 	mgr := New(ls, tr, DefaultConfig())
+	mgr.cycle(context.Background())
+	if ls.leaseOwner != mgr.cfg.LeaseOwner {
+		t.Fatal("cycle did not acquire lease")
+	}
 
 	if err := mgr.StopForUpgrade("test-project"); err != nil {
 		t.Fatalf("StopForUpgrade: %v", err)
 	}
-	// Invariant: StopForUpgrade must not call ReleaseSyncLease.
-	// The fakeLocalStore tracks leaseOwner; if it was never acquired, that's fine.
-	_ = mgr.Status()
+	if ls.leaseOwner != mgr.cfg.LeaseOwner {
+		t.Fatalf("lease owner = %q, want %q", ls.leaseOwner, mgr.cfg.LeaseOwner)
+	}
+	mgr.mu.RLock()
+	held := mgr.leaseHeld
+	mgr.mu.RUnlock()
+	if !held {
+		t.Fatal("manager lost its acquired lease")
+	}
 }
 
 func TestManagerResumeAfterUpgrade(t *testing.T) {
 	ls := newFakeLocalStore()
 	tr := newFakeTransport()
-	cfg := DefaultConfig()
-	cfg.DebounceDuration = 10 * time.Millisecond
-	cfg.PollInterval = 20 * time.Millisecond
-
-	mgr := New(ls, tr, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
-	time.Sleep(20 * time.Millisecond)
+	mgr := New(ls, tr, DefaultConfig())
+	mgr.cycle(context.Background())
 
 	if err := mgr.StopForUpgrade("test-project"); err != nil {
 		t.Fatalf("StopForUpgrade: %v", err)
@@ -1947,15 +2059,18 @@ func TestManagerResumeAfterUpgrade(t *testing.T) {
 		t.Fatal("phase should not be disabled after ResumeAfterUpgrade")
 	}
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&tr.pullCalls) > beforeResume {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if st := mgr.Status(); st.Phase != PhaseIdle || st.ReasonCode != "" || st.ReasonMessage != "" {
+		t.Fatalf("resume did not clear pause: %+v", st)
 	}
-	t.Fatalf("no cycles ran after ResumeAfterUpgrade (before=%d after=%d)",
-		beforeResume, atomic.LoadInt32(&tr.pullCalls))
+	select {
+	case <-mgr.dirtyCh:
+	default:
+		t.Fatal("resume did not signal work")
+	}
+	mgr.cycle(context.Background())
+	if atomic.LoadInt32(&tr.pullCalls) != beforeResume+1 || mgr.Status().Phase != PhaseHealthy {
+		t.Fatal("resume did not permit a healthy cycle")
+	}
 }
 
 func TestManagerResumeWithoutStop(t *testing.T) {

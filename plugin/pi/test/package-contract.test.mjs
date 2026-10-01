@@ -22,8 +22,8 @@ const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8"
 
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-test("next Pi package release is 0.1.17", () => {
-	assert.equal(pkg.version, "0.1.17");
+test("next Pi package release is 0.2.0", () => {
+	assert.equal(pkg.version, "0.2.0");
 });
 const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";

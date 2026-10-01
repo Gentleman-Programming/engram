@@ -11,11 +11,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
-	"github.com/Gentleman-Programming/engram/v2/internal/server"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/server"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func claudeHookStdin(t *testing.T, input string, closed bool) *os.File {
@@ -638,6 +639,179 @@ func TestClaudeAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 	if _, err := db.GetSession("foreign-model-session"); err == nil {
 		t.Fatal("foreign model session was created")
 	}
+}
+
+func TestClaudeShellLifecyclePersistsOnlyLiveHostWrites(t *testing.T) {
+	if testing.Short() {
+		t.Skip("invokes the Claude SessionStart bash hook")
+	}
+	for _, binary := range []string{"bash", "jq", "curl"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			t.Skipf("requires %s: %v", binary, err)
+		}
+	}
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const project = "same-worktree"
+	hosts := []string{"shell-host-one", "shell-host-two"}
+	const endedHost = "shell-host-ended"
+	production := server.New(db, 0).Handler()
+	var registrations, conflicts atomic.Int64
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"same-worktree","project_source":"config"}`)
+			return
+		}
+		if r.URL.Path == "/sessions" && r.Method == http.MethodPost {
+			registrations.Add(1)
+			capture := &statusCapture{ResponseWriter: w}
+			production.ServeHTTP(capture, r)
+			if capture.status == http.StatusConflict {
+				conflicts.Add(1)
+			}
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	stubDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(stubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/bin/sh\nif [ \"$#\" -eq 3 ] && [ \"$1\" = setup ] && [ \"$2\" = claude-code ] && [ \"$3\" = --mcp-only ]; then exit 0; fi\nexit 99\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "engram"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	t.Setenv("HOME", root)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("ENGRAM_DATA_DIR", filepath.Join(root, "data"))
+	t.Setenv("ENGRAM_SOCKET", "")
+	t.Setenv("ENGRAM_PROJECT", "")
+	t.Setenv("ENGRAM_PORT", "")
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	packageDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func(host string) {
+		t.Helper()
+		input, _ := json.Marshal(map[string]string{"session_id": host, "cwd": root})
+		cmd := exec.Command("bash", filepath.Join(packageDir, "..", "..", "plugin", "claude-code", "scripts", "session-start.sh"))
+		cmd.Dir = root
+		cmd.Stdin = strings.NewReader(string(input))
+		cmd.Env = os.Environ()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("SessionStart %s: %v: %s", host, err, out)
+		}
+	}
+	for _, host := range hosts {
+		start(host)
+		row, err := db.GetSession(host)
+		if err != nil || row.EndedAt != nil {
+			t.Fatalf("SessionStart %s did not persist live session: %+v, %v", host, row, err)
+		}
+	}
+	if registered, conflicted := registrations.Load(), conflicts.Load(); registered != 2 || conflicted != 0 {
+		t.Fatalf("initial registrations = %d, conflicts = %d", registered, conflicted)
+	}
+	oldStdin, oldOutput := os.Stdin, claudeHookOutput
+	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
+	mcpServer := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: project}, nil)
+	dispatches := 0
+	preToolUse := func(host, title string) (string, map[string]any) {
+		t.Helper()
+		request, _ := json.Marshal(map[string]any{"session_id": host, "cwd": root, "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": title, "content": title, "project": project, "session_id": "foreign-model-session"}})
+		os.Stdin = claudeHookStdin(t, string(request), false)
+		var output []byte
+		claudeHookOutput = func(data []byte) error { output = append([]byte(nil), data...); return nil }
+		cmdHook([]string{"claude-pre-tool-use"})
+		var hook struct {
+			HookSpecificOutput struct {
+				PermissionDecision string         `json:"permissionDecision"`
+				UpdatedInput       map[string]any `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(output, &hook); err != nil {
+			t.Fatalf("hook response %s: %v", output, err)
+		}
+		return hook.HookSpecificOutput.PermissionDecision, hook.HookSpecificOutput.UpdatedInput
+	}
+	want := map[string]map[string]int{hosts[0]: {"one first": 1, "one second": 1}, hosts[1]: {"two first": 1, "two second": 1}}
+	for _, step := range []struct{ host, title string }{{hosts[0], "one first"}, {hosts[1], "two first"}, {hosts[0], "one second"}, {hosts[1], "two second"}} {
+		decision, bound := preToolUse(step.host, step.title)
+		if decision == "deny" || bound["session_id"] != step.host || bound["project"] != project {
+			t.Fatalf("host %s decision %q, bound = %v", step.host, decision, bound)
+		}
+		call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": bound}})
+		dispatches++
+		result := mcpServer.HandleMessage(context.Background(), call)
+		encoded, err := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), `"isError":true`) || !strings.Contains(string(encoded), step.title) {
+			t.Fatalf("MCP result = %s, err = %v", encoded, err)
+		}
+	}
+	if err := db.CreateSession(endedHost, project, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(endedHost, "finished"); err != nil {
+		t.Fatal(err)
+	}
+	start(endedHost)
+	if registered, conflicted := registrations.Load(), conflicts.Load(); registered != 7 || conflicted != 1 {
+		t.Fatalf("registrations = %d, production 409s = %d", registered, conflicted)
+	}
+	decision, bound := preToolUse(endedHost, "must not persist")
+	if decision != "deny" || bound != nil || dispatches != 4 {
+		t.Fatalf("ended host decision %q, bound %v, dispatches %d", decision, bound, dispatches)
+	}
+	all, err := db.AllObservations(project, "", 100)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("observations = %d, err = %v", len(all), err)
+	}
+	for host, expected := range want {
+		observations, err := db.SessionObservations(host, 100)
+		if err != nil || len(observations) != 2 {
+			t.Fatalf("host %s observations = %v, err = %v", host, observations, err)
+		}
+		counts := map[string]int{}
+		for _, observation := range observations {
+			counts[observation.Title]++
+		}
+		if len(counts) != len(expected) {
+			t.Fatalf("host %s titles = %v", host, counts)
+		}
+		for title, count := range expected {
+			if counts[title] != count {
+				t.Fatalf("host %s title %q count = %d", host, title, counts[title])
+			}
+		}
+	}
+	ended, err := db.GetSession(endedHost)
+	if err != nil || ended.EndedAt == nil {
+		t.Fatalf("ended row = %+v, err = %v", ended, err)
+	}
+	endedWrites, err := db.SessionObservations(endedHost, 100)
+	if err != nil || len(endedWrites) != 0 {
+		t.Fatalf("ended writes = %v, err = %v", endedWrites, err)
+	}
+	if _, err := db.GetSession("foreign-model-session"); err == nil {
+		t.Fatal("foreign model session was created")
+	}
+}
+
+type statusCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCapture) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func TestCmdHookExitsWhenClaudeResponseWriteFails(t *testing.T) {

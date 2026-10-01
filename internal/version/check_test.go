@@ -274,8 +274,8 @@ func TestUpdateInstructions(t *testing.T) {
 	if msg == "" {
 		t.Fatal("expected non-empty update instructions")
 	}
-	if runtime.GOOS != "darwin" && !strings.Contains(msg, "github.com/Gentleman-Programming/engram/v2/cmd/engram@latest") {
-		t.Fatalf("update instructions = %q, want v2 Go install command", msg)
+	if runtime.GOOS != "darwin" && !strings.Contains(msg, "github.com/Gentleman-Programming/engram/v3/cmd/engram@latest") {
+		t.Fatalf("update instructions = %q, want v3 Go install command", msg)
 	}
 	if runtime.GOOS != "linux" && !strings.Contains(msg, "https://github.com/Gentleman-Programming/engram/releases/latest") {
 		t.Fatalf("update instructions = %q, want canonical GitHub Releases URL", msg)

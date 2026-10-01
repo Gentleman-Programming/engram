@@ -60,6 +60,28 @@ func TestExtractRepoName(t *testing.T) {
 			want: "my-project",
 		},
 		{
+			// Preserve the spelling used by existing detected project buckets.
+			name: "Azure DevOps HTTPS remote with encoded space",
+			url:  "https://org.visualstudio.com/My%20Project/_git/My%20Project",
+			want: "My%20Project",
+		},
+		{
+			name: "Azure DevOps SSH v3 remote with encoded space",
+			url:  "git@ssh.dev.azure.com:v3/org/My%20Project/Repo/My%20Project",
+			want: "My%20Project",
+		},
+		{
+			// Detection does not decode even one layer.
+			name: "Double-encoded name stays literal",
+			url:  "https://host/group/my%2520repo.git",
+			want: "my%2520repo",
+		},
+		{
+			name: "Invalid percent escape stays raw",
+			url:  "https://host/user/100%.git",
+			want: "100%",
+		},
+		{
 			name: "Empty URL returns empty",
 			url:  "",
 			want: "",
@@ -140,6 +162,40 @@ func TestDetectProject_GitRemote_HTTPS(t *testing.T) {
 	got := DetectProject(dir)
 	if got != "engram" {
 		t.Errorf("DetectProject HTTPS remote = %q; want %q", got, "engram")
+	}
+}
+
+// Detection preserves encoded names; cloud selection can opt into literal input.
+func TestDetectProject_GitRemote_PercentEncoded(t *testing.T) {
+	dir := t.TempDir()
+	initGit(t, dir)
+
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"https://org.visualstudio.com/My%20Project/_git/My%20Project")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	got := DetectProject(dir)
+	if got != "my%20project" {
+		t.Errorf("DetectProject percent-encoded remote = %q; want %q", got, "my%20project")
+	}
+}
+
+func TestDetectProjectFull_LiteralRemoteNames(t *testing.T) {
+	for _, remote := range []string{"https://host/team/my%2520repo.git", "https://host/team/my%2Frepo.git", "https://host/team/my%5Crepo.git", filepath.ToSlash(filepath.Join(t.TempDir(), "my%20repo.git"))} {
+		t.Run(remote, func(t *testing.T) {
+			dir := t.TempDir()
+			initGit(t, dir)
+			if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
+				t.Fatalf("remote: %v: %s", err, out)
+			}
+			want := strings.ToLower(strings.TrimSuffix(filepath.Base(remote), ".git"))
+			res := DetectProjectFull(dir)
+			if res.Error != nil || res.Source != SourceGitRemote || res.Project != want {
+				t.Fatalf("detection = %+v, want literal %q", res, want)
+			}
+		})
 	}
 }
 

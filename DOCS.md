@@ -302,12 +302,14 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>"}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
 
-- `POST /sessions` — Create or renew a runtime session. Body: `{id, project, directory, ownership_mode?, resume?}`
+- `POST /sessions` — Create or renew a runtime session. Body: `{id, project, directory?, ownership_mode?, resume?, isolated?}`
+  - `directory` is optional. Ordinary registration normalizes directories to the runtime worktree root, including omitted or blank input resolving to server cwd. Renewal keeps the first nonblank stored directory.
+  - `isolated: true` requires `ownership_mode: "project_owned"` and an omitted or blank directory (otherwise `400`). It stores an empty directory and atomically rejects a nonblank directory on either the requested root or selected continuation with `409 code: "session_isolation_conflict"` before lease renewal, ownership repair, or sync mutations. Existing runtime-bound rows are never silently cleared. This contract is advertised by `GET /health` as `capabilities.isolated_session_registration: true`; clients must require that exact capability before sending isolated registrations, because older servers may ignore the flag.
   - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
   - A successful create or renewal writes a local 30-minute `runtime_lease_expires_at` without changing the persisted session identity. Leases are local liveness evidence only: they are neither synced nor exported.
   - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
@@ -315,6 +317,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - With `resume: true`, a new or live root keeps its ID. For an ended root, the store atomically renews the lowest numeric live `<id>:resume:N` continuation, or creates the next ordinal after the maximum existing numeric suffix (starting at 2, no cap). Non-numeric suffixes and other roots are ignored. The selected continuation follows normal ownership and lease rules; conflicts return `409 session_project_conflict` without advancing further. Concurrent callers converge on one live continuation.
   - Success remains `201` with `{id, status:"created"}`. A continuation response also includes `resumed_from: <root id>` and returns the effective ID in `id`. Use that acknowledged ID for subsequent session-bound operations. MCP session registration does not opt into resume mode.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
+  - Session IDs are opaque non-blank strings. The Pi adapter derives cross-project satellite IDs as `<runtimeID>@<project>` (registered `project_owned` with `resume: true`, `isolated: true`, and no directory). Capability preflight protects against old servers without a guessed version floor. Newly created satellites are never implicit directory-matched runtime candidates; Pi's explicit `cwd` only resolves the target project. This ensures an explicitly targeted write to another project never re-registers the runtime session under a second owner. See [plugin/pi/README.md](plugin/pi/README.md#cross-project-saves).
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
   - No-result responses return `200` with `[]` (never `null`)
@@ -786,6 +789,36 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 - `engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below
+
+Cloud enrollment, unenrollment, and explicit cloud sync project inputs decode one
+layer of URL path encoding by default (for example, `my%20project` selects
+`my project`; `my%2520project` selects `my%20project`). Use `--literal-project`
+to skip that decoding when percent sequences are part of the stored name.
+Project normalization still applies. Literal plus signs remain plus signs in
+both modes; malformed percent escapes are accepted only in literal mode.
+
+```bash
+engram cloud enroll --literal-project 'my%20project'
+engram cloud status --project 'my%20project'
+engram sync --cloud --literal-project --project 'my%20project'
+engram sync --cloud --status --literal-project --project 'my%20project'
+engram sync --cloud --import --literal-project --project 'my%20project'
+engram cloud unenroll 'my%20project' --literal-project
+```
+
+`cloud status --project` already accepts literal names and needs no modifier.
+For sync, the modifier requires an explicit non-empty `--project` and cloud
+mode (`--cloud` or `ENGRAM_CLOUD_SYNC=true`); it cannot be combined with `--all`.
+For enroll/unenroll it may appear before or after the single project argument.
+Use `--` before positional names beginning with a hyphen (or named `help`),
+for example `engram cloud enroll --literal-project -- -project` and
+`engram cloud unenroll --literal-project -- -project`. Flags must precede `--`.
+For sync, address leading-hyphen names with `--project=-project`, for example
+`engram sync --cloud --status --literal-project --project=-project`.
+This is input selection only: existing enrollments are not migrated or merged,
+and unenrolling a literal name leaves a separately enrolled decoded name intact.
+Detection retains percent-encoded project names; no identity migration occurs.
+Copy the detected name with `--literal-project` to select that same stored bucket.
 
 `engram sync --cloud --import --project <project>` runs in the foreground and prints plain-text import progress that is safe for non-interactive logs. It emits an initial snapshot, bounded event-count-throttled updates, and a final `100%` / `0 pending` snapshot before the normal import summary. Each snapshot includes local, remote, and pending chunk counts; percentage is based on the pending work captured at import start, so retries do not inflate completion.
 

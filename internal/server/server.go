@@ -23,9 +23,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -500,10 +500,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":      "ok",
-		"service":     "engram",
-		"version":     s.version,
-		"instance_id": s.instanceID,
+		"status":       "ok",
+		"service":      "engram",
+		"version":      s.version,
+		"instance_id":  s.instanceID,
+		"capabilities": map[string]bool{"isolated_session_registration": true},
 	})
 }
 
@@ -514,6 +515,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Directory     string `json:"directory"`
 		OwnershipMode string `json:"ownership_mode"`
 		Resume        bool   `json:"resume"`
+		Isolated      bool   `json:"isolated"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -528,9 +530,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = store.SessionOwnershipShared
 	}
+	if body.Isolated && (mode != store.SessionOwnershipProjectOwned || strings.TrimSpace(body.Directory) != "") {
+		jsonError(w, http.StatusBadRequest, "isolated registration requires project_owned ownership and an empty directory")
+		return
+	}
 	effectiveID := body.ID
 	var err error
-	if body.Resume {
+	if body.Isolated {
+		effectiveID, err = s.store.RegisterIsolatedSession(body.ID, body.Project, body.Resume)
+	} else if body.Resume {
 		effectiveID, err = s.store.ResumeSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
 	} else {
 		err = s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
@@ -538,6 +546,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {
+		case errors.Is(err, store.ErrSessionIsolationConflict):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "session_isolation_conflict"})
 		case errors.Is(err, store.ErrSessionAlreadyEnded):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
 				"code":       "session_already_ended",

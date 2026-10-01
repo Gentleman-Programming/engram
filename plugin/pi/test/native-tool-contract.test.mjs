@@ -273,6 +273,21 @@ test("Pi native saves persist under separate host sessions and stop on failed re
         assert.equal(row.session_id, ids[index % 2]);
         assert.notEqual(row.session_id, "model-foreign-session");
       }
+      // Exercise cross-project routing against the same real core, not a wire-only stub.
+      const runtimeBefore = await (await fetch(`${url}/sessions/${ids[0]}`)).json();
+      const foreign = await save.execute("real-foreign", {
+        title: "real-project-b", content: "cross-project persistence", project: "pi-target-b",
+      }, undefined, undefined, runtimeContext(ids[0]));
+      assert.equal(foreign.isError, undefined, JSON.stringify(foreign));
+      const foreignRows = await (await fetch(`${url}/observations?project=pi-target-b&limit=20`)).json();
+      assert.equal(foreignRows.length, 1);
+      assert.equal(foreignRows[0].project, "pi-target-b");
+      assert.equal(foreignRows[0].session_id, `${ids[0]}@pi-target-b`);
+      const satellite = await (await fetch(`${url}/sessions/${encodeURIComponent(foreignRows[0].session_id)}`)).json();
+      assert.equal(satellite.project, "pi-target-b");
+      assert.equal(satellite.ownership_mode, "project_owned");
+      assert.equal(satellite.directory, "", "no directory binding means no satellite runtime candidacy (core regression tests assert ActiveRuntimeSessions)");
+      assert.deepEqual(await (await fetch(`${url}/sessions/${ids[0]}`)).json(), runtimeBefore, "foreign save must not mutate principal runtime owner A");
       // Exercise core resume against the real server, including a fresh module graph reload.
       const resumedCtx = runtimeContext(ids[0]);
       resumedCtx.sessionManager.getBranch = () => entries;
@@ -425,7 +440,7 @@ test("registered Pi-native mem_save_prompt persists through the Engram /prompts 
   }
 });
 
-test("one Pi runtime session cannot capture prompts or passive observations across projects", async () => {
+test("one Pi runtime session routes explicit foreign prompts to a satellite and never captures passive observations across projects", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   const originalStderrWrite = process.stderr.write;
@@ -436,7 +451,7 @@ test("one Pi runtime session cannot capture prompts or passive observations acro
   };
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   const { calls, fetchStub } = recordingFetch([
-    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/health", body: { status: "ok", capabilities: { isolated_session_registration: true } } },
     { method: "GET", path: "/project/current", body: { project: "project-b" } },
     { method: "POST", path: "/sessions", body: { status: "created" } },
     { method: "POST", path: "/prompts", body: { id: 1 } },
@@ -446,10 +461,15 @@ test("one Pi runtime session cannot capture prompts or passive observations acro
 
   try {
     await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
-      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
-      const memSavePrompt = registeredTools.get("mem_save_prompt");
       const sessionId = "cross-project-runtime-session";
+      // The runtime identity is persisted as owned by project-a while this cwd detects project-b.
+      const entries = [{ type: "custom", customType: "engram-effective-session", data: {
+        runtimeID: sessionId, effectiveID: sessionId, pending: true, project: "project-a",
+      } }];
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      const memSavePrompt = registeredTools.get("mem_save_prompt");
       const ctx = runtimeContext(sessionId);
+      ctx.sessionManager.getBranch = () => entries;
       const notifications = [];
       ctx.hasUI = true;
       ctx.ui.notify = (message, severity) => notifications.push([message, severity]);
@@ -473,26 +493,30 @@ test("one Pi runtime session cannot capture prompts or passive observations acro
 
       const crossProjectPrompt = await memSavePrompt.execute(
         "project-b-prompt",
-        { content: "this prompt must not be sent under another project", project: "project-b" },
+        { content: "this explicit prompt goes to a project-b satellite session", project: "project-b" },
         undefined,
         undefined,
         ctx,
       );
-      assert.equal(crossProjectPrompt.isError, true, "a cross-project prompt must fail before a write is attempted");
-      assert.match(crossProjectPrompt.content[0].text, /fresh Pi session/i);
+      assert.equal(crossProjectPrompt.isError, undefined, "an explicit cross-project prompt uses a satellite session");
 
+      // Automatic capture targets the detected project and is never routed to a satellite.
       const passiveEvent = { toolName: "shell", result: "this eligible passive observation must not cross the persisted project boundary" };
       await eventHandlers.get("tool_execution_end")(passiveEvent, ctx);
       await eventHandlers.get("tool_execution_end")(passiveEvent, ctx);
 
-      const sessionProjects = calls
+      const sessionRegistrations = calls
         .filter((call) => call.method === "POST" && call.path === "/sessions")
-        .map((call) => call.body.project);
-      assert.deepEqual(sessionProjects, ["project-a", "project-a"], "same-project activity renews without registering the identity under project-b");
-      assert.equal(
-        calls.filter((call) => call.method === "POST" && call.path === "/prompts").length,
-        2,
-        "only same-project prompts may be captured",
+        .map((call) => [call.body.id, call.body.project]);
+      assert.deepEqual(sessionRegistrations, [
+        [sessionId, "project-a"],
+        [sessionId, "project-a"],
+        [`${sessionId}@project-b`, "project-b"],
+      ], "the runtime identity is never registered under project-b");
+      assert.deepEqual(
+        calls.filter((call) => call.method === "POST" && call.path === "/prompts").map((call) => [call.body.session_id, call.body.project]),
+        [[sessionId, "project-a"], [sessionId, "project-a"], [`${sessionId}@project-b`, "project-b"]],
+        "explicit foreign prompts are attributed to the satellite session",
       );
       assert.equal(
         calls.filter((call) => call.method === "POST" && call.path === "/observations/passive").length,
@@ -1161,7 +1185,7 @@ test("parallel first-use writes share one acknowledged registration and keep it 
   }
 });
 
-test("concurrent explicit projects cannot share an in-flight effective registration", async () => {
+test("concurrent explicit projects cannot share an in-flight effective registration; the foreign one uses a satellite", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -1170,7 +1194,7 @@ test("concurrent explicit projects cannot share an in-flight effective registrat
   const writes = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
-    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     if (path === "/sessions") {
       registrations.push(JSON.parse(init.body));
@@ -1195,9 +1219,15 @@ test("concurrent explicit projects cannot share an in-flight effective registrat
       gate.resolve();
       const [a, b] = await Promise.all([first, second]);
       assert.equal(a.isError, undefined);
-      assert.equal(b.isError, true, "the second project must not inherit the first registration");
-      assert.deepEqual(writes.map(({ project }) => project), ["project-a"]);
-      assert.ok(registrations.every(({ project }) => project === "project-a"));
+      assert.equal(b.isError, undefined, b.content?.[0]?.text);
+      assert.deepEqual(writes.map(({ project, session_id }) => [project, session_id]).sort(), [
+        ["project-a", "project-race"],
+        ["project-b", "project-race@project-b"],
+      ], "the second project must not inherit the first registration");
+      assert.deepEqual(registrations.map(({ id, project }) => [id, project]), [
+        ["project-race", "project-a"],
+        ["project-race@project-b", "project-b"],
+      ]);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -1449,7 +1479,8 @@ test("simultaneous foreign projects honor core continuation ownership", async ()
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
-    if (path === "/project/current") return new Response(JSON.stringify({ project: "alpha" }));
+    // Without a resolved owner, each explicit project may claim the runtime identity itself.
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "unknown", error_hint: "ambiguous project", available_projects: ["alpha", "beta"] }));
     if (path === "/sessions" && body.id === "foreign-dual") {
       if (++originals === 2) entered.resolve();
       await release.promise;
@@ -1553,7 +1584,8 @@ test("an ownerless pending replacement cannot be adopted or ended by a foreign p
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
-    if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
+    // Without a resolved owner, the explicit project may try to claim the runtime identity itself.
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "unknown", error_hint: "ambiguous project", available_projects: ["project-a", "project-b"] }));
     if (path === "/sessions" && body.id === runtimeID) {
       entered.resolve();
       await release.promise;
@@ -1933,6 +1965,7 @@ test("a legacy pending mapping cannot be claimed by another project after pre-di
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     if (path === "/sessions" && body.id === "reserved") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
     if (path === "/sessions" && failedReplacementAttempts < 2) {
@@ -1954,11 +1987,11 @@ test("a legacy pending mapping cannot be claimed by another project after pre-di
       assert.equal((await save("project-a")).isError, true);
       const effectiveID = entries.at(-1).data.effectiveID;
       const registrationCount = calls.filter(({ path }) => path === "/sessions").length;
-      assert.equal((await save("project-b")).isError, true);
-      assert.equal(calls.filter(({ path }) => path === "/sessions").length, registrationCount, "B must not POST the reserved ID");
-      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      assert.equal((await save("project-b")).isError, undefined, "B saves through its own satellite session");
+      assert.deepEqual(calls.filter(({ path }) => path === "/sessions").slice(registrationCount).map(({ body }) => body.id), ["reserved@project-b"],
+        "B must not POST the reserved ID");
       assert.equal((await save("project-a")).isError, undefined);
-      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), [effectiveID]);
+      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), ["reserved@project-b", effectiveID]);
       await eventHandlers.get("session_shutdown")({}, ctx);
       assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`));
     });
@@ -2309,6 +2342,7 @@ test("a concurrent foreign-project caller cannot revoke the pending owner's shut
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     if (path === "/sessions" && body.id === "owner-race") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
     if (path === "/sessions" && body.project === "project-a") {
@@ -2329,17 +2363,18 @@ test("a concurrent foreign-project caller cannot revoke the pending owner's shut
       await started.promise;
       const effectiveID = entries.at(-1).data.effectiveID;
       const foreign = await save.execute("b", { title: "b", content: "b", project: "project-b" }, undefined, undefined, ctx);
-      assert.equal(foreign.isError, true);
-      assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+      assert.equal(foreign.isError, undefined, "the foreign caller writes through its own satellite session");
+      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), ["owner-race@project-b"]);
       gate.resolve();
       assert.equal((await owner).isError, undefined);
-      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), [effectiveID]);
+      assert.deepEqual(calls.filter(({ path }) => path === "/observations").map(({ body }) => body.session_id), ["owner-race@project-b", effectiveID]);
       await withPluginSandbox("engram-pi-owner-race-next-", async ({ sandbox: nextSandbox }) => {
         const next = await loadPluginHarness(nextSandbox, appendEntry);
         await next.eventHandlers.get("session_shutdown")({}, ctx);
       });
       assert.ok(calls.some(({ path }) => path === `/sessions/${encodeURIComponent(effectiveID)}/end`));
-      assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => body.project === "project-a" || body.id === "owner-race"));
+      assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => body.project === "project-a" || body.id === "owner-race"
+        || (body.id === "owner-race@project-b" && body.project === "project-b")));
     });
   } finally {
     gate.resolve();

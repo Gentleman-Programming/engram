@@ -30,8 +30,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -3116,15 +3116,29 @@ func (s *Store) StartSession(id, project, directory string) error {
 // lease. It preserves the existing session identity and refuses to reopen an
 // ended session; EndSession remains terminal truth.
 func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
-	return s.startSessionRegistration(id, project, directory, mode, false, nil)
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false)
 }
 
 // ResumeSessionWithOwnershipMode atomically selects and registers a live runtime
 // identity. Ended rows remain terminal; ordinary and MCP registrations do not opt in.
 func (s *Store) ResumeSessionWithOwnershipMode(id, project, directory, mode string) (string, error) {
 	effective := id
-	err := s.startSessionRegistration(id, project, directory, mode, true, &effective)
+	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false)
 	if err != nil {
+		return "", err
+	}
+	return effective, nil
+}
+
+// ErrSessionIsolationConflict refuses reuse of a runtime-bound identity as a satellite.
+var ErrSessionIsolationConflict = errors.New("isolated session registration requires an empty directory; existing runtime-bound sessions cannot be reused")
+
+// RegisterIsolatedSession atomically validates the root and selected continuation
+// before any ownership repair, sync mutation, or lease renewal. It never clears
+// a nonblank directory and uses project-owned registration rules with no directory.
+func (s *Store) RegisterIsolatedSession(id, project string, resume bool) (string, error) {
+	effective := id
+	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true); err != nil {
 		return "", err
 	}
 	return effective, nil
@@ -3189,7 +3203,7 @@ func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
 
-func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string) error {
+func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool) error {
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
@@ -3208,6 +3222,26 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		// attempt may become the terminal response.
 		claimed = false
 		id = root
+		validateIsolation := func(sessionID string) error {
+			if !isolated {
+				return nil
+			}
+			var existingDirectory string
+			err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, sessionID).Scan(&existingDirectory)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(existingDirectory) != "" {
+				return fmt.Errorf("%w: %q", ErrSessionIsolationConflict, sessionID)
+			}
+			return nil
+		}
+		if err := validateIsolation(root); err != nil {
+			return err
+		}
 		if resume {
 			// Validate terminal root ownership before looking up any continuation.
 			// A compatible suffix cannot bypass the requested identity's owner.
@@ -3242,6 +3276,11 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 				return err
 			}
 			*effective = id
+		}
+		if id != root {
+			if err := validateIsolation(id); err != nil {
+				return err
+			}
 		}
 		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
 		if err != nil {

@@ -169,6 +169,71 @@ async function withFixture(options, run) {
   }
 }
 
+for (const replacement of ["retry", "recovery"]) {
+  test(`satellite transport validates replacement capability on ${replacement}`, async () => {
+    await withFixture({ readyServer: true }, async ({ hooks, tools, ctx }) => {
+      await hooks.get("session_start")({}, ctx);
+      const originalFetch = globalThis.fetch;
+      let attempts = 0;
+      let unsafePosts = 0;
+      let recoveryProbes = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/health") {
+          if (attempts >= 2) recoveryProbes++;
+          return new Response(JSON.stringify({ instance_id: "00000000000000000000000000000000",
+            capabilities: { isolated_session_registration: attempts < (replacement === "retry" ? 1 : 2) } }));
+        }
+        if (path === "/sessions") {
+          attempts++;
+          if (replacement === "retry" ? attempts === 1 : attempts <= 2) {
+            throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+          }
+          unsafePosts++;
+          return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }), { status: 201 });
+        }
+        if (path === "/observations") return new Response('{"id":1}', { status: 201 });
+        return originalFetch(url, init);
+      };
+      try {
+        const result = await tools.get("mem_save").execute("replacement", { title: "t", content: "c", project: "foreign-project" }, undefined, undefined, ctx);
+        assert.equal(result.isError, true, JSON.stringify(result));
+        assert.match(result.content[0].text, /upgrade[\s\S]*isolated_session_registration/i);
+        assert.equal(unsafePosts, 0, "replacement must never receive satellite POST");
+        if (replacement === "recovery") assert.ok(recoveryProbes > 0, "fixture must exercise the recovery probe");
+      } finally { globalThis.fetch = originalFetch; }
+    });
+  });
+}
+
+for (const staysOffline of [false, true]) {
+  test(`capable satellite recovery is bounded (offline=${staysOffline})`, async () => {
+    await withFixture({ readyServer: true }, async ({ hooks, tools, ctx }) => {
+      await hooks.get("session_start")({}, ctx);
+      const originalFetch = globalThis.fetch;
+      let posts = 0;
+      let writes = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/health") return new Response(JSON.stringify({ instance_id: "00000000000000000000000000000000", capabilities: { isolated_session_registration: true } }));
+        if (path === "/sessions") {
+          posts++;
+          if (staysOffline || posts <= 2) throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+          return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }), { status: 201 });
+        }
+        if (path === "/observations") { writes++; return new Response('{"id":1}', { status: 201 }); }
+        return originalFetch(url, init);
+      };
+      try {
+        const result = await tools.get("mem_save").execute("recovery", { title: "t", content: "c", project: "foreign-project" }, undefined, undefined, ctx);
+        assert.equal(result.isError, staysOffline ? true : undefined, JSON.stringify(result));
+        assert.equal(posts, staysOffline ? 4 : 3, "only one bounded recovery replay");
+        assert.equal(writes, staysOffline ? 0 : 1);
+      } finally { globalThis.fetch = originalFetch; }
+    });
+  });
+}
+
 test("manifest presence never triggers import while startup still detects the project", async () => {
   for (const manifestPresent of [true, false]) {
     await withFixture({ readyServer: true }, async ({ hooks, ctx, dir, spawnLog, statusCalls }) => {
