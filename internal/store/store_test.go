@@ -13718,6 +13718,27 @@ func TestMergeProjectsByNameRefusesSameNormalizedProject(t *testing.T) {
 	}
 }
 
+// Merging a named source into the reserved inbox project must be refused with
+// the same error mergeProjects uses: the explicit-rename path names both sides
+// by spelling, so without the guard `--to inbox` would migrate records onto
+// the cloud-owned project and bypass mergeProjects' canonical refusal.
+func TestMergeProjectsByNameRefusesReservedInboxTarget(t *testing.T) {
+	s := newTestStore(t)
+	seedLegacyMergeRecords(t, s, "acme-api")
+
+	_, err := s.MergeProjectsByName("acme-api", "inbox")
+	if err == nil {
+		t.Fatal("MergeProjectsByName accepted the reserved inbox project as a merge destination")
+	}
+	if !strings.Contains(err.Error(), "reserved inbox project cannot be a merge destination") {
+		t.Fatalf("MergeProjectsByName(%q, %q) error = %v, want %q", "acme-api", "inbox", err, "reserved inbox project cannot be a merge destination")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acme-api'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source observations after refusal = %d, err %v", count, err)
+	}
+}
+
 func TestMergeProjectsByNameRefusesEmptyNames(t *testing.T) {
 	tests := []struct {
 		name      string

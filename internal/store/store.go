@@ -8884,6 +8884,9 @@ func (s *Store) MergeProjectsByName(from, to string) (*MergeResult, error) {
 	if fromNormalized == toNormalized {
 		return nil, fmt.Errorf("refusing to merge project %q into %q: both normalize to %q; use `engram projects consolidate` for normalization-equivalent variants", from, to, fromNormalized)
 	}
+	if toNormalized == ReservedInboxProjectName {
+		return nil, fmt.Errorf("reserved inbox project cannot be a merge destination")
+	}
 
 	result := &MergeResult{Canonical: toNormalized}
 	err := s.withTx(func(tx *sql.Tx) error {
