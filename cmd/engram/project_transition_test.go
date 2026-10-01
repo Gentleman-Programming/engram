@@ -48,7 +48,7 @@ func TestCLISaveFirstBindingTransition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if count, err := s.CountObservationsForProject("local-app"); err != nil || count != 2 {
 		t.Fatalf("local memory count=%d err=%v", count, err)
 	}

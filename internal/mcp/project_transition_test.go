@@ -92,13 +92,14 @@ func TestProjectTransitionFirstGitDetection(t *testing.T) {
 			req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}}
 			var res *mcppkg.CallToolResult
 			var err error
-			if operation == "current" || operation == "process" {
+			switch operation {
+			case "current", "process":
 				res, err = handleCurrentProject(s, cfg)(context.Background(), req)
-			} else if operation == "search" || operation == "all" {
+			case "search", "all":
 				res, err = handleSearch(s, cfg, NewSessionActivity(time.Minute))(context.Background(), req)
-			} else if operation == "start" {
+			case "start":
 				res, err = handleSessionStart(s, cfg, NewSessionActivity(time.Minute))(context.Background(), req)
-			} else {
+			default:
 				res, err = handleSave(s, cfg, NewSessionActivity(time.Minute))(context.Background(), req)
 			}
 			if err != nil {

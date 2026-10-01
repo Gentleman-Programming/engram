@@ -198,7 +198,7 @@ func detectProjectFull(dir string, options DetectionOptions, historyDirectory st
 			slices.Sort(names)
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
-			// DetectProject wrapper handles CLI compat by using filepath.Base on error.
+			// Consumers retain the error rather than inventing a basename identity.
 			// JW3: use SourceAmbiguous (not SourceDirBasename) to avoid misleading consumers.
 			return DetectionResult{
 				Project:           "",
@@ -534,30 +534,8 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 	}
 }
 
-// DetectProject detects the project name for a given directory.
-// Git detection uses a clone-private binding, initialized once from the remote
-// origin name or repository root basename; later calls reuse that binding.
-// The returned name is always non-empty and already normalized (lowercase, trimmed).
-// This function is a backward-compatible wrapper around DetectProjectFull.
-// On ErrAmbiguousProject, falls back to filepath.Base(dir) so CLI callers
-// never receive an empty string (design §9 backward-compat requirement).
-func DetectProject(dir string) string {
-	res := DetectProjectFull(dir)
-	if errors.Is(res.Error, ErrAmbiguousProject) {
-		// CLI compat: return basename rather than empty string.
-		if dir == "" {
-			return "unknown"
-		}
-		return fallbackProjectName(dir)
-	}
-	if res.Project == "" {
-		return "unknown"
-	}
-	return res.Project
-}
-
 // normalize applies the shared canonical project name rules and maps empty or
-// path-like values to unknown so DetectProject always returns a valid name.
+// path-like values to unknown so basename detection always returns a valid name.
 func normalize(name string) string {
 	n := CanonicalizeProjectName(name)
 	if n == "" || strings.ContainsAny(n, `/\\`) {

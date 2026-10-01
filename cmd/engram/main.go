@@ -1446,7 +1446,7 @@ func cmdSave(cfg store.Config) {
 	if err != nil {
 		fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	// The shared resolver preserves save's legitimate creation contract for an
 	// explicit name or a newly detected cwd, while rejecting malformed overrides.
 	rawProjectName := projectName

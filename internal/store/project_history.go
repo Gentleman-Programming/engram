@@ -18,7 +18,7 @@ func (s *Store) ProjectHistory(directory string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("project directory history: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var projects []string
 	for rows.Next() {
 		var name, storedDir string
