@@ -392,7 +392,12 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
 }
 
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
-  return (await engramFetchResult<TResponse>(path, opts)).data;
+  const result = await engramFetchResult<TResponse>(path, opts);
+  // Background registration has no native-tool side channel for transport diagnostics.
+  if (result.transportFailure?.operation === "session-registration") {
+    throw new Error(unreachableMessage(result.transportFailure));
+  }
+  return result.data;
 }
 
 function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; transportFailure: () => EngramTransportFailure | undefined } {
