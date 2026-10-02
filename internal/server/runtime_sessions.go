@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // Runtime operations never register or repair an identity. Both the root and

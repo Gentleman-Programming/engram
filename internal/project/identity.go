@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -20,6 +21,21 @@ const (
 // its private repository binding. Callers must surface this rather than derive
 // a potentially different name from mutable repository metadata.
 var ErrRepositoryBinding = errors.New("repository identity binding unavailable")
+
+// SourceUnboundGit is an inspected candidate, not persisted project authority.
+const SourceUnboundGit = "unbound_git"
+
+var ErrProjectHistoryUnavailable = errors.New("project history unavailable")
+
+// ProjectTransitionError signals uncertainty, not ownership of historical rows.
+type ProjectTransitionError struct {
+	Candidate          string
+	HistoricalProjects []string
+}
+
+func (e *ProjectTransitionError) Error() string {
+	return fmt.Sprintf("Git would select project %q, but this directory has history under %s; choose explicitly or run engram init <project> to set future scope (existing memories are not moved)", e.Candidate, strings.Join(e.HistoricalProjects, ", "))
+}
 
 type repositoryBinding struct {
 	Version int    `json:"version"`

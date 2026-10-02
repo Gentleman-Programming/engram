@@ -31,7 +31,7 @@ func TestPerfRatchetCompare(t *testing.T) {
 		{
 			name:       "rejects significant regression",
 			baseline:   benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
-			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearch_Hit-8\t1\t200 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearch_Hit-8\t1\t200 ns/op\n",
 			benchstat:  "BenchmarkSearch_Hit-8  100 ns/op  200 ns/op  +100.00%  (p=0.002 n=10)\n",
 			wantErr:    true,
 			wantOutput: "PERFORMANCE REGRESSIONS",
@@ -39,7 +39,7 @@ func TestPerfRatchetCompare(t *testing.T) {
 		{
 			name:       "rejects empty baseline",
 			baseline:   "",
-			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
 			benchstat:  "",
 			wantErr:    true,
 			wantOutput: "requires non-empty baseline and candidate",
@@ -55,14 +55,21 @@ func TestPerfRatchetCompare(t *testing.T) {
 		{
 			name:       "normalizes module package header on both inputs",
 			baseline:   benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
-			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\n",
+			benchstat:  "BenchmarkSearch_Hit-8  100 ns/op  105 ns/op  +5.00%  (p=0.002 n=10)\n",
+			wantOutput: "no statistically significant",
+		},
+		{
+			name:       "normalizes package header across the v2 to v3 module migration",
+			baseline:   strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\n",
 			benchstat:  "BenchmarkSearch_Hit-8  100 ns/op  105 ns/op  +5.00%  (p=0.002 n=10)\n",
 			wantOutput: "no statistically significant",
 		},
 		{
 			name:       "rejects unmatched benchmark sets",
 			baseline:   benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
-			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearchContext_Hit-8\t1\t100 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearchContext_Hit-8\t1\t100 ns/op\n",
 			benchstat:  "",
 			wantErr:    true,
 			wantOutput: "benchmark sets do not match",
@@ -70,7 +77,7 @@ func TestPerfRatchetCompare(t *testing.T) {
 		{
 			name:       "rejects separate configuration tables",
 			baseline:   benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
-			candidate:  "goos: darwin\n" + strings.TrimPrefix(strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1), "goos: linux\n") + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
+			candidate:  "goos: darwin\n" + strings.TrimPrefix(strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1), "goos: linux\n") + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
 			benchstat:  "",
 			wantErr:    true,
 			wantOutput: "configurations do not match",
@@ -78,7 +85,7 @@ func TestPerfRatchetCompare(t *testing.T) {
 		{
 			name:       "rejects report without paired rows",
 			baseline:   benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
-			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\n",
 			benchstat:  "name old time/op new time/op delta\nBenchmarkSearch_Hit-8 100 ns/op 105 ns/op +5.00%\n",
 			wantErr:    true,
 			wantOutput: "does not pair every expected benchmark",
@@ -86,7 +93,7 @@ func TestPerfRatchetCompare(t *testing.T) {
 		{
 			name:       "rejects partially paired report",
 			baseline:   benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\nBenchmarkScanProject_Page5000-8\t1\t100 ns/op\n",
-			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v2/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\nBenchmarkScanProject_Page5000-8\t1\t105 ns/op\n",
+			candidate:  strings.Replace(benchmarkHeader, "/engram/", "/engram/v3/", 1) + "BenchmarkSearch_Hit-8\t1\t105 ns/op\nBenchmarkScanProject_Page5000-8\t1\t105 ns/op\n",
 			benchstat:  "BenchmarkSearch_Hit-8 100 ns/op 105 ns/op +5.00% (p=0.002 n=10)\n",
 			wantErr:    true,
 			wantOutput: "does not pair every expected benchmark",

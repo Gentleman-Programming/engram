@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	engrammcp "github.com/Gentleman-Programming/engram/v2/internal/mcp"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	engrammcp "github.com/Gentleman-Programming/engram/v3/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -722,6 +722,11 @@ func TestCmdDoctorRepairInvalidSessionIdentityBlockers(t *testing.T) {
 			} else if plan["status"] != "blocked" || plan["blockers"].([]any)[0].(map[string]any)["reason_code"] != tc.want {
 				t.Fatal(plan)
 			}
+			if tc.want == "identity_repair_blocked" {
+				if skipped, ok := plan["skipped"].([]any); ok && len(skipped) != 0 {
+					t.Fatalf("explicit blocked replacement retains stale guidance: %v", skipped)
+				}
+			}
 			if tc.name == "collision" {
 				counts := plan["counts"].(map[string]any)
 				for _, field := range []string{"corrected_mutations_planned", "corrected_mutations_applied"} {
@@ -922,6 +927,19 @@ func assertDoctorRepairProject(t *testing.T, cfg store.Config, sessionID, wantPr
 func TestCmdDoctorJSONSingleCheckAndProjectScope(t *testing.T) {
 	cfg := testConfig(t)
 	otherRepo := newDoctorGitRepo(t, "other")
+	// This check exercises established Git authority. An unbound candidate is
+	// deliberately no longer created or trusted by a diagnostic scan.
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := s.DetectProject(otherRepo)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != nil {
+		t.Fatal(res.Error)
+	}
 	seedDoctorSession(t, cfg, "manual-save-engram", "engram", otherRepo)
 	seedDoctorSession(t, cfg, "manual-save-other", "other", otherRepo)
 	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "session_project_directory_mismatch")

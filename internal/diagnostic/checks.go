@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const (
@@ -197,7 +197,7 @@ func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject
 	if _, err := os.Stat(directory); err != nil {
 		return DetectedProject{}, false
 	}
-	res := projectpkg.DetectProjectFull(directory)
+	res := projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{InspectOnly: true})
 	if res.Error != nil {
 		return DetectedProject{}, false
 	}

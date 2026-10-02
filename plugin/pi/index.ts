@@ -497,6 +497,30 @@ class DeterministicStartupError extends Error {}
 // by a different identity; "legacy" is a live server provably too old to report one.
 type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "legacy" | "identity_missing";
 
+interface EngramHealthResult {
+  status: EngramHealth;
+  localInstanceID: string;
+  remoteInstanceID: string;
+  remoteVersion: string;
+}
+
+interface OwnershipEvidence {
+  localInstanceID: string;
+  remoteInstanceID: string;
+  localVersion: string;
+  remoteVersion: string;
+}
+
+class ForeignOwnershipError extends DeterministicStartupError {
+  readonly evidence: OwnershipEvidence;
+
+  constructor(evidence: OwnershipEvidence, message?: string) {
+    super(message ?? `Engram server ownership mismatch at ${ENGRAM_URL} (local ID ${evidence.localInstanceID}, remote ID ${evidence.remoteInstanceID}; local version ${evidence.localVersion}, remote version ${evidence.remoteVersion}). WSL2 shared-loopback is a possible cause, not a confirmed diagnosis. Stop the foreign server from its owning environment, or choose a free local port and relaunch Pi with ENGRAM_PORT=<port>. ENGRAM_PORT alone does not override an explicit ENGRAM_URL; unset ENGRAM_URL to use local auto-start. Nothing is spawned or terminated automatically for this mismatch.`);
+    this.name = "ForeignOwnershipError";
+    this.evidence = evidence;
+  }
+}
+
 // Instance identity first shipped in v2.0.0-rc.11. A missing identity is legacy only when a
 // valid SemVer health version is strictly older than that release; every other shape fails
 // closed because it cannot establish ownership.
@@ -581,49 +605,44 @@ function isConnectionRefusedError(error: unknown): boolean {
   return (error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error);
 }
 
-async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
+async function probeEngramHealth(expectedID = ""): Promise<EngramHealthResult> {
+  const result: EngramHealthResult = { status: "indeterminate", localInstanceID: expectedID || "unknown", remoteInstanceID: "unknown", remoteVersion: "unknown" };
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     });
-    if (!res.ok) return "indeterminate";
-    if (!expectedID) return "ready";
+    if (!res.ok) return result;
+    if (!expectedID) return { ...result, status: "ready" };
     const health = await res.json() as { version?: unknown; instance_id?: unknown };
-    engramServerVersion = typeof health.version === "string" && health.version.trim().length > 0 ? health.version : "unknown";
+    result.remoteVersion = typeof health.version === "string" && health.version.trim().length > 0 ? health.version : "unknown";
+    // Evidence is returned with this probe, never stored in shared mutable metadata.
     // A missing identity proves neither ownership nor age. Only a recognized release older
     // than v2.0.0-rc.11 is legacy; current, unknown, and malformed versions fail closed.
     if (typeof health.instance_id !== "string" || health.instance_id.length === 0) {
-      return isPreIdentityEngramVersion(engramServerVersion) ? "legacy" : "identity_missing";
+      return { ...result, status: isPreIdentityEngramVersion(result.remoteVersion) ? "legacy" : "identity_missing" };
     }
-    return health.instance_id === expectedID ? "ready" : "foreign";
+    return { ...result, remoteInstanceID: health.instance_id, status: health.instance_id === expectedID ? "ready" : "foreign" };
   } catch (error) {
-    if (isTimeoutError(error)) return "indeterminate";
-    if (isConnectionRefusedError(error)) {
-      return "refused";
-    }
-    return "indeterminate";
+    if (isTimeoutError(error)) return result;
+    if (isConnectionRefusedError(error)) return { ...result, status: "refused" };
+    return result;
   }
 }
 
 async function isEngramRunning(expectedID = ""): Promise<boolean> {
-	return (await probeEngramHealth(expectedID)) === "ready";
+  return (await probeEngramHealth(expectedID)).status === "ready";
 }
 
 let localEngramInstanceID = "";
 
-// The /health body is parsed by the identity-verified probe; its `version` field feeds the
-// legacy-server guidance message. It stays "unknown" until such a probe reads one, so the
-// message never reports a version the facade did not actually observe.
-let engramServerVersion = "unknown";
-
 // Approved wording (engram#1255). Versions come from the /health body the probe already
 // fetched and from a short `version` spawn; either side that cannot report one degrades to
 // "unknown".
-function legacyEngramServerMessage(): string {
+function legacyEngramServerMessage(engramServerVersion: string): string {
   return `Engram server at ${ENGRAM_URL} predates instance identity (server ${engramServerVersion}, CLI ${localEngramVersion()}). An older Engram left running by the upgrade is the likely cause: stop it and start the current binary. Nothing is terminated automatically and memory retries on its own. If nothing was upgraded recently, treat this port as occupied by an unrelated process.`;
 }
 
-function missingInstanceIdentityMessage(): string {
+function missingInstanceIdentityMessage(engramServerVersion: string): string {
   return `Engram server at ${ENGRAM_URL} did not report its instance identity (server ${engramServerVersion}). Its version is not proven older than v2.0.0-rc.11, so this response is incompatible with identity verification. Verify or upgrade the server, then retry. Nothing is terminated automatically and memory retries on its own.`;
 }
 
@@ -783,7 +802,7 @@ function waitCancellable(ms: number, signal: AbortSignal): Promise<void> {
 async function waitForEngramReadiness(signal: AbortSignal, deadline: number, expectedID = ""): Promise<void> {
   while (Date.now() < deadline) {
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
-    if (await probeEngramHealth(expectedID) === "ready") return;
+    if ((await probeEngramHealth(expectedID)).status === "ready") return;
     // The probe itself can outlive the abort, so re-check before sleeping again.
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
     await waitCancellable(ENGRAM_STARTUP_POLL_MS, signal);
@@ -863,12 +882,15 @@ async function initializeEngramServer(): Promise<void> {
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
   const health = await probeEngramHealth(instanceID);
-  if (health === "ready") return;
+  if (health.status === "ready") return;
   // Both deterministic owner outcomes fail closed before any spawn: a server we do not own
   // is never adopted and never terminated. Only the message and the retry cadence differ.
-  if (health === "foreign") throw new DeterministicStartupError(`Engram server ownership mismatch at ${ENGRAM_URL}`);
-  if (health === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage());
-  if (health === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage());
+  if (health.status === "foreign") throw new ForeignOwnershipError({
+    localInstanceID: health.localInstanceID, remoteInstanceID: health.remoteInstanceID,
+    localVersion: localEngramVersion(), remoteVersion: health.remoteVersion,
+  });
+  if (health.status === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage(health.remoteVersion));
+  if (health.status === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage(health.remoteVersion));
 
   // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
   // aborted probe, a DNS failure, an error shape we do not recognize — means we have no
@@ -882,7 +904,7 @@ async function initializeEngramServer(): Promise<void> {
     // is exactly what makes our child fail. Give that instance the rest of the shared
     // deadline before reporting failure. A definitive refusal gets no such grace: nothing was
     // listening when we looked, so there is no other instance to wait for.
-    if (health !== "indeterminate") throw error;
+    if (health.status !== "indeterminate") throw error;
     const readiness = new AbortController();
     try {
       await waitForEngramReadiness(readiness.signal, deadline, instanceID);
@@ -1446,9 +1468,10 @@ async function initialize(cwd: string): Promise<void> {
 // the same actionable prefix instead of leaking a raw spawn or readiness message.
 function normalizeInitializationError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
-  return new Error(
-    `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_BIN.`,
-  );
+  const normalized = `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_PORT/ENGRAM_BIN.`;
+  return error instanceof ForeignOwnershipError
+    ? new ForeignOwnershipError(error.evidence, normalized)
+    : new Error(normalized);
 }
 
 function initOnce(cwd: string): Promise<void> {
@@ -1984,6 +2007,11 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     return result;
   } catch (error) {
     if (signal?.aborted) throw error;
+    if (toolName === "mem_doctor" && error instanceof ForeignOwnershipError) {
+      const data = { source: "LOCAL", status: "error", code: "ownership_mismatch", endpoint: ENGRAM_URL, evidence: error.evidence, message: error.message };
+      ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${errorStatusLabel(error.message)}`);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: { data }, isError: true };
+    }
     const failure = transport.transportFailure();
     const message = failure ? unreachableMessage(failure) : error instanceof Error ? error.message : String(error);
     const details = error instanceof EngramHttpError

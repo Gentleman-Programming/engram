@@ -29,22 +29,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
-	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/server"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
-	"github.com/Gentleman-Programming/engram/v2/internal/tui"
-	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/server"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v3/internal/tui"
+	versioncheck "github.com/Gentleman-Programming/engram/v3/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -98,10 +98,16 @@ var (
 		return mcpserver.NewStdioServer(server).Listen(ctx, stdin, stdout)
 	}
 
-	// detectProject is injectable for testing; wraps project.DetectProject.
-	detectProject = project.DetectProject
+	// Sync-status inspection must not establish a project identity.
+	detectProject = func(dir string) string {
+		res := project.DetectProjectFullWithOptions(dir, project.DetectionOptions{InspectOnly: true})
+		if res.Error != nil || res.Source == project.SourceUnboundGit {
+			return ""
+		}
+		return res.Project
+	}
 	// detectProjectFull is injectable for commands that require unambiguous identity.
-	detectProjectFull = project.DetectProjectFull
+	detectProjectFull = project.DetectProjectFullWithOptions
 
 	newTUIModel   = func(s *store.Store) tui.Model { return tui.New(s, version) }
 	newTeaProgram = tea.NewProgram
@@ -192,7 +198,9 @@ var (
 // Explicit and process-level values must already exist; cwd detection remains
 // valid before a repository has written its first memory.
 func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
-	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, func(dir string) project.DetectionResult {
+		return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+	})
 }
 
 func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOverrides bool) (string, error) {
@@ -235,10 +243,6 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 		return "", err
 	}
 	return result.Project, nil
-}
-
-func detectProjectForSync(dir string) project.DetectionResult {
-	return detectProjectFull(dir)
 }
 
 type cloudSyncStatus struct {
@@ -1426,6 +1430,23 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	// Reject malformed overrides/config and repository ambiguity before opening
+	// SQLite, without creating a Git identity during this preflight.
+	_, preflightErr := project.Resolve(project.ResolutionOptions{
+		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true})
+		},
+	})
+	if preflightErr != nil {
+		fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", preflightErr))
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer func() { _ = s.Close() }()
 	// The shared resolver preserves save's legitimate creation contract for an
 	// explicit name or a newly detected cwd, while rejecting malformed overrides.
 	rawProjectName := projectName
@@ -1433,7 +1454,9 @@ func cmdSave(cfg store.Config) {
 		Mode:      project.ResolutionCurrent,
 		Explicit:  projectName,
 		Directory: cwd,
-		Detect:    detectProjectFull,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
 		if resolveErr != nil {
@@ -1461,11 +1484,6 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	s, err := storeNew(cfg)
-	if err != nil {
-		fatal(err)
-	}
-	defer s.Close()
 	sessionID := "manual-save-" + projectName
 	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
@@ -2063,6 +2081,7 @@ func cmdSync(cfg store.Config) {
 	doStatus := false
 	doAll := false
 	doCloud := false
+	literalProject := false
 	project := ""
 	projectProvided := false
 	for i := 2; i < len(os.Args); i++ {
@@ -2078,11 +2097,24 @@ func cmdSync(cfg store.Config) {
 			doAll = true
 		case "--cloud":
 			doCloud = true
+		case "--literal-project":
+			literalProject = true
 		case "--project":
-			if i+1 < len(os.Args) {
-				project = os.Args[i+1]
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
+			}
+			project, projectProvided = value, true
+			i++
+		default:
+			if strings.HasPrefix(os.Args[i], "--project=") {
+				project = strings.TrimPrefix(os.Args[i], "--project=")
+				if strings.TrimSpace(project) == "" {
+					fatal(fmt.Errorf("--project requires a non-empty value"))
+					return
+				}
 				projectProvided = true
-				i++
 			}
 		}
 	}
@@ -2091,8 +2123,12 @@ func cmdSync(cfg store.Config) {
 		return
 	}
 	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if literalProject && (!cloudEnabled || doAll || !projectProvided || strings.TrimSpace(project) == "") {
+		fatal(fmt.Errorf("--literal-project requires cloud sync with an explicit non-empty --project and cannot use --all"))
+		return
+	}
 	if cloudEnabled && projectProvided {
-		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project, literalProject)
 		if decodeErr != nil {
 			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
 			return
@@ -2113,7 +2149,7 @@ func cmdSync(cfg store.Config) {
 	// Sync is project-scoped unless --all is explicit. Route its omitted project
 	// through the same process-override-before-cwd resolver as other CLI paths.
 	if !doAll {
-		resolved, resolveErr := resolveCLIProjectWithDetector(s, project, false, detectProjectForSync)
+		resolved, resolveErr := resolveCLIProject(s, project, false)
 		if resolveErr != nil {
 			fatal(resolveErr)
 			return
@@ -2316,7 +2352,8 @@ func printSkippedRelationWarnings(result *engramsync.ImportResult) {
 }
 
 func printSyncUsage() {
-	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT]")
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT [--literal-project]]")
+	fmt.Println("--literal-project skips URL decoding of an explicit cloud project; normalization still applies.")
 	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
 	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
 }
@@ -2868,7 +2905,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		res := detectProjectFull(cwd)
+		res := detectProjectFull(cwd, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
 		if res.Error != nil {
 			fatal(res.Error)
 			return
@@ -3736,6 +3773,7 @@ Commands:
                          --project  Filter export to a specific project
                          --all      Export ALL projects (ignore directory-based filter)
 		                 --cloud    Run sync against configured cloud endpoint (requires explicit --project)
+                          --literal-project Skip URL decoding of explicit cloud project names
 	  cloud <subcommand> Cloud integration commands (opt-in)
 	                        status     Show cloud config status
 	                        enroll     Enroll a project for cloud sync

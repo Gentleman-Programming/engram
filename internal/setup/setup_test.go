@@ -816,7 +816,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	}
 	// Pi >= 0.99.0 ships built-in MCP and an installed pi-mcp-adapter replaces it,
 	// so setup must never install the adapter.
-	wantCommands := []string{"pi install npm:gentle-engram@0.1.16"}
+	wantCommands := []string{"pi install npm:gentle-engram@0.2.0"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -831,7 +831,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	if want := []string{"npm:gentle-engram@0.1.16"}; !reflect.DeepEqual(settings.Packages, want) {
+	if want := []string{"npm:gentle-engram@0.2.0"}; !reflect.DeepEqual(settings.Packages, want) {
 		t.Fatalf("expected fresh settings packages %#v without pi-mcp-adapter, got %#v", want, settings.Packages)
 	}
 
@@ -885,7 +885,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings after install: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.1.16"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.2.0"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("expected settings packages to preserve unrelated entries and migrate legacy pins: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -960,7 +960,7 @@ func TestWarnPiMCPConfigRejectsMalformedConfig(t *testing.T) {
 func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) {
 	resetSetupSeams(t)
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.8","npm:gentle-engram@0.1.11","npm:gentle-engram@0.1.12","npm:gentle-engram@0.1.14","npm:gentle-engram@0.1.15","npm:gentle-engram@0.1.8","npm:pi-mcp-adapter"]}`), 0644); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.8","npm:gentle-engram@0.1.11","npm:gentle-engram@0.1.12","npm:gentle-engram@0.1.14","npm:gentle-engram@0.1.15","npm:gentle-engram@0.1.16","npm:gentle-engram@0.1.8","npm:pi-mcp-adapter"]}`), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 
@@ -982,7 +982,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatalf("parse migrated settings: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.1.16"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.2.0"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("unexpected migrated packages: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -999,7 +999,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 func TestEnsurePiPackageSettingsDoesNotAddMCPAdapter(t *testing.T) {
 	resetSetupSeams(t)
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.1.16"]}`), 0644); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.2.0"]}`), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 	original, err := os.ReadFile(settingsPath)
@@ -1029,7 +1029,7 @@ func TestInstallPiCommandFailure(t *testing.T) {
 		return []byte("boom"), errors.New("exit 1")
 	}
 	_, err := Install("pi")
-	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.1.16") {
+	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.2.0") {
 		t.Fatalf("expected pi install error, got %v", err)
 	}
 }
@@ -1433,6 +1433,174 @@ func TestInstallOpenCodeBothInjectionFailuresAreNonFatal(t *testing.T) {
 	}
 	if result.TUIPluginEnabled {
 		t.Fatal("expected failed OpenCode TUI injection to remain disabled")
+	}
+}
+
+func TestOpenCodeJSONCCharacterization(t *testing.T) {
+	for _, agent := range []struct {
+		name, file, section, noop string
+		inject                    func() error
+	}{
+		{"MCP", "opencode.jsonc", "mcp", `{"mcp":{"engram":{"command":["custom"],"enabled":false}}}`, injectOpenCodeMCP},
+		{"TUI", "tui.jsonc", "plugin", `{"plugin":["existing","opencode-subagent-statusline"]}`, injectOpenCodeTUIPlugin},
+	} {
+		t.Run(agent.name, func(t *testing.T) {
+			for _, scenario := range []string{"noop", "precision", "read", "parse", "section", "entry", "block", "marshal", "write", "root null", "section null"} {
+				t.Run(scenario, func(t *testing.T) {
+					if agent.name == "TUI" && scenario == "entry" {
+						t.Skip("TUI has no entry serialization")
+					}
+					resetSetupSeams(t)
+					useIsolatedProfile(t)
+					path := filepath.Join(openCodeConfigDir(), agent.file)
+					if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+						t.Fatal(err)
+					}
+					original := `{/* keep */ "opaque":9007199254740993}`
+					switch scenario {
+					case "noop":
+						original = "// preserve bytes\n" + agent.noop
+					case "parse":
+						original = "{"
+					case "section":
+						original = `{"` + agent.section + `":42}`
+					case "root null":
+						original = "null"
+					case "section null":
+						original = `{"` + agent.section + `":null}`
+					}
+					if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+						t.Fatal(err)
+					}
+					before, err := os.Stat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cause := &os.PathError{Op: "characterize", Path: path, Err: os.ErrPermission}
+					prefix := ""
+					marshals, indents, writes, resolutions := 0, 0, 0, 0
+					osExecutable = func() (string, error) {
+						resolutions++
+						return "", errors.New("use bare fallback")
+					}
+					readFileFn = func(got string) ([]byte, error) {
+						if got != path {
+							t.Fatalf("read destination %q, want %q", got, path)
+						}
+						if scenario == "read" {
+							return nil, cause
+						}
+						return os.ReadFile(got)
+					}
+					jsonMarshalFn = func(v any) ([]byte, error) {
+						marshals++
+						if scenario == "entry" || scenario == "block" && (agent.name == "TUI" || marshals == 2) {
+							return nil, cause
+						}
+						return json.Marshal(v)
+					}
+					jsonMarshalIndentFn = func(v any, p, indent string) ([]byte, error) {
+						indents++
+						if p != "" || indent != "  " {
+							t.Fatalf("unexpected indentation %q %q", p, indent)
+						}
+						if scenario == "marshal" {
+							return nil, cause
+						}
+						return json.MarshalIndent(v, p, indent)
+					}
+					writeFileFn = func(got string, data []byte, mode os.FileMode) error {
+						writes++
+						if got != path || mode != 0644 || bytes.HasSuffix(data, []byte("\n")) {
+							t.Fatalf("unexpected persistence: %q %o %q", got, mode, data)
+						}
+						if scenario == "write" {
+							return cause
+						}
+						return os.WriteFile(got, data, mode)
+					}
+					panicked := false
+					func() {
+						defer func() { panicked = recover() != nil }()
+						err = agent.inject()
+					}()
+					wantPanic := scenario == "root null" || scenario == "section null" && agent.name == "MCP"
+					if panicked != wantPanic {
+						t.Fatalf("panic = %v, want %v", panicked, wantPanic)
+					}
+					switch scenario {
+					case "read", "parse", "marshal", "write":
+						prefix = scenario + " config: "
+					case "section":
+						prefix = "parse " + agent.section + " block: "
+					case "entry":
+						prefix = "marshal engram entry: "
+					case "block":
+						prefix = "marshal " + agent.section + " block: "
+					}
+					if prefix != "" {
+						if err == nil || !strings.HasPrefix(err.Error(), prefix) || strings.Count(err.Error(), prefix) != 1 {
+							t.Fatalf("want once-only %q, got %v", prefix, err)
+						}
+						switch scenario {
+						case "parse":
+							var typed *json.SyntaxError
+							if !errors.As(err, &typed) {
+								t.Fatalf("syntax cause lost: %v", err)
+							}
+						case "section":
+							var typed *json.UnmarshalTypeError
+							if !errors.As(err, &typed) {
+								t.Fatalf("type cause lost: %v", err)
+							}
+						default:
+							var typed *os.PathError
+							if !errors.Is(err, cause) || !errors.Is(err, os.ErrPermission) || !errors.As(err, &typed) || typed != cause {
+								t.Fatalf("wrapped cause lost: %v", err)
+							}
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					data, readErr := os.ReadFile(path)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					changed := scenario == "precision" || scenario == "section null" && agent.name == "TUI"
+					if !changed {
+						after, statErr := os.Stat(path)
+						if statErr != nil || !os.SameFile(before, after) || string(data) != original {
+							t.Fatalf("pre-persistence file changed: %q, %v", data, statErr)
+						}
+					}
+					if scenario == "noop" && (marshals != 0 || indents != 0 || writes != 0 || resolutions != 0) {
+						t.Fatalf("noop work: marshal=%d indent=%d write=%d resolve=%d", marshals, indents, writes, resolutions)
+					}
+					if scenario == "precision" {
+						var config map[string]json.RawMessage
+						if err := json.Unmarshal(data, &config); err != nil {
+							t.Fatal(err)
+						}
+						if string(config["opaque"]) != "9007199254740993" || writes != 1 {
+							t.Fatalf("opaque integer/persistence lost: %s writes=%d", data, writes)
+						}
+						if agent.name == "MCP" {
+							var servers map[string]json.RawMessage
+							if err := json.Unmarshal(config["mcp"], &servers); err != nil {
+								t.Fatal(err)
+							}
+							var compact bytes.Buffer
+							if err := json.Compact(&compact, servers["engram"]); err != nil {
+								t.Fatal(err)
+							}
+							if compact.String() != `{"command":["engram","mcp","--tools=agent"],"enabled":true,"type":"local"}` || resolutions != 1 {
+								t.Fatalf("builder payload/resolution changed: %s calls=%d", servers["engram"], resolutions)
+							}
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
