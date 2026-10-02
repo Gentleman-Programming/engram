@@ -1050,8 +1050,9 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 	return result
 }
 
-// RepairObservationMutationTitles restores the single title field that can be
-// proved from a matching titleless local observation. It deliberately does not
+// RepairObservationMutationTitles restores a missing payload title from a
+// matching local observation's current title, or derives a blank source title
+// from its content. It deliberately does not
 // enqueue a replacement mutation: the existing journal row keeps its sequence
 // and all delivery state while only its frozen payload is corrected.
 func (s *Store) RepairObservationMutationTitles(project string, apply bool) (SyncMutationTitleRepairReport, error) {
@@ -1108,6 +1109,10 @@ func (s *Store) RepairObservationMutationTitles(project string, apply bool) (Syn
 		}
 		repairedObservations := make(map[int64]struct{})
 		for _, repair := range repairs {
+			// A valid current title is copied only into the frozen payload.
+			if strings.TrimSpace(repair.sourceTitle) != "" {
+				continue
+			}
 			if _, repaired := repairedObservations[repair.observationID]; repaired {
 				continue
 			}
@@ -1167,10 +1172,21 @@ func (s *Store) observationMutationTitleRepairTx(tx *sql.Tx, mutation SyncMutati
 	observationProject, _ := NormalizeProject(derefString(observation.Project))
 	mutationProject, _ := NormalizeProject(mutation.Project)
 	payloadProject, _ := NormalizeProject(payloadString("project"))
-	if strings.TrimSpace(observation.Title) != "" || (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
+	if (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
 		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
 	}
-	title := deriveObservationRepairTitle(observation.Content)
+	var title string
+	if strings.TrimSpace(observation.Title) != "" {
+		// Trust the current local projection, not historical payload content.
+		// Legacy blank project references are safe only within the existing query.
+		if mutation.Source != SyncSourceLocal || observationProject == "" ||
+			payloadString("session_id") != observation.SessionID || payloadString("scope") != observation.Scope {
+			return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+		}
+		title = observation.Title
+	} else {
+		title = deriveObservationRepairTitle(observation.Content)
+	}
 	if err := ValidateObservationTitle(title); err != nil {
 		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
 	}

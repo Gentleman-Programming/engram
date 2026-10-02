@@ -942,6 +942,8 @@ engram sync --cloud --project <project>
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
 
+For pending observation upserts missing only a title, preview with `engram doctor repair --project <project> --check sync_mutation_required_fields --plan`, then use `--apply` instead of `--plan`. Eligible local mutations copy the matching live observation's validated current title verbatim without updating that observation. This repairs the current projection, not historical title truth. The existing blank-local-title path still derives a title from observation content and updates the source. Both paths patch only the queued payload title, preserving sequence and delivery state; neither pushes mutations. Conflicting identity, ownership, or project references are not eligible for current-title copying.
+
 When cloud sync receives `policy_forbidden`, Engram preserves the server's denied project message and advises the server administrator to check `ENGRAM_CLOUD_ALLOWED_PROJECTS`. A managed principal's project grant may also need checking; the client does not expose allowlist contents.
 
 For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
