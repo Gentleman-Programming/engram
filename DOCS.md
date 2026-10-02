@@ -195,6 +195,8 @@ engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred
 engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
 engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
 engram projects list          List projects with observation/session/prompt counts
+engram projects merge --from acmeapi --to acme-api --dry-run
+engram projects merge --from acmeapi --to acme-api --apply
 engram projects consolidate [--all] [--dry-run]
                               Merge similar names interactively; --all --dry-run previews without prompts
 engram projects prune         Prune projects with zero observations [--dry-run] [--paths-only]
@@ -225,6 +227,16 @@ Engram exposes two different runtimes. Keep routes split by runtime:
 - **Cloud runtime (`engram cloud serve`)**
   - `GET /health` (cloud service health)
   - `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, `POST /sync/mutations/push`, `GET /sync/mutations/pull` (cloud sync transport)
+  - `POST /sync/session-authorities` registers a session explicitly with JSON `session_id` and owner `project`.
+    Managed principals need a project grant; legacy authenticated tokens use the configured allowlist.
+    Grant normalization does not change the stored owner: a grant for `alpha-foo` can authorize `alpha/foo`, whose owner remains `alpha/foo`.
+    In insecure no-auth mode registration returns 401 without writing; oversized JSON returns 413.
+    Chunks and imported sessions never bootstrap registration: an imported/offline session needs deliberate reauthorization.
+    Matching owner replay returns 200; conflicting owner returns 409. Registration alone does not authorize prompt claims or deletes.
+  - `POST /sync/prompt-pair-claims` requires a bearer token and JSON `session_id`, `source_inbox_id`, `sync_id`, `owner_project`, and `project` (prompt storage project).
+    `owner_project` is an authorization selector, **not** authority: the server checks grants/legacy allowlist for both projects before looking up the independently registered session, then requires its stored owner to match the selector. Grant aliases do not rewrite stored project identity.
+    Missing registration, owner mismatch, and authority disappearance during claim all return the same generic 404 JSON body with `error_code: session_authority_unavailable`; an absent old-server route returns a 404 without that code. Matching claim replay returns 200, competing pair binding 409. Invalid JSON/unknown fields return 400, oversized bodies 413, and insecure no-auth mode 401.
+    `MutationTransport.RegisterSessionAuthority` and `ClaimPromptPair` can POST these JSON requests over the configured transport; non-200 responses are errors, with an absent old-server route classified as `server_unsupported`. Autosync does not invoke these methods yet. Clients must explicitly register the session under its owner and claim the pair under dual authorization before relying on remote pair provenance. Delete enforcement and the client handshake/pending retry path are not implemented yet; this route alone does not make unverified deletes safe.
   - `GET /dashboard/*` HTML routes (browser dashboard)
 
 Dashboard route tree (`engram cloud serve`):
@@ -290,17 +302,22 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>"}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
 
-- `POST /sessions` — Create or renew a runtime session. Body: `{id, project, directory, ownership_mode?}`
+- `POST /sessions` — Create or renew a runtime session. Body: `{id, project, directory?, ownership_mode?, resume?, isolated?}`
+  - `directory` is optional. Ordinary registration normalizes directories to the runtime worktree root, including omitted or blank input resolving to server cwd. Renewal keeps the first nonblank stored directory.
+  - `isolated: true` requires `ownership_mode: "project_owned"` and an omitted or blank directory (otherwise `400`). It stores an empty directory and atomically rejects a nonblank directory on either the requested root or selected continuation with `409 code: "session_isolation_conflict"` before lease renewal, ownership repair, or sync mutations. Existing runtime-bound rows are never silently cleared. This contract is advertised by `GET /health` as `capabilities.isolated_session_registration: true`; clients must require that exact capability before sending isolated registrations, because older servers may ignore the flag.
   - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
   - A successful create or renewal writes a local 30-minute `runtime_lease_expires_at` without changing the persisted session identity. Leases are local liveness evidence only: they are neither synced nor exported.
   - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
-  - An ended session is terminal: renewal returns `409` and never reopens it. `POST /sessions/{id}/end` remains the only endpoint that sets `ended_at`.
+  - `resume` is an optional boolean, default `false`. Without it, an ended session returns `409` with `code: "session_already_ended"`; ended rows are never reopened. `POST /sessions/{id}/end` remains the endpoint that sets `ended_at`.
+  - With `resume: true`, a new or live root keeps its ID. For an ended root, the store atomically renews the lowest numeric live `<id>:resume:N` continuation, or creates the next ordinal after the maximum existing numeric suffix (starting at 2, no cap). Non-numeric suffixes and other roots are ignored. The selected continuation follows normal ownership and lease rules; conflicts return `409 session_project_conflict` without advancing further. Concurrent callers converge on one live continuation.
+  - Success remains `201` with `{id, status:"created"}`. A continuation response also includes `resumed_from: <root id>` and returns the effective ID in `id`. Use that acknowledged ID for subsequent session-bound operations. MCP session registration does not opt into resume mode.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
+  - Session IDs are opaque non-blank strings. The Pi adapter derives cross-project satellite IDs as `<runtimeID>@<project>` (registered `project_owned` with `resume: true`, `isolated: true`, and no directory). Capability preflight protects against old servers without a guessed version floor. Newly created satellites are never implicit directory-matched runtime candidates; Pi's explicit `cwd` only resolves the target project. This ensures an explicitly targeted write to another project never re-registers the runtime session under a second owner. See [plugin/pi/README.md](plugin/pi/README.md#cross-project-saves).
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
   - No-result responses return `200` with `[]` (never `null`)
@@ -319,16 +336,17 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
 - `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, find?, replace?, type?, project?, scope?, topic_key?}`
+- `PATCH /observations/{id}?expected_project=X` — Update fields. Body: `{title?, content?, find?, replace?, type?, project?, scope?, topic_key?}`
   - `find` and `replace` must be supplied together and cannot be combined with `content`. They perform a literal, case-sensitive, global replacement inside the existing observation; empty `find`, no match, or normalized-identical output leaves content unchanged.
   - Each replacement input and the transformed result are bounded by the configured observation content limit. `400` is returned for invalid pairs, content conflicts, bounds failures, or title/content validation failures; missing observations return `404`.
 - `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
 - `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
   - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
   - Pin state is local-only for sync: these routes do not change `updated_at` or enqueue sync work. Direct backups preserve pin state, but shared sync payloads continue to omit it.
-- `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
+- `DELETE /observations/{id}?expected_project=X` — Delete observation (`&hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
+  - Both PATCH and DELETE require an explicit `expected_project` owner assertion: missing, blank, or invalid names return `400`; normalized owner mismatch or immutable project reassignment through PATCH returns `409` without changing the observation, revision, or sync queue. Personal/global scopes do not bypass ownership. The assertion and mutation run in one store transaction; project metadata remains immutable.
 - `POST /topic-keys/suggest` — Suggest a stable topic key using the same heuristic as `mem_suggest_topic_key`. Body: `{type?, title?, content?}`. Returns `{topic_key}`.
   - At least one of `title` or `content` must be non-empty; invalid JSON or missing suggestion input returns `400`
 
@@ -772,6 +790,36 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 - `engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below
 
+Cloud enrollment, unenrollment, and explicit cloud sync project inputs decode one
+layer of URL path encoding by default (for example, `my%20project` selects
+`my project`; `my%2520project` selects `my%20project`). Use `--literal-project`
+to skip that decoding when percent sequences are part of the stored name.
+Project normalization still applies. Literal plus signs remain plus signs in
+both modes; malformed percent escapes are accepted only in literal mode.
+
+```bash
+engram cloud enroll --literal-project 'my%20project'
+engram cloud status --project 'my%20project'
+engram sync --cloud --literal-project --project 'my%20project'
+engram sync --cloud --status --literal-project --project 'my%20project'
+engram sync --cloud --import --literal-project --project 'my%20project'
+engram cloud unenroll 'my%20project' --literal-project
+```
+
+`cloud status --project` already accepts literal names and needs no modifier.
+For sync, the modifier requires an explicit non-empty `--project` and cloud
+mode (`--cloud` or `ENGRAM_CLOUD_SYNC=true`); it cannot be combined with `--all`.
+For enroll/unenroll it may appear before or after the single project argument.
+Use `--` before positional names beginning with a hyphen (or named `help`),
+for example `engram cloud enroll --literal-project -- -project` and
+`engram cloud unenroll --literal-project -- -project`. Flags must precede `--`.
+For sync, address leading-hyphen names with `--project=-project`, for example
+`engram sync --cloud --status --literal-project --project=-project`.
+This is input selection only: existing enrollments are not migrated or merged,
+and unenrolling a literal name leaves a separately enrolled decoded name intact.
+Detection retains percent-encoded project names; no identity migration occurs.
+Copy the detected name with `--literal-project` to select that same stored bucket.
+
 `engram sync --cloud --import --project <project>` runs in the foreground and prints plain-text import progress that is safe for non-interactive logs. It emits an initial snapshot, bounded event-count-throttled updates, and a final `100%` / `0 pending` snapshot before the normal import summary. Each snapshot includes local, remote, and pending chunk counts; percentage is based on the pending work captured at import start, so retries do not inflate completion.
 
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
@@ -780,7 +828,7 @@ Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD
 Cloud server always requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` (comma-separated), including insecure mode, so project scope remains server-enforced.
 `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_ALLOWED_PROJECTS` are server-side requirements for authenticated mode and must be configured before `engram cloud serve` (or compose startup).
 Authenticated mode also requires an explicit non-default `ENGRAM_JWT_SECRET`; implicit development defaults are rejected.
-Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. For cloud authenticated sync and admin requests, the Authorization parser trims outer whitespace and requires exactly two whitespace-delimited fields: a case-insensitive `Bearer` scheme and one credential. Tabs or multiple spaces between fields are accepted; whitespace embedded in the credential and a scheme glued to the credential are rejected. This describes field separation, not an RFC credential-character grammar; it does not describe the local `ENGRAM_HTTP_TOKEN` parser. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
+Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`, `/sync/session-authorities`, `/sync/prompt-pair-claims`) remain header-auth only. For cloud authenticated sync and admin requests, the Authorization parser trims outer whitespace and requires exactly two whitespace-delimited fields: a case-insensitive `Bearer` scheme and one credential. Tabs or multiple spaces between fields are accepted; whitespace embedded in the credential and a scheme glued to the credential are rejected. This describes field separation, not an RFC credential-character grammar; it does not describe the local `ENGRAM_HTTP_TOKEN` parser. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
 
 `ENGRAM_CLOUD_ADMIN` is optional in authenticated mode. Its sessions can access the existing dashboard admin read surfaces, project sync controls, and audit logs, but managed-user, token, and project-grant mutations require a managed admin token.
 `ENGRAM_CLOUD_ADMIN` is rejected in insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) to avoid an incoherent admin/browser auth path.
@@ -847,6 +895,8 @@ This path requires exactly one enabled managed human admin and exactly one activ
 - Set `ENGRAM_CLOUD_TOKEN_PEPPER` to enable managed-token authentication. A token issued by `engram cloud bootstrap admin --issue-token` (or by the dashboard/`/admin/*` token-create routes) then authenticates directly against `/sync/*` and `/admin/*`, and can log into the dashboard as its resolved principal/role.
 - If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, managed-token authentication is simply disabled: the server still starts normally, and `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` continue to authenticate exactly as before (legacy-only mode).
 - Managed principals are deny-by-default for project sync: a managed token only reaches projects explicitly granted via `--grant-project` (or the dashboard/`/admin/*` grant routes). Legacy `ENGRAM_CLOUD_TOKEN` keeps its existing `ENGRAM_CLOUD_ALLOWED_PROJECTS` allowlist behavior, unaffected by managed grants.
+- Managed dashboard inventory, details, statistics, browser views, and project sync controls use the principal's grants, not `ENGRAM_CLOUD_ALLOWED_PROJECTS`. Zero grants expose no projects; wildcard access must be explicitly granted. Legacy dashboard credentials remain env-allowlist restricted.
+- Explicit `cloud_project_controls` rows register projects, including empty projects shown with zero counts. Existing projects with synced content remain visible for compatibility, subject to the same credential scope. Updating project sync controls refreshes dashboard inventory.
 - Disabled managed users, revoked managed tokens, and revoked project grants stop authenticating/authorizing on the very next request — no server restart required.
 - No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` continues to use its existing sync allowlist, and `ENGRAM_CLOUD_ADMIN` continues to provide dashboard read access, project sync controls, audit logs, and the first-admin dashboard bootstrap entry point whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured. The CLI recovery command remains limited to its documented stranded-admin state. Use a managed admin token for managed-user administration.
 
@@ -1033,7 +1083,7 @@ Exceptions:
 
 `mem_session_start` resolves from its explicit `directory` argument when supplied; otherwise it auto-detects from cwd. `mem_session_end` and `mem_capture_passive` auto-detect project from cwd; any `project` argument the LLM sends to them is ignored. `mem_session_summary` supports explicit project override (`project`, `project_choice_reason`, `recovery_token`) matching `mem_save`'s project resolution.
 
-`mem_update` uses ID-based updates and auto-detects project only for response envelope metadata. Its public schema does not expose `project`; raw legacy clients may still send a non-empty `project` argument, and the handler tolerates it as an observation project update for compatibility.
+`mem_update` requires `id` and caller-supplied `expected_project`. Native MCP also checks ownership against the known current/process project; the assertion does not bypass those checks, malformed/unknown process overrides, or ambiguous-project recovery protections. It no longer falls back to the stored owner for writes when cwd is ambiguous. `mem_get_observation` retains its read-only stored-owner fallback.
 
 `mem_save` resolves writes by precedence: validated explicit `project`, project already associated with `session_id`, repo/cwd detection (nearest `.engram/config.json` within the enclosing git root, git remote/root/child), then directory-basename fallback.
 
@@ -1042,17 +1092,17 @@ Guardrails:
 - Invalid explicit `project` names fail loudly instead of silently falling back.
 - Valid-looking explicit `project` names are accepted only when backed by known context: an existing local project in the store, a matching existing session project, the nearest resolvable `.engram/config.json`, or exact ambiguous-project recovery after the user selected one available project.
 - An unbacked explicit `project` fails loudly and does not create a new bucket.
-- If a non-empty `session_id` is supplied and no session exists, `mem_save` fails with a structured error and does not write.
+- An unknown non-empty `session_id` normally fails with `unknown_session`. Only genuine cwd ambiguity offers a short-lived MCP-local `recovery_token` bound to that session ID, canonical context, and exact unique candidate paths. After explicit user selection, `mem_save`, `mem_save_prompt`, or `mem_session_summary` may register that ID as project-owned before writing, using `project`, `project_choice_reason=user_selected_after_ambiguous_project`, and the token. A bare explicit project cannot register an unknown session, even when the project already exists. Recovery never resumes an ended session or changes an unrelated owner.
 - If both explicit `project` and `session_id` are supplied, they must resolve to the same normalized project or `mem_save` fails with a structured error and does not write.
 - An explicit `session_id` is authoritative. When a write omits it, Engram uses the current process directory only to narrow active non-manual runtime sessions for the resolved project. A valid, unexpired local lease takes precedence over legacy unleased rows in the same directory; every live leased owner remains a candidate, so multiple live leases fail closed. Expired, malformed, and nonblank invalid leases are excluded. Only when a directory has no live lease do unleased rows use the legacy seven-day effective-activity fallback (latest observation, then `started_at`). This precedence is applied independently for every requested directory. Engram attaches to a session only when exactly one candidate remains, uses the project manual-save session when none remain, and fails closed when multiple candidates remain rather than selecting by recency. Selection is read-only and never changes `ended_at`. Directory is not session identity; callers with concurrent sessions must supply `session_id`, end other active matching sessions, or save independently with `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`. The CLI fallback writes to an independent project manual-save session and does not bind it to the current MCP session. Claude Code currently may require ending other active matching sessions because its MCP transport does not expose runtime identity to each tool call.
 - `project_choice_reason=user_selected_after_ambiguous_project` is only honored when cwd resolution is actually ambiguous. On a non-ambiguous cwd, stale recovery flags do not override explicit-project precedence or session mismatch validation.
-- If ambiguous-project recovery is active, `project` must exactly match one of the previously returned `available_projects`; invented or normalized guesses are rejected.
+- If ambiguous-project recovery is active, `project` must exactly match one of the previously returned `available_projects`; invented or normalized guesses are rejected. Tokens expire after five minutes and are valid only in the issuing MCP process. Same-choice retries are allowed; changed-choice, wrong-session, changed-context/candidate, and duplicate case-normalized candidate-path requests fail closed. Tokens are recovery capabilities, not OpenCode authentication.
 - Exact ambiguous-project choices can still fail with `project_name_collision` when multiple available names collapse to the same stored project bucket after normalization. Rename or disambiguate the colliding projects before retrying.
 - Ordinary explicit `mem_save(project=...)` calls can also fail with `project_name_collision` when the raw explicit name collapses into an existing config-backed, session-backed, or store-backed project bucket, such as `foo--bar` colliding with `foo-bar`.
 
 For monorepos, detection now honors the **nearest** `.engram/config.json` at or below the enclosing git root. That lets `repo/backend/.engram/config.json` and `repo/frontend/.engram/config.json` behave as independent projects without letting `~/.engram/config.json` leak into nested workspaces.
 
-`mem_save_prompt` keeps the older cwd/default behavior by default and only uses `project` for the narrow ambiguous-project recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`.
+`mem_save_prompt` keeps the older cwd/default behavior by default and only uses `project` for the narrow ambiguous-project recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`, with the returned `recovery_token`. A supplied session normally remains authoritative; the same narrow token-validated unknown-session bootstrap applies.
 
 ### Read tools (optional project override)
 
@@ -1060,7 +1110,7 @@ For monorepos, detection now honors the **nearest** `.engram/config.json` at or 
 
 ### Admin tools
 
-`mem_delete` is ID-based and requires `id`; optional `hard_delete=true` permanently deletes the observation. It does not accept or auto-detect `project`.
+`mem_delete` requires `id` and caller-supplied `expected_project`; optional `hard_delete=true` permanently deletes the observation. The owner assertion is not a project-resolution override.
 
 `mem_merge_projects` requires `from` (comma-separated, explicitly named source project names) and `to` (canonical target project name). Case/trim variants and matching `-`/`_` separator variants (for example, `foo-bar` to `foo_bar`) are allowed; unrelated names and missing sources are rejected. It does not accept or auto-detect `project`.
 
@@ -1127,7 +1177,9 @@ Save responses include lifecycle metadata for the saved observation: computed `s
 
 ### mem_update
 
-Update an observation by ID. Public schema supports partial updates for `title`, `content`, `find`, `replace`, `type`, `scope`, and `topic_key`. `find` and `replace` are paired literal, case-sensitive global replacement inputs and cannot be combined with `content`; empty finds and replacements with no effective normalized change preserve content. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
+Update an observation by ID, with mandatory `expected_project` supplied by the caller (for example, `{ "id": 42, "expected_project": "engram", "title": "Corrected" }`). Public schema supports partial updates for `title`, `content`, `find`, `replace`, `type`, `scope`, and `topic_key`. `find` and `replace` are paired literal, case-sensitive global replacement inputs and cannot be combined with `content`; empty finds and replacements with no effective normalized change preserve content.
+
+This intentionally breaks mutation clients that omit the owner assertion. Native MCP and the in-repository Pi adapter require it; an external gentle-engram relay must be adapted separately and is not fixed by this repository change. Never read the target observation to manufacture a missing expectation. CLI/internal maintenance store APIs retain their unguarded entry points.
 
 ### mem_review
 
@@ -1166,7 +1218,7 @@ Suggest a stable `topic_key` from `type + title` (or content fallback). Uses fam
 
 ### mem_delete
 
-Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optional hard-delete for permanent removal.
+Delete an observation by ID with mandatory caller-supplied `expected_project`, for example `{ "id": 42, "expected_project": "engram", "hard_delete": true }`. Uses soft-delete by default (`deleted_at`); optional hard-delete for permanent removal. Both modes reject invalid or mismatched assertions before changing data.
 
 ### mem_save_prompt
 
@@ -1440,6 +1492,8 @@ Both errors carry a `remedy` field naming the exact command to run: `engram proj
 When saving to a project that doesn't exist yet, Engram checks for similar existing project names (Levenshtein distance, substring, case-insensitive matching) and warns the agent if a likely variant already exists.
 
 ### Retroactive cleanup
+
+Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated or normalized-identical names are rejected. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves. The reserved `inbox` project cannot be a merge destination, including for an explicitly named separator variant such as `in-box`; preview and apply both reject it.
 
 Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation.
 

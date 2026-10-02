@@ -23,9 +23,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -500,10 +500,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":      "ok",
-		"service":     "engram",
-		"version":     s.version,
-		"instance_id": s.instanceID,
+		"status":       "ok",
+		"service":      "engram",
+		"version":      s.version,
+		"instance_id":  s.instanceID,
+		"capabilities": map[string]bool{"isolated_session_registration": true},
 	})
 }
 
@@ -513,6 +514,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Project       string `json:"project"`
 		Directory     string `json:"directory"`
 		OwnershipMode string `json:"ownership_mode"`
+		Resume        bool   `json:"resume"`
+		Isolated      bool   `json:"isolated"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -527,9 +530,24 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = store.SessionOwnershipShared
 	}
-	if err := s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+	if body.Isolated && (mode != store.SessionOwnershipProjectOwned || strings.TrimSpace(body.Directory) != "") {
+		jsonError(w, http.StatusBadRequest, "isolated registration requires project_owned ownership and an empty directory")
+		return
+	}
+	effectiveID := body.ID
+	var err error
+	if body.Isolated {
+		effectiveID, err = s.store.RegisterIsolatedSession(body.ID, body.Project, body.Resume)
+	} else if body.Resume {
+		effectiveID, err = s.store.ResumeSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
+	} else {
+		err = s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
+	}
+	if err != nil {
 		var conflict *store.SessionProjectConflictError
 		switch {
+		case errors.Is(err, store.ErrSessionIsolationConflict):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "session_isolation_conflict"})
 		case errors.Is(err, store.ErrSessionAlreadyEnded):
 			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
 				"code":       "session_already_ended",
@@ -551,7 +569,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.notifyWrite()
-	jsonResponse(w, http.StatusCreated, map[string]string{"id": body.ID, "status": "created"})
+	ack := map[string]string{"id": effectiveID, "status": "created"}
+	if effectiveID != body.ID {
+		ack["resumed_from"] = body.ID
+	}
+	jsonResponse(w, http.StatusCreated, ack)
 }
 
 func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
@@ -777,10 +799,11 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.store.UpdateObservation(id, body)
+	obs, err := s.store.UpdateObservationForProject(id, r.URL.Query().Get("expected_project"), body)
 	if err != nil {
 		switch {
-		case errors.Is(err, store.ErrObservationTitleRequired),
+		case errors.Is(err, store.ErrExpectedProjectRequired),
+			errors.Is(err, store.ErrObservationTitleRequired),
 			errors.Is(err, store.ErrObservationContentRequired),
 			errors.Is(err, store.ErrObservationFindReplacePairRequired),
 			errors.Is(err, store.ErrObservationFindReplaceContentConflict),
@@ -788,6 +811,9 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 			errors.Is(err, store.ErrObservationFindReplaceResultTooLarge),
 			errors.Is(err, store.ErrObservationFindReplaceLegacyContentLarge):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationProjectMismatch),
+			errors.Is(err, store.ErrObservationProjectImmutable):
+			jsonError(w, http.StatusConflict, err.Error())
 		default:
 			jsonError(w, http.StatusNotFound, err.Error())
 		}
@@ -877,8 +903,12 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	hard := queryBool(r, "hard", false)
-	if err := s.store.DeleteObservation(id, hard); err != nil {
+	if err := s.store.DeleteObservationForProject(id, r.URL.Query().Get("expected_project"), hard); err != nil {
 		switch {
+		case errors.Is(err, store.ErrExpectedProjectRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationProjectMismatch):
+			jsonError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
 		default:
@@ -1051,11 +1081,13 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.store.AddPrompt(body)
+	id, inserted, err := s.store.AddPromptWithResult(body)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPromptContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrPromptInboxDeleted):
+			jsonError(w, http.StatusConflict, err.Error())
 		case writeOwnershipError(w, body.SessionID, err):
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())
@@ -1063,7 +1095,9 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifyWrite()
+	if inserted {
+		s.notifyWrite()
+	}
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 
@@ -1244,6 +1278,31 @@ func clampContextBytes(v int) int {
 	return v
 }
 
+// contextBytesQuery caps positive decimal budgets before converting to int,
+// including values beyond the native integer range.
+func contextBytesQuery(r *http.Request) int {
+	v := r.URL.Query().Get("max_bytes")
+	if v == "" {
+		return 0
+	}
+	if v[0] == '+' {
+		v = v[1:]
+	}
+	if v == "" {
+		return 0
+	}
+	budget := 0
+	for _, digit := range v {
+		if digit < '0' || digit > '9' {
+			return 0
+		}
+		if budget <= contextMaxBytes {
+			budget = budget*10 + int(digit-'0')
+		}
+	}
+	return clampContextBytes(budget)
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -1262,7 +1321,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
 	// pass through untouched so all three states survive.
 	opts := store.ContextOptions{
-		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
+		MaxBytes:     contextBytesQuery(r),
 		Observations: clampContextLimit(queryInt(r, "observations", 0)),
 		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
 		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),
@@ -1333,7 +1392,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		var transition *projectpkg.ProjectTransitionError
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) && !errors.As(err, &transition) {
 			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
 			return
 		}
@@ -1355,7 +1415,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
-	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.store.InspectProject)
 	if err != nil {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
@@ -1393,6 +1453,7 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:      projectpkg.ResolutionCurrent,
 		Directory: cwd,
+		Detect:    s.store.DetectProject,
 	})
 	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		s.writeProjectResolutionError(w, res, err)
@@ -1419,6 +1480,10 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 // Current-project reads require known explicit/process overrides, while cwd
 // detection remains usable before a project has any stored memories.
 func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool) (projectpkg.DetectionResult, error) {
+	return s.resolveRequestProjectWithDetector(r, mode, requireKnownOverrides, s.store.DetectProject)
+}
+
+func (s *Server) resolveRequestProjectWithDetector(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool, detect func(string) projectpkg.DetectionResult) (projectpkg.DetectionResult, error) {
 	query := r.URL.Query()
 	projectValues, projectProvided := query["project"]
 	if projectProvided {
@@ -1446,6 +1511,7 @@ func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.Resoluti
 		Explicit:             query.Get("project"),
 		Directory:            query.Get("cwd"),
 		ProjectExists:        s.store.ProjectExists,
+		Detect:               detect,
 		RequireKnownExplicit: requireKnownOverrides,
 		RequireKnownProcess:  requireKnownOverrides,
 	})
@@ -1477,7 +1543,16 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectp
 		code = "ambiguous_project"
 		status = http.StatusConflict
 	}
+	var transition *projectpkg.ProjectTransitionError
+	if errors.As(err, &transition) {
+		code = "project_transition_conflict"
+		status = http.StatusConflict
+	}
 	fields := map[string]any{"code": code}
+	if transition != nil {
+		fields["candidate_project"] = transition.Candidate
+		fields["available_projects"] = res.AvailableProjects
+	}
 	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		fields["available_projects"] = res.AvailableProjects
 		fields["project_source"] = res.Source
@@ -1771,6 +1846,7 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		Explicit:             body.Project,
 		Directory:            r.URL.Query().Get("cwd"),
 		ProjectExists:        s.store.ProjectExists,
+		Detect:               s.store.DetectProject,
 		RequireKnownExplicit: true,
 		RequireKnownProcess:  true,
 	})

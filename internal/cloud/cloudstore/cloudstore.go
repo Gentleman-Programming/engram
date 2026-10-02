@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -231,7 +231,9 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		if string(normalizedIncoming) != string(normalizedExisting) {
 			return fmt.Errorf("%w: existing chunk %q has different payload", ErrChunkConflict, chunkID)
 		}
-		_ = cs.indexChunkSessions(ctx, project, payload)
+		if err := cs.indexChunkSessions(ctx, project, payload); err != nil {
+			return err
+		}
 		cs.invalidateDashboardReadModel()
 		return nil
 	}
@@ -766,6 +768,31 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			END IF;
 		END $$`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS cloud_chunks_project_chunk_uidx ON cloud_chunks (project_name, chunk_id)`,
+		`CREATE TABLE IF NOT EXISTS cloud_session_authority (
+			session_id TEXT PRIMARY KEY,
+			owner_project TEXT NOT NULL,
+			registered_by TEXT NOT NULL,
+			registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_prompt_pair_claims (
+			session_id TEXT NOT NULL REFERENCES cloud_session_authority(session_id),
+			source_inbox_id TEXT NOT NULL,
+			sync_id TEXT NOT NULL UNIQUE,
+			prompt_project TEXT NOT NULL,
+			claimed_by TEXT NOT NULL,
+			claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (session_id, source_inbox_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_prompt_source_attestations (
+			id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			source_inbox_id TEXT NOT NULL,
+			sync_id TEXT NOT NULL,
+			owner_project TEXT NOT NULL,
+			prompt_project TEXT NOT NULL,
+			actor_id TEXT NOT NULL,
+			attested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 		`CREATE TABLE IF NOT EXISTS cloud_project_sessions (
 			project_name TEXT NOT NULL,
 			session_id TEXT NOT NULL,

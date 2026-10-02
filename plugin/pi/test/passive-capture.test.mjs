@@ -17,6 +17,13 @@ async function withPassiveCaptureFixture(run) {
       response.end(JSON.stringify({ project: "fixture-project" }));
       return;
     }
+    if (request.url === "/sessions") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: JSON.parse(body).id, status: "created" }));
+      return;
+    }
     if (request.url === "/observations/passive") {
       let body = "";
       for await (const chunk of request) body += chunk;

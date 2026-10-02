@@ -6,6 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,7 +37,7 @@ func TestCodexWindowsBashHookDispatcherContract(t *testing.T) {
 
 	const prefix = `\\.\GLOBALROOT\SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand `
 	wantMappings := map[string]string{
-		`"${PLUGIN_ROOT}/scripts/session-start.sh"`:      "session-start.sh",
+		`"${PLUGIN_ROOT}/scripts/session-start.sh"`:   "session-start.sh",
 		`"${PLUGIN_ROOT}/scripts/post-compaction.sh"`: "post-compaction.sh",
 	}
 	seenMappings := make(map[string]bool, len(wantMappings))
@@ -338,6 +342,224 @@ func TestCodexWindowsConsoleCodePagesRestoreIndependently(t *testing.T) {
 	if input != inputCodePage || output != outputCodePage {
 		t.Fatalf("console code pages = input %d, output %d, want input %d, output %d", input, output, inputCodePage, outputCodePage)
 	}
+}
+
+// TestCodexWindowsBashHookDispatcherBackground exercises the actual CLI launcher
+// through the manifest dispatcher. Set ENGRAM_TEST_ORIGINAL_LAUNCH=1 to substitute
+// the pre-fix Bash launch in an isolated copy and observe the EOF assertion RED.
+func TestCodexWindowsBashHookDispatcherBackground(t *testing.T) {
+	if runtime.GOOS != "windows" || testing.Short() {
+		t.Skip("requires native Windows and Git Bash")
+	}
+	bash, ok := codexGitForWindowsBash()
+	if !ok {
+		t.Skip("Git for Windows Bash unavailable")
+	}
+	probe := exec.Command(bash, "--noprofile", "--norc", "-c", "command -v jq && command -v curl")
+	if err := probe.Run(); err != nil {
+		t.Skipf("jq/curl unavailable: %v", err)
+	}
+	root := repoRoot(t)
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "engram.exe")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/engram")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build isolated CLI: %v: %s", err, output)
+	}
+	pluginRoot := filepath.Join(dir, "plugin root with spaces")
+	scripts := filepath.Join(pluginRoot, "scripts")
+	if err := os.MkdirAll(scripts, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run-bash-hook.ps1", "session-start.sh", "_helpers.sh"} {
+		data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "session-start.sh" && os.Getenv("ENGRAM_TEST_ORIGINAL_LAUNCH") == "1" {
+			before := []byte("ENGRAM_CLOUD_AUTOSYNC=1 engram serve-background \"$ENGRAM_SERVE_ERR_LOG\" || true")
+			if !bytes.Contains(data, before) {
+				t.Fatal("cannot reconstruct original Bash launch")
+			}
+			data = bytes.Replace(data, before, []byte("ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> \"$ENGRAM_SERVE_ERR_LOG\" &"), 1)
+		}
+		if err := os.WriteFile(filepath.Join(scripts, name), data, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`)
+	// External ownership is the no-child control: it must not launch a local server.
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = w.Write([]byte(`{"project":"fixture","project_source":"dir_basename"}`))
+		case "/sessions":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"fixture-session","status":"created"}`))
+		case "/context":
+			_, _ = w.Write([]byte(`{"context":"EXTERNAL CONTEXT"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer external.Close()
+	baseEnv := append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "PLUGIN_ROOT="+pluginRoot, "ENGRAM_DATA_DIR="+filepath.Join(dir, "data"))
+	input := `{"session_id":"fixture-session","cwd":"C:/fixture"}`
+	type hookResult struct {
+		stdout, stderr              string
+		code                        int
+		exitAfter, eofAfter, eofLag time.Duration
+	}
+	run := func(env []string) hookResult {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "cmd.exe", "/D", "/S", "/C", command)
+		cmd.WaitDelay = time.Second
+		cmd.Env = env
+		cmd.Stdin = strings.NewReader(input)
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := reader.Close(); err != nil {
+				t.Errorf("close hook stdout reader: %v", err)
+			}
+		}()
+		cmd.Stdout = writer
+		stderrFile, err := os.CreateTemp(dir, "hook-stderr-*.log")
+		if err != nil {
+			_ = writer.Close()
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := stderrFile.Close(); err != nil {
+				t.Errorf("close hook stderr file: %v", err)
+			}
+		}()
+		cmd.Stderr = stderrFile
+		start := time.Now()
+		if err := cmd.Start(); err != nil {
+			_ = writer.Close()
+			t.Fatal(err)
+		}
+		_ = writer.Close()
+		type readResult struct {
+			output []byte
+			err    error
+			at     time.Time
+		}
+		type waitResult struct {
+			err error
+			at  time.Time
+		}
+		readDone := make(chan readResult, 1)
+		waitDone := make(chan waitResult, 1)
+		go func() {
+			data, err := io.ReadAll(reader)
+			readDone <- readResult{data, err, time.Now()}
+		}()
+		go func() {
+			err := cmd.Wait()
+			waitDone <- waitResult{err, time.Now()}
+		}()
+		var read readResult
+		var wait waitResult
+		for read.at.IsZero() || wait.at.IsZero() {
+			select {
+			case read = <-readDone:
+			case wait = <-waitDone:
+			case <-ctx.Done():
+				_ = cmd.Process.Kill()
+				t.Fatalf("hook exit or consumer EOF exceeded 12 seconds (exit=%t EOF=%t): %v", !wait.at.IsZero(), !read.at.IsZero(), ctx.Err())
+			}
+		}
+		if read.err != nil {
+			t.Fatal(read.err)
+		}
+		stderr, err := os.ReadFile(stderrFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := 0
+		if wait.err != nil {
+			var exit *exec.ExitError
+			if !errors.As(wait.err, &exit) {
+				t.Fatal(wait.err)
+			}
+			code = exit.ExitCode()
+		}
+		lag := read.at.Sub(wait.at)
+		if lag < 0 {
+			lag = 0
+		}
+		return hookResult{string(read.output), string(stderr), code, wait.at.Sub(start), read.at.Sub(start), lag}
+	}
+	externalResult := run(append(append([]string{}, baseEnv...), "ENGRAM_URL="+external.URL))
+	t.Logf("external exit=%s EOF=%s lag=%s", externalResult.exitAfter, externalResult.eofAfter, externalResult.eofLag)
+	if externalResult.code != 0 || externalResult.eofAfter >= 5*time.Second || externalResult.eofLag >= time.Second || !strings.Contains(externalResult.stdout, "EXTERNAL CONTEXT") || !strings.Contains(externalResult.stdout, `{"session_id":"fixture-session"}`) || externalResult.stderr != "" {
+		t.Fatalf("external ownership: exit=%d processExit=%s EOF=%s lag=%s context=%t stderr=%q", externalResult.code, externalResult.exitAfter, externalResult.eofAfter, externalResult.eofLag, strings.Contains(externalResult.stdout, "EXTERNAL CONTEXT"), externalResult.stderr)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	// Resolve the listener PID only after verifying its executable is our
+	// temporary CLI; a released ephemeral port could be reused by another app.
+	t.Cleanup(func() {
+		output, err := exec.Command("netstat", "-ano", "-p", "TCP").Output()
+		if err != nil {
+			t.Errorf("find test server for cleanup: %v", err)
+			return
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 && fields[1] == fmt.Sprintf("127.0.0.1:%d", port) && fields[3] == "LISTENING" {
+				pid, err := strconv.Atoi(fields[4])
+				if err != nil {
+					t.Errorf("parse listener PID: %v", err)
+					continue
+				}
+				pathOutput, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf("(Get-Process -Id %d -ErrorAction SilentlyContinue).Path", pid)).Output()
+				if err != nil {
+					t.Errorf("identify listener executable: %v", err)
+					continue
+				}
+				if !strings.EqualFold(filepath.Clean(strings.TrimSpace(string(pathOutput))), binary) {
+					t.Errorf("refusing cleanup of unrelated listener on port %d: %q", port, pathOutput)
+					continue
+				}
+				if process, err := os.FindProcess(pid); err == nil {
+					if err := process.Kill(); err != nil {
+						t.Errorf("stop test server: %v", err)
+					}
+				}
+			}
+		}
+	})
+	cold := run(append(append([]string{}, baseEnv...), "ENGRAM_URL=", fmt.Sprintf("ENGRAM_PORT=%d", port)))
+	t.Logf("cold start exit=%s EOF=%s lag=%s", cold.exitAfter, cold.eofAfter, cold.eofLag)
+	if cold.code != 0 || cold.eofAfter >= 10*time.Second || cold.eofLag >= time.Second || !strings.Contains(cold.stdout, "RUNTIME SESSION IDENTITY") || cold.stderr != "" {
+		t.Errorf("cold start: exit=%d processExit=%s EOF=%s lag=%s identity=%t stderr=%q", cold.code, cold.exitAfter, cold.eofAfter, cold.eofLag, strings.Contains(cold.stdout, "RUNTIME SESSION IDENTITY"), cold.stderr)
+	}
+	time.Sleep(4100 * time.Millisecond)
+	response, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		t.Fatalf("server died before four seconds: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("server health after four seconds: %d", response.StatusCode)
+	}
+	logData, err := os.ReadFile(filepath.Join(dir, "data", "serve.err.log"))
+	if err != nil {
+		t.Fatalf("server stderr log missing: %v", err)
+	}
+	_ = logData // The server may have no stderr on a healthy start.
 }
 
 func codexWindowsConsoleCodePages(t *testing.T) (int, int) {

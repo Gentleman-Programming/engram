@@ -29,22 +29,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
-	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/server"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
-	"github.com/Gentleman-Programming/engram/v2/internal/tui"
-	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/server"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v3/internal/tui"
+	versioncheck "github.com/Gentleman-Programming/engram/v3/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -98,10 +98,16 @@ var (
 		return mcpserver.NewStdioServer(server).Listen(ctx, stdin, stdout)
 	}
 
-	// detectProject is injectable for testing; wraps project.DetectProject.
-	detectProject = project.DetectProject
+	// Sync-status inspection must not establish a project identity.
+	detectProject = func(dir string) string {
+		res := project.DetectProjectFullWithOptions(dir, project.DetectionOptions{InspectOnly: true})
+		if res.Error != nil || res.Source == project.SourceUnboundGit {
+			return ""
+		}
+		return res.Project
+	}
 	// detectProjectFull is injectable for commands that require unambiguous identity.
-	detectProjectFull = project.DetectProjectFull
+	detectProjectFull = project.DetectProjectFullWithOptions
 
 	newTUIModel   = func(s *store.Store) tui.Model { return tui.New(s, version) }
 	newTeaProgram = tea.NewProgram
@@ -192,7 +198,9 @@ var (
 // Explicit and process-level values must already exist; cwd detection remains
 // valid before a repository has written its first memory.
 func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
-	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, func(dir string) project.DetectionResult {
+		return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+	})
 }
 
 func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOverrides bool) (string, error) {
@@ -235,10 +243,6 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 		return "", err
 	}
 	return result.Project, nil
-}
-
-func detectProjectForSync(dir string) project.DetectionResult {
-	return detectProjectFull(dir)
 }
 
 type cloudSyncStatus struct {
@@ -314,6 +318,14 @@ func (a autosyncManagerAdapter) Status() cloudSyncStatus {
 // This bridges the type gap between packages without creating a circular import.
 type mutationTransportAdapter struct {
 	remote *remote.MutationTransport
+}
+
+func (a *mutationTransportAdapter) RegisterSessionAuthority(sessionID, ownerProject string) error {
+	return a.remote.RegisterSessionAuthority(sessionID, ownerProject)
+}
+
+func (a *mutationTransportAdapter) ClaimPromptPair(sessionID, inboxID, syncID, ownerProject, promptProject string) error {
+	return a.remote.ClaimPromptPair(sessionID, inboxID, syncID, ownerProject, promptProject)
 }
 
 func (a *mutationTransportAdapter) PushMutations(entries []autosync.MutationEntry) (*autosync.PushMutationsResult, error) {
@@ -716,6 +728,13 @@ func main() {
 			}
 			return
 		}
+	}
+
+	if os.Args[1] == "serve-background" {
+		if err := cmdServeBackground(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
 	}
 
 	if shouldCheckForUpdates(os.Args[1:]) {
@@ -1413,6 +1432,23 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 		return
 	}
+	// Reject malformed overrides/config and repository ambiguity before opening
+	// SQLite, without creating a Git identity during this preflight.
+	_, preflightErr := project.Resolve(project.ResolutionOptions{
+		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true})
+		},
+	})
+	if preflightErr != nil {
+		fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", preflightErr))
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer func() { _ = s.Close() }()
 	// The shared resolver preserves save's legitimate creation contract for an
 	// explicit name or a newly detected cwd, while rejecting malformed overrides.
 	rawProjectName := projectName
@@ -1420,7 +1456,9 @@ func cmdSave(cfg store.Config) {
 		Mode:      project.ResolutionCurrent,
 		Explicit:  projectName,
 		Directory: cwd,
-		Detect:    detectProjectFull,
+		Detect: func(dir string) project.DetectionResult {
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
 		if resolveErr != nil {
@@ -1448,11 +1486,6 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	s, err := storeNew(cfg)
-	if err != nil {
-		fatal(err)
-	}
-	defer s.Close()
 	sessionID := "manual-save-" + projectName
 	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
@@ -2049,6 +2082,7 @@ func cmdSync(cfg store.Config) {
 	doStatus := false
 	doAll := false
 	doCloud := false
+	literalProject := false
 	project := ""
 	projectProvided := false
 	for i := 2; i < len(os.Args); i++ {
@@ -2064,11 +2098,24 @@ func cmdSync(cfg store.Config) {
 			doAll = true
 		case "--cloud":
 			doCloud = true
+		case "--literal-project":
+			literalProject = true
 		case "--project":
-			if i+1 < len(os.Args) {
-				project = os.Args[i+1]
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
+			}
+			project, projectProvided = value, true
+			i++
+		default:
+			if strings.HasPrefix(os.Args[i], "--project=") {
+				project = strings.TrimPrefix(os.Args[i], "--project=")
+				if strings.TrimSpace(project) == "" {
+					fatal(fmt.Errorf("--project requires a non-empty value"))
+					return
+				}
 				projectProvided = true
-				i++
 			}
 		}
 	}
@@ -2077,8 +2124,12 @@ func cmdSync(cfg store.Config) {
 		return
 	}
 	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if literalProject && (!cloudEnabled || doAll || !projectProvided || strings.TrimSpace(project) == "") {
+		fatal(fmt.Errorf("--literal-project requires cloud sync with an explicit non-empty --project and cannot use --all"))
+		return
+	}
 	if cloudEnabled && projectProvided {
-		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project, literalProject)
 		if decodeErr != nil {
 			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
 			return
@@ -2099,7 +2150,7 @@ func cmdSync(cfg store.Config) {
 	// Sync is project-scoped unless --all is explicit. Route its omitted project
 	// through the same process-override-before-cwd resolver as other CLI paths.
 	if !doAll {
-		resolved, resolveErr := resolveCLIProjectWithDetector(s, project, false, detectProjectForSync)
+		resolved, resolveErr := resolveCLIProject(s, project, false)
 		if resolveErr != nil {
 			fatal(resolveErr)
 			return
@@ -2302,7 +2353,8 @@ func printSkippedRelationWarnings(result *engramsync.ImportResult) {
 }
 
 func printSyncUsage() {
-	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT]")
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT [--literal-project]]")
+	fmt.Println("--literal-project skips URL decoding of an explicit cloud project; normalization still applies.")
 	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
 	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
 }
@@ -2515,6 +2567,8 @@ func cmdProjects(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "merge":
+		cmdProjectsMerge(cfg)
 	case "consolidate":
 		cmdProjectsConsolidate(cfg)
 	case "prune":
@@ -2532,9 +2586,74 @@ func cmdProjects(cfg store.Config) {
 
 func printProjectsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
+	fmt.Fprintln(os.Stderr, "       engram projects merge --from <source> --to <canonical> (--dry-run|--apply)")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
 	fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run] [--paths-only]")
 	fmt.Fprintln(os.Stderr, "       engram projects rescue-ownership --project <name> [--session <id>]... [--observation <id>]... [--prompt <id>]...")
+}
+
+func cmdProjectsMerge(cfg store.Config) {
+	var from, to string
+	var dryRun, apply bool
+	seen := map[string]bool{}
+	for i := 3; i < len(os.Args); i++ {
+		flag := os.Args[i]
+		if seen[flag] {
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+		seen[flag] = true
+		switch flag {
+		case "--from", "--to":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "--") {
+				printProjectsUsage()
+				exitFunc(1)
+				return
+			}
+			i++
+			if flag == "--from" {
+				from = os.Args[i]
+			} else {
+				to = os.Args[i]
+			}
+		case "--dry-run":
+			dryRun = true
+		case "--apply":
+			apply = true
+		default:
+			printProjectsUsage()
+			exitFunc(1)
+			return
+		}
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" || dryRun == apply {
+		printProjectsUsage()
+		exitFunc(1)
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer func() { _ = s.Close() }() // Closing the command's store is best effort.
+	// Preview and apply share store eligibility; apply revalidates transactionally.
+	preview, err := s.PreviewExplicitProjectMerge(from, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if dryRun {
+		fmt.Printf("[dry-run] Source %q -> target %q: observations %d, sessions %d, prompts %d. Sync identity changes: %t. No changes made. Point-in-time preview; apply revalidates and counts may differ.\n", preview.Source, preview.Canonical, preview.ObservationsUpdated, preview.SessionsUpdated, preview.PromptsUpdated, preview.SyncIdentityChanges)
+		return
+	}
+	result, err := s.MergeExplicitProjectVariants([]string{from}, to)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Merged source %q into target %q: observations %d, sessions %d, prompts %d. Sync identity may also change.\n", preview.Source, result.Canonical, result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
 }
 
 // cmdProjectsRescueOwnership assigns explicit ownership to legacy rows that
@@ -2787,7 +2906,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		res := detectProjectFull(cwd)
+		res := detectProjectFull(cwd, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
 		if res.Error != nil {
 			fatal(res.Error)
 			return
@@ -3636,6 +3755,8 @@ Commands:
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
   projects list      List all projects with observation, session, and prompt counts
+  projects merge --from <source> --to <canonical> (--dry-run|--apply)
+                     Preview or apply an explicit separator-variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
@@ -3653,6 +3774,7 @@ Commands:
                          --project  Filter export to a specific project
                          --all      Export ALL projects (ignore directory-based filter)
 		                 --cloud    Run sync against configured cloud endpoint (requires explicit --project)
+                          --literal-project Skip URL decoding of explicit cloud project names
 	  cloud <subcommand> Cloud integration commands (opt-in)
 	                        status     Show cloud config status
 	                        enroll     Enroll a project for cloud sync

@@ -3,11 +3,10 @@
  *
  * Thin adapter that connects Pi session events to an Engram HTTP server.
  * Persistence remains owned by the Engram Go binary (`engram serve`). MCP tools
- * are configured separately through pi-mcp-adapter and `engram mcp`.
+ * are configured separately through Pi's built-in MCP (`mcp.json`) and `engram mcp`.
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -129,6 +128,8 @@ interface FetchOptions {
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
+  // Satellite-only pre-dispatch validation, including transport retries/reconnects.
+  beforeDispatch?: () => Promise<void>;
 }
 
 type EngramOperation = "read" | "doctor" | "session-registration" | "write";
@@ -211,6 +212,11 @@ interface ContextResponse {
 }
 
 interface SessionContext {
+  hasUI?: boolean;
+  ui?: {
+    notify?: (message: string, severity: "warning") => void;
+    setStatus?: (key: string, text: string | undefined) => void;
+  };
   cwd: string;
   sessionManager: {
     getSessionId(): string | undefined;
@@ -218,14 +224,19 @@ interface SessionContext {
   };
 }
 
-type MemoryToolContext = SessionContext & {
-  hasUI?: boolean;
-  ui?: { setStatus?: (key: string, text: string | undefined) => void };
-};
+type MemoryToolContext = SessionContext;
 
 interface AgentStartEvent {
   systemPrompt: string;
   prompt?: string;
+  // Present on Pi versions that expose structured, per-run cloned prompt options.
+  systemPromptOptions?: { appendSystemPrompt?: string } | null;
+}
+
+function appendPromptSection(options: { appendSystemPrompt?: string }, section: string): void {
+  const existing = options.appendSystemPrompt ?? "";
+  if (existing.includes(section)) return;
+  options.appendSystemPrompt = existing.length > 0 ? `${existing}\n\n${section}` : section;
 }
 
 interface ToolEndEvent {
@@ -259,18 +270,19 @@ class SessionProjectConflictError extends Error {
   }
 }
 
-function sessionProjectConflictFromResponse(error: unknown, sessionId: string, requestedProject: string): SessionProjectConflictError | undefined {
+function sessionProjectConflictFromResponse(error: unknown, sessionId: string, requestedProject: string, resumeRoot?: string): SessionProjectConflictError | undefined {
   if (!(error instanceof EngramHttpError) || error.status !== 409 || !error.data || typeof error.data !== "object") return undefined;
   const data = error.data as Record<string, unknown>;
   const ownerProject = typeof data.owner_project === "string" ? data.owner_project : "";
   if (
     data.code !== "session_project_conflict"
-    || data.session_id !== sessionId
+    || !(data.session_id === sessionId || (resumeRoot !== undefined
+      && typeof data.session_id === "string" && data.session_id.startsWith(`${resumeRoot}:resume:`)))
     || data.requested_project !== requestedProject
     || ownerProject.length === 0
     || ownerProject === requestedProject
   ) return undefined;
-  return new SessionProjectConflictError(sessionId, ownerProject, requestedProject);
+  return new SessionProjectConflictError(data.session_id as string, ownerProject, requestedProject);
 }
 
 // Node rejects an AbortSignal.timeout() fetch with a DOMException named "TimeoutError",
@@ -299,13 +311,15 @@ function isDefinitelyPreDispatchError(error: unknown): boolean {
 
 // A completed response with JSON null is a successful result. Failure metadata belongs to
 // the request, so concurrent native tools never share timeout outcomes.
-async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<EngramFetchResult<TResponse>> {
+async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchOptions = {}, allowGuardedRecovery = true): Promise<EngramFetchResult<TResponse>> {
   const method = opts.method ?? "GET";
   const policy = engramFetchPolicy(path, method);
   let timedOut = false;
   let refused = false;
   let ambiguousTransport = false;
   for (let attempt = 0; attempt < policy.maxAttempts; attempt += 1) {
+    // Validation errors must escape, not be classified/retried as transport failures.
+    if (opts.beforeDispatch) await opts.beforeDispatch();
     let res: Response;
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
@@ -371,8 +385,8 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
     return { data: null, transportFailure: { operation: policy.operation, outcome: "unknown", timeoutMs: policy.timeoutMs } };
   }
   if (timedOut) return { data: null, transportFailure: { operation: policy.operation, outcome: "timed_out", timeoutMs: policy.timeoutMs } };
-  if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
-    return engramFetchResult<TResponse>(path, opts);
+  if (refused && (!opts.beforeDispatch || allowGuardedRecovery) && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+    return engramFetchResult<TResponse>(path, opts, false);
   }
   throw new Error(unreachableMessage(undefined));
 }
@@ -393,26 +407,30 @@ function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher
   };
 }
 
-// warnEngramFailure reports a background capture failure on stderr. These calls
-// are best-effort by design, but discarding them without a trace means a user
-// whose memories stopped being saved — an unowned session rejecting writes, for
-// example — has no signal at all that anything is wrong.
-function warnEngramFailure(path: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+// Diagnostics belong to the capture's context, never the latest active session.
+// Pi owns terminal rendering; RPC also supports notify through its UI protocol.
+function warnEngramFailure(path: string, error: unknown, ctx?: SessionContext): void {
   try {
-    process.stderr.write(`[engram] background capture to ${redactUrlPath(path)} failed: ${message}\n`);
+    const message = redactPrivateTags(error instanceof Error ? error.message : String(error));
+    const warning = `[engram] background capture to ${redactUrlPath(path)} failed: ${message}`;
+    if (ctx?.hasUI) {
+      // A disposed or incomplete UI must not fall back to raw terminal output.
+      ctx.ui?.notify?.(warning, "warning");
+      return;
+    }
+    process.stderr.write(`${warning}\n`);
   } catch {
     // Diagnostics must never break the caller.
   }
 }
 
-async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}, ctx?: SessionContext): Promise<TResponse | null> {
   try {
     const result = await engramFetchResult<TResponse>(path, opts);
-    if (result.transportFailure) warnEngramFailure(path, new Error(unreachableMessage(result.transportFailure)));
+    if (result.transportFailure) warnEngramFailure(path, new Error(unreachableMessage(result.transportFailure)), ctx);
     return result.data;
   } catch (error) {
-    warnEngramFailure(path, error);
+    warnEngramFailure(path, error, ctx);
     return null;
   }
 }
@@ -457,12 +475,12 @@ function projectCurrentUnsupportedError(cwd: string): CurrentProjectResponse {
   };
 }
 
-async function ensureSessionBestEffort(sessionId: string, sessionProject = project, renew = false): Promise<boolean> {
+async function ensureSessionBestEffort(sessionId: string, sessionProject = project, renew = false, ctx?: SessionContext): Promise<boolean> {
   try {
     await ensureSession(sessionId, sessionProject, engramFetch, renew);
     return true;
   } catch (error) {
-    warnSessionProjectConflictOnce(error);
+    warnSessionProjectConflictOnce(error, ctx);
     return false;
   }
 }
@@ -478,6 +496,30 @@ class DeterministicStartupError extends Error {}
 // but "ready" may be read as "a server is already there". "foreign" is a live server owned
 // by a different identity; "legacy" is a live server provably too old to report one.
 type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign" | "legacy" | "identity_missing";
+
+interface EngramHealthResult {
+  status: EngramHealth;
+  localInstanceID: string;
+  remoteInstanceID: string;
+  remoteVersion: string;
+}
+
+interface OwnershipEvidence {
+  localInstanceID: string;
+  remoteInstanceID: string;
+  localVersion: string;
+  remoteVersion: string;
+}
+
+class ForeignOwnershipError extends DeterministicStartupError {
+  readonly evidence: OwnershipEvidence;
+
+  constructor(evidence: OwnershipEvidence, message?: string) {
+    super(message ?? `Engram server ownership mismatch at ${ENGRAM_URL} (local ID ${evidence.localInstanceID}, remote ID ${evidence.remoteInstanceID}; local version ${evidence.localVersion}, remote version ${evidence.remoteVersion}). WSL2 shared-loopback is a possible cause, not a confirmed diagnosis. Stop the foreign server from its owning environment, or choose a free local port and relaunch Pi with ENGRAM_PORT=<port>. ENGRAM_PORT alone does not override an explicit ENGRAM_URL; unset ENGRAM_URL to use local auto-start. Nothing is spawned or terminated automatically for this mismatch.`);
+    this.name = "ForeignOwnershipError";
+    this.evidence = evidence;
+  }
+}
 
 // Instance identity first shipped in v2.0.0-rc.11. A missing identity is legacy only when a
 // valid SemVer health version is strictly older than that release; every other shape fails
@@ -563,49 +605,44 @@ function isConnectionRefusedError(error: unknown): boolean {
   return (error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error);
 }
 
-async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
+async function probeEngramHealth(expectedID = ""): Promise<EngramHealthResult> {
+  const result: EngramHealthResult = { status: "indeterminate", localInstanceID: expectedID || "unknown", remoteInstanceID: "unknown", remoteVersion: "unknown" };
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     });
-    if (!res.ok) return "indeterminate";
-    if (!expectedID) return "ready";
+    if (!res.ok) return result;
+    if (!expectedID) return { ...result, status: "ready" };
     const health = await res.json() as { version?: unknown; instance_id?: unknown };
-    engramServerVersion = typeof health.version === "string" && health.version.trim().length > 0 ? health.version : "unknown";
+    result.remoteVersion = typeof health.version === "string" && health.version.trim().length > 0 ? health.version : "unknown";
+    // Evidence is returned with this probe, never stored in shared mutable metadata.
     // A missing identity proves neither ownership nor age. Only a recognized release older
     // than v2.0.0-rc.11 is legacy; current, unknown, and malformed versions fail closed.
     if (typeof health.instance_id !== "string" || health.instance_id.length === 0) {
-      return isPreIdentityEngramVersion(engramServerVersion) ? "legacy" : "identity_missing";
+      return { ...result, status: isPreIdentityEngramVersion(result.remoteVersion) ? "legacy" : "identity_missing" };
     }
-    return health.instance_id === expectedID ? "ready" : "foreign";
+    return { ...result, remoteInstanceID: health.instance_id, status: health.instance_id === expectedID ? "ready" : "foreign" };
   } catch (error) {
-    if (isTimeoutError(error)) return "indeterminate";
-    if (isConnectionRefusedError(error)) {
-      return "refused";
-    }
-    return "indeterminate";
+    if (isTimeoutError(error)) return result;
+    if (isConnectionRefusedError(error)) return { ...result, status: "refused" };
+    return result;
   }
 }
 
 async function isEngramRunning(expectedID = ""): Promise<boolean> {
-	return (await probeEngramHealth(expectedID)) === "ready";
+  return (await probeEngramHealth(expectedID)).status === "ready";
 }
 
 let localEngramInstanceID = "";
 
-// The /health body is parsed by the identity-verified probe; its `version` field feeds the
-// legacy-server guidance message. It stays "unknown" until such a probe reads one, so the
-// message never reports a version the facade did not actually observe.
-let engramServerVersion = "unknown";
-
 // Approved wording (engram#1255). Versions come from the /health body the probe already
 // fetched and from a short `version` spawn; either side that cannot report one degrades to
 // "unknown".
-function legacyEngramServerMessage(): string {
+function legacyEngramServerMessage(engramServerVersion: string): string {
   return `Engram server at ${ENGRAM_URL} predates instance identity (server ${engramServerVersion}, CLI ${localEngramVersion()}). An older Engram left running by the upgrade is the likely cause: stop it and start the current binary. Nothing is terminated automatically and memory retries on its own. If nothing was upgraded recently, treat this port as occupied by an unrelated process.`;
 }
 
-function missingInstanceIdentityMessage(): string {
+function missingInstanceIdentityMessage(engramServerVersion: string): string {
   return `Engram server at ${ENGRAM_URL} did not report its instance identity (server ${engramServerVersion}). Its version is not proven older than v2.0.0-rc.11, so this response is incompatible with identity verification. Verify or upgrade the server, then retry. Nothing is terminated automatically and memory retries on its own.`;
 }
 
@@ -765,7 +802,7 @@ function waitCancellable(ms: number, signal: AbortSignal): Promise<void> {
 async function waitForEngramReadiness(signal: AbortSignal, deadline: number, expectedID = ""): Promise<void> {
   while (Date.now() < deadline) {
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
-    if (await probeEngramHealth(expectedID) === "ready") return;
+    if ((await probeEngramHealth(expectedID)).status === "ready") return;
     // The probe itself can outlive the abort, so re-check before sleeping again.
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
     await waitCancellable(ENGRAM_STARTUP_POLL_MS, signal);
@@ -818,6 +855,9 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 
     try {
       proc = spawn(ENGRAM_BIN, ["serve"], {
+        // Opt into cloud autosync like the Claude Code and Codex launchers; the
+        // server skips it on its own when no cloud server or token is configured.
+        env: { ...process.env, ENGRAM_CLOUD_AUTOSYNC: "1" },
         windowsHide: true,
         detached: true,
         stdio: "ignore",
@@ -842,12 +882,15 @@ async function initializeEngramServer(): Promise<void> {
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
   const health = await probeEngramHealth(instanceID);
-  if (health === "ready") return;
+  if (health.status === "ready") return;
   // Both deterministic owner outcomes fail closed before any spawn: a server we do not own
   // is never adopted and never terminated. Only the message and the retry cadence differ.
-  if (health === "foreign") throw new DeterministicStartupError(`Engram server ownership mismatch at ${ENGRAM_URL}`);
-  if (health === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage());
-  if (health === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage());
+  if (health.status === "foreign") throw new ForeignOwnershipError({
+    localInstanceID: health.localInstanceID, remoteInstanceID: health.remoteInstanceID,
+    localVersion: localEngramVersion(), remoteVersion: health.remoteVersion,
+  });
+  if (health.status === "legacy") throw new DeterministicStartupError(legacyEngramServerMessage(health.remoteVersion));
+  if (health.status === "identity_missing") throw new DeterministicStartupError(missingInstanceIdentityMessage(health.remoteVersion));
 
   // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
   // aborted probe, a DNS failure, an error shape we do not recognize — means we have no
@@ -861,7 +904,7 @@ async function initializeEngramServer(): Promise<void> {
     // is exactly what makes our child fail. Give that instance the rest of the shared
     // deadline before reporting failure. A definitive refusal gets no such grace: nothing was
     // listening when we looked, so there is no other instance to wait for.
-    if (health !== "indeterminate") throw error;
+    if (health.status !== "indeterminate") throw error;
     const readiness = new AbortController();
     try {
       await waitForEngramReadiness(readiness.signal, deadline, instanceID);
@@ -957,7 +1000,7 @@ let runtimeSessionIdentityAmbiguous = false;
 
 const knownSessions = new Set<string>();
 const registeredSessionProjects = new Map<string, string>();
-const sessionRegistrationsInFlight = new Map<string, Promise<void>>();
+const sessionRegistrationsInFlight = new Map<string, Promise<unknown>>();
 const sessionRegistrationProjects = new Map<string, string>();
 const sessionEndingsInFlight = new Map<string, Promise<unknown>>();
 // Module graphs loaded by the same Pi realm share only active shutdown deliveries.
@@ -966,7 +1009,7 @@ const shutdownFlightsKey = Symbol.for("engram.pi.shutdown-flights");
 const realm = globalThis as typeof globalThis & { [shutdownFlightsKey]?: WeakMap<object, Map<string, Promise<void>>> };
 const shutdownFlights = realm[shutdownFlightsKey] ??= new WeakMap<object, Map<string, Promise<void>>>();
 const lifecycleKey = Symbol.for("engram.pi.session-lifecycle");
-type Lifecycle = { epoch: number; closing: boolean };
+type Lifecycle = { epoch: number; closing: boolean; confirmedShutdownID?: string };
 const lifecycleRealm = globalThis as typeof globalThis & { [lifecycleKey]?: WeakMap<object, Map<string, Lifecycle>> };
 const lifecycles = lifecycleRealm[lifecycleKey] ??= new WeakMap<object, Map<string, Lifecycle>>();
 function lifecycle(ctx: SessionContext, id: string): Lifecycle {
@@ -1006,18 +1049,17 @@ function sessionProjectConflict(sessionId: string, sessionProject: string): Sess
     : undefined;
 }
 
-function warnSessionProjectConflictOnce(error: unknown): void {
+function warnSessionProjectConflictOnce(error: unknown, ctx?: SessionContext): void {
   if (!(error instanceof SessionProjectConflictError)) return;
   const key = `${error.sessionId}\u0000${error.ownerProject}\u0000${error.requestedProject}`;
   if (warnedSessionProjectConflicts.has(key)) return;
   warnedSessionProjectConflicts.add(key);
-  warnEngramFailure("/sessions", error);
+  warnEngramFailure("/sessions", error, ctx);
 }
 
 const EFFECTIVE_SESSION_ENTRY = "engram-effective-session";
 const REJECTED_SESSION_ENTRY = "engram-rejected-effective-session";
 const effectiveSessionRegistrations = new Map<string, Promise<string>>();
-const submittedEffectiveSessions = new Set<string>();
 
 function pendingEffectiveSession(ctx: SessionContext, runtimeID: string, effectiveID: string): boolean {
   const branch = ctx.sessionManager.getBranch?.() || [];
@@ -1049,7 +1091,8 @@ function effectiveSessionID(ctx: SessionContext, runtimeID: string): string {
     const entry = branch[i];
     if (entry.type !== "custom" || entry.customType !== EFFECTIVE_SESSION_ENTRY) continue;
     const data = entry.data as { runtimeID?: string; effectiveID?: string } | undefined;
-    if (data?.runtimeID === runtimeID && typeof data.effectiveID === "string" && data.effectiveID !== runtimeID) return data.effectiveID;
+    if (data?.runtimeID === runtimeID && typeof data.effectiveID === "string"
+      && (data.effectiveID === runtimeID || data.effectiveID.startsWith(`${runtimeID}:resume:`))) return data.effectiveID;
   }
   return runtimeID;
 }
@@ -1069,55 +1112,70 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
     return effectiveID;
   }
   const registration = (async () => {
-    const effectiveID = effectiveSessionID(ctx, runtimeID);
+    const persistedID = effectiveSessionID(ctx, runtimeID);
+    const canPersist = !!appendEntry && !!ctx.sessionManager.getBranch;
+    if (pendingEffectiveSession(ctx, runtimeID, persistedID)) {
+      const owner = pendingEffectiveSessionProject(ctx, runtimeID, persistedID);
+      if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${persistedID}`);
+      if (owner !== sessionProject) throw new SessionProjectConflictError(persistedID, owner, sessionProject);
+    }
+    const register = async (id: string, resume: boolean): Promise<string> => {
+      const conflict = sessionProjectConflict(id, sessionProject);
+      if (conflict) throw conflict;
+      const key = `${sessionProject}:${id}`;
+      sessionRegistrationProjects.set(id, sessionProject);
+      const delivery = (async () => {
+        let acknowledgement: { id?: unknown; status?: unknown } | null;
+        try {
+          acknowledgement = await fetch("/sessions", { method: "POST", body: {
+            id, project: sessionProject, directory, ownership_mode: "project_owned", resume,
+          } });
+        } catch (error) {
+          throw sessionProjectConflictFromResponse(error, id, sessionProject, resume ? runtimeID : undefined) || error;
+        }
+        const effectiveID = acknowledgement?.id;
+        if (acknowledgement?.status !== "created" || typeof effectiveID !== "string"
+          || !(effectiveID === runtimeID || effectiveID.startsWith(`${runtimeID}:resume:`))) {
+          throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${runtimeID}: invalid acknowledgement`);
+        }
+        if (effectiveID !== persistedID && !canPersist) {
+          throw new Error("Cannot persist the acknowledged resumed Pi session identity");
+        }
+        registeredSessionProjects.set(effectiveID, sessionProject);
+        knownSessions.add(`${sessionProject}:${effectiveID}`);
+        state.confirmedShutdownID = undefined;
+        // This marker tracks cleanup delivery, not a client-selected reservation.
+        // Read again after acknowledgement so a peer graph's synchronous append is visible.
+        const alreadyPersisted = effectiveSessionID(ctx, runtimeID) === effectiveID
+          && pendingEffectiveSession(ctx, runtimeID, effectiveID)
+          && pendingEffectiveSessionProject(ctx, runtimeID, effectiveID) === sessionProject;
+        if ((effectiveID !== runtimeID || persistedID !== runtimeID) && appendEntry && !alreadyPersisted) appendEntry(EFFECTIVE_SESSION_ENTRY, {
+          runtimeID, effectiveID, pending: true, project: sessionProject,
+        });
+        assertOpen(state, epoch);
+        return effectiveID;
+      })();
+      sessionRegistrationsInFlight.set(key, delivery);
+      try { return await delivery; }
+      finally {
+        if (sessionRegistrationsInFlight.get(key) === delivery) {
+          sessionRegistrationsInFlight.delete(key);
+          if (!registeredSessionProjects.has(id)) sessionRegistrationProjects.delete(id);
+        }
+      }
+    };
     try {
-      if (pendingEffectiveSession(ctx, runtimeID, effectiveID)) {
-        const pendingProject = pendingEffectiveSessionProject(ctx, runtimeID, effectiveID);
-        if (!pendingProject) throw new Error(`Cannot confirm project ownership for pending Pi session ${effectiveID}`);
-        if (pendingProject !== sessionProject) {
-          throw new SessionProjectConflictError(effectiveID, pendingProject, sessionProject);
-        }
-      }
-      await ensureSession(effectiveID, sessionProject, fetch, true);
-      assertOpen(state, epoch);
-      return effectiveID;
+      // Re-register legacy UUID mappings as-is; never resume a continuation as a new root.
+      return await register(persistedID, canPersist && persistedID === runtimeID);
     } catch (error) {
-      if (error instanceof SessionProjectConflictError && effectiveID !== runtimeID && appendEntry
-        && error.ownerProject !== pendingEffectiveSessionProject(ctx, runtimeID, effectiveID)) {
-        appendEntry(REJECTED_SESSION_ENTRY, { runtimeID, effectiveID });
-        submittedEffectiveSessions.delete(effectiveID);
+      if (error instanceof SessionProjectConflictError && persistedID !== runtimeID && appendEntry
+        && error.ownerProject !== pendingEffectiveSessionProject(ctx, runtimeID, persistedID)) {
+        appendEntry(REJECTED_SESSION_ENTRY, { runtimeID, effectiveID: persistedID });
       }
-      if (!(error instanceof EngramHttpError) || error.status !== 409
+      if (persistedID === runtimeID || !(error instanceof EngramHttpError) || error.status !== 409
         || (error.data as { code?: string } | null)?.code !== "session_already_ended") throw error;
-      if (!appendEntry || !ctx.sessionManager.getBranch) throw error;
-      // Another module graph may have reserved the replacement while this POST was in flight.
-      // Read the shared branch before reserving: appendEntry is synchronous, so this check
-      // and the reservation below cannot interleave with another caller's continuation.
       assertOpen(state, epoch);
-      const reservedID = effectiveSessionID(ctx, runtimeID);
-      if (reservedID !== effectiveID && pendingEffectiveSession(ctx, runtimeID, reservedID)) {
-        const owner = pendingEffectiveSessionProject(ctx, runtimeID, reservedID);
-        if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${reservedID}`);
-        if (owner !== sessionProject) throw new SessionProjectConflictError(reservedID, owner, sessionProject);
-        await ensureSession(reservedID, sessionProject, fetch, true);
-        assertOpen(state, epoch);
-        return reservedID;
-      }
-      assertOpen(state, epoch);
-      const freshID = `${runtimeID}:resume:${randomUUID()}`;
-      appendEntry(EFFECTIVE_SESSION_ENTRY, { runtimeID, effectiveID: freshID, pending: true, project: sessionProject });
-      submittedEffectiveSessions.add(freshID);
-      try {
-        await ensureSession(freshID, sessionProject, fetch, true);
-        assertOpen(state, epoch);
-      } catch (registrationError) {
-        if (registrationError instanceof SessionProjectConflictError) {
-          appendEntry(REJECTED_SESSION_ENTRY, { runtimeID, effectiveID: freshID });
-          submittedEffectiveSessions.delete(freshID);
-        }
-        throw registrationError;
-      }
-      return freshID;
+      return register(runtimeID, canPersist);
     }
   })();
   effectiveSessionRegistrations.set(registrationKey, registration);
@@ -1129,6 +1187,98 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
   } finally { if (effectiveSessionRegistrations.get(registrationKey) === registration) effectiveSessionRegistrations.delete(registrationKey); }
 }
 
+// A runtime session is owned by exactly one project. Explicitly targeted writes to another
+// project use a derived satellite session owned by that project, so ownership never changes.
+const satelliteRegistrations = new Map<string, Promise<string>>();
+const satelliteSessions = new Map<string, Set<string>>();
+
+function satelliteSessionID(runtimeID: string, targetProject: string): string {
+  return `${runtimeID}@${targetProject}`;
+}
+
+// The project that owns (or will own) the runtime session. Undefined means ownership is not
+// established, so an explicit project may still claim the runtime session itself.
+function runtimeSessionOwner(ctx: SessionContext, runtimeID: string): string | undefined {
+  const persistedID = effectiveSessionID(ctx, runtimeID);
+  for (const id of [persistedID, runtimeID]) {
+    const owner = registeredSessionProjects.get(id) || sessionRegistrationProjects.get(id);
+    if (owner) return owner;
+  }
+  for (const key of effectiveSessionRegistrations.keys()) {
+    if (key.endsWith(`\u0000${runtimeID}`)) return key.slice(0, key.length - runtimeID.length - 1);
+  }
+  // An ownerless pending reservation stays unresolved so registration keeps failing closed.
+  if (pendingEffectiveSession(ctx, runtimeID, persistedID)) return pendingEffectiveSessionProject(ctx, runtimeID, persistedID);
+  return projectDetectionPending || projectResolutionError || project === "unknown" ? undefined : project;
+}
+
+async function registerSatelliteSession(ctx: SessionContext, targetProject: string, fetch: EngramFetcher = engramFetch): Promise<string> {
+  const runtimeID = requireRuntimeSessionID(ctx);
+  const state = lifecycle(ctx, runtimeID);
+  const epoch = state.epoch;
+  const assertRuntimeOpen = () => {
+    assertOpen(state, epoch);
+    if (knownSessions.has(`\u0000closing:${runtimeID}`)) throw new Error(`Pi runtime session ${runtimeID} is closing`);
+  };
+  assertRuntimeOpen();
+  const rootID = satelliteSessionID(runtimeID, targetProject);
+  let registration = satelliteRegistrations.get(rootID);
+  if (!registration) {
+    registration = (async () => {
+      // Old servers may ignore isolated and normalize omitted directory to their cwd.
+      // Require an explicit capability on every registration flight, never a version guess.
+      const validateCapability = async () => {
+        const health = await fetch("/health") as { capabilities?: { isolated_session_registration?: unknown } } | null;
+        if (health?.capabilities?.isolated_session_registration !== true) {
+          throw new Error("Upgrade the Engram server to one advertising capabilities.isolated_session_registration: true in GET /health before saving to another project. No satellite session was registered.");
+        }
+        assertRuntimeOpen();
+      };
+      let acknowledgement: { id?: unknown; status?: unknown } | null;
+      try {
+        // Every write renews the lease; core validates isolation before selecting/renewing a continuation.
+        acknowledgement = await fetch("/sessions", { method: "POST", beforeDispatch: validateCapability, body: {
+          id: rootID, project: targetProject, ownership_mode: "project_owned", resume: true, isolated: true,
+        } });
+      } catch (error) {
+        throw sessionProjectConflictFromResponse(error, rootID, targetProject, rootID) || error;
+      }
+      const effectiveID = acknowledgement?.id;
+      if (acknowledgement?.status !== "created" || typeof effectiveID !== "string"
+        || !(effectiveID === rootID || (effectiveID.startsWith(`${rootID}:resume:`)
+          && /^[0-9]+$/.test(effectiveID.slice(`${rootID}:resume:`.length))))) {
+        throw new Error(`gentle-engram could not confirm satellite session registration ${rootID} for project ${targetProject}: invalid acknowledgement`);
+      }
+      registeredSessionProjects.set(effectiveID, targetProject);
+      knownSessions.add(`${targetProject}:${effectiveID}`);
+      const satellites = satelliteSessions.get(runtimeID) || new Set<string>();
+      satellites.add(effectiveID);
+      satelliteSessions.set(runtimeID, satellites);
+      return effectiveID;
+    })();
+    satelliteRegistrations.set(rootID, registration);
+  }
+  try {
+    const effectiveID = await registration;
+    assertRuntimeOpen();
+    return effectiveID;
+  } finally {
+    if (satelliteRegistrations.get(rootID) === registration) satelliteRegistrations.delete(rootID);
+  }
+}
+
+async function endSatelliteSessions(runtimeID: string, ctx: SessionContext): Promise<void> {
+  await Promise.all([...satelliteRegistrations.entries()]
+    .filter(([rootID]) => rootID.startsWith(`${runtimeID}@`))
+    .map(([, registration]) => registration.catch(() => undefined)));
+  const satellites = satelliteSessions.get(runtimeID);
+  satelliteSessions.delete(runtimeID);
+  for (const satelliteID of satellites || []) {
+    await bestEffortEngramFetch(`/sessions/${encodeURIComponent(satelliteID)}/end`, { method: "POST", body: { summary: "" } }, ctx);
+    forgetKnownSession(satelliteID);
+  }
+}
+
 async function ensureSession(sessionId: string, sessionProject = project, fetch: EngramFetcher = engramFetch, renew = false): Promise<void> {
   const key = `${sessionProject}:${sessionId}`;
   if (!sessionId) return;
@@ -1138,7 +1288,7 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
   if (!renew && knownSessions.has(key)) return;
 
   const existingRegistration = sessionRegistrationsInFlight.get(key);
-  if (existingRegistration) return existingRegistration;
+  if (existingRegistration) { await existingRegistration; return; }
 
   const registration = (async () => {
     const body: SessionBody = { id: sessionId, project: sessionProject, directory, ownership_mode: "project_owned" };
@@ -1209,9 +1359,40 @@ function applyDetectedProject(detected: CurrentProjectResponse | undefined): boo
     return true;
   }
   project = "unknown";
-  const choices = detected.available_projects?.length ? ` Available projects: ${detected.available_projects.join(", ")}.` : "";
-  projectResolutionError = detected.error_hint || detected.warning || `Engram project detection did not resolve a project.${choices}`;
+  projectResolutionError = projectResolutionMessage(detected);
   return false;
+}
+
+function projectResolutionMessage(detected: CurrentProjectResponse, listChoices = false): string {
+  const choices = detected.available_projects?.length ? ` Available projects: ${detected.available_projects.join(", ")}.` : "";
+  const hint = detected.error_hint || detected.warning;
+  return hint ? `${hint}${listChoices ? choices : ""}` : `Engram project detection did not resolve a project.${choices}`;
+}
+
+const WRITE_TARGET_TOOLS = new Set(["mem_save", "mem_save_prompt", "mem_session_summary"]);
+
+// Resolves an explicit `cwd` write target through the same server detection as /project/current.
+// It never guesses: unresolved or ambiguous detection and a disagreeing `project` both fail.
+async function resolveExplicitWriteTarget(params: Record<string, unknown>, fetch: EngramFetcher): Promise<{ project: string } | undefined> {
+  const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+  if (!cwd) return undefined;
+  let detected: CurrentProjectResponse | null;
+  try {
+    detected = await fetch<CurrentProjectResponse>(`/project/current${queryString({ cwd })}`);
+  } catch (error) {
+    if (!(error instanceof EngramHttpError && error.status === 404)) throw error;
+    detected = detectLocalConfigProject(cwd) || projectCurrentUnsupportedError(cwd);
+  }
+  const resolved = detected ? isSafeDetectedProject(detected) : undefined;
+  if (!resolved) {
+    const reason = detected ? projectResolutionMessage(detected, true) : "Engram project detection is unavailable.";
+    throw new Error(`Cannot resolve a write project from cwd ${cwd}: ${reason}`);
+  }
+  const requested = typeof params.project === "string" ? params.project.trim() : "";
+  if (requested && requested.toLowerCase() !== resolved.toLowerCase()) {
+    throw new Error(`Explicit project ${requested} does not match project ${resolved} resolved from cwd ${cwd}. Pass only one of project or cwd, or make them agree.`);
+  }
+  return { project: resolved };
 }
 
 async function refreshProjectDetection(cwd: string, fetch: EngramFetcher = engramFetch, signal?: AbortSignal): Promise<void> {
@@ -1236,26 +1417,28 @@ function hasSessionRegistrationInFlight(sessionId: string): boolean {
   return [...sessionRegistrationsInFlight.keys()].some((key) => key.endsWith(`:${sessionId}`));
 }
 
-async function waitForSessionRegistration(sessionId: string): Promise<void> {
+async function waitForSessionRegistration(sessionId: string, propagateFailure = false): Promise<void> {
   const registrations = [...sessionRegistrationsInFlight.entries()]
     .filter(([key]) => key.endsWith(`:${sessionId}`))
-    .map(([, registration]) => registration.catch(() => undefined));
+    .map(([, registration]) => propagateFailure ? registration : registration.catch(() => undefined));
   await Promise.all(registrations);
 }
 
-async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>, persistedPending = false): Promise<unknown> {
+async function endRegisteredSessionOnce(sessionId: string, end: () => Promise<unknown>, persistedPending = false, requireConfirmedRegistration = false): Promise<unknown> {
   const existing = sessionEndingsInFlight.get(sessionId);
   if (existing) return existing;
 
   const registrationWasInFlight = hasSessionRegistrationInFlight(sessionId);
   const ending = (async () => {
-    await waitForSessionRegistration(sessionId);
-    if (!registrationWasInFlight && !hasKnownSession(sessionId) && !submittedEffectiveSessions.has(sessionId) && !persistedPending) return null;
+    await waitForSessionRegistration(sessionId, requireConfirmedRegistration);
+    if (requireConfirmedRegistration && !registeredSessionProjects.has(sessionId)) {
+      throw new Error(`Cannot end Pi session ${sessionId} without confirmed local project ownership`);
+    }
+    if (!registrationWasInFlight && !hasKnownSession(sessionId) && !persistedPending) return null;
     try {
       return await end();
     } finally {
       forgetKnownSession(sessionId);
-      submittedEffectiveSessions.delete(sessionId);
     }
   })();
   sessionEndingsInFlight.set(sessionId, ending);
@@ -1279,20 +1462,16 @@ async function initialize(cwd: string): Promise<void> {
   await initializeEngramServer();
 
   applyDetectedProject(await detectServerProject(cwd));
-
-  const manifestFile = `${cwd}/.engram/manifest.json`;
-  if (existsSync(manifestFile)) {
-    await spawnDetached(ENGRAM_BIN, ["sync", "--import"], cwd);
-  }
 }
 
 // Startup failures reach the agent as prose, so give every one of them the same shape and
 // the same actionable prefix instead of leaking a raw spawn or readiness message.
 function normalizeInitializationError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
-  return new Error(
-    `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_BIN.`,
-  );
+  const normalized = `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_PORT/ENGRAM_BIN.`;
+  return error instanceof ForeignOwnershipError
+    ? new ForeignOwnershipError(error.evidence, normalized)
+    : new Error(normalized);
 }
 
 function initOnce(cwd: string): Promise<void> {
@@ -1381,10 +1560,12 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     scope: optionalString("Scope: project, personal, or global"),
     topic_key: optionalString("Stable topic key for upserts"),
     project: optionalString("Optional explicit project"),
+    cwd: optionalString("Optional directory whose Engram project receives this write; must agree with project when both are set"),
     capture_prompt: optionalBoolean("Capture current prompt when available"),
   }),
   mem_update: Type.Object({
     id: Type.Number({ description: "Observation ID to update" }),
+    expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     title: optionalString("New title"),
     content: optionalString("New content"),
     type: optionalString("New type/category"),
@@ -1393,6 +1574,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_delete: Type.Object({
     id: Type.Number({ description: "Observation ID to delete" }),
+    expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     hard_delete: optionalBoolean("Permanently delete the observation"),
   }),
   mem_suggest_topic_key: Type.Object({
@@ -1403,14 +1585,18 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   mem_save_prompt: Type.Object({
     content: Type.String({ description: "The user's prompt text" }),
     project: optionalString("Optional project"),
+    cwd: optionalString("Optional directory whose Engram project receives this prompt; must agree with project when both are set"),
   }),
   mem_session_summary: Type.Object({
     content: Type.String({ description: "Full session summary" }),
     project: optionalString("Optional project to use when automatic detection is unavailable"),
+    cwd: optionalString("Optional directory whose Engram project receives this summary; must agree with project when both are set"),
   }),
   mem_context: Type.Object({
     project: optionalString("Filter by project"),
     scope: optionalString("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
+    max_bytes: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum context output size in bytes; must be a positive integer; enforced by Engram core" })),
+    compact: optionalBoolean("Use Engram core's compact context formatting"),
   }),
   mem_stats: Type.Object({
     project: optionalString("Project to echo in UI chrome"),
@@ -1485,9 +1671,10 @@ function queryString(params: Record<string, unknown>): string {
   return encoded ? `?${encoded}` : "";
 }
 
-async function archiveCompactionSummary(sessionId: string, summary: string): Promise<string> {
+async function archiveCompactionSummary(sessionId: string, summary: string, runtimeID: string, ctx?: SessionContext): Promise<string> {
   try {
-    if (soleActiveRuntimeSessionID() !== sessionId) return ArchiveOutcome.Unavailable;
+    // Ambiguity is checked against Pi's host identity; attribution uses Engram's effective ID.
+    if (soleActiveRuntimeSessionID() !== runtimeID) return ArchiveOutcome.Unavailable;
     const result = await engramFetchResult("/observations", {
       method: "POST",
       body: {
@@ -1502,16 +1689,16 @@ async function archiveCompactionSummary(sessionId: string, summary: string): Pro
     });
     return result.transportFailure?.outcome === "unknown" ? ArchiveOutcome.Unknown : ArchiveOutcome.Confirmed;
   } catch (error) {
-    warnEngramFailure("/observations", error);
+    warnEngramFailure("/observations", error, ctx);
     return ArchiveOutcome.Failed;
   }
 }
 
-async function loadCompactionRecoveryContext(sessionId: string): Promise<string | undefined> {
+async function loadCompactionRecoveryContext(sessionId: string, ctx?: SessionContext): Promise<string | undefined> {
   try {
     return (await engramFetchResult<ContextResponse>(`/context/compaction${queryString({ session_id: sessionId })}`)).data?.context;
   } catch (error) {
-    warnEngramFailure("/context/compaction", error);
+    warnEngramFailure("/context/compaction", error, ctx);
     return undefined;
   }
 }
@@ -1538,14 +1725,21 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
-async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"]): Promise<unknown> {
+async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
   const sessionId = getSessionId(ctx);
-  const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
-  const activeProject = requestedProject || project;
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
   const writeState = sessionId ? lifecycle(ctx, sessionId) : undefined;
   const writeEpoch = writeState?.epoch;
-  const registeredSessionForWrite = async (sessionProject: string) => registerEffectiveSession(ctx, sessionProject, appendEntry, fetch);
+  const writeTarget = WRITE_TARGET_TOOLS.has(toolName) ? await resolveExplicitWriteTarget(params, fetch) : undefined;
+  const requestedProject = writeTarget?.project || (typeof params.project === "string" && params.project ? params.project : undefined);
+  const activeProject = requestedProject || project;
+  // Only an explicit target may route to a satellite; implicit writes keep the runtime session.
+  const registeredSessionForWrite = async (sessionProject: string) => {
+    const owner = requestedProject ? runtimeSessionOwner(ctx, requireRuntimeSessionID(ctx)) : undefined;
+    return owner && owner !== sessionProject
+      ? registerSatelliteSession(ctx, sessionProject, fetch)
+      : registerEffectiveSession(ctx, sessionProject, appendEntry, fetch);
+  };
 
   switch (toolName) {
     case "mem_search":
@@ -1561,7 +1755,12 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       })}`);
     case "mem_context":
       if (!params.project) requireResolvedProject();
-      return fetch(`/context${queryString({ project: params.project || project, scope: params.scope })}`);
+      return fetch(`/context${queryString({
+        project: params.project || project,
+        scope: params.scope,
+        max_bytes: params.max_bytes,
+        compact: params.compact,
+      })}`);
     case "mem_stats":
       return fetch(`/stats${queryString({ all_projects: true })}`);
     case "mem_timeline":
@@ -1588,7 +1787,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       });
     }
     case "mem_update":
-      return fetch(`/observations/${encodeURIComponent(String(params.id))}`, {
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ expected_project: params.expected_project })}`, {
         method: "PATCH",
         body: {
           title: params.title,
@@ -1599,7 +1798,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         },
       });
     case "mem_delete":
-      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ hard: params.hard_delete })}`, { method: "DELETE" });
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ hard: params.hard_delete, expected_project: params.expected_project })}`, { method: "DELETE" });
     case "mem_suggest_topic_key":
       return { topic_key: slugifyTopicKey(params) };
     case "mem_save_prompt": {
@@ -1637,15 +1836,64 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         body: { id: params.id, project, directory: params.directory || directory || ctx.cwd },
       });
     case "mem_session_end": {
-      const endedSessionID = String(params.id);
+      if (typeof params.id !== "string" || !params.id || params.id !== sessionId) {
+        throw new Error("Pi-native session end requires the current host session ID; end independent sessions directly outside Pi-native tools");
+      }
+      // Registration may select a continuation while this explicit end is waiting.
+      await Promise.all([...effectiveSessionRegistrations.entries()]
+        .filter(([key]) => key.endsWith(`\u0000${sessionId}`))
+        .map(([, registration]) => registration));
+      const endedSessionID = effectiveSessionID(ctx, sessionId);
+      const persistedPending = pendingEffectiveSession(ctx, sessionId, endedSessionID);
+      const owner = persistedPending ? pendingEffectiveSessionProject(ctx, sessionId, endedSessionID) : undefined;
+      if (persistedPending) {
+        const localOwner = registeredSessionProjects.get(endedSessionID) || sessionRegistrationProjects.get(endedSessionID);
+        if (!appendEntry || !owner || owner !== (localOwner || (project !== "unknown" ? project : undefined))) {
+          throw new Error("Cannot end a pending Pi session without confirmed local project ownership and entry persistence");
+        }
+      }
       const pendingEnd = sessionEndingsInFlight.get(endedSessionID);
       if (pendingEnd) return pendingEnd;
-      const end = () => fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
-        method: "POST",
-        body: { summary: params.summary || "" },
-      });
-      return endedSessionID === sessionId && (hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID))
-        ? endRegisteredSessionOnce(endedSessionID, end)
+      // A persisted reservation from an earlier module graph is not local proof of
+      // ownership. Confirm it with the server before allowing this graph to end it.
+      if (persistedPending && !registeredSessionProjects.has(endedSessionID)) {
+        try {
+          await ensureSession(endedSessionID, owner, fetch, true);
+        } catch (error) {
+          const data = error instanceof EngramHttpError ? error.data as { code?: string; session_id?: string } | null : null;
+          if (!(error instanceof EngramHttpError && error.status === 409
+            && data?.code === "session_already_ended" && data.session_id === endedSessionID
+            && owner === project && pendingEffectiveSession(ctx, sessionId, endedSessionID))) throw error;
+          appendEntry!(EFFECTIVE_SESSION_ENTRY, {
+            runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
+          });
+          return { status: "already_ended", session_id: endedSessionID };
+        }
+      }
+      if (endedSessionID === sessionId && !registeredSessionProjects.has(endedSessionID)) {
+        await waitForSessionRegistration(endedSessionID, true);
+        if (!registeredSessionProjects.has(endedSessionID)) {
+          throw new Error(`Cannot end Pi session ${endedSessionID} without confirmed local registration`);
+        }
+      }
+      const end = async () => {
+        const result = await fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
+          method: "POST",
+          body: { summary: params.summary || "" },
+        });
+        if (persistedPending && !transportFailure?.()) appendEntry!(EFFECTIVE_SESSION_ENTRY, {
+          runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
+        });
+        return result;
+      };
+      return endedSessionID !== sessionId || hasKnownSession(endedSessionID) || hasSessionRegistrationInFlight(endedSessionID)
+        ? endRegisteredSessionOnce(endedSessionID, async () => {
+          if (endedSessionID !== sessionId && (!registeredSessionProjects.has(endedSessionID)
+            || (persistedPending && registeredSessionProjects.get(endedSessionID) !== owner))) {
+            throw new Error(`Cannot end Pi session ${endedSessionID} without confirmed local project ownership`);
+          }
+          return end();
+        }, persistedPending, endedSessionID !== sessionId)
         : end();
     }
     case "mem_current_project": {
@@ -1745,7 +1993,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     await awaitWithAbort(initOnce(ctx.cwd), signal);
     await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
-    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry), signal);
+    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry, transport.transportFailure), signal);
     const failure = transport.transportFailure();
     if (failure) throw new Error(unreachableMessage(failure));
 
@@ -1759,6 +2007,11 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     return result;
   } catch (error) {
     if (signal?.aborted) throw error;
+    if (toolName === "mem_doctor" && error instanceof ForeignOwnershipError) {
+      const data = { source: "LOCAL", status: "error", code: "ownership_mismatch", endpoint: ENGRAM_URL, evidence: error.evidence, message: error.message };
+      ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${errorStatusLabel(error.message)}`);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: { data }, isError: true };
+    }
     const failure = transport.transportFailure();
     const message = failure ? unreachableMessage(failure) : error instanceof Error ? error.message : String(error);
     const details = error instanceof EngramHttpError
@@ -1836,23 +2089,29 @@ export default function registerEngram(pi: ExtensionAPI) {
         && !!owner && (owner === localOwner || owner === (detected || (project !== "unknown" ? project : undefined)));
       // A foreign graph may observe a reservation but never owns its shutdown;
       // still fall through to the common module-local cleanup below.
-      if (!(pendingEffectiveSession(ctx, runtimeID, sessionId) && !persistedPending)
+      if (state.confirmedShutdownID !== sessionId
+        && !(pendingEffectiveSession(ctx, runtimeID, sessionId) && !persistedPending)
         && (persistedPending || hasKnownSession(sessionId) || hasSessionRegistrationInFlight(sessionId))) {
         await sharedShutdown(ctx.sessionManager, sessionId, async () => {
           const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
             `/sessions/${encodeURIComponent(sessionId)}/end`,
             { method: "POST", body: { summary: "" } },
+            ctx,
           ), persistedPending);
-          if (persistedPending && ended !== null && ended !== undefined) {
-            pi.appendEntry?.(EFFECTIVE_SESSION_ENTRY, {
+          if (ended !== null && ended !== undefined) {
+            // Read-only session logs cannot clear pending; remember only confirmed delivery.
+            // Renewal resets this marker, and uncertain delivery remains retryable.
+            state.confirmedShutdownID = sessionId;
+            if (persistedPending) pi.appendEntry?.(EFFECTIVE_SESSION_ENTRY, {
               runtimeID, effectiveID: sessionId, pending: false, project: owner,
             });
           }
         });
       }
     } catch (error) {
-      warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error);
+      warnEngramFailure(`/sessions/${encodeURIComponent(sessionId)}/end`, error, ctx);
     }
+    await endSatelliteSessions(runtimeID, ctx);
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
     forgetSelfHealContext(runtimeID);
@@ -1883,16 +2142,16 @@ export default function registerEngram(pi: ExtensionAPI) {
     try {
       effectiveID = await registerEffectiveSession(observedSessionContexts.get(sessionId) || { cwd: directory, sessionManager: { getSessionId: () => sessionId } }, project, pi.appendEntry?.bind(pi));
     } catch (error) {
-      warnEngramFailure("/sessions", error);
+      warnEngramFailure("/sessions", error, observed);
       return;
     }
     if (soleActiveRuntimeSessionID() !== sessionId || knownSessions.has(`\u0000closing:${effectiveID}`)) return;
 
     let outcome: string;
-    try { open(); outcome = await archiveCompactionSummary(effectiveID, summary); }
+    try { open(); outcome = await archiveCompactionSummary(effectiveID, summary, sessionId, observed); }
     catch { outcome = ArchiveOutcome.Unavailable; }
     const context = !knownSessions.has(`\u0000closing:${effectiveID}`) && soleActiveRuntimeSessionID() === sessionId
-      ? await loadCompactionRecoveryContext(effectiveID)
+      ? await loadCompactionRecoveryContext(effectiveID, observed)
       : undefined;
     pendingRecoveryNotice = { sessionId, content: buildRecoveryNotice(project, context, outcome) };
   });
@@ -1902,34 +2161,42 @@ export default function registerEngram(pi: ExtensionAPI) {
     const sessionId = observeRuntimeSessionID(ctx);
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     const epoch = state?.epoch;
+    // A returned systemPrompt becomes a forced prompt that turns skipping this hook never see
+    // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
+    const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
+    if (options) appendPromptSection(options, MEMORY_INSTRUCTIONS);
     if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
-      systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
+      if (options) appendPromptSection(options, pendingRecoveryNotice.content);
+      else systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
       pendingRecoveryNotice = undefined;
     }
+    const result = options ? undefined : { systemPrompt };
     // The mem_* tools stay registered whether or not startup succeeded, so the agent still
     // needs the memory protocol; only the server-backed work below is skipped.
-    if (!(await initOnceForHook(ctx.cwd))) return { systemPrompt };
+    if (!(await initOnceForHook(ctx.cwd))) return result;
     await refreshProjectDetection(ctx.cwd);
 
     const finalContent = event.prompt?.trim();
     if ((projectDetectionPending || projectResolutionError) && sessionId && finalContent && finalContent.length > 10) {
-      return { systemPrompt };
+      return result;
     }
     if (sessionId && finalContent && finalContent.length > 10) {
       let effectiveID: string;
       try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
-      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error); else warnEngramFailure("/sessions", error); return { systemPrompt }; }
-      if (knownSessions.has(`\u0000closing:${effectiveID}`)) return { systemPrompt };
+      catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return result; }
+      if (knownSessions.has(`\u0000closing:${effectiveID}`)) return result;
       const body: PromptBody = {
         session_id: effectiveID,
-        content: stripPrivateTags(truncate(finalContent, 2000)),
+        // Redact before truncating: a <private> block straddling the limit
+        // would otherwise lose its closing tag and leak.
+        content: truncate(stripPrivateTags(finalContent), 2000),
         project,
       };
-      if (state && (state.closing || state.epoch !== epoch)) return { systemPrompt };
-      await bestEffortEngramFetch("/prompts", { method: "POST", body });
+      if (state && (state.closing || state.epoch !== epoch)) return result;
+      await bestEffortEngramFetch("/prompts", { method: "POST", body }, ctx);
     }
 
-    return { systemPrompt };
+    return result;
   });
 
   pi.on("tool_execution_end", async (event: ToolEndEvent, ctx: SessionContext) => {
@@ -1945,7 +2212,7 @@ export default function registerEngram(pi: ExtensionAPI) {
 
     let effectiveID: string;
     try { effectiveID = await registerEffectiveSession(ctx, project, pi.appendEntry?.bind(pi)); }
-    catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error); else warnEngramFailure("/sessions", error); return; }
+    catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return; }
     if (knownSessions.has(`\u0000closing:${effectiveID}`)) return;
     toolCounts.set(effectiveID, (toolCounts.get(effectiveID) ?? 0) + 1);
 
@@ -1965,6 +2232,6 @@ export default function registerEngram(pi: ExtensionAPI) {
       source: toolName,
     };
     if (state && (state.closing || state.epoch !== epoch)) return;
-    await bestEffortEngramFetch("/observations/passive", { method: "POST", body });
+    await bestEffortEngramFetch("/observations/passive", { method: "POST", body }, ctx);
   });
 }

@@ -76,6 +76,29 @@ Treat Engram as a curated project memory, not a transcript sink. Use this operat
 6. **Leave a handoff.** Before ending a session, save a `mem_session_summary` with the goal, instructions, discoveries, accomplished work, next steps, and relevant files.
 7. **Recover after compaction.** Persist the compacted handoff with `mem_session_summary` first. Then call `mem_context` to recover recent session history before continuing.
 
+### When Git initialization changes the detected project
+
+Before creating a repository's first private Git identity, Engram checks local
+session history for the exact working directory. If Git suggests `remote-app`
+but that directory has history under `local-app`, implicit project selection
+stops with `project_transition_conflict` instead of silently changing scope.
+History is only a precaution: explicit or imported sessions can also trigger it.
+
+Choose the intended scope deliberately. For a persistent choice, run
+`engram init local-app` in the project directory; existing explicit project
+filters and valid registered-session writes remain available. Do not overwrite
+an existing configuration without reviewing it. This choice changes future
+resolution; it does **not** merge or move previously split memories.
+
+Historical directories are matched as absolute, lexically normalized paths;
+Engram does not access their filesystems. Relative history without a recorded
+base is ignored. Only the selected working directory is filesystem-canonicalized,
+so legacy history stored under a symlink alias may require an explicit project
+choice (`engram init local-app`) rather than automatic recognition.
+
+Existing Git bindings stay stable. This check cannot reconstruct history without
+a usable absolute directory, across relocated paths, or in another local store.
+
 ### A useful memory is structured
 
 ```markdown
