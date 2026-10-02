@@ -54,11 +54,30 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const issuePattern = /(?:closes|fixes|resolves|refs)\s+(?:([a-z0-9_.-]+)\/([a-z0-9_.-]+))?#(\d+)/gi;
             const validate = (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) return ['no closing issue reference found'];
-              core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[1]).join(', ')}`);
+              if (matches.length === 0) return ['no issue reference found'];
+
+              const trustedOwner = context.repo.owner.toLowerCase();
+              const errors = [];
+              const validRefs = [];
+
+              for (const match of matches) {
+                const owner = (match[1] || context.repo.owner).toLowerCase();
+                const rawRef = match[1] && match[2] ? `${match[1]}/${match[2]}#${match[3]}` : `#${match[3]}`;
+
+                if (owner !== trustedOwner) {
+                  errors.push(`unauthorized issue reference "${rawRef}": issues must belong to ${context.repo.owner}`);
+                  continue;
+                }
+                validRefs.push(rawRef);
+              }
+
+              if (errors.length > 0) return errors;
+              if (validRefs.length === 0) return ['no valid trusted issue reference found'];
+
+              core.info(`✅ PR #${pull.number} references issue(s): ${validRefs.join(', ')}`);
               return [];
             };
             let failures;
@@ -81,7 +100,7 @@ jobs:
             if (failures.length > 0) {
               core.setFailed(
                 '❌ PR must reference an approved issue.\n' +
-                'Add "Closes #N", "Fixes #N", or "Resolves #N" to every PR body.\n' +
+                'Add "Closes #N", "Fixes #N", "Resolves #N", or "Refs #N" (or OWNER/REPO#N) to every PR body.\n' +
                 failures.join('\n')
               );
             }
@@ -102,29 +121,40 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const issuePattern = /(?:closes|fixes|resolves|refs)\s+(?:([a-z0-9_.-]+)\/([a-z0-9_.-]+))?#(\d+)/gi;
             const validate = async (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) return ['no closing issue reference found'];
+              if (matches.length === 0) return ['no issue reference found'];
 
+              const trustedOwner = context.repo.owner.toLowerCase();
               const errors = [];
               for (const match of matches) {
-                const issueNumber = parseInt(match[1], 10);
-                core.info(`Checking PR #${pull.number} issue #${issueNumber} for status:approved label...`);
+                const rawOwner = match[1] || context.repo.owner;
+                const rawRepo = match[2] || context.repo.repo;
+                const owner = rawOwner.toLowerCase();
+                const issueNumber = parseInt(match[3], 10);
+                const issueRef = match[1] && match[2] ? `${rawOwner}/${rawRepo}#${issueNumber}` : `#${issueNumber}`;
+
+                if (owner !== trustedOwner) {
+                  errors.push(`issue ${issueRef}: cross-repository references outside ${context.repo.owner} are not permitted.`);
+                  continue;
+                }
+
+                core.info(`Checking PR #${pull.number} issue ${issueRef} for status:approved label...`);
                 try {
                   const issue = (await github.rest.issues.get({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
+                    owner: rawOwner,
+                    repo: rawRepo,
                     issue_number: issueNumber,
                   })).data;
                   const labels = issue.labels.map((label) => label.name);
                   if (!labels.includes('status:approved')) {
-                    errors.push(`issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label.`);
+                    errors.push(`issue ${issueRef} ("${issue.title}") does not have the \`status:approved\` label.`);
                   } else {
-                    core.info(`✅ PR #${pull.number} issue #${issueNumber} has status:approved`);
+                    core.info(`✅ PR #${pull.number} issue ${issueRef} has status:approved`);
                   }
                 } catch (err) {
-                  errors.push(`issue #${issueNumber}: could not be fetched (${err.message})`);
+                  errors.push(`issue ${issueRef}: could not be fetched (${err.message})`);
                 }
               }
               return errors;
