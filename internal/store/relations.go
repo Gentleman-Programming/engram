@@ -1425,11 +1425,6 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 	}
 
 	// ── Phase 4: collect all (source, candidate) pairs for semantic scan ──────
-	// candidatePair represents a source+candidate pair to be semantically judged.
-	type candidatePair struct {
-		sourceSnippet    ObservationSnippet
-		candidateSnippet ObservationSnippet
-	}
 	var semanticPairs []candidatePair
 	semanticPairKeys := map[string]struct{}{}
 	hasUnprocessedWork := func(candidateIndex, candidateCount int) bool {
@@ -1564,10 +1559,35 @@ scan:
 		return result, nil
 	}
 
-	type pairResult struct {
-		judged  int
-		skipped int
-		errors  int
+	counts := s.executeSemanticWorkers(opts, semanticPairs, concurrency, timeoutPerCall)
+	result.SemanticJudged += counts.judged
+	result.SemanticSkipped += counts.skipped
+	result.SemanticErrors += counts.errors
+
+	return result, nil
+}
+
+// candidatePair represents a source+candidate pair to be semantically judged.
+type candidatePair struct {
+	sourceSnippet    ObservationSnippet
+	candidateSnippet ObservationSnippet
+}
+
+type semanticWorkerCounts struct {
+	judged  int
+	skipped int
+	errors  int
+}
+
+func (s *Store) executeSemanticWorkers(
+	opts ScanOptions,
+	semanticPairs []candidatePair,
+	concurrency int,
+	timeoutPerCall time.Duration,
+) semanticWorkerCounts {
+	var counts semanticWorkerCounts
+	if len(semanticPairs) == 0 {
+		return counts
 	}
 
 	pairCh := make(chan candidatePair, len(semanticPairs))
@@ -1592,7 +1612,7 @@ scan:
 							log.Printf("[store] ScanProject: runner.Compare panic pair=(%s,%s): %v",
 								pair.sourceSnippet.SyncID, pair.candidateSnippet.SyncID, r)
 							mu.Lock()
-							result.SemanticErrors++
+							counts.errors++
 							mu.Unlock()
 						}
 					}()
@@ -1606,14 +1626,14 @@ scan:
 						log.Printf("[store] ScanProject: runner.Compare pair=(%s,%s) error: %v",
 							pair.sourceSnippet.SyncID, pair.candidateSnippet.SyncID, err)
 						mu.Lock()
-						result.SemanticErrors++
+						counts.errors++
 						mu.Unlock()
 						return
 					}
 
 					if !opts.Apply && verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
 						mu.Lock()
-						result.SemanticSkipped++
+						counts.skipped++
 						mu.Unlock()
 						return
 					}
@@ -1627,7 +1647,7 @@ scan:
 						isValidRelationVerb(verdict.Relation) &&
 						isValidConfidence(verdict.Confidence) {
 						mu.Lock()
-						result.SemanticJudged++
+						counts.judged++
 						mu.Unlock()
 						return
 					}
@@ -1645,13 +1665,13 @@ scan:
 						log.Printf("[store] ScanProject: JudgeBySemantic pair=(%s,%s) error: %v",
 							pair.sourceSnippet.SyncID, pair.candidateSnippet.SyncID, judgeErr)
 						mu.Lock()
-						result.SemanticErrors++
+						counts.errors++
 						mu.Unlock()
 						return
 					}
 
 					mu.Lock()
-					result.SemanticJudged++
+					counts.judged++
 					mu.Unlock()
 				}()
 			}
@@ -1660,5 +1680,5 @@ scan:
 
 	wg.Wait()
 
-	return result, nil
+	return counts
 }
