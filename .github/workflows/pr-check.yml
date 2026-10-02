@@ -26,10 +26,10 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const issuePattern = /(?:closes|fixes|resolves|refs)\s+#(\d+)/gi;
             const validate = (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) return ['no closing issue reference found'];
+              if (matches.length === 0) return ['no issue reference found'];
               core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[1]).join(', ')}`);
               return [];
             };
@@ -53,7 +53,7 @@ jobs:
             if (failures.length > 0) {
               core.setFailed(
                 '❌ PR must reference an approved issue.\n' +
-                'Add "Closes #N", "Fixes #N", or "Resolves #N" to every PR body.\n' +
+                'Add "Closes #N", "Fixes #N", "Resolves #N", or "Refs #N" to every PR body.\n' +
                 failures.join('\n')
               );
             }
@@ -74,10 +74,10 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const issuePattern = /(?:closes|fixes|resolves|refs)\s+#(\d+)/gi;
             const validate = async (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) return ['no closing issue reference found'];
+              if (matches.length === 0) return ['no issue reference found'];
 
               const errors = [];
               for (const match of matches) {
