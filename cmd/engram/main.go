@@ -3767,7 +3767,8 @@ Commands:
                        --paths-only  Limit pruning to project names containing / or \
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
-                     cursor, vscode-copilot, kilocode, kimi, commandcode)
+                     cursor, vscode-copilot, kilocode, kimi, commandcode,
+                     cline)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
