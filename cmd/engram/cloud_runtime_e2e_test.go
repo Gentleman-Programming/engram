@@ -131,6 +131,12 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 		t.Fatalf("expected /admin/users response to include seeded admin, got %s", adminUsersBody)
 	}
 
+	tokens, err := dcr.store.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil || len(tokens) != 1 || tokens[0].LastUsedAt == nil {
+		t.Fatalf("successful runtime auth must persist usage: tokens=%+v err=%v", tokens, err)
+	}
+	lastUsed := *tokens[0].LastUsedAt
+
 	// (d) legacy ENGRAM_CLOUD_TOKEN still authenticates sync routes.
 	legacyPullStatus, legacyPullBody := doBearerRequest(t, handler, http.MethodGet, "/sync/pull?project=demo-project", legacySyncToken)
 	if legacyPullStatus != http.StatusOK {
@@ -162,6 +168,11 @@ func TestCloudRuntimeWiresManagedTokenAuthEndToEnd(t *testing.T) {
 	}
 	if status, body := doBearerRequest(t, handler, http.MethodGet, "/admin/users", managedToken.Raw); status != http.StatusUnauthorized {
 		t.Fatalf("expected revoked managed token to be rejected with 401, got status=%d body=%s", status, body)
+	}
+
+	tokens, err = dcr.store.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil || len(tokens) != 1 || tokens[0].LastUsedAt == nil || !tokens[0].LastUsedAt.Equal(lastUsed) {
+		t.Fatalf("legacy/cookie/rejected authentication changed managed usage: tokens=%+v err=%v", tokens, err)
 	}
 
 	// (e) graceful degradation: with no dedicated token pepper configured,
