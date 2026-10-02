@@ -15156,6 +15156,244 @@ func TestRepairObservationMutationTitles(t *testing.T) {
 	})
 }
 
+// seedCurrentTitleRepair keeps a valid local projection but freezes a stale journal title.
+func seedCurrentTitleRepair(t *testing.T, s *Store, n int) (Observation, int64) {
+	t.Helper()
+	title := fmt.Sprintf("  Current title %d \t", n)
+	id, err := s.AddObservation(AddObservationParams{SessionID: "current-title", Type: "bugfix", Title: title, Content: fmt.Sprintf("Different content %d.", n), Project: "project-a", Scope: "project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Capture trims titles; seed a padded legacy projection explicitly.
+	if _, err := s.db.Exec(`UPDATE observations SET title = ? WHERE id = ?`, title, id); err != nil {
+		t.Fatal(err)
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seq int64
+	if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, obs.SyncID).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	var payload string
+	if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, seq).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
+		t.Fatal(err)
+	}
+	switch n % 3 {
+	case 0:
+		delete(fields, "title")
+	case 1:
+		fields["title"] = json.RawMessage(`""`)
+	case 2:
+		fields["title"] = json.RawMessage(`" \t\u2003"`)
+	}
+	fields["unknown"] = json.RawMessage(`{"nested":[9007199254740993,{"keep":true}]}`)
+	body, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sync_mutations SET payload = ? WHERE seq = ?`, string(body), seq); err != nil {
+		t.Fatal(err)
+	}
+	return *obs, seq
+}
+
+func currentTitleRepairStore(t *testing.T) *Store {
+	t.Helper()
+	s := newTestStore(t)
+	enrollTestProject(t, s, "project-a")
+	// Sessions may be shared by observations owned by a different project.
+	if err := s.CreateSession("current-title", "session-project", "/work/shared"); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestRepairObservationMutationTitlesCurrentLocalBatch(t *testing.T) {
+	s := currentTitleRepairStore(t)
+	observations := make([]Observation, 13)
+	sequences := make([]int64, 13)
+	payloads := make([]string, 13)
+	for i := range observations {
+		observations[i], sequences[i] = seedCurrentTitleRepair(t, s, i)
+		if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, sequences[i]).Scan(&payloads[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var countBefore int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&countBefore); err != nil {
+		t.Fatal(err)
+	}
+	// Even an UPDATE that writes the same title is forbidden for a valid source.
+	if _, err := s.db.Exec(`CREATE TRIGGER forbid_source_update BEFORE UPDATE ON observations BEGIN SELECT RAISE(ABORT, 'valid source must not be updated'); END`); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.RepairObservationMutationTitles("project-a", false)
+	if err != nil || len(plan.Actions) != 13 {
+		t.Fatalf("plan=%+v err=%v", plan, err)
+	}
+	for i, obs := range observations {
+		var payload string
+		if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, sequences[i]).Scan(&payload); err != nil || payload != payloads[i] {
+			t.Fatalf("preview changed payload: %q err=%v", payload, err)
+		}
+		if plan.Actions[i].Seq != sequences[i] || plan.Actions[i].Title != obs.Title {
+			t.Fatalf("action=%+v source=%+v", plan.Actions[i], obs)
+		}
+	}
+	applied, err := s.RepairObservationMutationTitles("project-a", true)
+	if err != nil || !reflect.DeepEqual(applied.Actions, plan.Actions) {
+		t.Fatalf("apply=%+v err=%v", applied, err)
+	}
+	for i, obs := range observations {
+		after, err := s.GetObservation(obs.ID)
+		if err != nil || !reflect.DeepEqual(*after, obs) {
+			t.Fatalf("source changed: before=%+v after=%+v err=%v", obs, after, err)
+		}
+		var payload, source, disposition string
+		var seq int64
+		var ack sql.NullString
+		if err := s.db.QueryRow(`SELECT seq, payload, source, disposition, acked_at FROM sync_mutations WHERE seq = ?`, sequences[i]).Scan(&seq, &payload, &source, &disposition, &ack); err != nil {
+			t.Fatal(err)
+		}
+		if seq != sequences[i] || source != SyncSourceLocal || disposition != SyncMutationDispositionPending || ack.Valid {
+			t.Fatalf("delivery changed: seq=%d source=%q disposition=%q ack=%v", seq, source, disposition, ack)
+		}
+		var beforeFields, afterFields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(payloads[i]), &beforeFields); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(payload), &afterFields); err != nil {
+			t.Fatal(err)
+		}
+		var title string
+		if err := json.Unmarshal(afterFields["title"], &title); err != nil || title != obs.Title {
+			t.Fatalf("title=%q err=%v", title, err)
+		}
+		delete(beforeFields, "title")
+		delete(afterFields, "title")
+		if !reflect.DeepEqual(beforeFields, afterFields) {
+			t.Fatalf("non-title fields changed: before=%s after=%s", payloads[i], payload)
+		}
+		if validation := ValidateSyncMutationPayload(SyncEntityObservation, SyncOpUpsert, payload, obs.SyncID); validation.ReasonCode != "" {
+			t.Fatalf("still invalid: %+v", validation)
+		}
+	}
+	var countAfter int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&countAfter); err != nil || countAfter != countBefore {
+		t.Fatalf("count=%d want=%d err=%v", countAfter, countBefore, err)
+	}
+	if again, err := s.RepairObservationMutationTitles("project-a", true); err != nil || len(again.Actions) != 0 {
+		t.Fatalf("repeat=%+v err=%v", again, err)
+	}
+}
+
+func TestRepairObservationMutationTitlesCurrentLocalEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, project string
+		want               int
+	}{
+		{"local", "", "project-a", 1},
+		{"legacy payload project", `UPDATE sync_mutations SET payload = json_set(payload, '$.project', '') WHERE seq = ?`, "project-a", 1},
+		{"legacy outer project unscoped", `UPDATE sync_mutations SET project = '', payload = json_set(payload, '$.project', '') WHERE seq = ?`, "", 1},
+		{"legacy outer not discovered by scoped query", `UPDATE sync_mutations SET project = '' WHERE seq = ?`, "project-a", 0},
+		{"remote", `UPDATE sync_mutations SET source = 'remote' WHERE seq = ?`, "project-a", 0},
+		{"import", `UPDATE sync_mutations SET source = 'import' WHERE seq = ?`, "project-a", 0},
+		{"wrong target", `UPDATE sync_mutations SET target_key = 'other' WHERE seq = ?`, "project-a", 0},
+		{"acked", `UPDATE sync_mutations SET acked_at = datetime('now') WHERE seq = ?`, "project-a", 0},
+		{"nonpending", `UPDATE sync_mutations SET disposition = 'quarantined' WHERE seq = ?`, "project-a", 0},
+		{"delete", `UPDATE sync_mutations SET op = 'delete' WHERE seq = ?`, "project-a", 0},
+		{"valid payload title", `UPDATE sync_mutations SET payload = json_set(payload, '$.title', 'already valid') WHERE seq = ?`, "project-a", 0},
+		{"malformed", `UPDATE sync_mutations SET payload = '{' WHERE seq = ?`, "project-a", 0},
+		{"missing content", `UPDATE sync_mutations SET payload = json_remove(payload, '$.content') WHERE seq = ?`, "project-a", 0},
+		{"missing sync ID", `UPDATE sync_mutations SET payload = json_remove(payload, '$.sync_id') WHERE seq = ?`, "project-a", 0},
+		{"wrong sync ID", `UPDATE sync_mutations SET payload = json_set(payload, '$.sync_id', 'other') WHERE seq = ?`, "project-a", 0},
+		{"missing row", `UPDATE sync_mutations SET entity_key = 'absent', payload = json_set(payload, '$.sync_id', 'absent') WHERE seq = ?`, "project-a", 0},
+		{"wrong session", `UPDATE sync_mutations SET payload = json_set(payload, '$.session_id', 'other') WHERE seq = ?`, "project-a", 0},
+		{"wrong scope", `UPDATE sync_mutations SET payload = json_set(payload, '$.scope', 'personal') WHERE seq = ?`, "project-a", 0},
+		{"wrong payload project", `UPDATE sync_mutations SET payload = json_set(payload, '$.project', 'other') WHERE seq = ?`, "project-a", 0},
+		{"wrong outer project", `UPDATE sync_mutations SET project = 'other' WHERE seq = ?`, "", 0},
+		{"unattributed row", `UPDATE observations SET project = '' WHERE sync_id = (SELECT entity_key FROM sync_mutations WHERE seq = ?)`, "project-a", 0},
+		{"deleted row", `UPDATE observations SET deleted_at = datetime('now') WHERE sync_id = (SELECT entity_key FROM sync_mutations WHERE seq = ?)`, "project-a", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := currentTitleRepairStore(t)
+			obs, seq := seedCurrentTitleRepair(t, s, 0)
+			if tc.name == "wrong target" {
+				if _, err := s.db.Exec(`INSERT OR IGNORE INTO sync_state(target_key) VALUES ('other')`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.sql != "" {
+				if _, err := s.db.Exec(tc.sql, seq); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := s.GetObservation(obs.ID)
+			if err != nil && tc.name != "deleted row" {
+				t.Fatal(err)
+			}
+			var payload string
+			if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, seq).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			report, err := s.RepairObservationMutationTitles(tc.project, true)
+			if err != nil || len(report.Actions) != tc.want {
+				t.Fatalf("report=%+v want=%d err=%v", report, tc.want, err)
+			}
+			after, err := s.GetObservation(obs.ID)
+			if err != nil && tc.name != "deleted row" {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("source changed: before=%+v after=%+v", before, after)
+			}
+			if tc.want == 0 {
+				var afterPayload string
+				if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, seq).Scan(&afterPayload); err != nil || afterPayload != payload {
+					t.Fatalf("excluded payload changed: %q err=%v", afterPayload, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRepairObservationMutationTitlesCurrentLocalFreshAndRollback(t *testing.T) {
+	s := currentTitleRepairStore(t)
+	obs, seq := seedCurrentTitleRepair(t, s, 0)
+	plan, err := s.RepairObservationMutationTitles("project-a", false)
+	if err != nil || len(plan.Actions) != 1 {
+		t.Fatalf("plan=%+v err=%v", plan, err)
+	}
+	fresh := "  New current title \t"
+	if _, err := s.db.Exec(`UPDATE observations SET title = ? WHERE id = ?`, fresh, obs.ID); err != nil {
+		t.Fatal(err)
+	}
+	var original string
+	if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, seq).Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	commit := s.hooks.commit
+	s.hooks.commit = func(*sql.Tx) error { return errors.New("forced commit failure") }
+	if _, err := s.RepairObservationMutationTitles("project-a", true); err == nil {
+		t.Fatal("expected rollback")
+	}
+	s.hooks.commit = commit
+	var rolledBack string
+	if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE seq = ?`, seq).Scan(&rolledBack); err != nil || rolledBack != original {
+		t.Fatalf("rollback payload=%q err=%v", rolledBack, err)
+	}
+	report, err := s.RepairObservationMutationTitles("project-a", true)
+	if err != nil || len(report.Actions) != 1 || report.Actions[0].Title != fresh {
+		t.Fatalf("fresh apply=%+v err=%v", report, err)
+	}
+}
+
 func TestDeleteSession_NotFound(t *testing.T) {
 	s := newTestStore(t)
 

@@ -1392,7 +1392,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		var transition *projectpkg.ProjectTransitionError
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) && !errors.Is(err, projectpkg.ErrAmbiguousProject) && !errors.As(err, &transition) {
 			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed", map[string]any{"code": "project_resolution_failed"})
 			return
 		}
@@ -1414,7 +1415,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
-	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.store.InspectProject)
 	if err != nil {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
@@ -1452,6 +1453,7 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:      projectpkg.ResolutionCurrent,
 		Directory: cwd,
+		Detect:    s.store.DetectProject,
 	})
 	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		s.writeProjectResolutionError(w, res, err)
@@ -1478,6 +1480,10 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 // Current-project reads require known explicit/process overrides, while cwd
 // detection remains usable before a project has any stored memories.
 func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool) (projectpkg.DetectionResult, error) {
+	return s.resolveRequestProjectWithDetector(r, mode, requireKnownOverrides, s.store.DetectProject)
+}
+
+func (s *Server) resolveRequestProjectWithDetector(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool, detect func(string) projectpkg.DetectionResult) (projectpkg.DetectionResult, error) {
 	query := r.URL.Query()
 	projectValues, projectProvided := query["project"]
 	if projectProvided {
@@ -1505,6 +1511,7 @@ func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.Resoluti
 		Explicit:             query.Get("project"),
 		Directory:            query.Get("cwd"),
 		ProjectExists:        s.store.ProjectExists,
+		Detect:               detect,
 		RequireKnownExplicit: requireKnownOverrides,
 		RequireKnownProcess:  requireKnownOverrides,
 	})
@@ -1536,7 +1543,16 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectp
 		code = "ambiguous_project"
 		status = http.StatusConflict
 	}
+	var transition *projectpkg.ProjectTransitionError
+	if errors.As(err, &transition) {
+		code = "project_transition_conflict"
+		status = http.StatusConflict
+	}
 	fields := map[string]any{"code": code}
+	if transition != nil {
+		fields["candidate_project"] = transition.Candidate
+		fields["available_projects"] = res.AvailableProjects
+	}
 	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		fields["available_projects"] = res.AvailableProjects
 		fields["project_source"] = res.Source
@@ -1830,6 +1846,7 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		Explicit:             body.Project,
 		Directory:            r.URL.Query().Get("cwd"),
 		ProjectExists:        s.store.ProjectExists,
+		Detect:               s.store.DetectProject,
 		RequireKnownExplicit: true,
 		RequireKnownProcess:  true,
 	})

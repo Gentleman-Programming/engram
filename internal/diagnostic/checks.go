@@ -197,7 +197,7 @@ func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject
 	if _, err := os.Stat(directory); err != nil {
 		return DetectedProject{}, false
 	}
-	res := projectpkg.DetectProjectFull(directory)
+	res := projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{InspectOnly: true})
 	if res.Error != nil {
 		return DetectedProject{}, false
 	}

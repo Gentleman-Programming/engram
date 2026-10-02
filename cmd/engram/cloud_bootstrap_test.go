@@ -166,6 +166,7 @@ func fakePrincipalToken(params cloudstore.CreatePrincipalTokenParams) cloudstore
 }
 
 type bootstrapManagedTokenLookup struct {
+	usageIDs  *[]string
 	token     cloudstore.PrincipalToken
 	principal cloudauth.Principal
 }
@@ -180,6 +181,14 @@ func (l bootstrapManagedTokenLookup) FindManagedTokenByHash(_ context.Context, h
 		Hash:        l.token.TokenHash,
 		RevokedAt:   l.token.RevokedAt,
 	}, l.principal, nil
+}
+
+func (l bootstrapManagedTokenLookup) MarkManagedTokenUsed(_ context.Context, id string) error {
+	if id != l.token.ID {
+		return cloudauth.ErrUnknownToken
+	}
+	*l.usageIDs = append(*l.usageIDs, id)
+	return nil
 }
 
 func (s *fakeCloudBootstrapStore) CreateProjectGrant(_ context.Context, params cloudstore.CreateProjectGrantParams) (cloudstore.ProjectGrant, error) {
@@ -572,10 +581,12 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new managed token hasher: %v", err)
 	}
+	var usageIDs []string
 	resolver := cloudauth.NewPrincipalResolver(cloudauth.ResolverConfig{
 		Hasher: hasher,
 		ManagedTokens: bootstrapManagedTokenLookup{
-			token: store.tokens[0],
+			usageIDs: &usageIDs,
+			token:    store.tokens[0],
 			principal: cloudauth.Principal{
 				ID:      store.tokens[0].PrincipalID,
 				Kind:    cloudauth.PrincipalKindHuman,
@@ -587,6 +598,9 @@ func TestCloudBootstrapAdminIssuesTokenExactlyOnce(t *testing.T) {
 	principal, err := resolver.ResolveBearerToken(context.Background(), rawToken)
 	if err != nil {
 		t.Fatalf("bootstrap-issued token must resolve through the managed token resolver: %v", err)
+	}
+	if len(usageIDs) != 1 || usageIDs[0] != store.tokens[0].ID {
+		t.Fatalf("bootstrap authentication usage not recorded exactly once: %v", usageIDs)
 	}
 	if principal.ID != store.tokens[0].PrincipalID || principal.TokenID != store.tokens[0].ID || principal.Role != cloudauth.RoleAdmin || principal.Source != cloudauth.PrincipalSourceManagedToken {
 		t.Fatalf("unexpected resolved principal for bootstrap-issued token: %+v", principal)

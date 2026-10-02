@@ -888,7 +888,16 @@ func (m dashboardReadModel) filterPrompts(project, query string) []DashboardProm
 	return rows
 }
 
+// loadDashboardReadModel applies legacy deployment policy at every read boundary.
 func (cs *CloudStore) loadDashboardReadModel() (dashboardReadModel, error) {
+	model, err := cs.loadDashboardNeutralReadModel()
+	if err != nil {
+		return dashboardReadModel{}, err
+	}
+	return model.scoped(cs.dashboardAllowedScopes), nil
+}
+
+func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error) {
 	if cs == nil {
 		return dashboardReadModel{}, fmt.Errorf("cloudstore: not initialized")
 	}
@@ -937,7 +946,30 @@ func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
-	return model.scoped(cs.dashboardAllowedScopes), nil
+	controls, err := cs.ListProjectSyncControls()
+	if err != nil {
+		return dashboardReadModel{}, err
+	}
+	return model.withRegisteredProjects(controls), nil
+}
+
+// withRegisteredProjects preserves content-derived inventory and adds empty registrations.
+func (m dashboardReadModel) withRegisteredProjects(controls []ProjectSyncControl) dashboardReadModel {
+	for _, control := range controls {
+		project := strings.TrimSpace(control.Project)
+		if project == "" {
+			continue
+		}
+		if _, exists := m.projectDetails[project]; exists {
+			continue
+		}
+		row := DashboardProjectRow{Project: project}
+		m.projects = append(m.projects, row)
+		m.projectDetails[project] = DashboardProjectDetail{Project: project, Stats: row}
+	}
+	sort.Slice(m.projects, func(i, j int) bool { return m.projects[i].Project < m.projects[j].Project })
+	m.admin.Projects = len(m.projects)
+	return m
 }
 
 func (cs *CloudStore) ListProjects(query string) ([]DashboardProjectRow, error) {
@@ -1078,18 +1110,17 @@ func (cs *CloudStore) AdminOverview() (DashboardAdminOverview, error) {
 }
 
 // DashboardScopedStore is an immutable, request-owned view over CloudStore's
-// deployment-scoped dashboard read model. It never updates the shared cache.
+// permission-neutral dashboard read model. It never updates the shared cache.
 type DashboardScopedStore struct {
 	base    *CloudStore
 	model   dashboardReadModel
 	allowed map[string]struct{}
 }
 
-// DashboardStoreForProjects intersects the already deployment-scoped cached
-// model with the supplied principal grants. An empty grant set intentionally
-// produces an empty view rather than widening access.
+// DashboardStoreForProjects scopes the neutral cache by managed grants only.
+// An empty grant set intentionally produces an empty view, never wildcard access.
 func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardScopedStore, error) {
-	model, err := cs.loadDashboardReadModel()
+	model, err := cs.loadDashboardNeutralReadModel()
 	if err != nil {
 		return nil, err
 	}
@@ -1107,20 +1138,7 @@ func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardSc
 	}
 
 	allowed := principalAllowed
-	if !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
-		allowed = make(map[string]struct{})
-		if principalAll {
-			for project := range cs.dashboardAllowedScopes {
-				allowed[project] = struct{}{}
-			}
-		} else {
-			for project := range principalAllowed {
-				if _, ok := cs.dashboardAllowedScopes[project]; ok {
-					allowed[project] = struct{}{}
-				}
-			}
-		}
-	} else if principalAll {
+	if principalAll {
 		allowed = map[string]struct{}{"*": {}}
 	}
 
@@ -1533,24 +1551,8 @@ func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error)
 	project = strings.TrimSpace(project)
 	query := `SELECT chunk_id, project_name, created_by, created_at, payload FROM cloud_chunks`
 	args := []any{}
-	if project == "" && !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
-		allowed := make([]string, 0, len(cs.dashboardAllowedScopes))
-		for name := range cs.dashboardAllowedScopes {
-			allowed = append(allowed, name)
-		}
-		sort.Strings(allowed)
-		query += ` WHERE project_name = ANY($1)`
-		args = append(args, allowed)
-	}
+	// Cache inputs are permission-neutral; public readers apply credential scope.
 	if project != "" {
-		if !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
-			if _, ok := cs.dashboardAllowedScopes[project]; !ok {
-				return []dashboardChunkRow{}, nil
-			}
-		}
-		if len(args) > 0 {
-			return nil, fmt.Errorf("cloudstore: internal dashboard query invariant violated")
-		}
 		query += ` WHERE project_name = $1`
 		args = append(args, project)
 	}
@@ -1590,24 +1592,8 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 	project = strings.TrimSpace(project)
 	query := `SELECT seq, project, entity, entity_key, op, payload::text, occurred_at FROM cloud_mutations`
 	args := []any{}
-	if project == "" && !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
-		allowed := make([]string, 0, len(cs.dashboardAllowedScopes))
-		for name := range cs.dashboardAllowedScopes {
-			allowed = append(allowed, name)
-		}
-		sort.Strings(allowed)
-		query += ` WHERE project = ANY($1)`
-		args = append(args, allowed)
-	}
+	// Cache inputs are permission-neutral; public readers apply credential scope.
 	if project != "" {
-		if !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
-			if _, ok := cs.dashboardAllowedScopes[project]; !ok {
-				return []dashboardMutationRow{}, nil
-			}
-		}
-		if len(args) > 0 {
-			return nil, fmt.Errorf("cloudstore: internal dashboard mutation query invariant violated")
-		}
 		query += ` WHERE project = $1`
 		args = append(args, project)
 	}

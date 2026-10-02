@@ -277,13 +277,8 @@ func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan,
 		plan.Blockers = append(plan.Blockers, RepairSkip{ReasonCode: "ambiguous_or_missing_source", Message: "select one exact source with --source-id (use --source-id '' for the empty identity)"})
 		return plan
 	}
-	identity, err := scope.Store.PlanSessionIdentityRepair(sources[0], replacementID)
-	if err != nil {
-		plan.Status = "blocked"
-		plan.Blockers = append(plan.Blockers, RepairSkip{SessionID: sources[0], ReasonCode: "identity_repair_blocked", Message: err.Error()})
-		return plan
-	}
-	plan.IdentityRepair = &identity
+	// The selected source has an explicit replacement attempt, even if the
+	// store's safety checks block it. Keep guidance for unselected sources.
 	remaining := plan.Skipped[:0]
 	removed := false
 	for _, skipped := range plan.Skipped {
@@ -294,6 +289,13 @@ func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan,
 		remaining = append(remaining, skipped)
 	}
 	plan.Skipped = remaining
+	identity, err := scope.Store.PlanSessionIdentityRepair(sources[0], replacementID)
+	if err != nil {
+		plan.Status = "blocked"
+		plan.Blockers = append(plan.Blockers, RepairSkip{SessionID: sources[0], ReasonCode: "identity_repair_blocked", Message: err.Error()})
+		return plan
+	}
+	plan.IdentityRepair = &identity
 	plan.Counts.SessionsPlanned = 1
 	plan.Counts.ObservationsPlanned = identity.Observations
 	plan.Counts.PromptsPlanned = identity.Prompts

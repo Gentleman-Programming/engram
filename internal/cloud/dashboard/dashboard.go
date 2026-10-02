@@ -443,18 +443,13 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardObservationRow, int, error) {
+			return h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch observations page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback observations page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback observations page 1: %v", err)
+		})
 	}
 	partial := ObservationsPartial(rows, pg)
 	if isHTMXRequest(r) {
@@ -485,18 +480,13 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardSessionRow, int, error) {
+			return h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch sessions page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback sessions page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback sessions page 1: %v", err)
+		})
 	}
 	partial := SessionsPartial(rows, pg)
 	if isHTMXRequest(r) {
@@ -527,18 +517,13 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardPromptRow, int, error) {
+			return h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch prompts page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback prompts page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback prompts page 1: %v", err)
+		})
 	}
 	partial := PromptsPartial(rows, pg)
 	if isHTMXRequest(r) {
@@ -634,18 +619,13 @@ func (h *handlers) handleContributorsList(w http.ResponseWriter, r *http.Request
 	}
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListContributorsPaginated(query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardContributorRow, int, error) {
+			return h.cfg.Store.ListContributorsPaginated(query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch contributors list page %d: %v", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated(query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback contributors list page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback contributors list page 1: %v", err)
+		})
 	}
 	renderComponent(w, r, ContributorsListPartial(rows, pg))
 }
@@ -756,19 +736,13 @@ func (h *handlers) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 	// R5-3: add tier-3 fallback — if clamped re-fetch fails AND rows are empty, attempt page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListProjectsPaginated(query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardProjectRow, int, error) {
+			return h.cfg.Store.ListProjectsPaginated(query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch projects list page %d: %v (using first-page rows)", pg.Page, err)
-			// R5-3: tier-3 fallback to page 1 when re-fetch fails and rows are empty.
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListProjectsPaginated(query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback projects list page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback projects list page 1: %v", err)
+		})
 	}
 	renderComponent(w, r, ProjectsListPartial(rows, controlsMap, pg))
 }
@@ -1149,18 +1123,13 @@ func (h *handlers) handleAdminAuditLogList(w http.ResponseWriter, r *http.Reques
 	// Tier 3: page-1 fallback when re-fetch fails and rows are empty.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardAuditRow, int, error) {
+			return h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch audit log list page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback audit log list page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback audit log list page 1: %v", err)
+		})
 	}
 
 	renderComponent(w, r, AdminAuditLogListPartial(rows, pg, filter))

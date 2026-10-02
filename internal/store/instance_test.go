@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -97,6 +98,30 @@ func TestEnsureInstanceIDSerializesConcurrentRecoveryAndPublication(t *testing.T
 		} else if id != winner {
 			t.Fatalf("concurrent identity = %q, want published winner %q", id, winner)
 		}
+	}
+}
+
+func TestEnsureInstanceIDPublicationCompleteAndPrivate(t *testing.T) {
+	dataDir := t.TempDir()
+	id, err := EnsureInstanceID(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataDir, ".instance-id")
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != id+"\n" {
+		t.Fatalf("persisted identity = %q, %v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("identity permissions = %o", info.Mode().Perm())
+	}
+	temporary, err := filepath.Glob(filepath.Join(dataDir, ".instance-id-*"))
+	if err != nil || len(temporary) != 0 {
+		t.Fatalf("publication left temporary files: %v, %v", temporary, err)
 	}
 }
 

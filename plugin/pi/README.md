@@ -214,9 +214,25 @@ Run it again when new chunks are published and you want to import them. Opening 
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
 
+Background session registration reports exhausted timeout or unknown transport outcomes with safe-retry guidance, separately from invalid acknowledgement identities. Both failures block passive observations until registration is confirmed.
+
 When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi gives ordinary reads a bounded 10-second retry policy and `mem_doctor` a bounded 15-second retry policy. Session registration uses a separate bounded 5-second replay policy because Engram core implements that route as idempotent. Other writes are sent once with a short deadline: if their transport outcome is ambiguous, Pi reports it as **unknown** and tells you to verify before retrying rather than risking a duplicate mutation. Caller cancellation is propagated, not reported as a transport failure.
 
 A local `/health` response without `instance_id` is treated as legacy only when it reports a recognized version older than `2.0.0-rc.11`, the release that introduced instance identity. Current, unknown, absent, or malformed versions without identity fail closed with identity-verification guidance; Pi does not adopt, terminate, or replace that server automatically.
+
+### Local ownership mismatch
+
+When the local health probe observes a different instance ID, Pi fails closed: it neither adopts the foreign server nor spawns or kills a server. The error includes the expected local ID, observed remote ID, and available CLI/server versions (`unknown` when unavailable). WSL2 shared-loopback can cause a server in another environment to answer the local port, but this is a possible cause, not a diagnosis.
+
+`mem_doctor` returns a structured `LOCAL` error diagnostic with code `ownership_mismatch` and the retained evidence. It uses the initialization failure, without re-probing or sending `/doctor`, project, session, or memory requests to the foreign endpoint. Normal doctor calls still use the server and retain their project/session gates; other startup failures do not use this fallback. Startup retains its bounded retry cadence, so a later call can recheck after you fix the conflict.
+
+Stop the foreign server from its owning environment, or choose a free local port and relaunch:
+
+```bash
+ENGRAM_PORT=17437 pi
+```
+
+This local-port remedy requires `ENGRAM_URL` to be unset. `ENGRAM_PORT` alone never overrides an explicit `ENGRAM_URL`; an explicit URL opts into an externally managed server and skips local ownership checks.
 
 ## Configuration
 
