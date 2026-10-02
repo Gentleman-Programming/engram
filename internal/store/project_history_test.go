@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 func TestProjectHistoryIgnoresRelativeDirectories(t *testing.T) {
