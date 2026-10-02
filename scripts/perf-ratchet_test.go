@@ -199,7 +199,13 @@ func TestPerfRatchetUsageAndEnvironment(t *testing.T) {
 			cmdArgs := append([]string{"perf-ratchet.sh"}, tt.args...)
 			cmd := exec.Command(shell, cmdArgs...)
 			cmd.Dir = "."
-			cmd.Env = append(os.Environ(), tt.env...)
+			var baseEnv []string
+			for _, e := range os.Environ() {
+				if !strings.HasPrefix(e, "PERF_RATCHET_") {
+					baseEnv = append(baseEnv, e)
+				}
+			}
+			cmd.Env = append(baseEnv, tt.env...)
 			output, err := cmd.CombinedOutput()
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("perf-ratchet error = %v, wantErr %t\n%s", err, tt.wantErr, output)
@@ -250,6 +256,12 @@ func TestPerfRatchetBootstrap(t *testing.T) {
 			wantErr:    true,
 			wantOutput: "bootstrap requires non-empty versioned baseline and candidate benchmark output",
 		},
+		{
+			name:       "rejects non-empty benchmark output without benchmark rows",
+			fakeOutput: benchmarkHeader + "PASS\n",
+			wantErr:    true,
+			wantOutput: "bootstrap found no benchmark rows in the versioned baseline or candidate output",
+		},
 	}
 
 	for _, tt := range tests {
@@ -271,7 +283,7 @@ func TestPerfRatchetBootstrap(t *testing.T) {
 			cmd.Dir = "."
 			var env []string
 			for _, e := range os.Environ() {
-				if !strings.HasPrefix(e, "PATH=") {
+				if !strings.HasPrefix(e, "PATH=") && !strings.HasPrefix(e, "PERF_RATCHET_") {
 					env = append(env, e)
 				}
 			}
