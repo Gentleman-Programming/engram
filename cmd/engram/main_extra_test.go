@@ -2838,7 +2838,11 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 	mustSeedObservation(t, cfg, "s-exp-default", "proj", "note", "title", "content", "project")
 
 	withArgs(t, "engram", "export")
-	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdExport(cfg) })
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() {
+		if _, err := cmdExport(cfg); err != nil {
+			fatal(err)
+		}
+	})
 	if recovered != nil || stderr != "" {
 		t.Fatalf("export default should succeed, panic=%v stderr=%q", recovered, stderr)
 	}
@@ -2851,7 +2855,11 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 
 	badPath := filepath.Join(workDir, "missing", "out.json")
 	withArgs(t, "engram", "export", badPath)
-	_, stderr, recovered = captureOutputAndRecover(t, func() { cmdExport(cfg) })
+	_, stderr, recovered = captureOutputAndRecover(t, func() {
+		if _, err := cmdExport(cfg); err != nil {
+			fatal(err)
+		}
+	})
 	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "out.json") {
 		t.Fatalf("expected export write fatal, panic=%v stderr=%q", recovered, stderr)
 	}
@@ -2944,7 +2952,11 @@ func TestStoreInitFailurePaths(t *testing.T) {
 		cmdTimeline,
 		cmdContext,
 		cmdStats,
-		cmdExport,
+		func(cfg store.Config) {
+			if _, err := cmdExport(cfg); err != nil {
+				fatal(err)
+			}
+		},
 		cmdImport,
 		cmdSync,
 	}
@@ -4474,7 +4486,11 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		storeExport = func(*store.Store) (*store.ExportData, error) {
 			return nil, errors.New("forced export error")
 		}
-		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdExport(cfg) })
+		_, stderr, recovered := captureOutputAndRecover(t, func() {
+			if _, err := cmdExport(cfg); err != nil {
+				fatal(err)
+			}
+		})
 		assertFatal(t, stderr, recovered, "forced export error")
 	})
 
@@ -4484,7 +4500,11 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		jsonMarshalIndent = func(any, string, string) ([]byte, error) {
 			return nil, errors.New("forced marshal error")
 		}
-		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdExport(cfg) })
+		_, stderr, recovered := captureOutputAndRecover(t, func() {
+			if _, err := cmdExport(cfg); err != nil {
+				fatal(err)
+			}
+		})
 		assertFatal(t, stderr, recovered, "forced marshal error")
 	})
 

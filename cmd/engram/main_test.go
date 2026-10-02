@@ -1660,7 +1660,11 @@ func TestCmdTimelineStatsAndExportRejectInvalidProjectValues(t *testing.T) {
 	}{
 		{name: "timeline", args: []string{"timeline", "1"}, run: cmdTimeline},
 		{name: "stats", args: []string{"stats"}, run: cmdStats},
-		{name: "export", args: []string{"export", "out.json"}, run: cmdExport},
+		{name: "export", args: []string{"export", "out.json"}, run: func(cfg store.Config) {
+			if _, err := cmdExport(cfg); err != nil {
+				fatal(err)
+			}
+		}},
 	}
 	values := []struct {
 		name string
