@@ -33,6 +33,29 @@ func TestPublishLinuxUsesNoReplaceRename(t *testing.T) {
 }
 
 func TestPublishLinuxFallbackOnlyUnsupported(t *testing.T) {
+	t.Run("unsupported rename with successful link", func(t *testing.T) {
+		calls := 0
+		rename := func(oldfd int, old string, newfd int, new string, flags uint) error {
+			if oldfd != unix.AT_FDCWD || newfd != unix.AT_FDCWD || old != "source" || new != "destination" || flags != unix.RENAME_NOREPLACE {
+				t.Fatal("incorrect no-replace invocation")
+			}
+			return unix.ENOSYS
+		}
+		link := func(old, new string) error {
+			calls++
+			if old != "source" || new != "destination" {
+				t.Fatalf("link paths = %q, %q, want source, destination", old, new)
+			}
+			return nil
+		}
+		if err := publish("source", "destination", rename, link); err != nil {
+			t.Fatalf("successful fallback returned error: %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("fallback calls = %d, want 1", calls)
+		}
+	})
+
 	for _, errno := range []error{nil, unix.ENOSYS, unix.EINVAL, unix.EOPNOTSUPP, unix.EPERM, unix.EACCES, unix.EEXIST, unix.EXDEV, unix.ENOENT} {
 		name := "success"
 		if errno != nil {
