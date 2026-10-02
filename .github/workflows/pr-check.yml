@@ -58,8 +58,26 @@ jobs:
             const validate = (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
               if (matches.length === 0) return ['no issue reference found'];
-              const refs = matches.map((match) => (match[1] && match[2] ? `${match[1]}/${match[2]}#${match[3]}` : `#${match[3]}`));
-              core.info(`✅ PR #${pull.number} references issue(s): ${refs.join(', ')}`);
+
+              const trustedOwner = context.repo.owner.toLowerCase();
+              const errors = [];
+              const validRefs = [];
+
+              for (const match of matches) {
+                const owner = (match[1] || context.repo.owner).toLowerCase();
+                const rawRef = match[1] && match[2] ? `${match[1]}/${match[2]}#${match[3]}` : `#${match[3]}`;
+
+                if (owner !== trustedOwner) {
+                  errors.push(`unauthorized issue reference "${rawRef}": issues must belong to ${context.repo.owner}`);
+                  continue;
+                }
+                validRefs.push(rawRef);
+              }
+
+              if (errors.length > 0) return errors;
+              if (validRefs.length === 0) return ['no valid trusted issue reference found'];
+
+              core.info(`✅ PR #${pull.number} references issue(s): ${validRefs.join(', ')}`);
               return [];
             };
             let failures;
@@ -108,17 +126,25 @@ jobs:
               const matches = [...(pull.body || '').matchAll(issuePattern)];
               if (matches.length === 0) return ['no issue reference found'];
 
+              const trustedOwner = context.repo.owner.toLowerCase();
               const errors = [];
               for (const match of matches) {
-                const owner = match[1] || context.repo.owner;
-                const repo = match[2] || context.repo.repo;
+                const rawOwner = match[1] || context.repo.owner;
+                const rawRepo = match[2] || context.repo.repo;
+                const owner = rawOwner.toLowerCase();
                 const issueNumber = parseInt(match[3], 10);
-                const issueRef = match[1] && match[2] ? `${owner}/${repo}#${issueNumber}` : `#${issueNumber}`;
+                const issueRef = match[1] && match[2] ? `${rawOwner}/${rawRepo}#${issueNumber}` : `#${issueNumber}`;
+
+                if (owner !== trustedOwner) {
+                  errors.push(`issue ${issueRef}: cross-repository references outside ${context.repo.owner} are not permitted.`);
+                  continue;
+                }
+
                 core.info(`Checking PR #${pull.number} issue ${issueRef} for status:approved label...`);
                 try {
                   const issue = (await github.rest.issues.get({
-                    owner,
-                    repo,
+                    owner: rawOwner,
+                    repo: rawRepo,
                     issue_number: issueNumber,
                   })).data;
                   const labels = issue.labels.map((label) => label.name);
