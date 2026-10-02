@@ -122,6 +122,183 @@ func TestPerfRatchetCompare(t *testing.T) {
 	}
 }
 
+func TestPerfRatchetUsageAndEnvironment(t *testing.T) {
+	shell := perfRatchetShell()
+	if shell == "" {
+		t.Skip("a usable bash installation is required to test the shell ratchet")
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		env        []string
+		wantOutput string
+		wantErr    bool
+	}{
+		{
+			name:       "rejects unknown flag",
+			args:       []string{"--unknown"},
+			wantOutput: "Usage: scripts/perf-ratchet.sh",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects --against missing argument",
+			args:       []string{"--against"},
+			wantOutput: "Usage: scripts/perf-ratchet.sh",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects --against extra argument",
+			args:       []string{"--against", "HEAD", "extra"},
+			wantOutput: "Usage: scripts/perf-ratchet.sh",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects --compare missing arguments",
+			args:       []string{"--compare", "only-one"},
+			wantOutput: "Usage: scripts/perf-ratchet.sh",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects --bootstrap extra argument",
+			args:       []string{"--bootstrap", "extra"},
+			wantOutput: "Usage: scripts/perf-ratchet.sh",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects --update extra argument",
+			args:       []string{"--update", "extra"},
+			wantOutput: "Usage: scripts/perf-ratchet.sh",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects non-positive PERF_RATCHET_COUNT",
+			args:       []string{"--bootstrap"},
+			env:        []string{"PERF_RATCHET_COUNT=0"},
+			wantOutput: "PERF_RATCHET_COUNT must be a positive integer",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects negative PERF_RATCHET_THRESHOLD",
+			args:       []string{"--bootstrap"},
+			env:        []string{"PERF_RATCHET_THRESHOLD=-5"},
+			wantOutput: "PERF_RATCHET_THRESHOLD must be a non-negative number",
+			wantErr:    true,
+		},
+		{
+			name:       "rejects invalid PERF_RATCHET_BOOTSTRAP",
+			args:       []string{"--bootstrap"},
+			env:        []string{"PERF_RATCHET_BOOTSTRAP=2"},
+			wantOutput: "PERF_RATCHET_BOOTSTRAP must be 0 or 1",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmdArgs := append([]string{"perf-ratchet.sh"}, tt.args...)
+			cmd := exec.Command(shell, cmdArgs...)
+			cmd.Dir = "."
+			var baseEnv []string
+			for _, e := range os.Environ() {
+				if !strings.HasPrefix(e, "PERF_RATCHET_") {
+					baseEnv = append(baseEnv, e)
+				}
+			}
+			cmd.Env = append(baseEnv, tt.env...)
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("perf-ratchet error = %v, wantErr %t\n%s", err, tt.wantErr, output)
+			}
+			if !strings.Contains(string(output), tt.wantOutput) {
+				t.Fatalf("perf-ratchet output = %q, want %q", output, tt.wantOutput)
+			}
+		})
+	}
+}
+
+func TestPerfRatchetBootstrap(t *testing.T) {
+	shell := perfRatchetShell()
+	if shell == "" {
+		t.Skip("a usable bash installation is required to test the shell ratchet")
+	}
+
+	matchingBenches := benchmarkHeader +
+		"BenchmarkScanProject_Page5000-8\t1\t100 ns/op\n" +
+		"BenchmarkSearch_AllMode_Hit-8\t1\t100 ns/op\n" +
+		"BenchmarkSearch_AnyMode_Hit-8\t1\t100 ns/op\n" +
+		"BenchmarkSearchContext_AllMode_Hit-8\t1\t100 ns/op\n" +
+		"BenchmarkSearch_Limit20-8\t1\t100 ns/op\n" +
+		"BenchmarkSearch_NoHit-8\t1\t100 ns/op\n" +
+		"BenchmarkSearch_TypeFilter-8\t1\t100 ns/op\n"
+
+	tests := []struct {
+		name       string
+		fakeOutput string
+		wantErr    bool
+		wantOutput string
+	}{
+		{
+			name:       "accepts matching benchmark suite",
+			fakeOutput: matchingBenches,
+			wantErr:    false,
+			wantOutput: "validated its successor against the versioned baseline",
+		},
+		{
+			name:       "rejects mismatched benchmark suite",
+			fakeOutput: benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n",
+			wantErr:    true,
+			wantOutput: "bootstrap benchmark suite does not match the versioned baseline",
+		},
+		{
+			name:       "rejects empty benchmark output",
+			fakeOutput: "",
+			wantErr:    true,
+			wantOutput: "bootstrap requires non-empty versioned baseline and candidate benchmark output",
+		},
+		{
+			name:       "rejects non-empty benchmark output without benchmark rows",
+			fakeOutput: benchmarkHeader + "PASS\n",
+			wantErr:    true,
+			wantOutput: "bootstrap found no benchmark rows in the versioned baseline or candidate output",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatalf("mkdir bin: %v", err)
+			}
+
+			// Create a fake `go` script that outputs tt.fakeOutput when invoked as `go test ...`
+			fakeGo := filepath.Join(binDir, "go")
+			script := "#!/usr/bin/env bash\nprintf '%s' " + shellQuote(tt.fakeOutput) + "\n"
+			if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
+				t.Fatalf("write fake go: %v", err)
+			}
+
+			cmd := exec.Command(shell, "perf-ratchet.sh", "--bootstrap")
+			cmd.Dir = "."
+			var env []string
+			for _, e := range os.Environ() {
+				if !strings.HasPrefix(e, "PATH=") && !strings.HasPrefix(e, "PERF_RATCHET_") {
+					env = append(env, e)
+				}
+			}
+			cmd.Env = append(env, "PATH="+binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("perf-ratchet error = %v, wantErr %t\n%s", err, tt.wantErr, output)
+			}
+			if !strings.Contains(string(output), tt.wantOutput) {
+				t.Fatalf("perf-ratchet output = %q, want %q", output, tt.wantOutput)
+			}
+		})
+	}
+}
+
 func perfRatchetShell() string {
 	candidates := []string{"bash"}
 	if programFiles := os.Getenv("ProgramFiles"); programFiles != "" {
