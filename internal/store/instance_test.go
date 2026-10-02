@@ -1,12 +1,96 @@
 package store
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+// Android app storage rejects link(2) with EPERM, so the identity must still be
+// published and shared by every concurrent caller.
+func TestEnsureInstanceIDPublishesWithoutHardLinkSupport(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+	dataDir := t.TempDir()
+
+	id, err := EnsureInstanceID(dataDir)
+	if err != nil {
+		t.Fatalf("EnsureInstanceID: %v", err)
+	}
+	if !isValidInstanceID(id) {
+		t.Fatalf("identity = %q, want 32 lowercase hexadecimal characters", id)
+	}
+	persisted, err := os.ReadFile(filepath.Join(dataDir, ".instance-id"))
+	if err != nil {
+		t.Fatalf("read persisted identity: %v", err)
+	}
+	if strings.TrimSpace(string(persisted)) != id {
+		t.Fatalf("persisted identity = %q, want %q", persisted, id)
+	}
+}
+
+func TestEnsureInstanceIDConvergesWithoutHardLinkSupport(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+	dataDir := t.TempDir()
+
+	const callers = 32
+	start := make(chan struct{})
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			id, err := EnsureInstanceID(dataDir)
+			ids <- id
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(ids)
+	close(errs)
+
+	var winner string
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureInstanceID: %v", err)
+		}
+	}
+	for id := range ids {
+		if winner == "" {
+			winner = id
+		} else if id != winner {
+			t.Fatalf("concurrent identity = %q, want published winner %q", id, winner)
+		}
+	}
+}
+
+func TestEnsureInstanceIDFailsClosedWhenPublicationIsImpossible(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+	dataDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dataDir, []byte("regular file"), 0o600); err != nil {
+		t.Fatalf("write data directory fixture: %v", err)
+	}
+
+	if _, err := EnsureInstanceID(dataDir); err == nil {
+		t.Fatal("EnsureInstanceID accepted a regular file as data directory")
+	}
+}
+
+// withoutHardLinks makes every link attempt fail the way Android app storage
+// rejects it, so the publication path stays testable on filesystems that do
+// support hard links.
+func withoutHardLinks(t *testing.T, linkErr error) {
+	t.Helper()
+	original := linkFile
+	t.Cleanup(func() { linkFile = original })
+	linkFile = func(string, string) error { return linkErr }
+}
 
 func TestEnsureInstanceIDRecoversMalformedAndTruncatedFiles(t *testing.T) {
 	for name, contents := range map[string]string{

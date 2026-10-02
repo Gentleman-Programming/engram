@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var linkFile = os.Link
+
 func EnsureInstanceID(dataDir string) (string, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return "", fmt.Errorf("engram: create data dir: %w", err)
@@ -56,13 +58,20 @@ func EnsureInstanceID(dataDir string) (string, error) {
 			_ = os.Remove(temporaryPath)
 			return "", fmt.Errorf("engram: close instance identity: %w", err)
 		}
-		err = os.Link(temporaryPath, path)
+		err = linkFile(temporaryPath, path)
 		_ = os.Remove(temporaryPath)
 		if err == nil {
 			return id, nil
 		}
 		if !os.IsExist(err) {
-			return "", fmt.Errorf("engram: publish instance identity: %w", err)
+			// Filesystems without hard links (Android app storage rejects link(2))
+			// still need an atomic, first-writer-wins publication, so claim the path
+			// with an exclusive create and keep the same single-winner retry loop.
+			if publishErr := publishInstanceID(path, []byte(id+"\n")); publishErr == nil {
+				return id, nil
+			} else if !os.IsExist(publishErr) {
+				return "", fmt.Errorf("engram: publish instance identity: %w", err)
+			}
 		}
 		if data, readErr := os.ReadFile(path); readErr == nil {
 			if winner := strings.TrimSpace(string(data)); isValidInstanceID(winner) {
@@ -74,6 +83,25 @@ func EnsureInstanceID(dataDir string) (string, error) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return "", fmt.Errorf("engram: read instance identity: concurrent initialization did not complete")
+}
+
+// publishInstanceID claims path with O_EXCL so exactly one writer wins, then
+// fills it. A failed write removes the claim instead of leaving a partial file.
+func publishInstanceID(path string, payload []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(payload); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func isValidInstanceID(id string) bool {

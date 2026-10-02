@@ -2,6 +2,7 @@ package project
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,6 +137,106 @@ func TestRepositoryBinding_WriteFailureFailsClosed(t *testing.T) {
 	if !errors.Is(err, ErrRepositoryBinding) {
 		t.Fatalf("write failure error = %v, want ErrRepositoryBinding", err)
 	}
+}
+
+// Android app storage rejects link(2) with EPERM, so publication must survive a
+// filesystem with no hard links at all.
+func TestRepositoryBinding_PublishesWithoutHardLinkSupport(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+	commonDir := t.TempDir()
+
+	binding, err := loadOrCreateRepositoryBinding(commonDir, "project")
+	if err != nil {
+		t.Fatalf("loadOrCreateRepositoryBinding: %v", err)
+	}
+	persisted, err := readRepositoryBinding(commonDir)
+	if err != nil {
+		t.Fatalf("readRepositoryBinding: %v", err)
+	}
+	if persisted != binding {
+		t.Fatalf("persisted binding = %+v, want %+v", persisted, binding)
+	}
+	if !validRepositoryBinding(persisted) {
+		t.Fatalf("published binding = %+v, want a valid binding", persisted)
+	}
+}
+
+func TestRepositoryBinding_ConcurrentCreationConvergesWithoutHardLinks(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+	commonDir := t.TempDir()
+	const workers = 24
+	bindings := make(chan repositoryBinding, workers)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			binding, err := loadOrCreateRepositoryBinding(commonDir, "project")
+			if err != nil {
+				errs <- err
+				return
+			}
+			bindings <- binding
+		}()
+	}
+	wg.Wait()
+	close(bindings)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var first repositoryBinding
+	for binding := range bindings {
+		if first.ID == "" {
+			first = binding
+			continue
+		}
+		if binding != first {
+			t.Fatalf("concurrent binding = %+v, want %+v", binding, first)
+		}
+	}
+}
+
+func TestRepositoryBinding_UnwritableCommonDirFailsClosedWithoutHardLinks(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+
+	_, err := loadOrCreateRepositoryBinding(filepath.Join(t.TempDir(), "missing"), "project")
+	if !errors.Is(err, ErrRepositoryBinding) {
+		t.Fatalf("write failure error = %v, want ErrRepositoryBinding", err)
+	}
+}
+
+// An empty file carries no identity: it is a publisher that claimed the path and
+// has not written yet, not a corrupt binding, so detection must repair it.
+func TestRepositoryBinding_EmptyFileIsTreatedAsUnpublished(t *testing.T) {
+	withoutHardLinks(t, fs.ErrPermission)
+	commonDir := t.TempDir()
+	if err := os.WriteFile(repositoryBindingPath(commonDir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	binding, err := loadOrCreateRepositoryBinding(commonDir, "project")
+	if err != nil {
+		t.Fatalf("loadOrCreateRepositoryBinding: %v", err)
+	}
+	persisted, err := readRepositoryBinding(commonDir)
+	if err != nil {
+		t.Fatalf("readRepositoryBinding: %v", err)
+	}
+	if persisted != binding || !validRepositoryBinding(persisted) {
+		t.Fatalf("published binding = %+v, want a valid replacement", persisted)
+	}
+}
+
+// withoutHardLinks makes every link attempt fail the way Android app storage
+// rejects it, so the publication path stays testable on filesystems that do
+// support hard links.
+func withoutHardLinks(t *testing.T, linkErr error) {
+	t.Helper()
+	original := linkFile
+	t.Cleanup(func() { linkFile = original })
+	linkFile = func(string, string) error { return linkErr }
 }
 
 func TestDetectProjectFull_NonGitAndConfigRemainCompatible(t *testing.T) {
