@@ -3378,11 +3378,85 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 	return nil
 }
 
+// ErrRuntimeSessionScopeConflict refuses runtime-root reuse outside its binding.
+var ErrRuntimeSessionScopeConflict = errors.New("runtime session scope conflict")
+
+func runtimeSessionTx(tx *sql.Tx, root, project, directory, mode string) (string, error) {
+	if err := validateSessionID(root); err != nil {
+		return "", err
+	}
+	if !validSessionOwnershipMode(mode) {
+		return "", ErrInvalidSessionOwnershipMode
+	}
+	project, _ = NormalizeProject(project)
+	if project == "" {
+		return "", ErrProjectRequired
+	}
+	validate := func(id string, live bool) error {
+		var owner, ownership, scope string
+		var ended *string
+		if err := tx.QueryRow(`SELECT ifnull(project, ''), ifnull(ownership_mode, ''), ifnull(directory, ''), ended_at FROM sessions WHERE id = ?`, id).Scan(&owner, &ownership, &scope, &ended); err != nil {
+			return err
+		}
+		owner, _ = NormalizeProject(strings.TrimSpace(owner))
+		ownership = strings.TrimSpace(ownership)
+		if sessionRegistrationProjectError(id, owner, ownership, project, mode) != nil || ownership != mode || strings.TrimSpace(directory) == "" || strings.TrimSpace(scope) == "" || projectpkg.RuntimeWorktreeDirectory(scope) != projectpkg.RuntimeWorktreeDirectory(directory) {
+			return ErrRuntimeSessionScopeConflict
+		}
+		if live && ended != nil {
+			return sql.ErrNoRows
+		}
+		return nil
+	}
+	if err := validate(root, false); err != nil {
+		return "", err
+	}
+	id, err := continuationSessionTx(tx, root)
+	if err != nil {
+		return "", err
+	}
+	if err := validate(id, true); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// ResolveRuntimeSessionWithOwnershipMode reads the authoritative live binding;
+// unlike resume registration it cannot create or advance a continuation.
+func (s *Store) ResolveRuntimeSessionWithOwnershipMode(root, project, directory, mode string) (string, error) {
+	var id string
+	err := s.withTx(func(tx *sql.Tx) error {
+		var err error
+		id, err = runtimeSessionTx(tx, root, project, directory, mode)
+		return err
+	})
+	return id, err
+}
+
+// EndRuntimeSession resolves and ends within one writer reservation. Generic
+// EndSession retains its exact-ID behavior for all existing callers.
+func (s *Store) EndRuntimeSession(root, project, directory, mode, summary string) (string, error) {
+	var id string
+	err := s.withTx(func(tx *sql.Tx) error {
+		var err error
+		id, err = runtimeSessionTx(tx, root, project, directory, mode)
+		if err != nil {
+			return err
+		}
+		return s.endSessionOperation(id, summary)(tx)
+	})
+	return id, err
+}
+
 func (s *Store) EndSession(id string, summary string) error {
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(s.endSessionOperation(id, summary))
+}
+
+func (s *Store) endSessionOperation(id, summary string) func(*sql.Tx) error {
+	return func(tx *sql.Tx) error {
 		res, err := s.execHook(tx,
 			`UPDATE sessions SET ended_at = datetime('now'), summary = ? WHERE id = ?`,
 			nullableString(summary), id,
@@ -3420,7 +3494,7 @@ func (s *Store) EndSession(id string, summary string) error {
 			EndedAt:       &endedAt,
 			Summary:       storedSummary,
 		})
-	})
+	}
 }
 
 func (s *Store) GetSession(id string) (*Session, error) {

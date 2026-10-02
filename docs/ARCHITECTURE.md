@@ -41,6 +41,14 @@ Engram trusts the **agent** to decide what's worth remembering — not a firehos
 
 ## Session Lifecycle
 
+Codex runtime identity is core-owned: startup registers a resumable root, while
+writes, prompt capture and compaction resolve an existing active identity.
+Runtime closing resolves and ends atomically without creating a continuation.
+Both root and continuation must satisfy existing project-sharing policy, exact
+ownership and canonical worktree; equivalent directory spelling is accepted without rewriting
+stored rows. Ended roots remain terminal. These operations are separate from
+ordinary exact-ID session ending; adapters maintain no identity cache.
+
 ```
 Session starts → Agent works → Agent saves memories proactively
                                     ↓

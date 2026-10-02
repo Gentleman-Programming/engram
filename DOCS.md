@@ -319,6 +319,11 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
   - Session IDs are opaque non-blank strings. The Pi adapter derives cross-project satellite IDs as `<runtimeID>@<project>` (registered `project_owned` with `resume: true`, `isolated: true`, and no directory). Capability preflight protects against old servers without a guessed version floor. Newly created satellites are never implicit directory-matched runtime candidates; Pi's explicit `cwd` only resolves the target project. This ensures an explicitly targeted write to another project never re-registers the runtime session under a second owner. See [plugin/pi/README.md](plugin/pi/README.md#cross-project-saves).
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
+- `POST /runtime-sessions/resolve` — Read the existing live identity for a runtime root. Body: `{id, project, directory, ownership_mode?}`; default ownership is `shared`.
+- `POST /runtime-sessions/end` — Atomically resolve and end that live identity without registration. Same body, plus optional `summary`.
+  - Both return `200` with `{id, status}` (`resolved` or `ended`) and `resumed_from` when the effective ID differs from the root.
+  - Both validate root and selected identity using existing project-sharing policy, exact ownership mode and canonical worktree. Shared sessions permit cross-project use without changing ownership; foreign project-owned contexts reject. Blank stored directories or incompatible scopes return `409`; no live identity returns `404`. Malformed/unknown/trailing input returns `400`.
+  - Neither operation creates, repairs, advances or reopens sessions. Generic exact-ID ending remains unchanged.
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
   - No-result responses return `200` with `[]` (never `null`)
 - `GET /sessions/{id}` — Get single session by ID

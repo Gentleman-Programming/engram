@@ -58,7 +58,7 @@ fi
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Register and retain only the server-confirmed runtime identity.
-SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD") && SESSION_REGISTERED=1 || SESSION_REGISTERED=0
+SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-register) && SESSION_REGISTERED=1 || SESSION_REGISTERED=0
 
 # Auto-import git-synced chunks
 if [ -f "${CWD}/.engram/manifest.json" ]; then
