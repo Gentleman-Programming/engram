@@ -38,13 +38,13 @@ func (f *fakeManagedTokenHashStore) MarkPrincipalTokenUsed(_ context.Context, id
 
 func TestManagedTokenUsageAdapter(t *testing.T) {
 	failure := errors.New("storage unavailable")
-	for _, want := range []error{nil, failure, cloudstore.ErrPrincipalTokenNotFound, cloudstore.ErrPrincipalTokenRevoked, cloudstore.ErrPrincipalDisabled} {
+	for _, want := range []error{nil, failure, cloudstore.ErrPrincipalTokenNotFound, cloudstore.ErrPrincipalNotFound, cloudstore.ErrPrincipalTokenRevoked, cloudstore.ErrPrincipalDisabled} {
 		store := &fakeManagedTokenHashStore{usageErr: want}
 		lookup := cloudstoreManagedTokenLookup{store: store}
 		err := lookup.MarkManagedTokenUsed(context.Background(), "token-id")
 		mapped := want
 		switch want {
-		case cloudstore.ErrPrincipalTokenNotFound:
+		case cloudstore.ErrPrincipalTokenNotFound, cloudstore.ErrPrincipalNotFound:
 			mapped = auth.ErrUnknownToken
 		case cloudstore.ErrPrincipalTokenRevoked:
 			mapped = auth.ErrTokenRevoked
