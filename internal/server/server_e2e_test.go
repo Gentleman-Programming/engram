@@ -60,6 +60,55 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 	return out
 }
 
+func TestEndEffectiveSessionE2E(t *testing.T) {
+	st, ts := newE2EServer(t)
+	client := ts.Client()
+	dir := t.TempDir()
+	registration := map[string]any{"id": "root", "project": "engram", "directory": dir, "ownership_mode": "project_owned", "resume": true}
+	create := func() string {
+		t.Helper()
+		resp := postJSON(t, client, ts.URL+"/sessions", registration)
+		ack := decodeJSON[map[string]string](t, resp)
+		if resp.StatusCode != 201 {
+			t.Fatalf("registration: %d %v", resp.StatusCode, ack)
+		}
+		return ack["id"]
+	}
+	closeBody := map[string]any{"effective_continuation": true, "project": "engram", "directory": dir, "ownership_mode": "project_owned"}
+	close := func(wantID, wantStatus string) {
+		t.Helper()
+		resp := postJSON(t, client, ts.URL+"/sessions/root/end", closeBody)
+		ack := decodeJSON[map[string]string](t, resp)
+		if resp.StatusCode != 200 || ack["id"] != wantID || ack["status"] != wantStatus {
+			t.Fatalf("close: %d %v", resp.StatusCode, ack)
+		}
+	}
+	if id := create(); id != "root" {
+		t.Fatal(id)
+	}
+	close("root", "completed")
+	id := create()
+	if id != "root:resume:2" || create() != id {
+		t.Fatalf("resume: %q", id)
+	}
+	resp := postJSON(t, client, ts.URL+"/observations", map[string]any{"session_id": id, "project": "engram", "type": "note", "title": "resumed", "content": "bound to continuation"})
+	decodeJSON[map[string]any](t, resp)
+	if resp.StatusCode != 201 {
+		t.Fatalf("save: %d", resp.StatusCode)
+	}
+	close(id, "completed")
+	close("", "no_active_session")
+	for _, sessionID := range []string{"root", id} {
+		session, err := st.GetSession(sessionID)
+		if err != nil || session.EndedAt == nil {
+			t.Fatalf("terminal row: %+v %v", session, err)
+		}
+	}
+	if _, err := st.GetSession("root:resume:3"); err == nil {
+		t.Fatal("close created continuation")
+	}
+}
+
 func TestObservationExpectedProjectRouteE2E(t *testing.T) {
 	t.Setenv("ENGRAM_HTTP_TOKEN", "")
 	st, ts := newE2EServer(t)

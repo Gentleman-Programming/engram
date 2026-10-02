@@ -7,6 +7,131 @@ import (
 	"testing"
 )
 
+func TestEndEffectiveSession(t *testing.T) {
+	for _, target := range []string{"root", "root:resume:2"} {
+		t.Run(target, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnrollProject("engram"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.StartSessionWithOwnershipMode("root", "engram", "/work", SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			if target != "root" {
+				if err := s.EndSession("root", "old"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.ResumeSessionWithOwnershipMode("root", "engram", "/work", SessionOwnershipProjectOwned); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := s.GetSession(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := s.EndEffectiveSession("root", " ENGRAM ", "/work", SessionOwnershipProjectOwned, "done")
+			if err != nil || id != target {
+				t.Fatalf("close: %q %v", id, err)
+			}
+			after, err := s.GetSession(target)
+			if err != nil || after.EndedAt == nil || (after.RuntimeLeaseExpiresAt == nil || before.RuntimeLeaseExpiresAt == nil || *after.RuntimeLeaseExpiresAt != *before.RuntimeLeaseExpiresAt) {
+				t.Fatalf("after: %+v %v", after, err)
+			}
+			if _, err := s.db.Exec(`UPDATE sessions SET ended_at = '2000-01-01' WHERE id = ?`, target); err != nil {
+				t.Fatal(err)
+			}
+			var mutations int
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutations); err != nil {
+				t.Fatal(err)
+			}
+			if mutations == 0 {
+				t.Fatal("journal assertion requires enrolled mutations")
+			}
+			for i := 0; i < 2; i++ {
+				if id, err := s.EndEffectiveSession("root", "engram", "/work", SessionOwnershipProjectOwned, "changed"); err != nil || id != "" {
+					t.Fatalf("repeat: %q %v", id, err)
+				}
+			}
+			var rows, journal int
+			if err := s.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&journal); err != nil {
+				t.Fatal(err)
+			}
+			wantRows := 1
+			if target != "root" {
+				wantRows = 2
+			}
+			after, err = s.GetSession(target)
+			if err != nil || rows != wantRows || journal != mutations || *after.EndedAt != "2000-01-01" || *after.Summary != "done" {
+				t.Fatalf("repeat mutated: rows=%d journal=%d session=%+v err=%v", rows, journal, after, err)
+			}
+		})
+	}
+}
+
+func TestEndEffectiveSessionOwnership(t *testing.T) {
+	for _, field := range []string{"project", "directory", "ownership_mode"} {
+		for _, target := range []string{"root", "root:resume:2"} {
+			t.Run(target+"/"+field, func(t *testing.T) {
+				s := newTestStore(t)
+				if err := s.StartSessionWithOwnershipMode("root", "engram", "/work", SessionOwnershipProjectOwned); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.EndSession("root", "old"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.ResumeSessionWithOwnershipMode("root", "engram", "/work", SessionOwnershipProjectOwned); err != nil {
+					t.Fatal(err)
+				}
+				value := "foreign"
+				if field == "ownership_mode" {
+					value = SessionOwnershipShared
+				}
+				if _, err := s.db.Exec(`UPDATE sessions SET `+field+` = ? WHERE id = ?`, value, target); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.EndEffectiveSession("root", "engram", "/work", SessionOwnershipProjectOwned, ""); err == nil {
+					t.Fatal("ownership mismatch allowed")
+				}
+				live, err := s.GetSession("root:resume:2")
+				if err != nil || live.EndedAt != nil {
+					t.Fatalf("conflict closed row: %+v %v", live, err)
+				}
+			})
+		}
+	}
+}
+
+func TestEndEffectiveSessionSelection(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"root", "root:resume:10", "root:resume:2", "root:resume:invalid", "other:resume:1"} {
+		if err := s.StartSessionWithOwnershipMode(id, "engram", "/work", SessionOwnershipProjectOwned); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, want := range []string{"root", "root:resume:2", "root:resume:10", ""} {
+		id, err := s.EndEffectiveSession("root", "engram", "/work", SessionOwnershipProjectOwned, "")
+		if err != nil || id != want {
+			t.Fatalf("selection: %q %v want %q", id, err, want)
+		}
+	}
+	for _, tc := range []struct{ root, project, mode string }{
+		{"missing", "engram", SessionOwnershipProjectOwned},
+		{" ", "engram", SessionOwnershipProjectOwned},
+		{"root", "", SessionOwnershipProjectOwned},
+		{"root", "engram", "unknown"},
+	} {
+		if _, err := s.EndEffectiveSession(tc.root, tc.project, "/work", tc.mode, ""); err == nil {
+			t.Fatalf("invalid request allowed: %+v", tc)
+		}
+	}
+	if _, err := s.GetSession("root:resume:11"); err == nil {
+		t.Fatal("suffix allocated")
+	}
+}
+
 func TestResumeSession(t *testing.T) {
 	s := newTestStore(t)
 	register := func(id, project string) string {
