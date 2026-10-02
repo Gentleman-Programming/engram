@@ -27,10 +27,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )

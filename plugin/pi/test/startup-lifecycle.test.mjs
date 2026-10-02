@@ -506,18 +506,78 @@ test("a missing binary is reported as not found, not as an outdated version", as
   });
 });
 
-test("a foreign server keeps the byte-identical ownership mismatch message", async () => {
+test("a foreign server retains actionable evidence and doctor diagnoses locally", async () => {
+  const requests = [];
   await withFixture({
     readyServer: true,
     healthBody: { status: "ok", service: "engram", version: "2.0.0", instance_id: "ffffffffffffffffffffffffffffffff" },
     cliVersion: "2.0.0",
+    requests,
   }, async ({ tools, ctx, spawnLog }) => {
     const result = await tools.get("mem_search").execute("call-foreign", { query: "startup" }, undefined, undefined, ctx);
 
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /: Engram server ownership mismatch at http:\/\/127\.0\.0\.1:\d+\. Run mem_doctor/);
+    assert.match(result.content[0].text, /ownership mismatch/);
+    assert.match(result.content[0].text, /local ID 00000000000000000000000000000000/);
+    assert.match(result.content[0].text, /remote ID ffffffffffffffffffffffffffffffff/);
+    assert.match(result.content[0].text, /local version 2\.0\.0, remote version 2\.0\.0/);
+    assert.match(result.content[0].text, /WSL2.*possible cause/);
+    assert.match(result.content[0].text, /ENGRAM_PORT=<port>/);
+    const beforeDoctor = requests.length;
+    const doctor = await tools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+    assert.equal(doctor.isError, true);
+    assert.equal(doctor.details.data.source, "LOCAL");
+    assert.equal(doctor.details.data.code, "ownership_mismatch");
+    assert.deepEqual(doctor.details.data.evidence, {
+      localInstanceID: "00000000000000000000000000000000",
+      remoteInstanceID: "ffffffffffffffffffffffffffffffff",
+      localVersion: "2.0.0", remoteVersion: "2.0.0",
+    });
+    assert.equal(requests.length, beforeDoctor, "doctor uses cached failure, not a new probe");
+    assert.ok(requests.every(({ url }) => url === "/health"), "foreign endpoint receives no project, session, doctor or memory requests");
     assert.equal(await countSpawns(spawnLog), 0, "a foreign server is never adopted, terminated, or replaced");
   });
+});
+
+test("foreign doctor reports unavailable versions as unknown and honors cancellation", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, requests,
+    healthBody: { instance_id: "ffffffffffffffffffffffffffffffff" },
+  }, async ({ tools, ctx, spawnLog }) => {
+    const doctor = tools.get("mem_doctor");
+    const result = await doctor.execute("unknown", {}, undefined, undefined, ctx);
+    assert.equal(result.details.data.evidence.localVersion, "unknown");
+    assert.equal(result.details.data.evidence.remoteVersion, "unknown");
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(doctor.execute("cancelled", {}, controller.signal, undefined, ctx), /cancelled/);
+    assert.deepEqual(requests.map(({ url }) => url), ["/health"]);
+    assert.equal(await countSpawns(spawnLog), 0);
+  });
+});
+
+test("normal doctor still calls the server after project detection", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, requests }, async ({ tools, ctx }) => {
+    const result = await tools.get("mem_doctor").execute("normal", {}, undefined, undefined, ctx);
+    assert.equal(result.isError, undefined);
+    assert.ok(requests.some(({ url }) => url.startsWith("/project/current")));
+    assert.ok(requests.some(({ url }) => url.startsWith("/doctor?project=fake-project")));
+    assert.notEqual(result.details.data.source, "LOCAL");
+  });
+});
+
+test("doctor does not bypass unrelated deterministic initialization failures", async () => {
+  for (const healthBody of [{ version: "1.20.0" }, { version: "2.0.0" }, { version: "malformed", instance_id: null }]) {
+    const requests = [];
+    await withFixture({ readyServer: true, healthBody, requests }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_doctor").execute("unrelated", {}, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.equal(result.details.data, undefined, "no local ownership fallback for legacy/missing identity");
+      assert.deepEqual(requests.map(({ url }) => url), ["/health"]);
+      assert.equal(await countSpawns(spawnLog), 0);
+    });
+  }
 });
 
 test("loading the plugin leaves the checkout's node_modules untouched", async () => {

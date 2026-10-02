@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"encoding/json"
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func cmdDoctor(cfg store.Config) {

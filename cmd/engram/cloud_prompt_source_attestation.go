@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const promptSourceAttestationUsage = "usage: engram cloud attest-prompt-source --sync-id <exact-sync-id> --owner-project <asserted-owner>"

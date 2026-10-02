@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 )
 
 func TestSessionAuthorityExplicitRegistration(t *testing.T) {

@@ -30,8 +30,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
 
