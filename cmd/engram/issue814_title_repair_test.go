@@ -79,7 +79,11 @@ func TestCmdDoctorRepairCurrentLocalTitle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close repaired store: %v", err)
+		}
+	}()
 	after, err := reopened.GetObservation(id)
 	if err != nil || after.Title != obs.Title || after.Title != title {
 		t.Fatalf("source=%+v err=%v", after, err)
