@@ -722,6 +722,11 @@ func TestCmdDoctorRepairInvalidSessionIdentityBlockers(t *testing.T) {
 			} else if plan["status"] != "blocked" || plan["blockers"].([]any)[0].(map[string]any)["reason_code"] != tc.want {
 				t.Fatal(plan)
 			}
+			if tc.want == "identity_repair_blocked" {
+				if skipped, ok := plan["skipped"].([]any); ok && len(skipped) != 0 {
+					t.Fatalf("explicit blocked replacement retains stale guidance: %v", skipped)
+				}
+			}
 			if tc.name == "collision" {
 				counts := plan["counts"].(map[string]any)
 				for _, field := range []string{"corrected_mutations_planned", "corrected_mutations_applied"} {

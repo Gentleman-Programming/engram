@@ -93,6 +93,10 @@ var (
 	// the sequence so the cursor does not stall.
 	ErrRelationFKMissing = errors.New("relation FK precondition not met: referenced observation missing")
 
+	// ErrRelationProjectMismatch reports existing endpoints outside the relation's
+	// effective project. It shares the missing-endpoint retry/rearm lifecycle.
+	ErrRelationProjectMismatch = errors.New("relation FK precondition not met: referenced observation effective project mismatch")
+
 	// ErrCrossProjectRelation is returned by JudgeRelation when the source and
 	// target observations belong to different projects. The write is rejected
 	// entirely; no memory_relations row is created and no sync mutation is
@@ -7746,7 +7750,7 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 
 	status := ""
 	switch {
-	case errors.Is(applyErr, ErrRelationFKMissing):
+	case errors.Is(applyErr, ErrRelationFKMissing), errors.Is(applyErr, ErrRelationProjectMismatch):
 		status = "deferred"
 	case errors.Is(applyErr, ErrApplyDead):
 		status = "dead"
@@ -11313,7 +11317,8 @@ func relationEndpointPredicate(sourceID, targetID, payloadProject, outerProject 
 //  1. JSON-decode the payload into syncRelationPayload. Decode errors return
 //     ErrApplyDead (non-retryable).
 //  2. Verify both source and target observations exist locally by sync_id.
-//     If either is missing, return ErrRelationFKMissing. The caller must write
+//     If either is absent, return ErrRelationFKMissing; if both exist but fail
+//     the effective-project check, return ErrRelationProjectMismatch. Both defer
 //     the raw mutation to sync_apply_deferred and ACK the seq.
 //  3. INSERT INTO memory_relations with ON CONFLICT(sync_id) DO UPDATE
 //     (last-write-wins, preserving the original created_at).
@@ -11381,7 +11386,16 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
 	}
 	if obsCount < requiredObservations {
-		return ErrRelationFKMissing
+		// Diagnose only after the unchanged scoped predicate fails. Distinct
+		// identities preserve duplicate-row and self-edge absence checks.
+		var existingCount int
+		if err := tx.QueryRow(`SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`, p.SourceID, p.TargetID).Scan(&existingCount); err != nil {
+			return fmt.Errorf("applyRelationUpsertTx: check endpoint existence: %w", err)
+		}
+		if existingCount < requiredObservations {
+			return ErrRelationFKMissing
+		}
+		return ErrRelationProjectMismatch
 	}
 
 	// Step 3: upsert into memory_relations keyed on sync_id (idempotent re-apply).
@@ -12756,7 +12770,7 @@ func (s *Store) ListDeferredProjectsForTarget(targetKey string) ([]string, error
 //   - Calls applyPulledMutationTx inside a transaction.
 //   - On success: the apply itself deletes the deferred row (applyRelationUpsertTx
 //     already includes DELETE FROM sync_apply_deferred on success path).
-//   - On ErrRelationFKMissing: increments retry_count; if retry_count reaches 5,
+//   - On ErrRelationFKMissing or ErrRelationProjectMismatch: increments retry_count; if retry_count reaches 5,
 //     marks apply_status='dead'. Otherwise updates last_error + last_attempted_at.
 //   - On ErrApplyDead or other decode errors: marks apply_status='dead'.
 //
@@ -12861,7 +12875,7 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 		// Classify the error and update the deferred row.
 		newRetry := row.retryCount + 1
 		var newStatus string
-		if (errors.Is(applyErr, ErrRelationFKMissing) || errors.Is(applyErr, errPulledParentSessionMissing)) && newRetry < deadThreshold {
+		if (errors.Is(applyErr, ErrRelationFKMissing) || errors.Is(applyErr, ErrRelationProjectMismatch) || errors.Is(applyErr, errPulledParentSessionMissing)) && newRetry < deadThreshold {
 			// Still retryable.
 			newStatus = "deferred"
 			result.Failed++
@@ -12908,12 +12922,12 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 		  AND entity = ?
 		  AND apply_status = 'dead'
 		  AND retry_count = ?
-		  AND last_error = ?
+		  AND last_error IN (?, ?)
 		  AND sync_id = payload_sync_id
 		  AND entity_key = payload_sync_id
 		  AND op = ?
 		ORDER BY first_seen_at
-	`, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
+	`, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), ErrRelationProjectMismatch.Error(), SyncOpUpsert)
 	if err != nil {
 		return 0, fmt.Errorf("rearm eligible dead relations: list: %w", err)
 	}
@@ -12972,11 +12986,11 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 			  AND entity = ?
 			  AND apply_status = 'dead'
 			  AND retry_count = ?
-			  AND last_error = ?
+			  AND last_error IN (?, ?)
 			  AND sync_id = payload_sync_id
 			  AND entity_key = payload_sync_id
 			  AND op = ?
-		`, row.syncID, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
+		`, row.syncID, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), ErrRelationProjectMismatch.Error(), SyncOpUpsert)
 		if err != nil {
 			return rearmed, fmt.Errorf("rearm eligible dead relation %s: %w", row.syncID, err)
 		}

@@ -868,6 +868,106 @@ func TestInvalidSessionIdentityCheckReportsSourceReferencesAndJournal(t *testing
 	}
 }
 
+func TestInvalidSessionIdentityReplacementBlockedGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, replacement, blocker string
+		multiple                           bool
+	}{
+		{name: "deferred", status: "deferred", replacement: "canonical", blocker: `session identity blocked by deferred payload "identity-evidence"`},
+		{name: "dead", status: "dead", replacement: "canonical", blocker: `session identity blocked by deferred payload "identity-evidence"`},
+		{name: "selected among multiple", status: "dead", replacement: "canonical", blocker: `session identity blocked by deferred payload "identity-evidence"`, multiple: true},
+		{name: "invalid replacement", replacement: "  ", blocker: "invalid session identity repair IDs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work')`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.multiple {
+				if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES (' ','engram','/other')`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.status != "" {
+				if _, err := s.DB().Exec(`INSERT INTO sync_apply_deferred(sync_id,entity,payload,project,apply_status,retry_count,first_seen_at)
+					VALUES ('identity-evidence','relation','{"session_id":"another-session"}','engram',?,5,datetime('now'))`, tc.status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scope := Scope{Store: s, Project: "engram"}
+			report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: ReasonQuarantinedPulledSessionIdentity, Message: "remote evidence remains"})
+			planned := PlanSessionIdentityReplacement(scope, report, plan, "", true, tc.replacement)
+			if planned.Status != "blocked" || planned.IdentityRepair != nil || len(planned.Blockers) != 1 || planned.Blockers[0].ReasonCode != "identity_repair_blocked" || planned.Blockers[0].Message != tc.blocker {
+				t.Fatalf("actual blocker lost: %+v", planned)
+			}
+			for _, skip := range planned.Skipped {
+				if skip.SessionID == "" && skip.ReasonCode == "cannot_repair_without_explicit_canonical_session_id" {
+					t.Fatalf("selected source retains stale replacement guidance: %+v", planned.Skipped)
+				}
+			}
+			wantSkips := 1
+			if tc.multiple {
+				wantSkips = 2
+			}
+			if len(planned.Skipped) != wantSkips || planned.Skipped[wantSkips-1].ReasonCode != ReasonQuarantinedPulledSessionIdentity {
+				t.Fatalf("unrelated evidence lost: %+v", planned.Skipped)
+			}
+			if tc.multiple && (planned.Skipped[0].SessionID != " " || planned.Skipped[0].ReasonCode != "cannot_repair_without_explicit_canonical_session_id") {
+				t.Fatalf("unselected guidance lost: %+v", planned.Skipped)
+			}
+			if planned.Counts.SessionsPlanned != 0 {
+				t.Fatalf("blocked repair planned writes: %+v", planned.Counts)
+			}
+		})
+	}
+}
+
+func TestInvalidSessionIdentityReplacementSelectionFailuresPreserveGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, reason string
+		selected, malformed  bool
+	}{
+		{name: "ambiguous", reason: "ambiguous_or_missing_source"},
+		{name: "missing source", selected: true, source: "missing", reason: "ambiguous_or_missing_source"},
+		{name: "malformed evidence", selected: true, malformed: true, reason: "invalid_doctor_evidence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work'),(' ','engram','/other')`); err != nil {
+				t.Fatal(err)
+			}
+			scope := Scope{Store: s, Project: "engram"}
+			report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := append([]RepairSkip(nil), plan.Skipped...)
+			if tc.malformed {
+				report.Checks[0].Findings[0].Evidence = json.RawMessage(`not-json`)
+			}
+			planned := PlanSessionIdentityReplacement(scope, report, plan, tc.source, tc.selected, "canonical")
+			if planned.Status != "blocked" || len(planned.Blockers) != 1 || planned.Blockers[0].ReasonCode != tc.reason || planned.IdentityRepair != nil {
+				t.Fatalf("plan=%+v", planned)
+			}
+			if !reflect.DeepEqual(planned.Skipped, before) {
+				t.Fatalf("selection failure changed guidance: %+v", planned.Skipped)
+			}
+		})
+	}
+}
+
 func TestInvalidSessionIdentityReplacementPreservesOtherFindings(t *testing.T) {
 	s := newDiagnosticTestStore(t)
 	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work'),(' ','engram','/other')`); err != nil {
