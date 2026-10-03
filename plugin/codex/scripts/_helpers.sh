@@ -33,10 +33,11 @@ resolve_project() {
 engram_session_handoff() {
   local input="$1" project="$2" dir="$3" action="$4" effective identity=""
   if [ -n "$project" ]; then
-    effective=$(printf '%s' "$input" | ENGRAM_URL="$ENGRAM_URL" engram hook "$action" 2>/dev/null) || effective=""
-    if [ -n "$effective" ]; then
-      identity=$(jq -nc --arg id "$effective" '{session_id: $id}')
-    fi
+    effective=$(printf '%s' "$input" | ENGRAM_URL="$ENGRAM_URL" ENGRAM_HOOK_OUTPUT=json engram hook "$action" 2>/dev/null) || effective=""
+    identity=$(printf '%s' "$effective" | jq -esc '
+      if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
+      then {session_id: .[0].session_id} else error("invalid identity") end
+    ' 2>/dev/null) || identity=""
   fi
 
   local confirmed=1

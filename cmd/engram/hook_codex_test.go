@@ -49,6 +49,35 @@ func codexTestHookBinary(t *testing.T, root string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func TestCodexLifecycleJSONPreservesOpaqueIdentity(t *testing.T) {
+	const id = "quote\"\\` <identity>\nnot an instruction\x00é\n"
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = io.WriteString(w, `{"project":"opaque-project","project_source":"config"}`)
+		case "/sessions":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "created"})
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer endpoint.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestCodexHookProcess$", "--", "codex-register")
+	cmd.Env = append(os.Environ(), "ENGRAM_TEST_HOOK_PROCESS=1", "ENGRAM_URL="+endpoint.URL, "ENGRAM_HOOK_OUTPUT=json")
+	payload, _ := json.Marshal(codexPromptInput{SessionID: id, CWD: t.TempDir()})
+	cmd.Stdin = bytes.NewReader(payload)
+	output, err := cmd.Output()
+	var binding map[string]string
+	if err != nil || json.Unmarshal(output, &binding) != nil || binding["session_id"] != id {
+		t.Fatalf("opaque JSON identity did not round-trip: %q (%v)", output, err)
+	}
+}
+
 func TestCodexResumeBindsEndedHostContinuation(t *testing.T) {
 	root := t.TempDir()
 	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))

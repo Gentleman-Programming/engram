@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,6 +68,12 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	var posts, registrations atomic.Int32
 	requests := make(chan struct{}, 1)
 	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/runtime-sessions/resolve" && r.Method == http.MethodPost {
+			if refuseRegistration {
+				http.Error(w, "resolution unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		if r.URL.Path == "/sessions" && r.Method == http.MethodPost {
 			registrations.Add(1)
 			if refuseRegistration {
@@ -91,11 +98,8 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 		production.ServeHTTP(w, r)
 	}))
 	defer fixture.Close()
-	port := strings.TrimPrefix(strings.TrimPrefix(fixture.URL, "http://127.0.0.1:"), "http://localhost:")
 	bin := filepath.Join(root, "bin")
-	if err := os.Mkdir(bin, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	env := codexHandoffEnv(t, root, fixture.URL, buildCodexFixtureCLI(t))
 	if err := os.WriteFile(filepath.Join(bin, "touch"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -108,13 +112,7 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bash, filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh"))
 	cmd.Dir = root
-	cmd.Env = []string{
-		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME=" + root, "USERPROFILE=" + root, "APPDATA=" + root, "LOCALAPPDATA=" + root,
-		"TMPDIR=" + root, "TMP=" + root, "TEMP=" + root,
-		"ENGRAM_DATA_DIR=" + root, "ENGRAM_PORT=" + port, "ENGRAM_URL=" + fixture.URL,
-		"CURL_HOME=" + root, "XDG_CONFIG_HOME=" + root,
-	}
+	cmd.Env = env
 	cmd.Stdin = bytes.NewReader(payload)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("hook failed: %v: %s", err, output)
@@ -142,8 +140,8 @@ func codexPromptSubmitSession(t *testing.T, ended, refuseRegistration bool) {
 	if ended || refuseRegistration {
 		want = 0
 	}
-	if registrations.Load() != 1 || len(prompts) != want || posts.Load() != int32(want) {
-		t.Fatalf("ended=%t refused=%t: registrations=%d, persisted prompts=%d, POST /prompts=%d; want one registration and %d prompts", ended, refuseRegistration, registrations.Load(), len(prompts), posts.Load(), want)
+	if registrations.Load() != 0 || len(prompts) != want || posts.Load() != int32(want) {
+		t.Fatalf("ended=%t refused=%t: registrations=%d, persisted prompts=%d, POST /prompts=%d; want no registrations and %d prompts", ended, refuseRegistration, registrations.Load(), len(prompts), posts.Load(), want)
 	}
 	if want == 1 && (prompts[0].SessionID != id || prompts[0].Content != prompt) {
 		t.Fatalf("active prompt = %+v, want session %q and content %q", prompts[0], id, prompt)
@@ -177,6 +175,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 		t.Skip("executes lifecycle shell hooks")
 	}
 	bashPath := codexTestBash(t)
+	binary := buildCodexFixtureCLI(t)
 	for _, event := range []string{"startup", "resume", "clear", "compact"} {
 		t.Run(event, func(t *testing.T) {
 			for _, tc := range []struct {
@@ -208,8 +207,17 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					cwd := t.TempDir()
-					requests := make(chan map[string]string, 4)
+					requests := make(chan map[string]any, 4)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path == "/external/sessions" || r.URL.Path == "/external/runtime-sessions/resolve" {
+							wantPath := "/external/sessions"
+							if event == "compact" {
+								wantPath = "/external/runtime-sessions/resolve"
+							}
+							if r.Method != http.MethodPost || r.URL.Path != wantPath {
+								t.Errorf("wrong lifecycle operation: %s %s", r.Method, r.URL.Path)
+							}
+						}
 						switch r.URL.Path {
 						case "/external/project/current":
 							if tc.noProject {
@@ -223,7 +231,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 									return
 								}
 							}
-						case "/external/sessions":
+						case "/external/sessions", "/external/runtime-sessions/resolve":
 							body, err := io.ReadAll(r.Body)
 							if err != nil {
 								t.Errorf("read registration: %v", err)
@@ -233,7 +241,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 									t.Errorf("registration body lost UTF-8 bytes for opaque ID: %q", body)
 								}
 							}
-							var payload map[string]string
+							var payload map[string]any
 							if err := json.Unmarshal(body, &payload); err != nil {
 								t.Errorf("decode registration: %v", err)
 							}
@@ -252,6 +260,9 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 							status := tc.status
 							if status == 0 {
 								status = http.StatusCreated
+								if event == "compact" {
+									status = http.StatusOK
+								}
 							}
 							w.WriteHeader(status)
 							if status == http.StatusNoContent {
@@ -263,7 +274,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 									return
 								}
 							} else {
-								if err := json.NewEncoder(w).Encode(map[string]any{"id": tc.id, "status": "created"}); err != nil {
+								if err := json.NewEncoder(w).Encode(map[string]any{"id": tc.id, "status": map[bool]string{true: "resolved", false: "created"}[event == "compact"]}); err != nil {
 									t.Errorf("encode registration response: %v", err)
 									return
 								}
@@ -290,7 +301,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, bashPath, filepath.Join(repoRoot(t), "plugin", "codex", "scripts", script))
-					cmd.Env = codexHandoffEnv(t, cwd, "  "+server.URL+"/external  ")
+					cmd.Env = codexHandoffEnv(t, cwd, "  "+server.URL+"/external  ", binary)
 					cmd.Dir = cwd
 					cmd.Stdin = strings.NewReader(string(payload))
 					var stdout, stderr strings.Builder
@@ -374,7 +385,7 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 					}
 					if wantRequest {
 						registered := <-requests
-						if registered["id"] != id || registered["project"] != "test-project" || registered["directory"] != cwd {
+						if registered["id"] != id || registered["project"] != "test-project" || registered["directory"] != cwd || (event != "compact" && registered["resume"] != true) {
 							t.Errorf("incorrect registration payload: %#v", registered)
 						}
 					}
@@ -384,8 +395,23 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 	}
 }
 
+var codexFixtureBinaries sync.Map
+
 // Resolve tools without starting a login shell or inheriting subprocess settings.
-func codexHandoffEnv(t *testing.T, cwd, serverURL string) []string {
+func buildCodexFixtureCLI(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "engram.exe")
+	cmd := exec.Command("go", "build", "-o", binary, "./cmd/engram")
+	cmd.Dir = repoRoot(t)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fixture CLI: %v: %s", err, output)
+	}
+	binary = filepath.ToSlash(binary)
+	codexFixtureBinaries.Store(binary, true)
+	return binary
+}
+
+func codexHandoffEnv(t *testing.T, cwd, serverURL string, binary ...string) []string {
 	t.Helper()
 	target, err := url.Parse(strings.TrimSpace(serverURL))
 	if err != nil || target.Scheme != "http" || target.Hostname() != "127.0.0.1" || target.Port() == "" {
@@ -410,11 +436,23 @@ func codexHandoffEnv(t *testing.T, cwd, serverURL string) []string {
 		}
 		return quote(path)
 	}
-	for _, name := range []string{"cat", "dirname", "jq"} {
+	for _, name := range []string{"cat", "dirname", "jq", "date", "touch", "bash"} {
 		writeTool(name, "exec "+resolve(name)+` "$@"`)
 	}
 	reject := "printf '%s\\n' rejected >> " + quote(filepath.Join(cwd, "guard-rejected")) + "; exit 97"
 	writeTool("engram", reject)
+	if len(binary) == 1 {
+		if _, owned := codexFixtureBinaries.Load(binary[0]); !owned || !filepath.IsAbs(binary[0]) {
+			t.Fatal("fixture CLI must be an absolute candidate-built executable")
+		}
+		writeTool("engram", `[ "$#" -eq 2 ] && [ "$1" = hook ] && [ "$ENGRAM_URL" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
+case "$2" in
+  codex-register|codex-resolve) [ "$ENGRAM_HOOK_OUTPUT" = json ] || { `+reject+`; } ;;
+  codex-session-end) ;;
+  *) `+reject+` ;;
+esac
+exec `+quote(binary[0])+` "$@"`)
+	}
 	writeTool("curl", "origin="+quote(target.Scheme+"://"+target.Host)+"\n"+`validate_request() {
   urls=0
   while [ "$#" -gt 0 ]; do
@@ -423,6 +461,10 @@ func codexHandoffEnv(t *testing.T, cwd, serverURL string) []string {
       --max-time)
         [ "$#" -ge 2 ] || return 1
         case "$2" in 1|2|3) ;; *) return 1 ;; esac
+        shift 2 ;;
+      -d)
+        [ "$#" -ge 2 ] || return 1
+        printf '%s' "$2" | jq -e 'type == "object" and (.session_id | type) == "string"' >/dev/null || return 1
         shift 2 ;;
       -X|-H|--data-binary|-w)
         [ "$#" -ge 2 ] || return 1
@@ -471,6 +513,11 @@ func TestCodexHandoffTransportBoundary(t *testing.T) {
 		if err := cmd.Run(); err == nil || cmd.ProcessState.ExitCode() != 97 {
 			t.Fatalf("transport guard did not reject arguments %q: %v", args, err)
 		}
+	}
+	guard := exec.Command(codexTestBash(t), filepath.Join(cwd, "bin", "engram"), "hook", "codex-resolve")
+	guard.Env = env
+	if err := guard.Run(); err == nil {
+		t.Fatal("fixture selected an ambient CLI rather than its rejecting guard")
 	}
 	if len(requests) != 0 {
 		t.Fatal("rejected transport invoked the fixture server")

@@ -42,12 +42,13 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   (
     PROJECT=$(resolve_project "$CWD") || exit 0
-    SESSION_ID=$(printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_URL" engram hook codex-resolve 2>/dev/null) || exit 0
-    [ -n "$SESSION_ID" ] || exit 0
+    IDENTITY=$(printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_URL" ENGRAM_HOOK_OUTPUT=json engram hook codex-resolve 2>/dev/null) || exit 0
+    [ -n "$IDENTITY" ] || exit 0
+    PROMPT_BODY=$(printf '%s' "$IDENTITY" | jq -esc --arg p "$PROJECT" --arg c "$PROMPT" '
+      if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
+      then {session_id:.[0].session_id, project:$p, content:$c} else error("invalid identity") end') || exit 0
     curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
-      -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
-            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
+      -H 'Content-Type: application/json' -d "$PROMPT_BODY" >/dev/null 2>&1 || true
   ) </dev/null >/dev/null 2>&1 &
 fi
 
@@ -100,7 +101,7 @@ OUTPUT="{}"
 # FIRST-MESSAGE DETECTION
 #
 # Use a state file per session to determine if this is the first user message.
-# State file lives in /tmp and is keyed by session_id (falls back to project+pid).
+# State file follows TMPDIR (default /tmp) and is keyed by session_id.
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Build a stable session key — prefer SESSION_ID, then a process-local fallback.
@@ -110,7 +111,7 @@ else
   SESSION_KEY="engram-codex-unknown-$$-tools-loaded"
 fi
 
-STATE_FILE="/tmp/${SESSION_KEY}"
+STATE_FILE="${TMPDIR:-/tmp}/${SESSION_KEY}"
 
 if [ ! -f "$STATE_FILE" ]; then
   # ── FIRST MESSAGE ────────────────────────────────────────────────────────────
@@ -140,9 +141,9 @@ fi
 # Get session start time to check if session is > 5 minutes old
 SESSION_START=""
 if [ -n "$SESSION_ID" ]; then
-  SESSION_ID=$(printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_URL" engram hook codex-resolve 2>/dev/null) || SESSION_ID=""
-  [ -n "$SESSION_ID" ] || { echo "$OUTPUT"; exit 0; }
-  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time 0.2 2>/dev/null \
+  IDENTITY=$(printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_URL" ENGRAM_HOOK_OUTPUT=json engram hook codex-resolve 2>/dev/null) || IDENTITY=""
+  SESSION_URI=$(printf '%s' "$IDENTITY" | jq -esr 'if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0 then .[0].session_id | @uri else error("invalid identity") end' 2>/dev/null) || { echo "$OUTPUT"; exit 0; }
+  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_URI}" --max-time 0.2 2>/dev/null \
     | jq -r '.started_at // empty' 2>/dev/null)
 fi
 

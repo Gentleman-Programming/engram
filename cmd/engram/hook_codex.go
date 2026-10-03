@@ -195,7 +195,13 @@ func cmdCodexLifecycle(action string) {
 	}
 	result := runCodexLifecycle(action, data, codexHookURL())
 	if result != "" {
-		_, _ = fmt.Fprintln(os.Stdout, result)
+		// Internal shell callers opt into JSON to retain opaque identity bytes.
+		// The default text output remains compatible with existing CLI callers.
+		if os.Getenv("ENGRAM_HOOK_OUTPUT") == "json" {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"session_id": result})
+		} else {
+			_, _ = fmt.Fprintln(os.Stdout, result)
+		}
 	}
 }
 

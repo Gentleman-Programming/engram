@@ -17,6 +17,34 @@ import (
 	"time"
 )
 
+func TestCodexUnixUserPromptSubmitMarkerDirectory(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assignment string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "STATE_FILE=") {
+			assignment = line
+		}
+	}
+	if assignment == "" {
+		t.Fatal("missing marker assignment")
+	}
+	for _, dir := range []string{filepath.ToSlash(t.TempDir()), ""} {
+		cmd := exec.Command(codexTestBash(t), "--noprofile", "--norc", "-c", assignment+`; [ "$STATE_FILE" = "${TMPDIR:-/tmp}/$SESSION_KEY" ] || exit 42; printf '%s' "$STATE_FILE"`)
+		cmd.Env = []string{"TMPDIR=" + dir, "SESSION_KEY=quoted ' marker"}
+		output, err := cmd.Output()
+		want := dir
+		if want == "" {
+			want = "/tmp"
+		}
+		if err != nil || !strings.HasSuffix(string(output), "/quoted ' marker") {
+			t.Fatalf("marker path=%q error=%v, want owned/default directory %q", output, err, want)
+		}
+	}
+}
+
 func TestCodexUnixUserPromptSubmitValidatesObservationsAndFirstSaveThreshold(t *testing.T) {
 	bashPath := codexTestBash(t)
 	requireCodexUnixTools(t, bashPath)
@@ -48,6 +76,19 @@ func TestCodexUnixUserPromptSubmitValidatesObservationsAndFirstSaveThreshold(t *
 				switch r.URL.Path {
 				case "/project/current":
 					_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
+				case "/runtime-sessions/resolve":
+					var request struct {
+						ID string `json:"id"`
+					}
+					if json.NewDecoder(r.Body).Decode(&request) != nil || request.ID != sessionID || r.Method != http.MethodPost {
+						t.Error("invalid no-create resolution")
+						http.Error(w, "invalid", http.StatusBadRequest)
+						return
+					}
+					_, _ = fmt.Fprintf(w, `{"id":%q,"status":"resolved"}`, sessionID)
+				case "/sessions":
+					t.Error("prompt must not register a session")
+					http.Error(w, "no registration", http.StatusConflict)
 				case "/sessions/" + sessionID:
 					_, _ = fmt.Fprintf(w, `{"started_at":%q}`, now.Add(-tt.sessionAge).Format(time.DateTime))
 				case "/observations":
@@ -59,14 +100,14 @@ func TestCodexUnixUserPromptSubmitValidatesObservationsAndFirstSaveThreshold(t *
 			defer server.Close()
 
 			port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
-			env := append(codexPromptTestEnv(port), "TZ="+tt.timezone)
+			env := append(codexPromptTestEnv(t, port), "TZ="+tt.timezone)
 			runHook := func() string {
 				t.Helper()
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				cmd := exec.CommandContext(ctx, bashPath, adapterPath)
 				cmd.Env = env
-				cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"cwd":"/tmp/test","session_id":%q}`, sessionID))
+				cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"cwd":%q,"session_id":%q}`, t.TempDir(), sessionID))
 				output, err := cmd.CombinedOutput()
 				if err != nil {
 					t.Fatalf("run Codex user prompt hook: %v; output: %s", err, output)
@@ -104,6 +145,9 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
 		case "/sessions":
+			t.Error("prompt must not register a session")
+			http.Error(w, "no registration", http.StatusConflict)
+		case "/runtime-sessions/resolve":
 			var request struct {
 				ID string `json:"id"`
 			}
@@ -112,8 +156,8 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 				http.Error(w, "invalid registration", http.StatusBadRequest)
 				return
 			}
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprintf(w, `{"id":%q,"status":"created"}`, sessionID)
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"id":%q,"status":"resolved"}`, sessionID)
 		case "/prompts":
 			postOnce.Do(func() { close(postStarted) })
 			<-releasePost
@@ -146,7 +190,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 	defer stderrReader.Close()
 
 	run := exec.Command(bashPath, adapterPath)
-	run.Env = codexPromptTestEnv(port)
+	run.Env = codexPromptTestEnv(t, port)
 	run.Stdin = inputReader
 	run.Stdout = stdoutWriter
 	run.Stderr = stderrWriter
@@ -156,7 +200,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 	_ = inputReader.Close()
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
-	if _, err := io.WriteString(inputWriter, `{"cwd":"/tmp/test","session_id":"`+sessionID+`","prompt":"capture this"}`); err != nil {
+	if _, err := io.WriteString(inputWriter, fmt.Sprintf(`{"cwd":%q,"session_id":%q,"prompt":"capture this"}`, t.TempDir(), sessionID)); err != nil {
 		t.Fatalf("write hook input: %v", err)
 	}
 	if err := inputWriter.Close(); err != nil {
@@ -210,7 +254,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh")
 	binDir := t.TempDir()
 	markerPath := filepath.Join(binDir, "stdin-result")
-	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "cat"), "#!/bin/bash\nprintf '%s' '{\"cwd\":\"/tmp/test\",\"session_id\":\"stdin-pipe-test\",\"prompt\":\"capture this\"}'\n")
+	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "cat"), "#!/bin/bash\nprintf '%s' "+"'"+fmt.Sprintf(`{"cwd":%q,"session_id":"stdin-pipe-test","prompt":"capture this"}`, filepath.ToSlash(binDir))+"'\n")
 	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *'/sessions'*) printf '%s\\n201' '{\"id\":\"stdin-pipe-test\",\"status\":\"created\"}' ;;\n  *'/prompts'*) if IFS= read -r _; then printf data > \"$PROMPT_STDIN_MARKER\"; else printf eof > \"$PROMPT_STDIN_MARKER\"; fi ;;\n  *) exit 0 ;;\nesac\n")
 
 	stdinReader, stdinWriter, err := os.Pipe()
@@ -218,7 +262,19 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 		t.Fatalf("create stdin pipe: %v", err)
 	}
 	run := exec.Command(bashPath, "-c", `PATH="$1:$PATH"; export PATH; "$2"`, "codex-test", binDir, adapterPath)
-	run.Env = append(codexPromptTestEnv("7437"), "PROMPT_STDIN_MARKER="+markerPath)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
+		case "/runtime-sessions/resolve":
+			_, _ = io.WriteString(w, `{"id":"stdin-pipe-test","status":"resolved"}`)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	run.Env = append(codexPromptTestEnv(t, strings.TrimPrefix(server.URL, "http://127.0.0.1:")), "PROMPT_STDIN_MARKER="+markerPath)
 	run.Stdin = stdinReader
 	if err := run.Start(); err != nil {
 		_ = stdinWriter.Close()
@@ -272,13 +328,7 @@ func writeCodexPromptProbeCommand(t *testing.T, path, content string) {
 	}
 }
 
-func codexPromptTestEnv(port string) []string {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, item := range os.Environ() {
-		if strings.HasPrefix(strings.ToUpper(item), "ENGRAM_PORT=") {
-			continue
-		}
-		env = append(env, item)
-	}
-	return append(env, "ENGRAM_PORT="+port)
+func codexPromptTestEnv(t *testing.T, port string) []string {
+	t.Helper()
+	return codexHandoffEnv(t, t.TempDir(), "http://127.0.0.1:"+port, buildCodexFixtureCLI(t))
 }

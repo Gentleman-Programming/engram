@@ -250,6 +250,16 @@ func TestCodexWindowsNativeUserPromptTrustedPinForwardsInputAndMeetsTimingBudget
 		switch r.URL.Path {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+		case "/sessions":
+			t.Error("native prompt must not register a session")
+			http.Error(w, "no registration", http.StatusConflict)
+		case "/runtime-sessions/resolve":
+			var request struct{ ID, Directory string }
+			if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&request) != nil || request.Directory == "" {
+				t.Error("invalid no-create resolution")
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": request.ID, "status": "resolved"})
 		case "/prompts":
 			posts.Add(1)
 			var prompt struct{ Content string }
@@ -270,7 +280,7 @@ func TestCodexWindowsNativeUserPromptTrustedPinForwardsInputAndMeetsTimingBudget
 	port, command, stateDir := strings.TrimPrefix(server.URL, "http://127.0.0.1:"), codexNativeAdapter(t, root), t.TempDir()
 	run := func(session string) (string, time.Duration) {
 		start := time.Now()
-		stdout, stderr, code := runCodexNativeManifestCommand(t, command, `{"cwd":"C:\\work","session_id":"`+session+`","prompt":"persist once"}`, appData, port, stateDir, t.TempDir(), nil)
+		stdout, stderr, code := runCodexNativeManifestCommand(t, command, `{"cwd":`+jsonQuote(t.TempDir())+`,"session_id":"`+session+`","prompt":"persist once"}`, appData, port, stateDir, t.TempDir(), nil)
 		if code != 0 || !json.Valid(stdout) || len(stderr) != 0 {
 			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0, valid JSON, and no stderr", code, stdout, stderr)
 		}
