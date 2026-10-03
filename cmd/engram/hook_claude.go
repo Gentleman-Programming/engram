@@ -65,6 +65,12 @@ func cmdHook(args []string) {
 		return
 	}
 
+	// Pi owns its Engram session natively (gentle-engram); when pi-claude-bridge
+	// runs Claude Code inside a Pi turn, this hook must stay a silent no-op.
+	if args[0] == "claude-pre-tool-use" && runningUnderPi() {
+		return
+	}
+
 	input, err := io.ReadAll(os.Stdin)
 	response := claudePreToolUseDeny("cannot read authoritative Claude hook input")
 	if args[0] == "codex-pre-tool-use" {
@@ -79,6 +85,11 @@ func cmdHook(args []string) {
 		exitFunc(1)
 		return
 	}
+}
+
+// runningUnderPi reports whether Pi marked this process tree with PI_CODING_AGENT.
+func runningUnderPi() bool {
+	return os.Getenv("PI_CODING_AGENT") != ""
 }
 
 // guardClaudePreToolUse confirms the host session before binding a mutating tool.

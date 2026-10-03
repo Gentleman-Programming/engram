@@ -2,6 +2,10 @@
 # Engram — Shared helpers for Claude Code hooks
 # WARNING: Do not read from stdin here — scripts source this before reading their hook input.
 
+# Pi owns its Engram session natively (gentle-engram). When pi-claude-bridge runs
+# Claude Code inside a Pi turn (PI_CODING_AGENT is set), every hook is a silent no-op.
+[ -n "${PI_CODING_AGENT:-}" ] && exit 0
+
 trim_whitespace() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
