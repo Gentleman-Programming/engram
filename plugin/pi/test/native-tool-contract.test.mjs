@@ -553,6 +553,7 @@ test("fresh Pi state honors a structured session-project conflict without captur
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
+    if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: phase }));
     if (path === "/sessions") {
       if (phase === "generic-error") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 500 });
@@ -1422,6 +1423,7 @@ test("separate plugin graphs converge on a server-selected continuation", async 
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "shared" }));
     if (path === "/sessions" && body.id === "dual") {
       if (++originals === 2) entered.resolve();
@@ -1658,6 +1660,79 @@ test("an ownerless pending replacement is not registered on first use", async ()
   }
 });
 
+test("root resume compatibility negotiates support and fails closed", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const cases = [
+    { health: { version: "2.2.1" }, supported: false },
+    { health: { version: "3.0.0" }, supported: true },
+    { health: { version: "v3.0.1" }, supported: true },
+    { health: { capabilities: { root_session_resume: true } }, supported: true },
+    { health: { version: "3.0.0", capabilities: { root_session_resume: false } }, supported: false },
+    { health: { version: "3.0.0", capabilities: { root_session_resume: "true" } }, supported: false },
+    { health: { version: "3.0.0", capabilities: [] }, supported: false },
+    { health: { version: "3.0.0-rc.1" }, supported: false },
+    { health: { version: "3.invalid" }, supported: false },
+    { health: {}, supported: false },
+    { health: null, supported: false },
+    { health: {}, healthStatus: 404, supported: false },
+    { health: "not an object", supported: false },
+    { health: { version: "3.0.0", capabilities: null }, supported: false },
+  ];
+  try {
+    for (const { health, healthStatus = 200, supported } of cases) {
+      for (const mode of ["root-ended", "mapped-ended", "fresh", "mapped-live"]) {
+        const mapped = mode.startsWith("mapped-");
+        const fresh = mode === "fresh";
+        const activeMapping = mode === "mapped-live";
+        const runtimeID = "compat-root";
+        const persistedID = `${runtimeID}:resume:2`;
+        const entries = mapped ? [{ type: "custom", customType: "engram-effective-session", data: {
+          runtimeID, effectiveID: persistedID, pending: true, project: "compat-project",
+        } }] : [];
+        const calls = [];
+        globalThis.fetch = async (url, init = {}) => {
+          const path = new URL(url).pathname;
+          const body = init.body ? JSON.parse(init.body) : undefined;
+          calls.push({ path, body });
+          if (path === "/health") return new Response(JSON.stringify(health), { status: healthStatus });
+          if (path === "/project/current") return new Response(JSON.stringify({ project: "compat-project" }));
+          if (path === "/sessions") {
+            // Model an old core that ignores resume and rejects ended identities.
+            if (!fresh && !activeMapping && (body.id !== runtimeID || !supported || !body.resume)) {
+              return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+            }
+            return new Response(JSON.stringify({ id: activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`, status: "created" }));
+          }
+          return new Response(JSON.stringify({ status: "ok" }));
+        };
+        const ctx = runtimeContext(runtimeID);
+        ctx.sessionManager.getBranch = () => entries;
+        await withPluginSandbox("engram-pi-root-compat-", async ({ sandbox }) => {
+          const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+          const result = await registeredTools.get("mem_save").execute("compat", { title: "compat", content: "compat" }, undefined, undefined, ctx);
+          assert.equal(!!result.isError, !supported && !fresh && !activeMapping, JSON.stringify({ health, mode, result }));
+          if (!supported && !fresh && !activeMapping) {
+            assert.match(JSON.stringify(result), /gentle-engram 0\.2\.0/);
+            assert.match(JSON.stringify(result), /core .*root_session_resume.*3\.0\.0.*[Uu]pgrade/);
+            assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+            assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => !body.resume));
+            assert.equal(entries.length, mapped ? 1 : 0);
+          } else {
+            assert.equal(calls.findLast(({ path }) => path === "/observations").body.session_id, activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`);
+            if (!supported) assert.equal(calls.findLast(({ path }) => path === "/sessions").body.resume, false);
+          }
+        });
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("resumed quit adopts core numeric identities and reload retains the persisted ID", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -1668,6 +1743,7 @@ test("resumed quit adopts core numeric identities and reload retains the persist
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }), { status: 200 });
     if (path === "/sessions") {
       if (ended.has(body.id) && !body.resume) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -2571,6 +2647,7 @@ test("fallback from ended mapping to live root supersedes identity for writes an
         const path = new URL(url).pathname;
         const body = init.body ? JSON.parse(init.body) : undefined;
         calls.push({ path, body });
+        if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return body.id === legacyID
           ? new Response(JSON.stringify({ code: "session_already_ended", session_id: legacyID }), { status: 409 })
@@ -2774,6 +2851,7 @@ test("malformed persisted mapping never authorizes foreign writes or cleanup", a
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: foreignAck ? "foreign" : body.id, status: "created" }));
     return new Response(JSON.stringify({ id: 1, status: "ok" }));
@@ -2816,6 +2894,7 @@ test("legacy UUID mapping is registered as-is until ended, then resumes the runt
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/sessions") {
       registrations.push(body);
       if (ended && body.id === legacyID) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -2852,6 +2931,7 @@ test("resume registration refuses invalid acknowledgements before persisting or 
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
     calls.push(path);
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify(acknowledgement));
     throw new Error(`unexpected write: ${path}`);
@@ -2869,7 +2949,7 @@ test("resume registration refuses invalid acknowledgements before persisting or 
         assert.match(result.content[0].text, /invalid acknowledgement/);
       }
       assert.equal(entries.length, 0);
-      assert.equal(calls.filter((path) => path !== "/sessions" && path !== "/project/current").length, 0);
+      assert.equal(calls.filter((path) => path !== "/sessions" && path !== "/project/current" && path !== "/health").length, 0);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -2885,6 +2965,7 @@ test("lost core acknowledgement retries the root without guessing a continuation
   let writes = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") {
       registrations.push(JSON.parse(init.body));
@@ -2915,7 +2996,7 @@ test("lost core acknowledgement retries the root without guessing a continuation
   }
 });
 
-test("old server ended-session refusal retains its specific cause without client guessing", async () => {
+test("old server ended-session refusal explains compatibility without client guessing", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -2935,8 +3016,7 @@ test("old server ended-session refusal retains its specific cause without client
       ctx.sessionManager.getBranch = () => entries;
       const result = await registeredTools.get("mem_save").execute("no-entry", { title: "blocked", content: "blocked" }, undefined, undefined, ctx);
       assert.equal(result.isError, true);
-      assert.equal(result.details.http_status, 409);
-      assert.equal(result.details.data.code, "session_already_ended");
+      assert.match(result.details.error, /core unknown.*root_session_resume.*Upgrade/);
       assert.equal(entries.length, 0);
       assert.equal(calls.filter((path) => path === "/sessions").length, 1);
       assert.equal(calls.includes("/observations"), false);
