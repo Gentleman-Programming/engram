@@ -1,7 +1,9 @@
 package plugin_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -24,8 +26,20 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests <- r.Method + " " + r.URL.EscapedPath()
-		w.WriteHeader(http.StatusNoContent)
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"end-project","project_source":"config"}`)
+			return
+		}
+		var payload struct{ ID, Project, Directory string }
+		if json.NewDecoder(r.Body).Decode(&payload) != nil || payload.Directory == "" || payload.Project != "end-project" {
+			t.Error("end lost canonical project or cwd")
+		}
+		requests <- r.Method + " " + r.URL.EscapedPath() + " " + payload.ID
+		if payload.ID == "slow" {
+			<-r.Context().Done()
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id":%q,"status":"ended"}`, payload.ID)
 	})}
 	defer server.Close()
 	go func() { _ = server.Serve(listener) }()
@@ -33,12 +47,17 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 
 	t.Run("posts to a valid custom port", func(t *testing.T) {
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"custom-port"}`, &port, "")
-		assertCodexUnixRequest(t, requests, "POST /sessions/custom-port/end")
+		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end custom-port")
 	})
 
-	t.Run("percent-encodes a reserved session ID", func(t *testing.T) {
+	t.Run("preserves reserved session ID in JSON rather than URL path", func(t *testing.T) {
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"session id/with?characters#%"}`, &port, "")
-		assertCodexUnixRequest(t, requests, "POST /sessions/session%20id%2Fwith%3Fcharacters%23%25/end")
+		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end session id/with?characters#%")
+	})
+
+	t.Run("bounds an unresponsive HTTP request", func(t *testing.T) {
+		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"slow"}`, &port, "")
+		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end slow")
 	})
 
 	for _, tc := range []struct {
@@ -49,6 +68,7 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		{name: "malformed input", input: "{"},
 		{name: "missing session ID", input: `{}`},
 		{name: "empty session ID", input: `{"session_id":""}`},
+		{name: "empty cwd", input: `{"session_id":"id","cwd":""}`},
 		{name: "numeric session ID", input: `{"session_id":42}`},
 		{name: "boolean session ID", input: `{"session_id":true}`},
 		{name: "array session ID", input: `{"session_id":[]}`},
@@ -70,10 +90,8 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		{name: "zero", port: "0"},
 	} {
 		t.Run("rejects "+tc.name+" port before curl", func(t *testing.T) {
-			fakeCurlDir := writeRecordingCurl(t)
-			assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"id"}`, &tc.port, fakeCurlDir)
-			if _, err := os.Stat(filepath.Join(fakeCurlDir, "args")); !os.IsNotExist(err) {
-				t.Fatalf("curl must not run for port %q", tc.port)
+			if got := codexFixtureEndpoint(t, &tc.port); got != "" {
+				t.Fatalf("invalid port selected endpoint %q", got)
 			}
 		})
 	}
@@ -86,17 +104,8 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		{name: "blank", port: stringPointer("")},
 	} {
 		t.Run(tc.name+" port defaults to 7437 without binding it", func(t *testing.T) {
-			fakeCurlDir := writeRecordingCurl(t)
-			assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"id"}`, tc.port, fakeCurlDir)
-			args, err := os.ReadFile(filepath.Join(fakeCurlDir, "args"))
-			if err != nil {
-				t.Fatalf("read recorded curl arguments: %v", err)
-			}
-			if !strings.Contains(string(args), "http://127.0.0.1:7437/sessions/id/end") {
-				t.Fatalf("curl arguments do not use default port 7437: %q", args)
-			}
-			if !strings.Contains(string(args), "--max-time\n2\n") {
-				t.Fatalf("curl arguments do not set a two-second timeout: %q", args)
+			if got := codexFixtureEndpoint(t, tc.port); got != "http://127.0.0.1:7437" {
+				t.Fatalf("default endpoint = %q", got)
 			}
 		})
 	}
@@ -165,7 +174,7 @@ func codexTestBashCandidate(gitPath string) (string, error) {
 func TestCodexTestBashCandidates(t *testing.T) {
 	for _, tc := range []struct {
 		name, gitDir, bashPath string
-		directory, missing bool
+		directory, missing     bool
 	}{
 		{name: "cmd sibling bin", gitDir: "cmd", bashPath: "bin/bash.exe"},
 		{name: "bin colocated", gitDir: "bin", bashPath: "bin/bash.exe"},
@@ -206,7 +215,7 @@ func TestCodexTestBashCandidates(t *testing.T) {
 
 func requireCodexUnixTools(t *testing.T, bashPath string) {
 	t.Helper()
-	check := exec.Command(bashPath, "-lc", "command -v jq >/dev/null && command -v curl >/dev/null")
+	check := exec.Command(bashPath, "--noprofile", "--norc", "-c", "command -v jq >/dev/null && command -v curl >/dev/null")
 	if output, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("Unix SessionEnd runtime tests require jq and curl: %v: %s", err, output)
 	}
@@ -214,28 +223,27 @@ func requireCodexUnixTools(t *testing.T, bashPath string) {
 
 func assertSilentCodexUnixSessionEnd(t *testing.T, bashPath, adapterPath, input string, port *string, pathPrefix string) {
 	t.Helper()
-	var run *exec.Cmd
-	if pathPrefix == "" {
-		run = exec.Command(bashPath, adapterPath)
-	} else {
-		run = exec.Command(bashPath, "-c", `PATH="$1:$PATH"; export PATH; "$2"`, "codex-test", pathPrefix, adapterPath)
-	}
-	run.Env = make([]string, 0, len(os.Environ())+1)
-	for _, env := range os.Environ() {
-		upper := strings.ToUpper(env)
-		if strings.HasPrefix(upper, "ENGRAM_PORT=") {
-			continue
+	cwd := t.TempDir()
+	var payload map[string]any
+	if json.Unmarshal([]byte(input), &payload) == nil && payload != nil {
+		if _, present := payload["cwd"]; !present {
+			payload["cwd"] = cwd
 		}
-		run.Env = append(run.Env, env)
+		data, _ := json.Marshal(payload)
+		input = string(data)
 	}
-	if port != nil {
-		run.Env = append(run.Env, "ENGRAM_PORT="+*port)
-	}
+	run := exec.Command(bashPath, adapterPath)
+	run.Dir = cwd
+	run.Env = codexHandoffEnv(t, cwd, "http://127.0.0.1:"+*port, buildCodexFixtureCLI(t))
 	run.Stdin = strings.NewReader(input)
 	var stdout, stderr strings.Builder
 	run.Stdout = &stdout
 	run.Stderr = &stderr
+	started := time.Now()
 	err := run.Run()
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("closure exceeded two seconds: %s", elapsed)
+	}
 	code := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -270,13 +278,35 @@ func assertNoCodexUnixRequest(t *testing.T, requests <-chan string) {
 	}
 }
 
-func writeRecordingCurl(t *testing.T) string {
+func codexFixtureEndpoint(t *testing.T, port *string) string {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "curl")
-	content := "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\n"
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-		t.Fatalf("write recording curl: %v", err)
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "cmd", "engram", "hook_codex.go"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return dir
+	_, body, found := strings.Cut(string(data), "func codexHookURL() string {")
+	body, _, ended := strings.Cut(body, "\n}\n")
+	if !found || !ended {
+		t.Fatal("endpoint selector boundary changed")
+	}
+	dir := t.TempDir()
+	source := "package main\nimport (\"fmt\";\"os\";\"strconv\";\"strings\")\nfunc codexHookURL() string {" + body + "\n}\nfunc main(){fmt.Print(codexHookURL())}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "endpoint.exe")
+	build := exec.Command("go", "build", "-o", binary, filepath.Join(dir, "main.go"))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build endpoint probe: %v: %s", err, output)
+	}
+	run := exec.Command(binary)
+	run.Env = []string{"ENGRAM_URL=", "ENGRAM_SOCKET="}
+	if port != nil {
+		run.Env = append(run.Env, "ENGRAM_PORT="+*port)
+	}
+	output, err := run.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(output)
 }

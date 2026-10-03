@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,214 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/server"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestCodexHookProcess(t *testing.T) {
+	if os.Getenv("ENGRAM_TEST_HOOK_PROCESS") != "1" {
+		return
+	}
+	cmdHook(os.Args[len(os.Args)-1:])
+	os.Exit(0)
+}
+
+func codexTestHookBinary(t *testing.T, root string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "hook-bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "#!/bin/sh\nENGRAM_TEST_HOOK_PROCESS=1 exec '" + filepath.ToSlash(executable) + "' -test.run=^TestCodexHookProcess$ -- \"$2\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "engram"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestCodexLifecycleJSONPreservesOpaqueIdentity(t *testing.T) {
+	const id = "quote\"\\` <identity>\nnot an instruction\x00é\n"
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = io.WriteString(w, `{"project":"opaque-project","project_source":"config"}`)
+		case "/sessions":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "created"})
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer endpoint.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestCodexHookProcess$", "--", "codex-register")
+	cmd.Env = append(os.Environ(), "ENGRAM_TEST_HOOK_PROCESS=1", "ENGRAM_URL="+endpoint.URL, "ENGRAM_HOOK_OUTPUT=json")
+	payload, _ := json.Marshal(codexPromptInput{SessionID: id, CWD: t.TempDir()})
+	cmd.Stdin = bytes.NewReader(payload)
+	output, err := cmd.Output()
+	var binding map[string]string
+	if err != nil || json.Unmarshal(output, &binding) != nil || binding["session_id"] != id {
+		t.Fatalf("opaque JSON identity did not round-trip: %q (%v)", output, err)
+	}
+}
+
+func TestCodexResumeBindsEndedHostContinuation(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.CreateSession("ended-host", "resume-project", root); err != nil {
+		t.Fatal(err)
+	}
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"resume-project","project_source":"config"}`)
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	response, err := http.Post(endpoint.URL+"/sessions/ended-host/end", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("end status = %d", response.StatusCode)
+	}
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	startup, _ := json.Marshal(codexPromptInput{SessionID: "ended-host", CWD: root})
+	if id := runCodexLifecycle("codex-register", startup, endpoint.URL); id != "ended-host:resume:2" {
+		t.Fatalf("startup = %q", id)
+	}
+	input := []byte(`{"session_id":"ended-host","cwd":` + strconv.Quote(root) + `,"tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model-forged","title":"resume","content":"resume"}}`)
+	for i := 0; i < 2; i++ {
+		output := guardCodexPreToolUse(input)
+		var envelope struct {
+			HookSpecificOutput struct {
+				PermissionDecision string         `json:"permissionDecision"`
+				UpdatedInput       map[string]any `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(output, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.HookSpecificOutput.PermissionDecision != "allow" || envelope.HookSpecificOutput.UpdatedInput["session_id"] != "ended-host:resume:2" {
+			t.Fatalf("resume binding = %s", output)
+		}
+		args := envelope.HookSpecificOutput.UpdatedInput
+		args["project"] = "resume-project"
+		call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": i + 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": args}})
+		result := mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: "resume-project"}, nil).HandleMessage(context.Background(), call)
+		encoded, _ := json.Marshal(result)
+		if strings.Contains(string(encoded), `"isError":true`) {
+			t.Fatalf("persist resumed write: %s", encoded)
+		}
+	}
+	observations, err := db.SessionObservations("ended-host:resume:2", 10)
+	if err != nil || len(observations) == 0 {
+		t.Fatalf("persisted resumed observations = %v, %v", observations, err)
+	}
+	endInput, _ := json.Marshal(map[string]any{"session_id": "ended-host", "cwd": root, "tool_name": "mcp__engram__mem_session_end", "tool_input": map[string]string{"id": "model-forged"}})
+	var endHook struct {
+		HookSpecificOutput struct {
+			UpdatedInput map[string]any `json:"updatedInput"`
+		} `json:"hookSpecificOutput"`
+	}
+	_ = json.Unmarshal(guardCodexPreToolUse(endInput), &endHook)
+	if endHook.HookSpecificOutput.UpdatedInput["id"] != "ended-host:resume:2" {
+		t.Fatalf("end binding = %+v", endHook)
+	}
+	call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": map[string]any{"name": "mem_session_end", "arguments": endHook.HookSpecificOutput.UpdatedInput}})
+	_ = mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: "resume-project"}, nil).HandleMessage(context.Background(), call)
+	ended, err := db.GetSession("ended-host:resume:2")
+	if err != nil || ended.EndedAt == nil {
+		t.Fatalf("MCP effective close = %+v, %v", ended, err)
+	}
+}
+
+func TestCodexResumeLifecycleUsesConfirmedBinding(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.CreateSession("host", "resume-project", root); err != nil {
+		t.Fatal(err)
+	}
+	production := server.New(db, 0).Handler()
+	var registrations atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"resume-project","project_source":"config"}`)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
+			registrations.Add(1)
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	response, err := http.Post(endpoint.URL+"/sessions/host/end", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	input, _ := json.Marshal(codexPromptInput{CWD: root, SessionID: "host", Prompt: "resumed prompt"})
+	for _, phase := range []string{"codex-register", "codex-resolve"} {
+		if id := runCodexLifecycle(phase, input, endpoint.URL); id != "host:resume:2" {
+			t.Fatalf("%s effective id = %q", phase, id)
+		}
+	}
+	_ = runCodexUserPromptSubmit(input, endpoint.URL, filepath.Join(root, "prompt-state"), time.Now)
+	prompts, err := db.RecentPrompts("resume-project", 10)
+	if err != nil || len(prompts) != 1 || prompts[0].SessionID != "host:resume:2" {
+		t.Fatalf("continuation prompts = %v, err=%v", prompts, err)
+	}
+	before := registrations.Load()
+	if before != 1 {
+		t.Fatalf("resolution/prompt registered: %d registrations", before)
+	}
+	missing, _ := json.Marshal(codexPromptInput{CWD: root, SessionID: "missing"})
+	_ = runCodexLifecycle("codex-session-end", missing, endpoint.URL)
+	_ = runCodexLifecycle("codex-session-end", input, endpoint.URL)
+	_ = runCodexLifecycle("codex-session-end", input, endpoint.URL)
+	if registrations.Load() != before {
+		t.Fatal("close registered a session")
+	}
+	for _, id := range []string{"host", "host:resume:2"} {
+		session, err := db.GetSession(id)
+		if err != nil || session.EndedAt == nil {
+			t.Fatalf("terminal session %s = %+v, %v", id, session, err)
+		}
+	}
+}
+
+func TestCodexResumeAcknowledgmentRejectsUnrelatedIdentity(t *testing.T) {
+	for _, raw := range []string{
+		`{"id":"other","status":"created","resumed_from":"host"}`,
+		`{"id":"host:resume:x","status":"created","resumed_from":"host"}`,
+		`{"id":"host:resume:2","status":"created"}`,
+		`{"id":"host:resume:2","status":"created","resumed_from":"other"}`,
+		`{"id":"host","status":"created","error":null}`,
+	} {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+			t.Fatal(err)
+		}
+		if id := codexAcknowledgedID(fields, "host", true); id != "" {
+			t.Fatalf("accepted %s as %q", raw, id)
+		}
+	}
+}
 
 func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 	root := t.TempDir()
@@ -147,7 +356,7 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 			_, _ = io.WriteString(w, `{"project":"codex-lifecycle","project_source":"config"}`)
 		case "/context":
 			_, _ = io.WriteString(w, `{"context":""}`)
-		case "/sessions":
+		case "/sessions", "/runtime-sessions/resolve":
 			if reject.Load() {
 				rejected.Add(1)
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -164,6 +373,7 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 	t.Setenv("HOME", root)
 	t.Setenv("ENGRAM_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	codexTestHookBinary(t, root)
 	t.Setenv("ENGRAM_PROJECT", "")
 	script, err := filepath.Abs(filepath.Join("..", "..", "plugin", "codex", "scripts", "session-start.sh"))
 	if err != nil {
@@ -203,8 +413,8 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 		cmdHook([]string{"codex-pre-tool-use"})
 		var hook struct {
 			HookSpecificOutput struct {
-				PermissionDecision string `json:"permissionDecision"`
-				UpdatedInput map[string]any `json:"updatedInput"`
+				PermissionDecision string         `json:"permissionDecision"`
+				UpdatedInput       map[string]any `json:"updatedInput"`
 			} `json:"hookSpecificOutput"`
 		}
 		if err := json.Unmarshal(output, &hook); err != nil {
@@ -260,6 +470,14 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 	}
 }
 
+func codexMockResolved(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&request)
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": request.ID, "status": "resolved"})
+}
+
 func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
 	for _, tc := range []struct {
 		name, authority string
@@ -277,6 +495,8 @@ func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
 				case "/project/current":
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, tc.authority)
+				case "/runtime-sessions/resolve":
+					codexMockResolved(w, r)
 				case "/prompts":
 					posts.Add(1)
 					w.WriteHeader(http.StatusNoContent)
@@ -302,6 +522,8 @@ func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testin
 		switch r.URL.Path {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+		case "/runtime-sessions/resolve":
+			codexMockResolved(w, r)
 		case "/prompts":
 			promptPosts.Add(1)
 			w.WriteHeader(http.StatusNoContent)
@@ -344,6 +566,8 @@ func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
 				switch r.URL.Path {
 				case "/project/current":
 					_, _ = io.WriteString(w, tc.authority)
+				case "/runtime-sessions/resolve":
+					codexMockResolved(w, r)
 				case "/sessions/s-1":
 					_, _ = io.WriteString(w, `{"started_at":"2026-02-20T11:40:00Z"}`)
 				case "/observations":
@@ -386,6 +610,8 @@ func TestCodexUserPromptReminderBoundaries(t *testing.T) {
 				case "/project/current":
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/runtime-sessions/resolve":
+					codexMockResolved(w, r)
 				case "/sessions/s":
 					_, _ = io.WriteString(w, `{"started_at":"`+tc.started+`"}`)
 				case "/observations":
@@ -432,6 +658,8 @@ func TestCodexUserPromptExactReminderCutoffs(t *testing.T) {
 				switch r.URL.Path {
 				case "/project/current":
 					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/runtime-sessions/resolve":
+					codexMockResolved(w, r)
 				case "/sessions/s":
 					_ = json.NewEncoder(w).Encode(map[string]string{"started_at": now.Add(-tc.started).Format(time.RFC3339)})
 				case "/observations":
@@ -466,9 +694,10 @@ func TestCodexUserPromptFirstPromptPersistsThroughServer(t *testing.T) {
 	t.Setenv("ENGRAM_PROJECT", "codex-hook-test")
 	ts := httptest.NewServer(server.New(db, 0).Handler())
 	defer ts.Close()
+	worktree := t.TempDir()
 	create := func(id, project string) {
 		t.Helper()
-		body, _ := json.Marshal(map[string]string{"id": id, "project": project, "directory": t.TempDir()})
+		body, _ := json.Marshal(map[string]string{"id": id, "project": project, "directory": worktree})
 		resp, err := ts.Client().Post(ts.URL+"/sessions", "application/json", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
@@ -489,7 +718,7 @@ func TestCodexUserPromptFirstPromptPersistsThroughServer(t *testing.T) {
 		{"mismatched", "wrong project must not persist", false},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
-			input, _ := json.Marshal(codexPromptInput{CWD: t.TempDir(), SessionID: tc.id, Prompt: tc.prompt})
+			input, _ := json.Marshal(codexPromptInput{CWD: worktree, SessionID: tc.id, Prompt: tc.prompt})
 			output := runCodexUserPromptSubmit(input, ts.URL, t.TempDir(), time.Now)
 			if !json.Valid(output) || !strings.Contains(string(output), "CRITICAL FIRST ACTION") {
 				t.Fatalf("first output: %s", output)
@@ -559,6 +788,8 @@ func TestCodexUserPromptTimeoutFailsOpenWithoutRetry(t *testing.T) {
 		switch r.URL.Path {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+		case "/runtime-sessions/resolve":
+			_, _ = io.WriteString(w, `{"id":"timeout","status":"resolved"}`)
 		case "/prompts":
 			posts.Add(1)
 			<-release

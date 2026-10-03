@@ -425,6 +425,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
 	s.mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
+	s.mux.HandleFunc("POST /runtime-sessions/resolve", s.handleRuntimeSession)
+	s.mux.HandleFunc("POST /runtime-sessions/end", s.handleRuntimeSession)
 	s.mux.HandleFunc("DELETE /sessions/{id}", requireAuth(s.handleDeleteSession))
 
 	// Observations

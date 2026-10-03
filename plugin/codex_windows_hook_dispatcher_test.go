@@ -255,10 +255,14 @@ func TestCodexWindowsBashHookDispatcherRealSessionContext(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for _, item := range codexWindowsEndEnv(t, strings.TrimPrefix(fixture.URL, "http://127.0.0.1:")) {
+		key, value, _ := strings.Cut(item, "=")
+		t.Setenv(key, value)
+	}
 	t.Setenv("PLUGIN_ROOT", pluginRoot)
 	t.Setenv("ENGRAM_URL", fixture.URL)
 	command := codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`)
-	stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"fixture-session","cwd":"C:/fixture-project"}`, "")
+	stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"fixture-session","cwd":`+jsonQuote(t.TempDir())+`}`, "")
 	if code != 0 || !strings.Contains(stdout, "DISTINCTIVE SESSION CONTEXT FROM FIXTURE") || !strings.Contains(stdout, "Registered runtime session") {
 		t.Fatalf("exit=%d contextPresent=%t identityPresent=%t stderr=%q", code, strings.Contains(stdout, "DISTINCTIVE SESSION CONTEXT FROM FIXTURE"), strings.Contains(stdout, "Registered runtime session"), stderr)
 	}
@@ -405,7 +409,10 @@ func TestCodexWindowsBashHookDispatcherBackground(t *testing.T) {
 	}))
 	defer external.Close()
 	baseEnv := append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "PLUGIN_ROOT="+pluginRoot, "ENGRAM_DATA_DIR="+filepath.Join(dir, "data"))
-	input := `{"session_id":"fixture-session","cwd":"C:/fixture"}`
+	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CURL_HOME", "CODEX_HOME", "TMPDIR", "TMP", "TEMP"} {
+		baseEnv = append(baseEnv, key+"="+dir)
+	}
+	input := `{"session_id":"fixture-session","cwd":` + jsonQuote(dir) + `}`
 	type hookResult struct {
 		stdout, stderr              string
 		code                        int

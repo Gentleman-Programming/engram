@@ -46,6 +46,10 @@ var claudeHookOutput = func(response []byte) error {
 }
 
 func cmdHook(args []string) {
+	if len(args) == 1 && (args[0] == "codex-register" || args[0] == "codex-resolve" || args[0] == "codex-session-end") {
+		cmdCodexLifecycle(args[0])
+		return
+	}
 	if len(args) == 1 && args[0] == "codex-user-prompt-submit" {
 		cmdCodexUserPromptSubmit()
 		return
@@ -212,12 +216,18 @@ func guardCodexPreToolUse(input []byte) []byte {
 	if !isClaudeEngramWriteOrSessionTool(tool) {
 		return transformCodexPreToolUse(input)
 	}
-	id, idOK := claudeHookRequiredString(payload, "session_id")
-	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
-	if !idOK || !cwdOK || !confirmHookSession(id, cwd, false) {
-		return claudePreToolUseDeny("Codex host session registration could not be confirmed")
+	_, idOK := claudeHookRequiredString(payload, "session_id")
+	_, cwdOK := claudeHookRequiredString(payload, "cwd")
+	if !idOK || !cwdOK {
+		return claudePreToolUseDeny("Codex host session resolution could not be confirmed")
 	}
-	return transformCodexPreToolUse(input)
+	effective := runCodexLifecycle("codex-resolve", input, codexHookURL())
+	if effective == "" {
+		return claudePreToolUseDeny("Codex host session resolution could not be confirmed")
+	}
+	payload["session_id"], _ = json.Marshal(effective)
+	bound, _ := json.Marshal(payload)
+	return transformCodexPreToolUse(bound)
 }
 
 // Codex requires an explicit allow alongside updatedInput for MCP argument rewrites.
