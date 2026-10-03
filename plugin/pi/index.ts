@@ -1154,6 +1154,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
       const delivery = (async () => {
         let acknowledgement: { id?: unknown; status?: unknown } | null;
         let health: unknown;
+        let resumeSupport: boolean | undefined;
         const body = { id, project: sessionProject, directory, ownership_mode: "project_owned", resume };
         const validateCapability = resume ? async () => {
           // Missing/unreadable health is not support evidence, but fresh registration
@@ -1161,8 +1162,13 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
           try { health = await fetch("/health"); }
           catch { health = undefined; }
           assertOpen(state, epoch);
-          body.resume = supportsRootSessionResume(health);
-          if (requireResume && !body.resume) throw rootResumeCompatibilityError(health);
+          const supported = supportsRootSessionResume(health);
+          if (resumeSupport !== undefined && supported !== resumeSupport) {
+            throw new Error("Engram core root resume support changed during session registration. Retry once core health is stable; the previous registration may have succeeded, but its acknowledgement was not confirmed.");
+          }
+          if (requireResume && !supported) throw rootResumeCompatibilityError(health);
+          resumeSupport = supported;
+          body.resume = supported;
         } : undefined;
         try {
           acknowledgement = await fetch("/sessions", { method: "POST", beforeDispatch: validateCapability, body });

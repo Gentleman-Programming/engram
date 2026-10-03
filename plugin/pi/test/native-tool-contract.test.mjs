@@ -1733,6 +1733,68 @@ test("root resume compatibility negotiates support and fails closed", async () =
   }
 });
 
+test("root resume compatibility pins retry support after lost acknowledgement", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const [initial, next, mandatory] of [
+      [true, false, false], [false, true, false], [true, null, false],
+      [true, true, false], [false, false, false], [false, null, false],
+      [true, false, true], [true, true, true],
+    ]) {
+      const runtimeID = "retry-compat";
+      const mappedID = `${runtimeID}:resume:2`;
+      const entries = mandatory ? [{ type: "custom", customType: "engram-effective-session", data: {
+        runtimeID, effectiveID: mappedID, pending: true, project: "retry-project",
+      } }] : [];
+      const initialEntries = entries.length;
+      const posts = [];
+      const writes = [];
+      let healthChecks = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        const body = init.body ? JSON.parse(init.body) : undefined;
+        if (path === "/health") {
+          const support = healthChecks++ === 0 ? initial : next;
+          return new Response(support === null ? "unreadable" : JSON.stringify({ capabilities: { root_session_resume: support } }));
+        }
+        if (path === "/project/current") return new Response(JSON.stringify({ project: "retry-project" }));
+        if (path === "/sessions") {
+          if (body.id === mappedID) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+          posts.push(body);
+          // The core applied the first registration, but its successful body was lost.
+          if (posts.length === 1) return new Response("truncated acknowledgement");
+          return new Response(JSON.stringify({ id: initial ? `${runtimeID}:resume:3` : runtimeID, status: "created" }));
+        }
+        if (path === "/observations") writes.push(body);
+        return new Response(JSON.stringify({ status: "ok" }));
+      };
+      const ctx = runtimeContext(runtimeID);
+      ctx.sessionManager.getBranch = () => entries;
+      await withPluginSandbox("engram-pi-retry-compat-", async ({ sandbox }) => {
+        const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+        const result = await registeredTools.get("mem_save").execute("retry-compat", { title: "retry", content: "retry" }, undefined, undefined, ctx);
+        const changed = initial !== (next === true);
+        assert.equal(!!result.isError, changed, JSON.stringify({ initial, next, mandatory, result }));
+        assert.ok(healthChecks >= 2, "each dispatch attempt must recheck health (other probes may also run)");
+        assert.deepEqual(posts.map(({ resume }) => resume), changed ? [initial] : [initial, initial]);
+        if (changed) {
+          assert.match(JSON.stringify(result), /resume support changed.*retry/i);
+          assert.equal(writes.length, 0);
+          assert.equal(entries.length, initialEntries, "lost acknowledgement must not adopt an identity");
+        } else {
+          assert.equal(writes.at(-1).session_id, initial ? `${runtimeID}:resume:3` : runtimeID);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("resumed quit adopts core numeric identities and reload retains the persisted ID", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

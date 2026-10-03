@@ -85,6 +85,13 @@ v3.0.0 server implements core-selected continuation identities; earlier releases
 are not inferred compatible. Unknown, malformed, and prerelease versions require
 explicit support advertisement.
 
+Each root registration flight retains its first resume-support decision and
+rechecks health before every dispatch. If support changes (including unreadable
+health after supported health), the retry stops before another POST. Retry once
+core health is stable: the earlier registration may have succeeded despite a
+lost acknowledgement, but no unacknowledged identity is adopted. Stable support
+permits an idempotent retry with the same resume flag.
+
 Without resume support, fresh root sessions and still-active persisted mappings
 can register normally without resume. If an ended identity needs continuation,
 attributed writes stop with a diagnostic naming the plugin and core versions,
