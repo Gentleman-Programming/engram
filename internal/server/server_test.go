@@ -26,6 +26,96 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestEndEffectiveSession(t *testing.T) {
+	st := newServerTestStore(t)
+	dir := projectpkg.RuntimeWorktreeDirectory(t.TempDir())
+	if err := st.StartSessionWithOwnershipMode("root", "engram", dir, store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EndSession("root", "old"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.ResumeSessionWithOwnershipMode("root", "engram", dir, store.SessionOwnershipProjectOwned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, 0)
+	for _, want := range []string{"completed", "no_active_session"} {
+		body := fmt.Sprintf(`{"effective_continuation":true,"project":"engram","directory":%q,"ownership_mode":"project_owned"}`, dir)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/root/end", strings.NewReader(body)))
+		var ack map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != 200 || ack["status"] != want || (want == "completed" && ack["id"] != id) || (want != "completed" && ack["id"] != "") {
+			t.Fatalf("ack: %d %v", rec.Code, ack)
+		}
+	}
+	session, err := st.GetSession(id)
+	if err != nil || session.EndedAt == nil {
+		t.Fatalf("continuation not ended: %+v %v", session, err)
+	}
+}
+
+func TestEndEffectiveSessionValidation(t *testing.T) {
+	st := newServerTestStore(t)
+	dir := projectpkg.RuntimeWorktreeDirectory(t.TempDir())
+	if err := st.StartSessionWithOwnershipMode("root", "engram", dir, store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatal(err)
+	}
+	valid := fmt.Sprintf(`{"effective_continuation":true,"project":"engram","directory":%q,"ownership_mode":"project_owned"}`, dir)
+	for _, tc := range []struct {
+		name, path, body string
+		code             int
+	}{
+		{"missing inputs", "root", `{"effective_continuation":true}`, 400},
+		{"missing directory", "root", `{"effective_continuation":true,"project":"engram","ownership_mode":"project_owned"}`, 400},
+		{"unsupported mode", "root", strings.Replace(valid, "project_owned", "unknown", 1), 400},
+		{"invalid flag", "root", `{"effective_continuation":"yes"}`, 400},
+		{"null flag", "root", `{"effective_continuation":null}`, 400},
+		{"malformed", "root", `{"effective_continuation":true,`, 400},
+		{"foreign root", "root", strings.Replace(valid, "engram", "foreign", 1), 409},
+		{"wrong directory", "root", fmt.Sprintf(`{"effective_continuation":true,"project":"engram","directory":%q,"ownership_mode":"project_owned"}`, t.TempDir()), 409},
+		{"missing root", "missing", valid, 404},
+		{"blank root", "%20", valid, 400},
+		{"trailing JSON", "root", valid + `{}`, 400},
+		{"legacy invalid type", "root", `{"summary":123}`, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+tc.path+"/end", strings.NewReader(tc.body)))
+			if rec.Code != tc.code {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			root, err := st.GetSession("root")
+			if err != nil || root.EndedAt != nil {
+				t.Fatalf("invalid close mutated root: %+v %v", root, err)
+			}
+		})
+	}
+}
+
+func TestEndSessionCompatibility(t *testing.T) {
+	for _, body := range []string{`{"summary":"done"}`, `{"effective_continuation":false,"summary":"done"}`} {
+		st := newServerTestStore(t)
+		if err := st.StartSession("root", "engram", "/work"); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			rec := httptest.NewRecorder()
+			New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/root/end", strings.NewReader(body)))
+			var ack map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != 200 || ack["id"] != "root" || ack["status"] != "completed" {
+				t.Fatalf("ack: %d %v", rec.Code, ack)
+			}
+		}
+	}
+}
+
 func TestCreateSessionResume(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

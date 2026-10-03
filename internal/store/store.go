@@ -3155,6 +3155,10 @@ const continuationSessionsQuery = `SELECT id, ended_at FROM sessions WHERE id >=
 // next ordinal after all numeric suffixes. Literal prefix comparison avoids SQL
 // wildcard interpretation. Arbitrary precision ordinals impose no restart cap.
 func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
+	return selectContinuationSessionTx(tx, root, true)
+}
+
+func selectContinuationSessionTx(tx *sql.Tx, root string, allocate bool) (string, error) {
 	var endedAt *string
 	err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && endedAt == nil) {
@@ -3203,6 +3207,9 @@ func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
 		// The normal registration checks this selected identity's ownership;
 		// a conflict must be returned, never skipped by advancing the ordinal.
 		return liveID, nil
+	}
+	if !allocate {
+		return "", nil
 	}
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
@@ -3380,6 +3387,81 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		return ErrSessionAlreadyEnded
 	}
 	return nil
+}
+
+// EndEffectiveSession closes only an existing live identity. An empty result is
+// an idempotent no-op; missing roots return sql.ErrNoRows. No registration occurs.
+func (s *Store) EndEffectiveSession(root, project, directory, mode, summary string) (string, error) {
+	if err := validateSessionID(root); err != nil {
+		return "", err
+	}
+	if !validSessionOwnershipMode(mode) {
+		return "", ErrInvalidSessionOwnershipMode
+	}
+	project, _ = NormalizeProject(project)
+	if project == "" {
+		return "", ErrProjectRequired
+	}
+	effective := ""
+	err := s.withTx(func(tx *sql.Tx) error {
+		effective = ""
+		validate := func(id string) error {
+			owner, ownerMode, found, err := sessionOwnershipTx(tx, id)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return sql.ErrNoRows
+			}
+			if err := sessionRegistrationProjectError(id, owner, ownerMode, project, mode); err != nil {
+				return err
+			}
+			var storedDirectory string
+			if err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, id).Scan(&storedDirectory); err != nil {
+				return err
+			}
+			// Closing never adopts or repairs an unclassified identity.
+			if owner != project || ownerMode != mode || storedDirectory != directory {
+				return &SessionProjectConflictError{SessionID: id, OwnerProject: owner, RequestedProject: project}
+			}
+			return nil
+		}
+		if err := validate(root); err != nil {
+			return err
+		}
+		id, err := selectContinuationSessionTx(tx, root, false)
+		if err != nil || id == "" {
+			return err
+		}
+		if id != root {
+			if err := validate(id); err != nil {
+				return err
+			}
+		}
+		res, err := s.execHook(tx, `UPDATE sessions SET ended_at = datetime('now'), summary = ? WHERE id = ? AND ended_at IS NULL`, nullableString(summary), id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		var persisted Session
+		if err := tx.QueryRow(`SELECT id, project, ownership_mode, directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id).Scan(&persisted.ID, &persisted.Project, &persisted.OwnershipMode, &persisted.Directory, &persisted.StartedAt, &persisted.EndedAt, &persisted.Summary); err != nil {
+			return err
+		}
+		if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpUpsert, syncSessionPayload{
+			ID: id, Project: persisted.Project, OwnershipMode: persisted.OwnershipMode, Directory: persisted.Directory, StartedAt: persisted.StartedAt, EndedAt: persisted.EndedAt, Summary: persisted.Summary,
+		}); err != nil {
+			return err
+		}
+		effective = id
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return effective, nil
 }
 
 func (s *Store) EndSession(id string, summary string) error {
