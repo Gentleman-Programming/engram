@@ -542,7 +542,7 @@ test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
   assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)[\s\S]*session_id: summarySessionId[\s\S]*project: activeProject/);
   assert.match(source, /const registeredSessionForWrite = async \(sessionProject: string\) => \{[\s\S]*: registerEffectiveSession\(ctx, sessionProject, appendEntry, fetch\);/);
-  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist\)/);
+  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
 });
 
 test("mem_save_prompt returns a prompt-scoped identity", () => {
@@ -578,7 +578,7 @@ test("unsafe detected projects do not reach session or memory writes", () => {
     assert.match(block, /if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)/);
     assert.ok(block.indexOf("requireResolvedProject()") < block.indexOf("await registeredSessionForWrite"), `${tool} must resolve project before registration`);
   }
-  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist\)/);
+  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
 
   for (const detected of [
     undefined,
@@ -1929,7 +1929,7 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
-  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist\)/);
+  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
   assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
 });
 

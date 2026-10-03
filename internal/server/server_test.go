@@ -217,10 +217,14 @@ func TestHealthReportsVersion(t *testing.T) {
 			}
 
 			var response struct {
-				Version string `json:"version"`
+				Version      string          `json:"version"`
+				Capabilities map[string]bool `json:"capabilities"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode /health response: %v", err)
+			}
+			if !response.Capabilities["root_session_resume"] {
+				t.Fatal("/health must advertise root_session_resume")
 			}
 			if response.Version != tt.version {
 				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)

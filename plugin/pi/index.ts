@@ -128,7 +128,7 @@ interface FetchOptions {
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
-  // Satellite-only pre-dispatch validation, including transport retries/reconnects.
+  // Capability validation before dispatch, including transport retries/reconnects.
   beforeDispatch?: () => Promise<void>;
 }
 
@@ -1102,6 +1102,28 @@ function effectiveSessionID(ctx: SessionContext, runtimeID: string): string {
   return runtimeID;
 }
 
+// The v3.0.0 tagged server supports core-selected resume identities. Earlier
+// releases need explicit advertisement rather than an unverified version guess.
+function supportsRootSessionResume(health: unknown): boolean {
+  if (!health || typeof health !== "object" || Array.isArray(health)) return false;
+  const { capabilities, version } = health as { capabilities?: unknown; version?: unknown };
+  if (capabilities !== undefined) {
+    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return false;
+    if (Object.prototype.hasOwnProperty.call(capabilities, "root_session_resume")) {
+      return (capabilities as Record<string, unknown>).root_session_resume === true;
+    }
+  }
+  if (typeof version !== "string") return false;
+  const release = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version);
+  return !!release && Number(release[1]) >= 3;
+}
+
+function rootResumeCompatibilityError(health: unknown): Error {
+  const version = health && typeof health === "object" && typeof (health as { version?: unknown }).version === "string"
+    ? (health as { version: string }).version : "unknown";
+  return new Error(`gentle-engram 0.2.0 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
+}
+
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
   const runtimeID = requireRuntimeSessionID(ctx);
   const state = lifecycle(ctx, runtimeID);
@@ -1124,19 +1146,38 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
       if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${persistedID}`);
       if (owner !== sessionProject) throw new SessionProjectConflictError(persistedID, owner, sessionProject);
     }
-    const register = async (id: string, resume: boolean): Promise<string> => {
+    const register = async (id: string, resume: boolean, requireResume = false): Promise<string> => {
       const conflict = sessionProjectConflict(id, sessionProject);
       if (conflict) throw conflict;
       const key = `${sessionProject}:${id}`;
       sessionRegistrationProjects.set(id, sessionProject);
       const delivery = (async () => {
         let acknowledgement: { id?: unknown; status?: unknown } | null;
+        let health: unknown;
+        let resumeSupport: boolean | undefined;
+        const body = { id, project: sessionProject, directory, ownership_mode: "project_owned", resume };
+        const validateCapability = resume ? async () => {
+          // Missing/unreadable health is not support evidence, but fresh registration
+          // without resume remains safe. Registration itself retains transport errors.
+          try { health = await fetch("/health"); }
+          catch { health = undefined; }
+          assertOpen(state, epoch);
+          const supported = supportsRootSessionResume(health);
+          if (resumeSupport !== undefined && supported !== resumeSupport) {
+            throw new Error("Engram core root resume support changed during session registration. Retry once core health is stable; the previous registration may have succeeded, but its acknowledgement was not confirmed.");
+          }
+          if (requireResume && !supported) throw rootResumeCompatibilityError(health);
+          resumeSupport = supported;
+          body.resume = supported;
+        } : undefined;
         try {
-          acknowledgement = await fetch("/sessions", { method: "POST", body: {
-            id, project: sessionProject, directory, ownership_mode: "project_owned", resume,
-          } });
+          acknowledgement = await fetch("/sessions", { method: "POST", beforeDispatch: validateCapability, body });
         } catch (error) {
-          throw sessionProjectConflictFromResponse(error, id, sessionProject, resume ? runtimeID : undefined) || error;
+          if (resume && !body.resume && error instanceof EngramHttpError && error.status === 409
+            && (error.data as { code?: string } | null)?.code === "session_already_ended") {
+            throw rootResumeCompatibilityError(health);
+          }
+          throw sessionProjectConflictFromResponse(error, id, sessionProject, body.resume ? runtimeID : undefined) || error;
         }
         const effectiveID = acknowledgement?.id;
         if (acknowledgement?.status !== "created" || typeof effectiveID !== "string"
@@ -1180,7 +1221,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
       if (persistedID === runtimeID || !(error instanceof EngramHttpError) || error.status !== 409
         || (error.data as { code?: string } | null)?.code !== "session_already_ended") throw error;
       assertOpen(state, epoch);
-      return register(runtimeID, canPersist);
+      return register(runtimeID, canPersist, true);
     }
   })();
   effectiveSessionRegistrations.set(registrationKey, registration);

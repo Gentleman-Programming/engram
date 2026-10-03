@@ -75,6 +75,32 @@ Engram does not try to make the model read everything. It gives the model a disc
 
 Engram includes a terminal UI for browsing sessions, observations, prompts, projects, timelines, and search results. Engram Cloud adds browser visibility for shared project memory.
 
+## Core resume compatibility
+
+`gentle-engram` 0.2.0 negotiates root session resume through `GET /health`:
+`capabilities.root_session_resume: true` enables it; explicit false or malformed
+capability data disables it. When the capability is absent, a stable core version
+of **3.0.0 or newer** (optionally prefixed with `v`) is accepted. The tagged
+v3.0.0 server implements core-selected continuation identities; earlier releases
+are not inferred compatible. Unknown, malformed, and prerelease versions require
+explicit support advertisement.
+
+Each root registration flight retains its first resume-support decision and
+rechecks health before every dispatch. If support changes (including unreadable
+health after supported health), the retry stops before another POST. Retry once
+core health is stable: the earlier registration may have succeeded despite a
+lost acknowledgement, but no unacknowledged identity is adopted. Stable support
+permits an idempotent retry with the same resume flag.
+
+Without resume support, fresh root sessions and still-active persisted mappings
+can register normally without resume. If an ended identity needs continuation,
+attributed writes stop with a diagnostic naming the plugin and core versions,
+the support requirement, and upgrade guidance. Upgrade the Engram binary and
+restart the running server, then retry; updating only the Pi package is not
+sufficient. The plugin never invents a continuation ID or adopts a failed
+registration. Read-only memory tools do not require resume support. Cross-project
+satellite saves still require `isolated_session_registration: true` separately.
+
 ## Quick start
 
 ```bash
