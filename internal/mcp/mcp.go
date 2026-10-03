@@ -1317,7 +1317,9 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			// decides Project/Source/Path — it never reads .engram/config.json,
 			// so it can't know org. Carry the cwd-detected Org through so the
 			// override doesn't silently hide a repo's org label (#776).
-			org := res.Org
+			// InspectProject, not DetectProject: this lookup only wants the
+			// org label and must not publish an implicit identity binding.
+			org := s.InspectProject(cwd).Org
 			if err != nil {
 				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err, Org: org}
 			} else {
@@ -1697,7 +1699,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// name itself was resolved (#776).
 		if strings.TrimSpace(org) == "" {
 			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
-				if cfgResult := projectpkg.DetectProjectFull(cwd); cfgResult.Org != "" {
+				// InspectProject: the lookup only wants the org label and must
+				// not publish an implicit identity binding (#1596).
+				if cfgResult := s.InspectProject(cwd); cfgResult.Org != "" {
 					org = cfgResult.Org
 				}
 			}
@@ -2593,7 +2597,9 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		// org argument, so config inheritance is the only source.
 		var org string
 		if cwd, cwdErr := os.Getwd(); cwdErr == nil {
-			if cfgResult := projectpkg.DetectProjectFull(cwd); cfgResult.Org != "" {
+			// InspectProject: the lookup only wants the org label and must
+			// not publish an implicit identity binding (#1596).
+			if cfgResult := s.InspectProject(cwd); cfgResult.Org != "" {
 				org = cfgResult.Org
 			}
 		}
