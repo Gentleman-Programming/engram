@@ -1506,7 +1506,9 @@ func cmdSave(cfg store.Config) {
 	// .engram/config.json org field for this cwd, independent of how the
 	// project name itself was resolved (#776).
 	if strings.TrimSpace(org) == "" {
-		if cfgResult := detectProjectFull(cwd, project.DetectionOptions{}); cfgResult.Org != "" {
+		// InspectOnly: this lookup only wants the org label; it must not
+		// publish a Git identity binding as a side effect (#1596).
+		if cfgResult := detectProjectFull(cwd, project.DetectionOptions{InspectOnly: true}); cfgResult.Org != "" {
 			org = cfgResult.Org
 		}
 	}
