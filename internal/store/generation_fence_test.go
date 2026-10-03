@@ -143,6 +143,71 @@ func TestStatsPropagatesGenerationChange(t *testing.T) {
 	assertGenerationChanged(t, err)
 }
 
+func TestStoreRejectsOperationsAfterDatabaseIdentityChange(t *testing.T) {
+	// Do not parallelize: statFile is a package-global seam.
+	s := newTestStore(t)
+	if err := s.CreateSession("healthy-session", "generation-test", ""); err != nil {
+		t.Fatalf("healthy write: %v", err)
+	}
+	stats, err := s.Stats()
+	if err != nil {
+		t.Fatalf("healthy Stats: %v", err)
+	}
+	if stats.TotalSessions != 1 {
+		t.Fatalf("healthy sessions = %d, want 1", stats.TotalSessions)
+	}
+
+	dbPath := filepath.Join(s.DataDir(), "engram.db")
+	replacementPath := filepath.Join(t.TempDir(), "different-file")
+	writeTestFile(t, replacementPath)
+	original := statFile
+	// Registered after newTestStore so the seam is restored before store close;
+	// both run before their temporary directories are removed.
+	t.Cleanup(func() { statFile = original })
+	replacementInfo, err := original(replacementPath)
+	if err != nil {
+		t.Fatalf("stat different file: %v", err)
+	}
+	if os.SameFile(s.generation.files[0], replacementInfo) {
+		t.Fatal("different file retained captured database identity")
+	}
+	// Simulate identity drift, not an actual live-file replacement: SQLite's
+	// open DB/WAL/SHM files are left untouched for Windows portability.
+	statFile = func(path string) (os.FileInfo, error) {
+		if path == dbPath {
+			return replacementInfo, nil
+		}
+		return original(path)
+	}
+	_, err = s.Stats()
+	assertGenerationChanged(t, err)
+	assertGenerationChanged(t, s.CreateSession("rejected-session", "generation-test", ""))
+
+	statFile = original
+	_, err = s.Stats()
+	assertGenerationChanged(t, err)
+	assertGenerationChanged(t, s.CreateSession("sticky-rejected-session", "generation-test", ""))
+
+	// Independently inspect persisted data through the real, unfenced driver.
+	// This does not reset the store's sticky generation failure.
+	raw, err := sql.Open("sqlite", storeDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open unfenced database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := raw.Close(); err != nil {
+			t.Errorf("close unfenced database: %v", err)
+		}
+	})
+	var sessions int
+	if err := raw.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessions); err != nil {
+		t.Fatalf("inspect persisted sessions: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("persisted sessions = %d, want only healthy session", sessions)
+	}
+}
+
 func TestWithReadTxPropagatesRollbackGenerationChange(t *testing.T) {
 	callbackErr := errors.New("callback failed")
 	for _, tt := range []struct {
