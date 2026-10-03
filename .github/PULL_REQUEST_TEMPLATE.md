@@ -11,8 +11,10 @@
 
 ## 🔗 Linked Issue
 
-<!-- REQUIRED: Replace the # below with the issue number. -->
-<!-- Automated check: "Check Issue Reference" verifies this exists. -->
+<!-- REQUIRED: Replace the # below with the issue number. The issue MUST have the `status:approved` label. -->
+<!-- Use "Closes #N", "Fixes #N", or "Resolves #N" when this PR completes the issue (it auto-closes on merge). -->
+<!-- Use "Refs #N" for a partial PR that must NOT close an approved umbrella issue. -->
+<!-- Automated check: "Check Issue Reference" verifies one of these forms exists. -->
 <!-- Automated check: "Check Issue Has status:approved" verifies the issue is approved. -->
 
 Closes #
@@ -66,7 +68,7 @@ After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applica
 
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
-| **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
+| **Check Issue Reference** | PR body contains a supported reference — `Closes #N` / `Fixes #N` / `Resolves #N` (closing) or `Refs #N` (non-closing) | ⏳ |
 | **Check Issue Has status:approved** | Linked issue has `status:approved` label | ⏳ |
 | **Check PR Has type:* Label** | Canonical labels, applicability, and cardinality | ⏳ |
 | **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
@@ -81,7 +83,7 @@ After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applica
 
 ## ✅ Contributor Checklist
 
-- [ ] I linked an approved issue above (`Closes #N`)
+- [ ] I linked an approved issue above (`Closes #N` / `Fixes #N` / `Resolves #N` to close on merge, or `Refs #N` for a non-closing partial reference); the issue has `status:approved`
 - [ ] I added exactly **one** `type:*` label to this PR
 - [ ] I recorded actual focused regression and affected package test commands/outcomes for behavior changes, or N/A for docs-only changes
 - [ ] I recorded additional applicable local checks for an unpushed/no-PR or high-risk change, and identified any missing CI evidence

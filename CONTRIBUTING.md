@@ -37,8 +37,10 @@ Once the issue is approved:
 
 1. Fork the repo and create a branch from `main`
 2. Implement your change
-3. Open a PR using the PR template — **link the approved issue** with `Closes #N`
+3. Open a PR using the PR template — **link the approved issue** with `Closes #N`, `Fixes #N`, or `Resolves #N` when the PR completes that issue, or with `Refs #N` for a partial PR that must not close the umbrella issue
 4. Add exactly **one `type:*` label** to the PR (see label system below)
+
+**`Refs` vs closing keywords:** `Closes #N`, `Fixes #N`, and `Resolves #N` auto-close the issue when the PR merges — use them only on the PR that completes the issue. `Refs #N` is a non-closing reference: it passes the same issue-reference and `status:approved` checks but never closes the referenced issue, making it the right form for reviewable partial PRs of an approved umbrella issue. Bare issue numbers or arbitrary prose are not accepted references.
 
 ### Step 4: Automated PR Checks
 
@@ -46,8 +48,8 @@ The active required contexts run automatically on every PR and merge queue group
 
 | Check | What it verifies |
 |-------|-----------------|
-| **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
-| **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
+| **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, `Resolves #N` (closing), or `Refs #N` (non-closing) |
+| **Check Issue Has status:approved** | Every referenced issue (closing or non-closing) has the `status:approved` label |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
 | **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
