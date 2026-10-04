@@ -580,9 +580,54 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var body struct {
-		Summary string `json:"summary"`
+		Summary               string          `json:"summary"`
+		EffectiveContinuation json.RawMessage `json:"effective_continuation"`
+		Project               string          `json:"project"`
+		Directory             *string         `json:"directory"`
+		OwnershipMode         string          `json:"ownership_mode"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	decoder := json.NewDecoder(r.Body)
+	decodeErr := decoder.Decode(&body)
+	if decodeErr == nil && decoder.Decode(&struct{}{}) != io.EOF {
+		decodeErr = errors.New("expected a single JSON value")
+	}
+	var effectiveContinuation bool
+	if len(body.EffectiveContinuation) > 0 && (string(body.EffectiveContinuation) == "null" || json.Unmarshal(body.EffectiveContinuation, &effectiveContinuation) != nil) {
+		jsonError(w, http.StatusBadRequest, "effective_continuation must be a boolean")
+		return
+	}
+	if effectiveContinuation {
+		if decodeErr != nil || strings.TrimSpace(body.Project) == "" || body.Directory == nil || (body.OwnershipMode != store.SessionOwnershipShared && body.OwnershipMode != store.SessionOwnershipProjectOwned) {
+			jsonError(w, http.StatusBadRequest, "effective close requires valid project, directory, and ownership_mode")
+			return
+		}
+		effective, err := s.store.EndEffectiveSession(id, body.Project, projectpkg.RuntimeWorktreeDirectory(*body.Directory), body.OwnershipMode, body.Summary)
+		if err != nil {
+			var conflict *store.SessionProjectConflictError
+			switch {
+			case errors.Is(err, store.ErrSessionIDRequired), errors.Is(err, store.ErrProjectRequired):
+				jsonError(w, http.StatusBadRequest, err.Error())
+			case errors.Is(err, sql.ErrNoRows):
+				jsonError(w, http.StatusNotFound, "session not found")
+			case errors.As(err, &conflict), errors.Is(err, store.ErrSessionOwnershipMismatch), errors.Is(err, store.ErrProjectOwnershipAmbiguous):
+				jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{"code": "session_project_conflict"})
+			default:
+				jsonError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		if effective == "" {
+			jsonResponse(w, http.StatusOK, map[string]string{"status": "no_active_session"})
+			return
+		}
+		s.notifyWrite()
+		jsonResponse(w, http.StatusOK, map[string]string{"id": effective, "status": "completed"})
+		return
+	}
+	if decodeErr != nil && decodeErr != io.EOF {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+decodeErr.Error())
+		return
+	}
 
 	if err := s.store.EndSession(id, body.Summary); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
