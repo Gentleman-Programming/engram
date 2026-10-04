@@ -9,6 +9,161 @@ import (
 	"time"
 )
 
+// TestRelationProjectMismatch pins diagnostics without changing endpoint scope or retry safety.
+func TestRelationProjectMismatch(t *testing.T) {
+	const missingMessage = "relation FK precondition not met: referenced observation missing"
+	const mismatchMessage = "relation FK precondition not met: referenced observation effective project mismatch"
+	for _, tc := range []struct {
+		name                     string
+		project                  string
+		inherited, missing, self bool
+		want                     string
+	}{
+		{name: "override beats session", project: "other", want: mismatchMessage},
+		{name: "same project", project: "proj-apply"},
+		{name: "inherited session", inherited: true},
+		{name: "missing endpoint", project: "proj-apply", missing: true, want: missingMessage},
+		{name: "mixed missing and mismatch", project: "other", missing: true, want: missingMessage},
+		{name: "self mismatch", project: "other", self: true, want: mismatchMessage},
+		{name: "self matching", project: "proj-apply", self: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, source, target := setupSyncApplyStore(t)
+			project := tc.project
+			if tc.inherited {
+				project = ""
+			}
+			if _, err := s.db.Exec(`UPDATE observations SET project = ? WHERE sync_id = ?`, project, target); err != nil {
+				t.Fatal(err)
+			}
+			if tc.self {
+				source = target
+			}
+			if tc.missing {
+				source = "absent-source"
+			}
+			m := buildRelationMutation(t, syncRelationPayload{
+				SyncID: "rel-diagnostic", SourceID: source, TargetID: target,
+				Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged, Project: "proj-apply",
+				CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+			})
+			m.Seq = 1
+			err := applyRelationMutation(t, s, m)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("diagnostic = %v, want %q", err, tc.want)
+			}
+			if tc.want == mismatchMessage && (!errors.Is(err, ErrRelationProjectMismatch) || errors.Is(err, ErrRelationFKMissing) || errors.Is(err, ErrApplyDead)) {
+				t.Fatalf("mismatch sentinel classification: %v", err)
+			}
+			if tc.want == missingMessage && !errors.Is(err, ErrRelationFKMissing) {
+				t.Fatalf("missing sentinel lost: %v", err)
+			}
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, m); err != nil {
+				t.Fatal(err)
+			}
+			for retry := 0; retry <= 5; retry++ {
+				status, count := getDeferredRow(t, s, m.EntityKey)
+				wantStatus := "deferred"
+				if retry == 5 {
+					wantStatus = "dead"
+				}
+				if status != wantStatus || count != retry {
+					t.Fatalf("retry %d: (%s, %d)", retry, status, count)
+				}
+				if retry > 0 {
+					var message string
+					if err := s.db.QueryRow(`SELECT last_error FROM sync_apply_deferred WHERE sync_id = ?`, m.EntityKey).Scan(&message); err != nil {
+						t.Fatal(err)
+					}
+					if message != tc.want {
+						t.Fatalf("last_error = %q, want %q", message, tc.want)
+					}
+				}
+				if retry < 5 {
+					if _, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, "proj-apply"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if countRelationRows(t, s, m.EntityKey) != 0 {
+				t.Fatal("unsafe relation applied")
+			}
+		})
+	}
+}
+
+func TestRearmEligibleDeadRelationsProjectMismatch(t *testing.T) {
+	for _, message := range []string{ErrRelationFKMissing.Error(), ErrRelationProjectMismatch.Error()} {
+		t.Run(message, func(t *testing.T) {
+			for _, tc := range []struct {
+				name                                      string
+				foreign, missing, badIdentity, wrongScope bool
+				retries                                   int
+			}{
+				{name: "eligible", retries: 5},
+				{name: "foreign", foreign: true, retries: 5},
+				{name: "missing", missing: true, retries: 5},
+				{name: "identity", badIdentity: true, retries: 5},
+				{name: "scope", wrongScope: true, retries: 5},
+				{name: "not retry cap", retries: 4},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					s, source, target := setupSyncApplyStore(t)
+					if tc.foreign {
+						if _, err := s.db.Exec(`UPDATE observations SET project = 'other' WHERE sync_id = ?`, target); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if tc.missing {
+						target = "absent"
+					}
+					m := buildRelationMutation(t, syncRelationPayload{SyncID: "rel-rearm-diagnostic", SourceID: source, TargetID: target, Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged, Project: "proj-apply"})
+					key, project := m.EntityKey, m.Project
+					if tc.badIdentity {
+						key = "wrong-key"
+					}
+					if tc.wrongScope {
+						project = "other"
+					}
+					if _, err := s.db.Exec(`INSERT INTO sync_apply_deferred
+						(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, last_error, first_seen_at)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scoped', 'dead', ?, ?, datetime('now'))`,
+						m.EntityKey, m.Entity, m.Payload, DefaultSyncTargetKey, key, m.Op, m.EntityKey, project, tc.retries, message); err != nil {
+						t.Fatal(err)
+					}
+					n, err := s.RearmEligibleDeadRelationsForScope(DefaultSyncTargetKey, "proj-apply")
+					if err != nil {
+						t.Fatal(err)
+					}
+					want, status, retries := 0, "dead", tc.retries
+					if tc.name == "eligible" {
+						want, status, retries = 1, "deferred", 0
+					}
+					if n != want {
+						t.Fatalf("rearmed = %d, want %d", n, want)
+					}
+					if got, count := getDeferredRow(t, s, m.EntityKey); got != status || count != retries {
+						t.Fatalf("row = (%s, %d), want (%s, %d)", got, count, status, retries)
+					}
+					var preserved string
+					if err := s.db.QueryRow(`SELECT last_error FROM sync_apply_deferred WHERE sync_id = ?`, m.EntityKey).Scan(&preserved); err != nil {
+						t.Fatal(err)
+					}
+					if preserved != message {
+						t.Fatal("historical diagnostic rewritten")
+					}
+				})
+			}
+		})
+	}
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // buildRelationMutation builds a SyncMutation for entity='relation' from a
@@ -812,11 +967,25 @@ func TestApplyPulledRelation_UsesOuterMutationProjectForEndpointValidation(t *te
 			sourceScope: "project", targetScope: "project",
 		},
 		{
-			name:           "personal scope endpoints do not satisfy project relation",
+			name:           "same project personal endpoints satisfy project relation",
 			outerProject:   projectA,
 			payloadProject: projectA,
 			sourceProject:  projectA, targetProject: projectA,
 			sourceScope: "personal", targetScope: "personal",
+			wantApplied: true,
+		},
+		{
+			name:          "same project global and personal endpoints satisfy project relation",
+			outerProject:  projectA,
+			sourceProject: projectA, targetProject: projectA,
+			sourceScope: "global", targetScope: "personal",
+			wantApplied: true,
+		},
+		{
+			name:          "unknown endpoint project does not satisfy project relation",
+			outerProject:  projectA,
+			sourceProject: projectB, targetProject: projectA,
+			sourceScope: "global", targetScope: "personal",
 		},
 		{
 			name:          "normalized outer project accepts project scoped endpoints",
@@ -841,6 +1010,14 @@ func TestApplyPulledRelation_UsesOuterMutationProjectForEndpointValidation(t *te
 
 			sourceID := addEndpoint("source", tt.sourceProject, tt.sourceScope)
 			targetID := addEndpoint("target", tt.targetProject, tt.targetScope)
+			if tt.name == "unknown endpoint project does not satisfy project relation" {
+				if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE sync_id = ?`, sourceID); err != nil {
+					t.Fatalf("clear source observation project: %v", err)
+				}
+				if _, err := s.db.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, "session-source"); err != nil {
+					t.Fatalf("clear source session project: %v", err)
+				}
+			}
 			relationSyncID := newSyncID("rel-outer-project")
 			mutation := buildRelationMutation(t, syncRelationPayload{
 				SyncID:         relationSyncID,
@@ -1746,9 +1923,8 @@ func TestRearmEligibleDeadRelationsForScope(t *testing.T) {
 	}
 }
 
-// TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate keeps
-// authoritative replay restricted to project-scoped endpoints while legacy rows
-// remain satisfiable when duplicate observation rows share one endpoint sync ID.
+// TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate accepts
+// authoritative same-project personal endpoints, including duplicate sync IDs.
 func TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate(t *testing.T) {
 	const targetKey = DefaultSyncTargetKey
 	const project = "proj-rearm-predicate"
@@ -1798,14 +1974,22 @@ func TestRearmEligibleDeadRelationsForScopePreservesApplyEndpointPredicate(t *te
 	if err != nil {
 		t.Fatalf("RearmEligibleDeadRelationsForScope: %v", err)
 	}
-	if rearmed != 1 {
-		t.Fatalf("rearmed = %d, want only the legacy relation", rearmed)
+	if rearmed != 2 {
+		t.Fatalf("rearmed = %d, want both same-project relations", rearmed)
 	}
-	if status, retries := getDeferredRow(t, s, authoritativeID); status != "dead" || retries != 5 {
-		t.Fatalf("authoritative personal-endpoint row = (%q, %d), want (dead, 5)", status, retries)
+	if status, retries := getDeferredRow(t, s, authoritativeID); status != "deferred" || retries != 0 {
+		t.Fatalf("authoritative personal-endpoint row = (%q, %d), want (deferred, 0)", status, retries)
 	}
 	if status, retries := getDeferredRow(t, s, legacyID); status != "deferred" || retries != 0 {
 		t.Fatalf("legacy duplicate-endpoint row = (%q, %d), want (deferred, 0)", status, retries)
+	}
+	if _, err := s.ReplayDeferred(); err != nil {
+		t.Fatalf("ReplayDeferred: %v", err)
+	}
+	for _, syncID := range []string{authoritativeID, legacyID} {
+		if got := countRelationRows(t, s, syncID); got != 1 {
+			t.Fatalf("replayed relation %q rows = %d, want 1", syncID, got)
+		}
 	}
 }
 

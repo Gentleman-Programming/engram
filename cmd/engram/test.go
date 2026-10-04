@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/selftest"
+	"github.com/Gentleman-Programming/engram/v3/internal/selftest"
 )
 
 const (

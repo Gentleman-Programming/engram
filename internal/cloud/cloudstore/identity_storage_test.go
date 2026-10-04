@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -839,7 +839,7 @@ func TestHumanCreationSerializesWithStrandedRecoveryEligibility(t *testing.T) {
 			if tt.serialized {
 				if err := <-created; err != nil {
 					t.Fatalf("admin creation after recovery guard release: %v", err)
-			}
+				}
 			}
 			_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_recovery-race-" + tt.role, TokenHash: "hmac-sha256:v1:recovery-race-" + tt.role}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
 			if tt.serialized && !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {

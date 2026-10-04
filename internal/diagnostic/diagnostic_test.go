@@ -5,14 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -102,7 +104,7 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckAmbiguousActiveRuntimeSessions, CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
+	want := []string{CheckAmbiguousActiveRuntimeSessions, CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckOrphanedPendingRelations, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -375,6 +377,145 @@ func TestOrphanedObservationSessionCheckPropagatesStoreFailure(t *testing.T) {
 	}
 }
 
+func TestOrphanedPendingRelationsCheckIsOKWhenNoCandidates(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("ses-healthy", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "ses-healthy", Type: "decision", Title: "live", Content: "content", Project: "engram", Scope: "project"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 0 {
+		t.Fatalf("report=%+v, want healthy check without findings", report)
+	}
+}
+
+func TestOrphanedPendingRelationsCheckWarnsWithCountsAndBoundedSample(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("ses-1455", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	obsSyncID := func(title string) string {
+		t.Helper()
+		id, err := s.AddObservation(store.AddObservationParams{SessionID: "ses-1455", Type: "decision", Title: title, Content: "content for " + title, Project: "engram", Scope: "project"})
+		if err != nil {
+			t.Fatalf("AddObservation %q: %v", title, err)
+		}
+		var syncID string
+		if err := s.DB().QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, id).Scan(&syncID); err != nil {
+			t.Fatalf("read observation sync_id: %v", err)
+		}
+		return syncID
+	}
+	liveSrc := obsSyncID("live source")
+	liveTgt := obsSyncID("live target")
+	oneEndpointTgt := obsSyncID("one endpoint target")
+	seedDiagnosticRelation(t, s, "rel-live", liveSrc, liveTgt, "pending")
+	seedDiagnosticRelation(t, s, "rel-one-missing", "missing-obs", oneEndpointTgt, "pending")
+	seedDiagnosticRelation(t, s, "rel-orphan", "missing-src", "missing-tgt", "pending")
+	seedDiagnosticRelation(t, s, "rel-legacy", "missing-src2", "missing-tgt2", "orphaned")
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 {
+		t.Fatalf("report=%+v, want one warning check", report)
+	}
+	check := report.Checks[0]
+	if check.CheckID != CheckOrphanedPendingRelations || check.ReasonCode != CheckOrphanedPendingRelations || check.Severity != SeverityWarning {
+		t.Fatalf("check=%+v", check)
+	}
+	if len(check.Findings) != 1 {
+		t.Fatalf("findings=%d, want one aggregate finding with counts", len(check.Findings))
+	}
+	finding := check.Findings[0]
+	if finding.CheckID != CheckOrphanedPendingRelations || finding.ReasonCode != CheckOrphanedPendingRelations || finding.Severity != SeverityWarning || !finding.RequiresConfirmation {
+		t.Fatalf("finding=%+v", finding)
+	}
+	var evidence struct {
+		CandidateCount     int `json:"candidate_count"`
+		OneEndpointMissing int `json:"one_endpoint_missing"`
+		LivePending        int `json:"live_pending"`
+		Sample             []struct {
+			SyncID string `json:"sync_id"`
+		} `json:"sample"`
+	}
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence.CandidateCount != 1 || evidence.OneEndpointMissing != 1 || evidence.LivePending != 1 {
+		t.Fatalf("evidence=%+v, want one candidate plus untouched one-missing and live counts", evidence)
+	}
+	if len(evidence.Sample) != 1 || evidence.Sample[0].SyncID != "rel-orphan" {
+		t.Fatalf("sample=%+v, want the both-endpoints-missing relation", evidence.Sample)
+	}
+	for _, want := range []string{"engram doctor repair --check orphaned_pending_relations", "--dry-run", "orphaned"} {
+		if !strings.Contains(finding.SafeNextStep, want) {
+			t.Fatalf("SafeNextStep=%q, want %q", finding.SafeNextStep, want)
+		}
+	}
+}
+
+// TestOrphanedPendingRelationsCheckBoundedSampleUnderLargeBacklog proves the
+// doctor check keeps its output shape on a backlog larger than the sample
+// limit: the finding and metadata carry the TOTAL candidate count while the
+// embedded evidence sample stays bounded and id-ordered.
+func TestOrphanedPendingRelationsCheckBoundedSampleUnderLargeBacklog(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	for i := 0; i < 12; i++ {
+		seedDiagnosticRelation(t, s, fmt.Sprintf("rel-orphan-%02d", i), fmt.Sprintf("missing-src-%02d", i), fmt.Sprintf("missing-tgt-%02d", i), "pending")
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckOrphanedPendingRelations)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v, want one warning check with one aggregate finding", report)
+	}
+	finding := report.Checks[0].Findings[0]
+	var evidence struct {
+		CandidateCount int `json:"candidate_count"`
+		Sample         []struct {
+			SyncID string `json:"sync_id"`
+		} `json:"sample"`
+	}
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence.CandidateCount != 12 {
+		t.Fatalf("candidate_count=%d, want the full backlog size 12", evidence.CandidateCount)
+	}
+	if len(evidence.Sample) != 10 {
+		t.Fatalf("sample size=%d, want the bounded 10", len(evidence.Sample))
+	}
+	if evidence.Sample[0].SyncID != "rel-orphan-00" || evidence.Sample[9].SyncID != "rel-orphan-09" {
+		t.Fatalf("sample=%+v, want the id-ordered head of the candidate list", evidence.Sample)
+	}
+	if !strings.Contains(finding.Message, "12 pending relation(s)") {
+		t.Fatalf("Message=%q, want the full backlog count", finding.Message)
+	}
+}
+
+// seedDiagnosticRelation inserts a memory_relations row with an arbitrary
+// judgment status so tests can model legacy rows the public API never writes.
+func seedDiagnosticRelation(t *testing.T, s *store.Store, syncID, sourceID, targetID, status string) {
+	t.Helper()
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, datetime('now'), datetime('now'))
+	`, syncID, sourceID, targetID, status); err != nil {
+		t.Fatalf("seed relation %q: %v", syncID, err)
+	}
+}
+
 func seedDiagnosticOrphanedObservation(t *testing.T, s *store.Store, syncID, sessionID, project string) {
 	t.Helper()
 	ctx := context.Background()
@@ -434,7 +575,7 @@ func TestSessionProjectDirectoryMismatchFinding(t *testing.T) {
 		Project: "api",
 		DetectProject: func(dir string) (DetectedProject, bool) {
 			if dir == "/work/web" {
-				return DetectedProject{Project: "web", Source: "test", Path: dir}, true
+				return DetectedProject{Project: "web", Source: projectpkg.SourceGitRoot, Path: dir}, true
 			}
 			return DetectedProject{}, false
 		},
@@ -455,8 +596,8 @@ func TestSessionProjectDirectoryMismatchDefersToKnownManualTarget(t *testing.T) 
 		knownTarget  bool
 		wantFindings int
 	}{
-		{name: "known manual target beats third project directory", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 0},
-		{name: "healthy known manual session has no directory finding", sessionID: "manual-save-engram", project: "engram", wantFindings: 0},
+		{name: "trusted third project directory beats known manual target", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 1},
+		{name: "trusted directory mismatch beats matching manual suffix", sessionID: "manual-save-engram", project: "engram", wantFindings: 1},
 		{name: "unknown manual target retains trusted directory finding", sessionID: "manual-save-engram", project: "sias-app", wantFindings: 1},
 		{name: "non-manual session retains trusted directory finding", sessionID: "runtime-session", project: "sias-app", wantFindings: 1},
 	}
@@ -724,6 +865,145 @@ func TestInvalidSessionIdentityCheckReportsSourceReferencesAndJournal(t *testing
 	}
 	if plan.Status != "noop" || len(plan.Actions) != 0 || len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != "cannot_repair_without_explicit_canonical_session_id" {
 		t.Fatalf("repair plan=%+v", plan)
+	}
+}
+
+func TestInvalidSessionIdentityReplacementBlockedGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, replacement, blocker string
+		multiple                           bool
+	}{
+		{name: "deferred", status: "deferred", replacement: "canonical", blocker: `session identity blocked by deferred payload "identity-evidence"`},
+		{name: "dead", status: "dead", replacement: "canonical", blocker: `session identity blocked by deferred payload "identity-evidence"`},
+		{name: "selected among multiple", status: "dead", replacement: "canonical", blocker: `session identity blocked by deferred payload "identity-evidence"`, multiple: true},
+		{name: "invalid replacement", replacement: "  ", blocker: "invalid session identity repair IDs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work')`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.multiple {
+				if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES (' ','engram','/other')`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.status != "" {
+				if _, err := s.DB().Exec(`INSERT INTO sync_apply_deferred(sync_id,entity,payload,project,apply_status,retry_count,first_seen_at)
+					VALUES ('identity-evidence','relation','{"session_id":"another-session"}','engram',?,5,datetime('now'))`, tc.status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scope := Scope{Store: s, Project: "engram"}
+			report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: ReasonQuarantinedPulledSessionIdentity, Message: "remote evidence remains"})
+			planned := PlanSessionIdentityReplacement(scope, report, plan, "", true, tc.replacement)
+			if planned.Status != "blocked" || planned.IdentityRepair != nil || len(planned.Blockers) != 1 || planned.Blockers[0].ReasonCode != "identity_repair_blocked" || planned.Blockers[0].Message != tc.blocker {
+				t.Fatalf("actual blocker lost: %+v", planned)
+			}
+			for _, skip := range planned.Skipped {
+				if skip.SessionID == "" && skip.ReasonCode == "cannot_repair_without_explicit_canonical_session_id" {
+					t.Fatalf("selected source retains stale replacement guidance: %+v", planned.Skipped)
+				}
+			}
+			wantSkips := 1
+			if tc.multiple {
+				wantSkips = 2
+			}
+			if len(planned.Skipped) != wantSkips || planned.Skipped[wantSkips-1].ReasonCode != ReasonQuarantinedPulledSessionIdentity {
+				t.Fatalf("unrelated evidence lost: %+v", planned.Skipped)
+			}
+			if tc.multiple && (planned.Skipped[0].SessionID != " " || planned.Skipped[0].ReasonCode != "cannot_repair_without_explicit_canonical_session_id") {
+				t.Fatalf("unselected guidance lost: %+v", planned.Skipped)
+			}
+			if planned.Counts.SessionsPlanned != 0 {
+				t.Fatalf("blocked repair planned writes: %+v", planned.Counts)
+			}
+		})
+	}
+}
+
+func TestInvalidSessionIdentityReplacementSelectionFailuresPreserveGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, reason string
+		selected, malformed  bool
+	}{
+		{name: "ambiguous", reason: "ambiguous_or_missing_source"},
+		{name: "missing source", selected: true, source: "missing", reason: "ambiguous_or_missing_source"},
+		{name: "malformed evidence", selected: true, malformed: true, reason: "invalid_doctor_evidence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work'),(' ','engram','/other')`); err != nil {
+				t.Fatal(err)
+			}
+			scope := Scope{Store: s, Project: "engram"}
+			report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := append([]RepairSkip(nil), plan.Skipped...)
+			if tc.malformed {
+				report.Checks[0].Findings[0].Evidence = json.RawMessage(`not-json`)
+			}
+			planned := PlanSessionIdentityReplacement(scope, report, plan, tc.source, tc.selected, "canonical")
+			if planned.Status != "blocked" || len(planned.Blockers) != 1 || planned.Blockers[0].ReasonCode != tc.reason || planned.IdentityRepair != nil {
+				t.Fatalf("plan=%+v", planned)
+			}
+			if !reflect.DeepEqual(planned.Skipped, before) {
+				t.Fatalf("selection failure changed guidance: %+v", planned.Skipped)
+			}
+		})
+	}
+}
+
+func TestInvalidSessionIdentityReplacementPreservesOtherFindings(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work'),(' ','engram','/other')`); err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Store: s, Project: "engram"}
+	report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, RepairModePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Skipped = append(plan.Skipped, RepairSkip{ReasonCode: ReasonQuarantinedPulledSessionIdentity, Message: "remote evidence remains"})
+	planned := PlanSessionIdentityReplacement(scope, report, plan, "", true, "canonical")
+	if planned.IdentityRepair == nil || len(planned.Skipped) != 2 || planned.Skipped[0].SessionID != " " || planned.Skipped[1].ReasonCode != ReasonQuarantinedPulledSessionIdentity {
+		t.Fatalf("plan=%+v", planned)
+	}
+}
+
+func TestInvalidSessionIdentityRepairPlanNoReplacementPreservesGuidance(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if _, err := s.DB().Exec(`INSERT INTO sessions(id,project,directory) VALUES ('','engram','/work')`); err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Store: s, Project: "engram"}
+	report, err := NewRunner().RunOne(context.Background(), scope, CheckInvalidSessionIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun, RepairModeApply} {
+		plan, err := BuildRepairPlan(context.Background(), scope, report, CheckInvalidSessionIdentity, mode)
+		if err != nil || plan.Status != "noop" || plan.IdentityRepair != nil || len(plan.Blockers) != 0 || len(plan.Skipped) != 1 || !strings.Contains(plan.Skipped[0].Message, "--replacement-id") {
+			t.Fatalf("mode=%s plan=%+v err=%v", mode, plan, err)
+		}
 	}
 }
 

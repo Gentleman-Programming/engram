@@ -19,11 +19,6 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
-# Claude CLI owns user-scope MCP configuration. Keep this hook as a thin
-# delegator: setup performs conflict detection and postcondition verification.
-if ! engram setup claude-code --mcp-only; then
-  printf '%s\n' "warning: Engram MCP registration failed; run 'engram setup claude-code --mcp-only' after resolving the reported error." >&2
-fi
 # An explicit URL is an external-server opt-in. Only the default local endpoint
 # is owned by this data directory, so reachability alone is never sufficient.
 if [ "${ENGRAM_MANAGED_LOCAL:-0}" = 1 ]; then
@@ -55,7 +50,7 @@ if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir}')" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: "project_owned"}')" \
     > /dev/null
 fi
 

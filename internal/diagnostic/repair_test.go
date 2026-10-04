@@ -4,7 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func TestBuildRepairPlanForeignSyncTargetUsesStoreClassification(t *testing.T) {
@@ -55,7 +56,7 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 		case "/work/engram":
 			return DetectedProject{Project: "engram", Source: "git_remote", Path: dir}, true
 		case "/work/ignored":
-			return DetectedProject{Project: "ignored", Source: "basename", Path: dir}, true
+			return DetectedProject{Project: "ignored", Source: projectpkg.SourceDirBasename, Path: dir}, true
 		default:
 			return DetectedProject{}, false
 		}
@@ -76,8 +77,8 @@ func TestBuildRepairPlanDirectoryMismatchUsesTrustedEvidence(t *testing.T) {
 	if got.SessionID != "s-engram" || got.FromProject != "sias-app" || got.ToProject != "engram" || got.EvidenceSource != "git_remote" {
 		t.Fatalf("action=%+v", got)
 	}
-	if len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != "untrusted_directory_evidence" {
-		t.Fatalf("skipped=%+v", plan.Skipped)
+	if len(plan.Skipped) != 0 {
+		t.Fatalf("skipped=%+v, want basename evidence omitted before repair planning", plan.Skipped)
 	}
 }
 
@@ -164,7 +165,7 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			wantSkip: "manual_name_unknown_project",
 		},
 		{
-			name: "known manual target beats trusted third project directory",
+			name: "trusted third project directory leaves directory repair authoritative",
 			sessions: []store.DiagnosticSessionEvidence{
 				{ID: "manual-save-engram", Name: "manual-save-engram", Project: "sias-app", Directory: "/work/third-project"},
 				{ID: "known", Name: "known", Project: "engram", Directory: "/work/engram"},
@@ -172,7 +173,7 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			detect: func(string) (DetectedProject, bool) {
 				return DetectedProject{Project: "third-project", Source: "git_root", Path: "/work/third-project"}, true
 			},
-			wantAction: true,
+			wantAction: false,
 		},
 	}
 
@@ -192,8 +193,73 @@ func TestBuildRepairPlanManualSessionNameRules(t *testing.T) {
 			if tc.wantAction && (len(plan.Actions) != 1 || plan.Actions[0].ToProject != "engram") {
 				t.Fatalf("actions=%+v skipped=%+v", plan.Actions, plan.Skipped)
 			}
+			if tc.name == "trusted third project directory leaves directory repair authoritative" && len(plan.Actions) != 0 {
+				t.Fatalf("actions=%+v, want no competing manual repair", plan.Actions)
+			}
 			if tc.wantSkip != "" && (len(plan.Skipped) != 1 || plan.Skipped[0].ReasonCode != tc.wantSkip) {
 				t.Fatalf("skipped=%+v actions=%+v", plan.Skipped, plan.Actions)
+			}
+		})
+	}
+}
+
+// TestBuildRepairPlanOrphanedPendingRelations proves the planner derives its
+// candidates from fresh store evidence (never from the doctor report), sets
+// the planned relation count, keeps plan and dry-run nonmutating, and reports
+// a noop when the store has no candidates.
+func TestBuildRepairPlanOrphanedPendingRelations(t *testing.T) {
+	tests := []struct {
+		name      string
+		seed      bool
+		wantCount int64
+	}{
+		{name: "candidate store plans one reclassification", seed: true, wantCount: 1},
+		{name: "healthy store is a noop", seed: false, wantCount: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if tc.seed {
+				seedDiagnosticRelation(t, s, "rel-orphan", "missing-src", "missing-tgt", "pending")
+			}
+
+			for _, mode := range []RepairMode{RepairModePlan, RepairModeDryRun} {
+				wantStatus := "planned"
+				if mode == RepairModeDryRun {
+					wantStatus = "dry_run"
+				}
+				if !tc.seed {
+					wantStatus = "noop"
+				}
+				plan, err := BuildRepairPlan(context.Background(), Scope{Store: s}, Report{}, CheckOrphanedPendingRelations, mode)
+				if err != nil {
+					t.Fatalf("BuildRepairPlan %s: %v", mode, err)
+				}
+				if plan.Status != wantStatus {
+					t.Fatalf("%s status=%q, want %q", mode, plan.Status, wantStatus)
+				}
+				if tc.seed {
+					if plan.OrphanedPendingRelations == nil || len(plan.OrphanedPendingRelations.Candidates) != 1 || plan.OrphanedPendingRelations.Candidates[0].SyncID != "rel-orphan" {
+						t.Fatalf("%s evidence=%+v, want the seeded candidate", mode, plan.OrphanedPendingRelations)
+					}
+				} else if plan.OrphanedPendingRelations != nil {
+					t.Fatalf("%s evidence=%+v, want none", mode, plan.OrphanedPendingRelations)
+				}
+				if plan.Counts.RelationsPlanned != tc.wantCount {
+					t.Fatalf("%s relations_planned=%d, want %d", mode, plan.Counts.RelationsPlanned, tc.wantCount)
+				}
+			}
+
+			// Plan and dry-run must never mutate the candidate.
+			var status string
+			if err := s.DB().QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = 'rel-orphan'`).Scan(&status); err != nil {
+				if tc.seed {
+					t.Fatalf("read seeded relation: %v", err)
+				}
+				return
+			}
+			if tc.seed && status != "pending" {
+				t.Fatalf("nonmutating mode changed status to %q", status)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,14 +17,329 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	_ "modernc.org/sqlite"
 )
+
+func TestGenerationInvalidationRequestsOneShutdown(t *testing.T) {
+	for _, path := range []string{"/health", "/stats?all_projects=true"} {
+		t.Run(path, func(t *testing.T) {
+			st := newServerTestStore(t)
+			srv := New(st, 0)
+			notifier, ok := any(srv).(interface{ GenerationInvalidated() <-chan struct{} })
+			if !ok {
+				t.Fatal("server lacks generation shutdown notification")
+			}
+			oldObserved, oldStats := observedGenerationError, loadServerStats
+			t.Cleanup(func() { observedGenerationError, loadServerStats = oldObserved, oldStats })
+			observedGenerationError = func(*store.Store) error { return store.ErrDatabaseGenerationChanged }
+			loadServerStats = func(*store.Store) (*store.Stats, error) { return nil, store.ErrDatabaseGenerationChanged }
+			var requests sync.WaitGroup
+			for i := 0; i < 32; i++ {
+				requests.Add(1)
+				go func() {
+					defer requests.Done()
+					rec := httptest.NewRecorder()
+					srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+					want := "stats unavailable"
+					if path == "/health" {
+						want = "health check failed"
+					}
+					if rec.Code != 500 || !strings.Contains(rec.Body.String(), want) {
+						t.Errorf("response = %d: %s", rec.Code, rec.Body.String())
+					}
+				}()
+			}
+			requests.Wait()
+			select {
+			case <-notifier.GenerationInvalidated():
+			default:
+				t.Fatal("generation change did not notify owner")
+			}
+			select {
+			case <-notifier.GenerationInvalidated():
+				t.Fatal("duplicate notification")
+			default:
+			}
+		})
+	}
+}
+
+func TestTransientHealthFailureDoesNotRequestShutdown(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	notifier, ok := any(srv).(interface{ GenerationInvalidated() <-chan struct{} })
+	if !ok {
+		t.Fatal("server lacks generation shutdown notification")
+	}
+	old := loadServerStats
+	t.Cleanup(func() { loadServerStats = old })
+	loadServerStats = func(*store.Store) (*store.Stats, error) { return nil, errors.New("transient") }
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	if rec.Code != 500 || strings.Contains(rec.Body.String(), "transient") {
+		t.Fatalf("response: %d %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-notifier.GenerationInvalidated():
+		t.Fatal("transient failure notified shutdown")
+	default:
+	}
+	loadServerStats = old
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	if rec.Code != 200 {
+		t.Fatalf("recovery = %d", rec.Code)
+	}
+}
+
+func TestShutdownDrainsInflightRequestAndReleasesListener(t *testing.T) {
+	srv := New(nil, 0)
+	shutdown, ok := any(srv).(interface{ Shutdown(context.Context) error })
+	if !ok {
+		t.Fatal("server lacks graceful shutdown")
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv.mux.HandleFunc("/gate", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		_, _ = w.Write([]byte("drained"))
+	})
+	bound := make(chan net.Listener, 1)
+	srv.listen = func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen(network, addr)
+		if err == nil {
+			bound <- ln
+		}
+		return ln, err
+	}
+	started := make(chan error, 1)
+	go func() { started <- srv.Start() }()
+	ln := <-bound
+	response := make(chan error, 1)
+	go func() {
+		res, err := http.Get("http://" + ln.Addr().String() + "/gate")
+		if err == nil {
+			defer func() { _ = res.Body.Close() }()
+			var b bytes.Buffer
+			_, err = b.ReadFrom(res.Body)
+			if b.String() != "drained" {
+				err = fmt.Errorf("body = %q", b.String())
+			}
+		}
+		response <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	drained := make(chan error, 1)
+	go func() { drained <- shutdown.Shutdown(ctx) }()
+	// The serving loop ends when Shutdown closes the listener, before drain completes.
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-drained:
+		t.Fatalf("shutdown returned before release: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-response; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-drained; err != nil {
+		t.Fatal(err)
+	}
+	rebound, err := net.Listen("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("listener not released: %v", err)
+	}
+	_ = rebound.Close()
+}
+
+func TestShutdownDrainsExpiryForcesClose(t *testing.T) {
+	srv := New(nil, 0)
+	entered, canceled := make(chan struct{}), make(chan struct{})
+	srv.mux.HandleFunc("/gate", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(entered)
+		<-r.Context().Done()
+		close(canceled)
+	})
+	bound := make(chan net.Listener, 1)
+	srv.listen = func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen(network, addr)
+		if err == nil {
+			bound <- ln
+		}
+		return ln, err
+	}
+	started := make(chan error, 1)
+	go func() { started <- srv.Start() }()
+	ln := <-bound
+	res, err := http.Get("http://" + ln.Addr().String() + "/gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // deterministic expired drain budget, no wall-clock sleep
+	if err := srv.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("shutdown = %v", err)
+	}
+	<-canceled
+	var body bytes.Buffer
+	if _, err := body.ReadFrom(res.Body); err == nil {
+		t.Fatal("forced connection close did not interrupt response")
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	rebound, err := net.Listen("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("listener not released: %v", err)
+	}
+	_ = rebound.Close()
+}
+
+func TestCreateSessionResume(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	post := func(body string, code int, id, from string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		if rec.Code != code {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		var ack map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+			t.Fatal(err)
+		}
+		if code == 201 && (ack["id"] != id || ack["status"] != "created" || ack["resumed_from"] != from) {
+			t.Fatalf("ack: %v", ack)
+		}
+		if code == 409 && ack["code"] != "session_already_ended" {
+			t.Fatal(ack)
+		}
+	}
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root", "")
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root", "")
+	if err := st.EndSession("root", ""); err != nil {
+		t.Fatal(err)
+	}
+	post(`{"id":"root","project":"engram"}`, 409, "", "")
+	post(`{"id":"root","project":"engram","resume":false}`, 409, "", "")
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root:resume:2", "root")
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root:resume:2", "root")
+	if err := st.EndSession("root:resume:2", ""); err != nil {
+		t.Fatal(err)
+	}
+	post(`{"id":"root","project":"engram","resume":true}`, 201, "root:resume:3", "root")
+	post(`{"id":"root","project":"engram","resume":"yes"}`, 400, "", "")
+}
+
+func TestCreateSessionResumeConflict(t *testing.T) {
+	for _, mode := range []string{store.SessionOwnershipShared, store.SessionOwnershipProjectOwned} {
+		t.Run(mode, func(t *testing.T) {
+			st := newServerTestStore(t)
+			srv := New(st, 0)
+			if err := st.StartSession("root", "engram", "/work"); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.EndSession("root", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.StartSessionWithOwnershipMode("root:resume:2", "foreign", "/work", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"id":"root","project":"engram","resume":true,"ownership_mode":%q}`, mode))))
+			var ack map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != 409 || ack["code"] != "session_project_conflict" || ack["session_id"] != "root:resume:2" || ack["owner_project"] != "foreign" || ack["requested_project"] != "engram" {
+				t.Fatalf("conflict: %d %v", rec.Code, ack)
+			}
+			if _, err := st.GetSession("root:resume:3"); err == nil {
+				t.Fatal("advanced past conflict")
+			}
+		})
+	}
+}
+
+func TestCreateSessionResumeEndedRootProjectConflict(t *testing.T) {
+	for _, mode := range []string{store.SessionOwnershipProjectOwned, store.SessionOwnershipShared} {
+		for _, continuation := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/continuation=%v", mode, continuation), func(t *testing.T) {
+				st := newServerTestStore(t)
+				if err := st.StartSessionWithOwnershipMode("root", "project-a", "/work", store.SessionOwnershipProjectOwned); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.EndSession("root", "done"); err != nil {
+					t.Fatal(err)
+				}
+				if continuation {
+					if err := st.StartSessionWithOwnershipMode("root:resume:2", "project-b", "/work", mode); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rec := httptest.NewRecorder()
+				New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"id":"root","project":"project-b","resume":true,"ownership_mode":%q}`, mode))))
+				var ack map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil {
+					t.Fatal(err)
+				}
+				if rec.Code != http.StatusConflict || ack["code"] != "session_project_conflict" || ack["session_id"] != "root" || ack["owner_project"] != "project-a" || ack["requested_project"] != "project-b" {
+					t.Fatalf("root conflict: %d %v", rec.Code, ack)
+				}
+				if !continuation {
+					if _, err := st.GetSession("root:resume:2"); err == nil {
+						t.Fatal("created continuation despite root conflict")
+					}
+				}
+				if _, err := st.GetSession("root:resume:3"); err == nil {
+					t.Fatal("advanced past root conflict")
+				}
+			})
+		}
+	}
+}
+
+func TestCreateSessionResumeConcurrent(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	if err := st.StartSession("root", "engram", "/work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EndSession("root", ""); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan bool, 16)
+	for i := 0; i < 16; i++ {
+		go func() {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"root","project":"engram","resume":true}`)))
+			var ack map[string]string
+			err := json.Unmarshal(rec.Body.Bytes(), &ack)
+			done <- err == nil && rec.Code == 201 && ack["id"] == "root:resume:2" && ack["resumed_from"] == "root"
+		}()
+	}
+	for i := 0; i < 16; i++ {
+		if !<-done {
+			t.Error("concurrent request did not converge")
+		}
+	}
+}
 
 type stubListener struct{}
 
@@ -73,7 +389,7 @@ func TestHealthReportsVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(nil, 0)
+			srv := New(newServerTestStore(t), 0)
 			if tt.setVersion {
 				srv.SetVersion(tt.version)
 			}
@@ -85,15 +401,43 @@ func TestHealthReportsVersion(t *testing.T) {
 			}
 
 			var response struct {
-				Version string `json:"version"`
+				Version      string          `json:"version"`
+				Capabilities map[string]bool `json:"capabilities"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode /health response: %v", err)
+			}
+			if !response.Capabilities["root_session_resume"] {
+				t.Fatal("/health must advertise root_session_resume")
 			}
 			if response.Version != tt.version {
 				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)
 			}
 		})
+	}
+}
+
+func TestHealthRejectsFailedStore(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("failed store health = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	assertGenericStoreError(t, rec, "health check failed")
+}
+
+func assertGenericStoreError(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if body["error"] != want || strings.Contains(strings.ToLower(rec.Body.String()), "database is closed") || strings.Contains(strings.ToLower(rec.Body.String()), "sqlite") {
+		t.Fatalf("unsafe or unexpected error response: %s; want %q", rec.Body.String(), want)
 	}
 }
 
@@ -149,8 +493,16 @@ func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	go func() { _ = http.Serve(ln, winner.Handler()) }()
 	t.Cleanup(func() { _ = ln.Close() })
+	var output bytes.Buffer
+	originalWriter := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(originalWriter) })
 	if err := New(owner, port).Start(); err != nil {
 		t.Fatalf("same-instance bind loser: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "did not bind") || !strings.Contains(lines[0], "an existing instance owns the port") || !strings.Contains(lines[0], fmt.Sprintf("127.0.0.1:%d", port)) {
+		t.Fatalf("same-instance diagnostic = %q, want one actionable line", output.String())
 	}
 	foreign := newServerTestStore(t)
 	if err := New(foreign, port).Start(); err == nil || !strings.Contains(err.Error(), "different or legacy") {
@@ -556,32 +908,50 @@ func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 	for _, tc := range []struct {
 		id        string
 		directory string
+		omit      bool
 	}{
 		{id: "nested-trailing", directory: nested + string(os.PathSeparator)},
 		{id: "nested-relative", directory: filepath.Join("nested", "child")},
-		{id: "omitted-directory"},
+		{id: "omitted-directory", omit: true},
+		{id: "empty-directory"},
+		{id: "whitespace-directory", directory: " \t\n "},
 	} {
-		t.Run(tc.id, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			body := fmt.Sprintf(`{"id":%q,"project":"engram"`, tc.id)
-			if tc.directory != "" {
-				body += fmt.Sprintf(`,"directory":%q`, tc.directory)
-			}
-			body += `}`
-			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
-			h.ServeHTTP(rec, req)
-			if rec.Code != http.StatusCreated {
-				t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
-			}
+		for _, resume := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/resume=%t", tc.id, resume), func(t *testing.T) {
+				id := fmt.Sprintf("%s-%t", tc.id, resume)
+				rec := httptest.NewRecorder()
+				body := fmt.Sprintf(`{"id":%q,"project":"engram","resume":%t}`, id, resume)
+				if !tc.omit {
+					body = strings.TrimSuffix(body, "}") + fmt.Sprintf(`,"directory":%q}`, tc.directory)
+				}
+				req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusCreated {
+					t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
+				}
 
-			session, err := st.GetSession(tc.id)
-			if err != nil {
-				t.Fatalf("get session: %v", err)
-			}
-			if want := projectpkg.RuntimeWorktreeDirectory(root); session.Directory != want {
-				t.Fatalf("stored directory = %q, want worktree root %q", session.Directory, want)
-			}
-		})
+				session, err := st.GetSession(id)
+				if err != nil {
+					t.Fatalf("get session: %v", err)
+				}
+				// Ordinary registrations retain runtime cwd normalization, including blank input.
+				want := projectpkg.RuntimeWorktreeDirectory(root)
+				if session.Directory != want {
+					t.Errorf("stored directory = %q, want %q", session.Directory, want)
+				}
+				candidates, err := st.ActiveRuntimeSessions("engram", root)
+				if err != nil {
+					t.Fatalf("active runtime sessions: %v", err)
+				}
+				found := false
+				for _, candidate := range candidates {
+					found = found || candidate == id
+				}
+				if found != (want != "") {
+					t.Errorf("runtime candidate = %t, want %t (candidates: %v)", found, want != "", candidates)
+				}
+			})
+		}
 	}
 }
 
@@ -1502,7 +1872,7 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 		t.Fatalf("expected 400 for invalid observation id, got %d", getBadIDRec.Code)
 	}
 
-	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999", strings.NewReader(`{"title":"updated"}`))
+	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999?expected_project=engram", strings.NewReader(`{"title":"updated"}`))
 	updateNotFoundReq.Header.Set("Content-Type", "application/json")
 	updateNotFoundRec := httptest.NewRecorder()
 	h.ServeHTTP(updateNotFoundRec, updateNotFoundReq)
@@ -1586,8 +1956,8 @@ func TestWriteHandlersRejectWhitespaceOnlyRequiredFields(t *testing.T) {
 
 	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":" \t\n ","content":"Invalid observation","project":"engram"}`, store.ErrObservationTitleRequired)
 	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":"Valid title","content":" \t\n ","project":"engram"}`, store.ErrObservationContentRequired)
-	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"title":" \t\n "}`, store.ErrObservationTitleRequired)
-	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"content":" \t\n "}`, store.ErrObservationContentRequired)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", observationID), `{"title":" \t\n "}`, store.ErrObservationTitleRequired)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", observationID), `{"content":" \t\n "}`, store.ErrObservationContentRequired)
 	assertBadRequest(http.MethodPost, "/prompts", `{"session_id":"s-whitespace","content":" \t\n ","project":"engram"}`, store.ErrPromptContentRequired)
 
 	var observationCount, promptCount int
@@ -2055,6 +2425,85 @@ func TestSyncStatusResolvesProjectSelectors(t *testing.T) {
 	}
 }
 
+func TestPromptInboxIdentityHTTP(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	var writes atomic.Int32
+	srv.SetOnWrite(func() { writes.Add(1) })
+	if err := st.CreateSession("inbox-http", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	request := func(body string) (int, string) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(body)))
+		return rec.Code, rec.Body.String()
+	}
+	payload := `{"session_id":"inbox-http","project":"engram","content":"same","source_inbox_id":"a"}`
+	code, first := request(payload)
+	if code != http.StatusCreated || writes.Load() != 1 {
+		t.Fatalf("first: %d %s writes=%d", code, first, writes.Load())
+	}
+	var created struct {
+		ID     int64  `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(first), &created); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if created.ID <= 0 || created.Status != "saved" {
+		t.Fatalf("first response: id=%d status=%q body=%s", created.ID, created.Status, first)
+	}
+	code, replay := request(payload)
+	if code != http.StatusCreated || replay != first || writes.Load() != 1 {
+		t.Fatalf("replay: %d %s writes=%d", code, replay, writes.Load())
+	}
+	code, rejected := request(`{"session_id":"inbox-http","project":"other","content":"same","source_inbox_id":"a"}`)
+	var rejection map[string]string
+	if err := json.Unmarshal([]byte(rejected), &rejection); err != nil {
+		t.Fatalf("decode wrong-project response: %v", err)
+	}
+	if code != http.StatusBadRequest || rejection["code"] != "session_project_mismatch" ||
+		rejection["error"] != "session project does not match requested project" || writes.Load() != 1 {
+		t.Fatalf("wrong project: %d %s writes=%d", code, rejected, writes.Load())
+	}
+}
+
+func TestPromptInboxDeletedReplayHTTP(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	if err := st.CreateSession("deleted-http", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddPrompt(store.AddPromptParams{SessionID: "deleted-http", Project: "engram", Content: "same", SourceInboxID: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeletePrompt(id); err != nil {
+		t.Fatal(err)
+	}
+	var writes atomic.Int32
+	srv.SetOnWrite(func() { writes.Add(1) })
+	var before, after int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"deleted-http","project":"engram","content":"same","source_inbox_id":"one"}`)))
+	if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), `"id"`) || writes.Load() != 0 {
+		t.Fatalf("replay: status=%d body=%s writes=%d", rec.Code, rec.Body.String(), writes.Load())
+	}
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&after); err != nil || after != before {
+		t.Fatalf("mutations %d -> %d: %v", before, after, err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"deleted-http","project":"engram","content":"same","source_inbox_id":"two"}`)))
+	if rec.Code != http.StatusCreated || writes.Load() != 1 {
+		t.Fatalf("new ID: status=%d body=%s writes=%d", rec.Code, rec.Body.String(), writes.Load())
+	}
+}
+
 // ─── OnWrite Notification Tests ──────────────────────────────────────────────
 
 func TestOnWriteCalledAfterSuccessfulWrites(t *testing.T) {
@@ -2190,6 +2639,27 @@ func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 	}
 }
 
+func TestStatsRejectsFailedStore(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/stats?all_projects=true", "/stats?project=alpha"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("failed store stats = %d, want 500: %s", rec.Code, rec.Body.String())
+			}
+			want := "stats unavailable"
+			if path == "/stats?project=alpha" {
+				want = "project resolution failed"
+			}
+			assertGenericStoreError(t, rec, want)
+		})
+	}
+}
+
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
 	loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -2249,6 +2719,7 @@ func TestProjectResolutionStoreFailureReturnsInternalErrorCode(t *testing.T) {
 	if body["code"] != "project_resolution_failed" {
 		t.Fatalf("resolution failure code = %#v, want project_resolution_failed: %s", body["code"], rec.Body.String())
 	}
+	assertGenericStoreError(t, rec, "project resolution failed")
 }
 
 // ─── DELETE /sessions/{id} tests ─────────────────────────────────────────────
@@ -3754,9 +4225,11 @@ func TestContextMaxBytesQuery(t *testing.T) {
 		t.Fatalf("max_bytes wiring returned %d bytes: %q", len(bounded), bounded)
 	}
 
-	clamped := contextFor(t, "&max_bytes=999999999")
-	if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
-		t.Fatalf("max_bytes clamp returned %d bytes, want %d", len(clamped), contextMaxBytes)
+	for _, query := range []string{"999999999", "100000000000000000000"} {
+		clamped := contextFor(t, "&max_bytes="+query)
+		if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
+			t.Fatalf("max_bytes=%s returned %d bytes (truncated=%t), want %d with truncation", query, len(clamped), strings.HasSuffix(clamped, "\n[truncated]\n"), contextMaxBytes)
+		}
 	}
 }
 
@@ -3961,6 +4434,111 @@ func TestHandleAddObservationBlankTitleNotMaskedBySessionError(t *testing.T) {
 	}
 }
 
+func TestObservationExpectedProjectPreservesImmutableBodyProject(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("immutable-owner", "owner", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "immutable-owner", Project: "owner", Type: "note", Title: "original", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=owner", id), strings.NewReader(`{"project":"other","content":"changed"}`)))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), store.ErrObservationProjectImmutable.Error()) {
+		t.Fatalf("immutable project response = %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.GetObservation(id)
+	if err != nil || after.Project == nil || *after.Project != "owner" || after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+		t.Fatalf("immutable rejection changed record: %#v, %v", after, err)
+	}
+}
+
+func TestObservationExpectedProject(t *testing.T) {
+	for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+		for _, tc := range []struct {
+			name, query string
+			status      int
+		}{
+			{"missing", "", http.StatusBadRequest},
+			{"blank", "?expected_project=%20", http.StatusBadRequest},
+			{"invalid", "?expected_project=../owner", http.StatusBadRequest},
+			{"mismatch", "?expected_project=other", http.StatusConflict},
+		} {
+			t.Run(method+"/"+tc.name, func(t *testing.T) {
+				st := newServerTestStore(t)
+				if err := st.CreateSession("expected-owner", "owner", t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
+				id, err := st.AddObservation(store.AddObservationParams{SessionID: "expected-owner", Project: "owner", Type: "note", Title: "original", Content: "original"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := st.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := httptest.NewRecorder()
+				New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(method, fmt.Sprintf("/observations/%d%s", id, tc.query), strings.NewReader(`{"content":"changed"}`)))
+				if rec.Code != tc.status {
+					t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+				}
+				after, err := st.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+					t.Fatal("rejected mutation changed observation")
+				}
+			})
+		}
+	}
+}
+
+func TestHandleUpdateObservationFindReplace(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+	if err := st.CreateSession("s-find-replace", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-find-replace", Type: "note", Title: "Original", Content: "old old", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	replace := httptest.NewRecorder()
+	h.ServeHTTP(replace, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(`{"find":"old","replace":"new"}`)))
+	if replace.Code != http.StatusOK {
+		t.Fatalf("replacement PATCH = %d: %s", replace.Code, replace.Body.String())
+	}
+	var updated store.Observation
+	if err := json.Unmarshal(replace.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode replacement response: %v", err)
+	}
+	if updated.Content != "new new" {
+		t.Fatalf("replacement content = %q", updated.Content)
+	}
+
+	for _, body := range []string{`{"find":"new"}`, `{"find":"new","replace":"old","content":"other"}`} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("invalid replacement PATCH %s = %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodPatch, "/observations/999999?expected_project=engram", strings.NewReader(`{"find":"old","replace":"new"}`)))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing replacement PATCH = %d: %s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
@@ -4005,7 +4583,7 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 	for _, title := range []string{"", " \t\n "} {
 		title := title
 		t.Run("blank title", func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
+			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d?expected_project=engram", id), strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -4035,7 +4613,7 @@ func TestHandleUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T
 		t.Fatalf("expected no onWrite calls for rejected updates, got %d", writeCount.Load())
 	}
 
-	req := httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"title":"updated"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/observations/999999?expected_project=engram", strings.NewReader(`{"title":"updated"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -4099,6 +4677,56 @@ func TestListProjectsEndpointEmptyStore(t *testing.T) {
 	}
 	if body.Count != 0 || body.Projects == nil || len(body.Projects) != 0 {
 		t.Fatalf("expected empty successful listing, got count=%d projects=%v", body.Count, body.Projects)
+	}
+}
+
+func TestHandleCreateSessionClaimsEndedLegacyOwner(t *testing.T) {
+	st := newServerTestStore(t)
+	const id = "ended-unowned-http"
+	const ended = "2024-01-02 03:04:05"
+	if _, err := st.DB().Exec(`INSERT INTO sessions(id, project, directory, started_at, ended_at) VALUES (?, '', '', ?, ?)`, id, ended, ended); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, 0).Handler()
+	for _, tc := range []struct{ project, code string }{
+		{"project-a", "session_already_ended"},
+		{"project-b", "session_project_conflict"},
+	} {
+		rec := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"id":%q,"project":%q,"ownership_mode":"project_owned"}`, id, tc.project)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		var response struct {
+			Code         string `json:"code"`
+			OwnerProject string `json:"owner_project"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusConflict || response.Code != tc.code {
+			t.Fatalf("%s response = %d %s", tc.project, rec.Code, rec.Body.String())
+		}
+		if tc.project == "project-b" && response.OwnerProject != "project-a" {
+			t.Fatalf("wrong owner: %s", rec.Body.String())
+		}
+	}
+	var project, mode, gotEnded string
+	if err := st.DB().QueryRow(`SELECT project, ownership_mode, ended_at FROM sessions WHERE id = ?`, id).Scan(&project, &mode, &gotEnded); err != nil {
+		t.Fatal(err)
+	}
+	if project != "project-a" || mode != store.SessionOwnershipProjectOwned || gotEnded != ended {
+		t.Fatalf("session project=%q mode=%q ended=%q", project, mode, gotEnded)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{SessionID: id, Project: "project-b", Type: "manual", Title: "blocked", Content: "blocked", Scope: "project"}); !errors.Is(err, store.ErrSessionOwnershipMismatch) {
+		t.Fatalf("losing observation = %v", err)
+	}
+	if _, err := st.AddPrompt(store.AddPromptParams{SessionID: id, Project: "project-b", Content: "blocked"}); !errors.Is(err, store.ErrSessionOwnershipMismatch) {
+		t.Fatalf("losing prompt = %v", err)
+	}
+	for _, table := range []string{"observations", "user_prompts"} {
+		var count int
+		if err := st.DB().QueryRow(`SELECT count(*) FROM `+table+` WHERE session_id = ?`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s losing writes=%d err=%v", table, count, err)
+		}
 	}
 }
 

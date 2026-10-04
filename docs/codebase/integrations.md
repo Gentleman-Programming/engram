@@ -39,7 +39,7 @@ is either:
 - **declarative** — just an MCP path + format (`mcpServers` / `servers` / OpenCode's
   `mcp` object) and instruction surfaces; the generic `injectMCP` / `writeInstruction`
   driver in `registry.go` does the writes. Antigravity CLI, Windsurf, Qwen, Kiro,
-  Cursor, VS Code Copilot, and Kilo Code are all declarative.
+  Cursor, VS Code Copilot, Kilo Code, Kimi Code, and CommandCode are all declarative.
 
 Adding a declarative agent is normally just a new entry in `agentAdapters()` plus
 its path helpers — no new install code path. Agents not in the registry remain
@@ -60,6 +60,24 @@ Plugins may:
 Plugins **should not** implement core memory semantics. If there is a dedupe, prompt capture, relation judgment, or project resolution rule, it must be in Go.
 
 For per-agent details, use [docs/AGENT-SETUP.md](../AGENT-SETUP.md) and [docs/PLUGINS.md](../PLUGINS.md).
+
+## Runtime session identity
+
+Adapters translate host runtime identity into an Engram session; they do not own
+persistence or decide which session an omitted ID should select.
+
+| Adapter | Runtime-to-Engram mapping | Registration before identity use |
+| --- | --- | --- |
+| Claude Code | SessionStart posts the host `session_id` with its resolved project and directory. | SessionStart alone does not confirm registration. Before binding a classified Engram write/session tool, PreToolUse confirms project-owned registration for the host ID and cwd with HTTP 201, matching `id`, and `status: "created"`; otherwise it denies the call. |
+| Codex | SessionStart posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model only after matching HTTP 201, `id`, and `status: "created"`. Failed confirmation withholds the active memory-tool protocol on startup, resume, clear, and post-compaction while preserving the warning and fetched context; independent CLI/manual saves are not a session-attribution fallback. | Prompt capture requires confirmed registration of the host session before posting; before allowing and binding a classified Engram write/session tool, PreToolUse re-confirms the host ID and cwd using shared session ownership, and failed or ended registration denies the call. |
+| OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. The core selects a live continuation when the root has ended. | Before session-attributed tool writes it registers the root with `resume: true`, rechecks host ownership, and injects the acknowledged effective `id` as `session_id`. Injection requires an HTTP-success response with `status: "created"` and an `id` equal to the root or prefixed by `<root>:resume:`; missing or foreign acknowledgements block injection. |
+
+Parent/root translation is specific to OpenCode's session hierarchy, not a
+universal adapter rule. Hook-level binding cannot protect calls when a hook is
+skipped, bypassed, or timed out; independent direct/manual MCP saves remain
+outside these adapters. Go owns the HTTP session registration and persistence
+contract ([Sessions](../../DOCS.md#sessions)), project/session validation and
+omitted-ID cardinality ([Write tools: explicit/session/cwd project resolution](../../DOCS.md#write-tools-explicitsessioncwd-project-resolution)).
 
 ## Setup boundary
 

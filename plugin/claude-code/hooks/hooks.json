@@ -1,6 +1,18 @@
 {
   "description": "Engram persistent memory hooks — session tracking, auto-import, compaction recovery, and passive capture",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(mcp__engram__|mcp__plugin_engram_engram__)(mem_save|mem_update|mem_review|mem_delete|mem_save_prompt|mem_pin|mem_unpin|mem_session_summary|mem_session_start|mem_session_end|mem_capture_passive|mem_merge_projects|mem_judge|mem_compare)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engram hook claude-pre-tool-use",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|fork",

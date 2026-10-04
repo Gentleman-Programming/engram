@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 )
 
 type fakeStore struct {
@@ -2122,6 +2122,9 @@ func TestBearerTokenFromRequest(t *testing.T) {
 		{name: "lowercase scheme", header: "bearer sync-token", setHeader: true, wantToken: "sync-token"},
 		{name: "tab separator", header: "Bearer\tsync-token", setHeader: true, wantToken: "sync-token"},
 		{name: "extra inner spaces", header: "Bearer   sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "outer whitespace", header: " \tBearer sync-token\t ", setHeader: true, wantToken: "sync-token"},
+		{name: "mixed separator whitespace", header: "Bearer \t  sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "whitespace inside credential", header: "Bearer sync-\ttoken", setHeader: true, wantErr: errAuthorizationNotBearer},
 		{name: "surplus credentials", header: "Bearer sync-token surplus", setHeader: true, wantErr: errAuthorizationNotBearer},
 		{name: "non-bearer scheme", header: "Token sync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
 		{name: "scheme glued to token", header: "Bearersync-token", setHeader: true, wantErr: errAuthorizationNotBearer},

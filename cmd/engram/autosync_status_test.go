@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
-	engramsrv "github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
+	engramsrv "github.com/Gentleman-Programming/engram/v3/internal/server"
 )
 
 // fakeStatusProvider implements server.SyncStatusProvider for fallback tests.
@@ -28,8 +28,8 @@ func (f *fakeAutosyncManager) Status() autosync.Status {
 }
 
 func (f *fakeAutosyncManager) Run(_ context.Context) {}
-func (f *fakeAutosyncManager) NotifyDirty()      {}
-func (f *fakeAutosyncManager) Stop()             {}
+func (f *fakeAutosyncManager) NotifyDirty()          {}
+func (f *fakeAutosyncManager) Stop()                 {}
 func (f *fakeAutosyncManager) StopForUpgrade(_ string) error {
 	return nil
 }

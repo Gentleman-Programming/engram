@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -22,7 +23,7 @@ func agentAdapters() []agentAdapter {
 		},
 		{
 			slug:        "pi",
-			description: "Pi — gentle-engram package plus pi-mcp-adapter MCP tools",
+			description: "Pi — gentle-engram package with Pi-native memory tools",
 			custom:      installPi,
 			installDir:  piAgentDir,
 			postInstall: []string{
@@ -49,13 +50,13 @@ func agentAdapters() []agentAdapter {
 		},
 		{
 			slug:        "codex",
-			description: "Codex — MCP registration, model/compaction instruction files, and plugin (hooks)",
+			description: "Codex — MCP registration, informational instruction files, and plugin (hooks)",
 			custom:      installCodex,
 			installDir:  codexConfigPath,
 			postInstall: []string{
 				"Restart Codex so MCP config and plugin are reloaded",
 				"Verify ~/.codex/config.toml has [mcp_servers.engram]",
-				"Verify model_instructions_file + experimental_compact_prompt_file are set",
+				"Verify ~/.codex/config.toml does NOT set model_instructions_file or experimental_compact_prompt_file (they replace Codex's built-in prompt)",
 				"Verify plugin is installed with: codex plugin list",
 				"If codex CLI was absent during setup, install manually: codex plugin marketplace add Gentleman-Programming/engram --ref main && codex plugin add engram@engram",
 			},
@@ -158,6 +159,37 @@ func agentAdapters() []agentAdapter {
 				"Restart Kilo Code so MCP config is reloaded",
 				"Verify ~/.config/kilo/opencode.json includes mcp.engram",
 				"Verify ~/.config/kilo/AGENTS.md has the Memory Protocol block",
+			},
+		},
+		{
+			slug:        "commandcode",
+			description: "CommandCode — MCP registration in ~/.commandcode/mcp.json plus AGENTS.md Memory Protocol",
+			mcpPath:     commandcodeMCPPath,
+			mcpFormat:   commandCodeObject,
+			instructions: []instrSurface{
+				{path: commandcodeAgentsPath, style: markerBlock, body: memoryProtocolMarkdown},
+			},
+			postInstall: []string{
+				"Restart the CommandCode session so MCP config is reloaded",
+				"Verify ~/.commandcode/mcp.json includes mcpServers.engram",
+				"Verify ~/.commandcode/AGENTS.md has the Memory Protocol block",
+			},
+		},
+		{
+			slug:        "kimi",
+			description: "Kimi Code CLI — MCP registration in ~/.kimi-code/mcp.json plus AGENTS.md Memory Protocol",
+			mcpPath:     kimiMCPPath,
+			mcpFormat:   mcpServersObject,
+			instructions: []instrSurface{
+				{path: kimiAgentsPath, style: markerBlock, body: memoryProtocolMarkdown},
+			},
+			// Built from the resolved paths instead of the default root: an
+			// absolute KIMI_CODE_HOME relocates both files, so a hardcoded
+			// ~/.kimi-code would send the user to files setup never wrote.
+			postInstall: []string{
+				"Restart Kimi Code so MCP config is reloaded",
+				fmt.Sprintf("Verify %s includes mcpServers.engram", kimiMCPPath()),
+				fmt.Sprintf("Verify %s has the Memory Protocol block", kimiAgentsPath()),
 			},
 		},
 	}
@@ -290,4 +322,48 @@ func kilocodeConfigPath() string {
 
 func kilocodeAgentsPath() string {
 	return filepath.Join(kilocodeConfigDir(), "AGENTS.md")
+}
+
+// ─── CommandCode paths ───────────────────────────────────────────────────────
+//
+// CommandCode stores user-scope MCP servers in ~/.commandcode/mcp.json
+// (top-level "mcpServers") and user-tier memory in ~/.commandcode/AGENTS.md,
+// which is re-read every request alongside project and subdirectory tiers.
+
+func commandcodeDir() string {
+	home, _ := userHome()
+	return filepath.Join(home, ".commandcode")
+}
+
+func commandcodeMCPPath() string {
+	return filepath.Join(commandcodeDir(), "mcp.json")
+}
+
+func commandcodeAgentsPath() string {
+	return filepath.Join(commandcodeDir(), "AGENTS.md")
+}
+
+// ─── Kimi Code paths ─────────────────────────────────────────────────────────
+//
+// Kimi Code keeps all user-level data under KIMI_CODE_HOME (default
+// ~/.kimi-code on every platform, including Windows). MCP servers are declared
+// in mcp.json (top-level "mcpServers") and global agent instructions in
+// AGENTS.md; both live directly under the data root. Like the XDG/APPDATA
+// helpers above, only an absolute KIMI_CODE_HOME is honored — a relative value
+// falls back to the default root instead of writing under the working directory.
+
+func kimiCodeHome() string {
+	if dir := os.Getenv("KIMI_CODE_HOME"); dir != "" && filepath.IsAbs(dir) {
+		return dir
+	}
+	home, _ := userHome()
+	return filepath.Join(home, ".kimi-code")
+}
+
+func kimiMCPPath() string {
+	return filepath.Join(kimiCodeHome(), "mcp.json")
+}
+
+func kimiAgentsPath() string {
+	return filepath.Join(kimiCodeHome(), "AGENTS.md")
 }

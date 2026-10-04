@@ -39,6 +39,7 @@ type promptContext struct {
 type ambiguousProjectRecovery struct {
 	availableProjects []string
 	contextPath       string
+	candidatePaths    []string
 	expiresAt         time.Time
 	selectedProject   string
 }
@@ -56,7 +57,7 @@ func NewSessionActivity(nudgeAfter time.Duration) *SessionActivity {
 func generateRecoveryToken() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+		return ""
 	}
 	return hex.EncodeToString(b[:])
 }
@@ -98,11 +99,16 @@ func (a *SessionActivity) IssueAmbiguousProjectRecoveryToken(sessionID string, a
 		s.recoveryTokens = make(map[string]*ambiguousProjectRecovery)
 	}
 	token := generateRecoveryToken()
+	path, paths, ok := recoveryContext(availableProjects, contextPath)
+	if token == "" || !ok {
+		return ""
+	}
 	projects := append([]string(nil), availableProjects...)
 	slices.Sort(projects)
 	s.recoveryTokens[token] = &ambiguousProjectRecovery{
 		availableProjects: projects,
-		contextPath:       filepath.Clean(contextPath),
+		contextPath:       path,
+		candidatePaths:    paths,
 		expiresAt:         a.now().Add(ambiguousProjectRecoveryTTL),
 	}
 	return token
@@ -130,7 +136,8 @@ func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token
 	}
 	projects := append([]string(nil), availableProjects...)
 	slices.Sort(projects)
-	if !slices.Equal(recovery.availableProjects, projects) || recovery.contextPath != filepath.Clean(contextPath) {
+	path, paths, valid := recoveryContext(availableProjects, contextPath)
+	if !valid || !slices.Contains(projects, selectedProject) || !slices.Equal(recovery.availableProjects, projects) || recovery.contextPath != path || !slices.Equal(recovery.candidatePaths, paths) {
 		return false
 	}
 	if recovery.selectedProject == "" {
@@ -138,6 +145,33 @@ func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token
 		return true
 	}
 	return recovery.selectedProject == selectedProject
+}
+
+// recoveryContext binds exact detector names to unique canonical repository paths.
+// Duplicate case-normalized directories must not disappear behind a single name.
+func recoveryContext(projects []string, contextPath string) (string, []string, bool) {
+	path, err := filepath.EvalSymlinks(contextPath)
+	if err != nil {
+		return "", nil, false
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", nil, false
+	}
+	names := append([]string(nil), projects...)
+	slices.Sort(names)
+	paths := make([]string, 0, len(names))
+	for i, name := range names {
+		if name == "" || (i > 0 && names[i-1] == name) {
+			return "", nil, false
+		}
+		candidate := resolveAmbiguousChoicePath(path, name)
+		if candidate == "" {
+			return "", nil, false
+		}
+		paths = append(paths, candidate)
+	}
+	return path, paths, len(paths) > 1
 }
 
 // RecordSave increments the save counter and updates lastSaveAt.

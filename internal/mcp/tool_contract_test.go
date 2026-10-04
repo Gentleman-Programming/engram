@@ -474,11 +474,91 @@ func TestMCPToolContractV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Issue #1569 deliberately requires caller-authored owner assertions on
+	// these two mutations. Assert their exact schema, then compare every other
+	// field against the unchanged v1 baseline using the original ratchet.
+	if err := removeApprovedExpectedProjectDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyMCPToolContract(fixture, live, before); err != nil {
 		t.Fatal(err)
 	}
 	if after, err := os.ReadFile("testdata/tool-contract-v1.json"); err != nil || string(before) != string(after) {
 		t.Fatalf("fixture changed: %v", err)
+	}
+}
+
+// removeApprovedExpectedProjectDelta applies only the two approved v1 breaks.
+// It operates on observed test schemas, never on the baseline fixture.
+func removeApprovedExpectedProjectDelta(live map[string]mcpToolSchema) error {
+	for _, name := range []string{"mem_update", "mem_delete"} {
+		tool, ok := live[name]
+		if !ok {
+			return fmt.Errorf("approved mutation tool %s is missing", name)
+		}
+		field, ok := tool.Properties["expected_project"]
+		if !ok || !slices.Equal(field.Types, []string{"string"}) || len(field.Properties) != 0 || len(field.Required) != 0 || field.Items != nil || len(field.Enum) != 0 || !field.Additional {
+			return fmt.Errorf("%s expected_project must retain the approved string schema: %#v", name, field)
+		}
+		index := slices.Index(tool.Required, "expected_project")
+		if index < 0 {
+			return fmt.Errorf("%s expected_project must be required", name)
+		}
+		delete(tool.Properties, "expected_project")
+		tool.Required = slices.Delete(tool.Required, index, index+1)
+		live[name] = tool
+	}
+	return nil
+}
+
+func TestApprovedExpectedProjectDeltaPreservesRatchet(t *testing.T) {
+	for _, tc := range []struct {
+		name, change, want string
+	}{
+		{"approved pair only", "", ""},
+		{"optional assertion rejected", "optional", "must be required"},
+		{"different assertion type rejected", "type", "approved string schema"},
+		{"another mutation requirement rejected", "mutation requirement", "new-required-property"},
+		{"another tool requirement rejected", "other requirement", "new-required-property"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := map[string]mcpToolSchema{}
+			live := map[string]mcpToolSchema{}
+			for _, name := range []string{"mem_update", "mem_delete", "mem_search"} {
+				fixture[name] = mustNormalize(t, `{"type":"object","properties":{"id":{"type":"number"}},"required":["id"],"additionalProperties":true}`)
+				live[name] = mustNormalize(t, `{"type":"object","properties":{"id":{"type":"number"}},"required":["id"],"additionalProperties":true}`)
+			}
+			for _, name := range []string{"mem_update", "mem_delete"} {
+				tool := live[name]
+				tool.Properties["expected_project"] = mcpToolSchema{Types: []string{"string"}, Additional: true}
+				tool.Required = append(tool.Required, "expected_project")
+				live[name] = tool
+			}
+			switch tc.change {
+			case "optional":
+				tool := live["mem_delete"]
+				tool.Required = []string{"id"}
+				live["mem_delete"] = tool
+			case "type":
+				live["mem_update"].Properties["expected_project"] = mcpToolSchema{Types: []string{"number"}, Additional: true}
+			case "mutation requirement", "other requirement":
+				name := "mem_update"
+				if tc.change == "other requirement" {
+					name = "mem_search"
+				}
+				tool := live[name]
+				tool.Properties["unapproved"] = mcpToolSchema{Types: []string{"string"}, Additional: true}
+				tool.Required = append(tool.Required, "unapproved")
+				live[name] = tool
+			}
+			err := removeApprovedExpectedProjectDelta(live)
+			if err == nil {
+				err = compareMCPToolContract(fixture, live)
+			}
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

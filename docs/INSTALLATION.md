@@ -8,6 +8,7 @@
 - [Install from source (macOS / Linux)](#install-from-source-macos--linux)
 - [Download binary (all platforms)](#download-binary-all-platforms)
 - [Requirements](#requirements)
+- [Data-directory filesystem safety](#data-directory-filesystem-safety)
 - [Environment Variables](#environment-variables)
 - [Windows Config Paths](#windows-config-paths)
 
@@ -46,18 +47,19 @@ brew update && brew upgrade engram
 
 If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it.
 
-Two paths exist because Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule appends `/v2` (and above) to the module path starting at major version 2. Pick the line that matches the major version you want:
+Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule puts the major version in the module path starting at major version 2, so each major line has its own `go install` path. Pick the line that matches the major version you want:
 
 ```powershell
-# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
-go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+# Current line (v3.x)
+go install github.com/Gentleman-Programming/engram/v3/cmd/engram@latest
 
-# v2 line (first post-migration release candidate or any later v2 release)
+# Previous lines, only if you must stay on an older major version
 go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
+go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 ```
 
-The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
+The `/v3` command requires `v3.0.0` or a later v3 release. `@latest` selects the latest released version for the requested module path only; it never moves you to another major line.
 
 Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
@@ -134,18 +136,19 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 
 ## Install from source (macOS / Linux)
 
-Pick the line that matches the major version you want — the `/v2` suffix exists starting at major version 2 because of Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule:
+Pick the line that matches the major version you want — the `/vN` suffix exists starting at major version 2 because of Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule:
 
 ```bash
-# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
-go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+# Current line (v3.x)
+go install github.com/Gentleman-Programming/engram/v3/cmd/engram@latest
 
-# v2 line (first post-migration release candidate or any later v2 release)
+# Previous lines, only if you must stay on an older major version
 go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
+go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 # Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
 
-The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
+The `/v3` command requires `v3.0.0` or a later v3 release. `@latest` selects the latest released version for the requested module path only; it never moves you to another major line.
 
 Or build from a local clone:
 
@@ -200,6 +203,26 @@ The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.
 
 ---
 
+## Data-directory filesystem safety
+
+Engram uses persistent SQLite WAL and rejects known NFS and SMB/CIFS data directories before changing the SQLite files. Use a local disk for `ENGRAM_DATA_DIR`; an unknown filesystem remains compatible but is not proven local.
+
+If startup rejects a network data directory, stop **all** Engram processes. Copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage, set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected), then start Engram and run `engram doctor`. Check SQLite integrity with the command for your shell:
+
+```bash
+# POSIX shell or Git Bash
+sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"
+```
+
+```powershell
+# PowerShell
+sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
+```
+
+Engram does not auto-repair, quarantine, checkpoint, or use rollback journaling as a fallback.
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -218,7 +241,7 @@ When using `engram setup`, config files are written to platform-appropriate loca
 |-------|---------------|---------|
 | OpenCode | `~/.config/opencode/` | `%APPDATA%\opencode\` |
 | Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
-| Codex | `~/.codex/` | `%APPDATA%\codex\` |
+| Codex | `$CODEX_HOME/` when absolute, else `~/.codex/` | `%CODEX_HOME%\` when absolute, else `%USERPROFILE%\.codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
 | Antigravity CLI | `~/.gemini/config/mcp_config.json` + `~/.gemini/GEMINI.md` | `%APPDATA%\gemini\config\mcp_config.json` + `%APPDATA%\gemini\GEMINI.md` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` + `.../memories/global_rules.md` | `%USERPROFILE%\.codeium\windsurf\...` |
@@ -227,4 +250,6 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Cursor | `~/.cursor/mcp.json` + `~/.cursor/rules/engram.mdc` | `%USERPROFILE%\.cursor\...` |
 | VS Code Copilot | `~/.config/Code/User/mcp.json` + `.../prompts/engram.instructions.md` (macOS: `~/Library/Application Support/Code/User/`) | `%APPDATA%\Code\User\...` |
 | Kilo Code | `~/.config/kilo/opencode.json` + `~/.config/kilo/AGENTS.md` | `%USERPROFILE%\.config\kilo\...` |
+| Kimi Code | `~/.kimi-code/mcp.json` + `~/.kimi-code/AGENTS.md` | `%USERPROFILE%\.kimi-code\...` |
+| CommandCode | `~/.commandcode/mcp.json` + `~/.commandcode/AGENTS.md` | `%USERPROFILE%\.commandcode\mcp.json` + `%USERPROFILE%\.commandcode\AGENTS.md` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |

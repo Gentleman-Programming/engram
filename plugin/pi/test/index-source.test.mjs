@@ -6,6 +6,17 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 
+test("observation mutations require explicit expected owner and forward it", () => {
+  for (const name of ["mem_update", "mem_delete"]) {
+    const schema = source.split(`${name}: Type.Object({`)[1].split("\n  }),")[0];
+    assert.match(schema, /expected_project: Type\.String\(/);
+    assert.doesNotMatch(schema, /expected_project: optionalString/);
+    const handler = source.split(`case "${name}":`)[1].split("\n    case ")[0];
+    assert.match(handler, /expected_project: params\.expected_project/);
+    assert.doesNotMatch(handler, /expected_project: (activeProject|resolvedProject)/);
+  }
+});
+
 function extractFunctionBody(name, marker) {
   const signatureIndex = source.indexOf(`function ${name}`);
   assert.notEqual(signatureIndex, -1, `${name} signature not found`);
@@ -47,7 +58,7 @@ function buildAwaitWithAbortForTest() {
   `)();
 }
 
-function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal }) {
+function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal, appendEntry = () => {} }) {
   const body = extractFunctionBody("executeMemoryTool", "{\n  const action")
     .replaceAll('type: "text" as const', 'type: "text"');
   const factory = new Function(
@@ -56,13 +67,15 @@ function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjec
     "refreshProjectDetection",
     "callMemoryTool",
     "scheduleEngramSelfHeal",
+    "appendEntry",
     `
     let project = "engram";
     class EngramHttpError extends Error {}
+    class ForeignOwnershipError extends Error {}
     const humanToolName = (toolName) => toolName;
     const createMemoryToolTransport = () => ({
       fetch: async () => null,
-      timedOutMethod: () => undefined,
+      transportFailure: () => undefined,
     });
     const unreachableMessage = () => "unreachable";
     const textResult = () => "result";
@@ -75,22 +88,20 @@ function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjec
     return executeMemoryTool;
     `,
   );
-  return factory(awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal);
+  return factory(awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal, appendEntry);
 }
 
 function buildEngramFetchForTest({
   wait = () => Promise.resolve(),
-  timeoutMs = 3000,
-  maxAttempts = 3,
   backoffBaseMs = 150,
   recover = async () => false,
   abortSignal = AbortSignal,
   url = "http://127.0.0.1:7437",
 } = {}) {
   const body = extractFunctionBody("engramFetchResult", "{\n  const method")
-    .replace("let res: Response | undefined;", "let res;")
+    .replace("let res: Response;", "let res;")
     .replace("let data: unknown = null;", "let data = null;")
-    .replace("return engramFetchResult<TResponse>(path, opts);", "return engramFetchResult(path, opts);")
+    .replace("return engramFetchResult<TResponse>(path, opts, false);", "return engramFetchResult(path, opts, false);")
     .replace("return { data: data as TResponse };", "return { data };");
   const factory = new Function(
     "fetch",
@@ -98,8 +109,6 @@ function buildEngramFetchForTest({
     "redactUrlPath",
     "redactValue",
     "ENGRAM_URL",
-    "ENGRAM_FETCH_TIMEOUT_MS",
-    "ENGRAM_FETCH_MAX_ATTEMPTS",
     "ENGRAM_FETCH_BACKOFF_BASE_MS",
     "AbortSignal",
     "recoverImplicitEngramServer",
@@ -115,8 +124,23 @@ function buildEngramFetchForTest({
     function isTimeoutError(error) {
       ${extractFunctionBody("isTimeoutError", "{\n  return error instanceof Error")}
     }
+    ${["ENGRAM_WRITE_TIMEOUT_MS", "ENGRAM_READ_TIMEOUT_MS", "ENGRAM_DOCTOR_TIMEOUT_MS", "ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS", "ENGRAM_READ_MAX_ATTEMPTS", "ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS"].map((name) => {
+      const declaration = source.match(new RegExp(`^const ${name} = \\d+;`, "m"));
+      assert.ok(declaration, `${name} production policy missing`);
+      return declaration[0];
+    }).join("\n    ")}
+    const DEFINITE_PRE_DISPATCH_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "ERR_INVALID_URL"]);
+    function isDefinitelyPreDispatchError(error) {
+      ${extractFunctionBody("isDefinitelyPreDispatchError", "{\n  let current")}
+    }
+    function isIdempotentSessionRegistration(path, method) {
+      ${extractFunctionBody("isIdempotentSessionRegistration", "{\n  // Core uses")}
+    }
     function isSafeToReplay(path, method) {
-      return method === "GET" || (method === "POST" && path === "/sessions");
+      ${extractFunctionBody("isSafeToReplay", "{\n  return")}
+    }
+    function engramFetchPolicy(path, method) {
+      ${extractFunctionBody("engramFetchPolicy", "{\n  if (isIdempotentSessionRegistration")}
     }
     function isConnectionRefusedError(error) {
       return error instanceof Error && error.message === "connection refused";
@@ -124,7 +148,7 @@ function buildEngramFetchForTest({
     function unreachableMessage() {
       return "gentle-engram could not reach the Engram HTTP server";
     }
-    const engramFetchResult = async function engramFetchResult(path, opts = {}) {
+    const engramFetchResult = async function engramFetchResult(path, opts = {}, allowGuardedRecovery = true) {
       ${body}
     };
     const engramFetch = async (path, opts = {}) => (await engramFetchResult(path, opts)).data;
@@ -137,8 +161,6 @@ function buildEngramFetchForTest({
     (value) => value,
     (value) => value,
     url,
-    timeoutMs,
-    maxAttempts,
     backoffBaseMs,
     abortSignal,
     recover,
@@ -200,6 +222,11 @@ function buildInitializeEngramServerForTest({
     "DeterministicStartupError",
     `
     let localEngramInstanceID = "";
+    class ForeignOwnershipError extends DeterministicStartupError {
+      constructor(evidence) { super("Engram server ownership mismatch at " + ENGRAM_URL); this.evidence = evidence; }
+    }
+    const localEngramVersion = () => "unknown";
+    const missingInstanceIdentityMessage = () => "missing identity";
     const localInstanceID = () => instanceID;
     async function initializeEngramServer() {
       ${body}
@@ -210,7 +237,10 @@ function buildInitializeEngramServerForTest({
   );
   return factory(
     configuredUrl ? "http://configured" : undefined,
-    probeEngramHealth,
+    async (...args) => {
+      const status = await probeEngramHealth(...args);
+      return { status, localInstanceID: instanceID, remoteInstanceID: "ffffffffffffffffffffffffffffffff", remoteVersion: "unknown" };
+    },
     spawnAndWaitForEngram,
     waitForEngramReadiness,
     timeoutMs,
@@ -244,8 +274,8 @@ function buildInstanceIDFailureMessageForTest() {
 
 function buildLegacyEngramServerMessageForTest({ engramUrl = "http://127.0.0.1:7437", serverVersion = "unknown", localEngramVersion = () => "unknown" }) {
   const body = extractFunctionBody("legacyEngramServerMessage", "{\n  return");
-  const factory = new Function("ENGRAM_URL", "engramServerVersion", "localEngramVersion", `
-    return function legacyEngramServerMessage() {
+  const factory = new Function("ENGRAM_URL", "serverVersion", "localEngramVersion", `
+    return function legacyEngramServerMessage(engramServerVersion = serverVersion) {
       ${body}
     };
   `);
@@ -263,7 +293,9 @@ function buildLocalEngramVersionForTest({ spawnSync }) {
 }
 
 function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
-  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { version?: unknown; instance_id?: unknown };", "const health = await res.json();");
+  const body = extractFunctionBody("probeEngramHealth", "{\n  const result")
+    .replace("const result: EngramHealthResult", "const result")
+    .replace("const health = await res.json() as { version?: unknown; instance_id?: unknown };", "const health = await res.json();");
   const preIdentityVersionBody = extractFunctionBody("isPreIdentityEngramVersion", "{\n  const match");
   const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
     .replace("value as Record<string, unknown>", "value");
@@ -287,8 +319,10 @@ function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
     async function probeEngramHealth(expectedID = "") {
       ${body}
     }
-    probeEngramHealth.serverVersion = () => engramServerVersion;
-    return probeEngramHealth;
+    let lastResult;
+    const probe = async (...args) => { lastResult = await probeEngramHealth(...args); return lastResult.status; };
+    probe.serverVersion = () => lastResult.remoteVersion;
+    return probe;
     `,
   );
   return factory(fetch, isTimeoutError, "http://127.0.0.1:7437", { timeout: () => undefined });
@@ -384,7 +418,7 @@ function buildWaitForEngramReadinessForTest({ probeEngramHealth, pollMs = 5 }) {
     return waitForEngramReadiness;
     `,
   );
-  return factory(probeEngramHealth, "http://127.0.0.1:7437", pollMs);
+  return factory(async (...args) => ({ status: await probeEngramHealth(...args) }), "http://127.0.0.1:7437", pollMs);
 }
 
 function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 5 }) {
@@ -415,7 +449,7 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     return spawnAndWaitForEngram;
     `,
   );
-  return factory(spawn, probeEngramHealth, "engram", "http://127.0.0.1:7437", pollMs);
+  return factory(spawn, async (...args) => ({ status: await probeEngramHealth(...args) }), "engram", "http://127.0.0.1:7437", pollMs);
 }
 
 function buildEnsureSessionForTest(engramFetch) {
@@ -444,6 +478,7 @@ function buildEnsureSessionForTest(engramFetch) {
 function buildProjectDetectionBoundaryForTest() {
   const safeProjectBody = extractFunctionBody("isSafeDetectedProject", "{\n  const candidate");
   const applyBody = extractFunctionBody("applyDetectedProject", "{\n  if (!detected)");
+  const messageBody = extractFunctionBody("projectResolutionMessage", "{\n  const choices");
   const requireBody = extractFunctionBody("requireResolvedProject", "{\n  if (projectResolutionError)");
   const factory = new Function(`
     let project = "fallback-project";
@@ -454,6 +489,9 @@ function buildProjectDetectionBoundaryForTest() {
     }
     function applyDetectedProject(detected) {
       ${applyBody}
+    }
+    function projectResolutionMessage(detected, listChoices = false) {
+      ${messageBody}
     }
     function requireResolvedProject() {
       ${requireBody}
@@ -502,7 +540,9 @@ test("optional Engram environment values treat blank strings as unset without re
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch, true\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)[\s\S]*session_id: summarySessionId[\s\S]*project: activeProject/);
+  assert.match(source, /const registeredSessionForWrite = async \(sessionProject: string\) => \{[\s\S]*: registerEffectiveSession\(ctx, sessionProject, appendEntry, fetch\);/);
+  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
 });
 
 test("mem_save_prompt returns a prompt-scoped identity", () => {
@@ -531,9 +571,14 @@ test("project detection 404 falls back to local config or diagnostic", () => {
 });
 
 test("unsafe detected projects do not reach session or memory writes", () => {
-  assert.match(source, /case "mem_save":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
-  assert.match(source, /case "mem_save_prompt":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  for (const tool of ["mem_save", "mem_save_prompt", "mem_session_summary"]) {
+    const start = source.indexOf(`case "${tool}":`);
+    const next = source.indexOf('\n    case "', start + 1);
+    const block = source.slice(start, next);
+    assert.match(block, /if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*await registeredSessionForWrite\(activeProject\)/);
+    assert.ok(block.indexOf("requireResolvedProject()") < block.indexOf("await registeredSessionForWrite"), `${tool} must resolve project before registration`);
+  }
+  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
 
   for (const detected of [
     undefined,
@@ -743,7 +788,7 @@ test("a legacy server fails closed without spawning or waiting", async () => {
   assert.equal(readinessWaits, 0, "a legacy server is never waited on");
 });
 
-test("a foreign server keeps the exact ownership mismatch message and fails closed", async () => {
+test("a foreign server carries probe evidence and fails closed", async () => {
   let spawns = 0;
   const initializeEngramServer = buildInitializeEngramServerForTest({
     probeEngramHealth: async () => "foreign",
@@ -755,8 +800,30 @@ test("a foreign server keeps the exact ownership mismatch message and fails clos
     (error) => error,
   );
   assert.ok(failure instanceof initializeEngramServer.deterministicStartupError, "ownership mismatch is a deterministic failure");
-  assert.equal(failure?.message, "Engram server ownership mismatch at http://127.0.0.1:7437");
+  assert.deepEqual(failure.evidence, {
+    localInstanceID: "00000000000000000000000000000000",
+    remoteInstanceID: "ffffffffffffffffffffffffffffffff",
+    localVersion: "unknown", remoteVersion: "unknown",
+  });
   assert.equal(spawns, 0, "a foreign server is never replaced by a spawn");
+});
+
+test("normalization preserves typed ownership evidence without text classification", () => {
+  class ForeignOwnershipError extends Error {
+    constructor(evidence, message) { super(message); this.evidence = evidence; }
+  }
+  const normalize = new Function("ForeignOwnershipError", "ENGRAM_URL", `
+    return function normalizeInitializationError(error) {
+      ${extractFunctionBody("normalizeInitializationError", "{\n  const message")}
+    };
+  `)(ForeignOwnershipError, "http://127.0.0.1:7437");
+  const evidence = { localInstanceID: "local", remoteInstanceID: "remote", localVersion: "unknown", remoteVersion: "2.0.0" };
+  const normalized = normalize(new ForeignOwnershipError(evidence, "ownership mismatch"));
+  assert.ok(normalized instanceof ForeignOwnershipError);
+  assert.strictEqual(normalized.evidence, evidence, "normalization retains the same evidence object");
+  assert.match(normalized.message, /could not initialize/);
+  assert.match(normalized.message, /ENGRAM_URL\/ENGRAM_PORT\/ENGRAM_BIN/);
+  assert.ok(!(normalize(new Error("ownership mismatch")) instanceof ForeignOwnershipError), "prose alone cannot authorize fallback");
 });
 
 test("an inconclusive probe falls back to an already-starting server when our child loses the port", async () => {
@@ -1336,13 +1403,12 @@ test("native tool fetch backs off exponentially and attaches a per-request timeo
         waits.push(ms);
         return Promise.resolve();
       },
-      timeoutMs: 2500,
       backoffBaseMs: 150,
     });
     assert.deepEqual(await engramFetch("/health"), { status: "ok" });
     assert.equal(calls, 3);
     assert.deepEqual(waits, [150, 300]);
-    assert.equal(observedTimeoutMs, 2500);
+    assert.equal(observedTimeoutMs, 10000);
   } finally {
     globalThis.fetch = originalFetch;
     AbortSignal.timeout = originalAbortSignalTimeout;
@@ -1373,10 +1439,10 @@ test("Pi tool cancellation composes with the native request timeout", async () =
   try {
     const { engramFetch } = buildEngramFetchForTest({ abortSignal });
     assert.deepEqual(await engramFetch("/health", { signal: callbackSignal }), { status: "ok" });
-    assert.equal(timeoutMs, 3000, "the existing timeout policy remains active");
+    assert.equal(timeoutMs, 10000, "the production read timeout remains active");
     assert.deepEqual(composedSignals, [timeoutSignal, callbackSignal]);
     assert.deepEqual(requestSignal, { kind: "combined" });
-    assert.match(source, /async execute\(_toolCallId, params, signal, _onUpdate, ctx\)[\s\S]*executeMemoryTool\(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal\)/);
+    assert.match(source, /async execute\(_toolCallId, params, signal, _onUpdate, ctx\)[\s\S]*executeMemoryTool\(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal, pi\.appendEntry\?\.bind\(pi\)\)/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1405,7 +1471,7 @@ test("a native request without a Pi signal keeps timeout-only behavior", async (
   try {
     const { engramFetch } = buildEngramFetchForTest({ abortSignal });
     assert.deepEqual(await engramFetch("/health"), { status: "ok" });
-    assert.equal(timeoutMs, 3000, "the existing timeout policy remains active");
+    assert.equal(timeoutMs, 10000, "the production read timeout remains active");
     assert.equal(anyCalls, 0, "a request without Pi cancellation must not compose signals");
     assert.equal(requestSignal, timeoutSignal);
   } finally {
@@ -1428,7 +1494,6 @@ test("Pi cancellation aborts a held native HTTP request before it can return a l
   const controller = new AbortController();
   const { engramFetch } = buildEngramFetchForTest({
     url: `http://127.0.0.1:${port}`,
-    maxAttempts: 1,
   });
 
   try {
@@ -1548,7 +1613,196 @@ test("already-cancelled preflight observes a later shared initialization rejecti
   await flush();
 
   assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
-  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch\), signal\);/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry, transport\.transportFailure\), signal\);/);
+});
+
+test("transport policies bound read, doctor and registration retries independently of writes", () => {
+  assert.match(source, /const ENGRAM_WRITE_TIMEOUT_MS = 3000;/);
+  assert.match(source, /const ENGRAM_READ_TIMEOUT_MS = 10000;/);
+  assert.match(source, /const ENGRAM_DOCTOR_TIMEOUT_MS = 15000;/);
+  assert.match(source, /const ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS = 5000;/);
+  assert.match(source, /const ENGRAM_READ_MAX_ATTEMPTS = 3;/);
+  assert.match(source, /const ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS = 2;/);
+  assert.match(source, /return \{ operation: "write", timeoutMs: ENGRAM_WRITE_TIMEOUT_MS, maxAttempts: 1, replaySafe: false \};/);
+});
+
+test("doctor body timeout retries within policy and preserves a successful second response", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  const waits = [];
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 200, ok: true, async json() {
+      if (calls === 1) throw new DOMException("deadline", "TimeoutError");
+      return { status: "healthy" };
+    } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({ wait: async (ms) => waits.push(ms) });
+    assert.deepEqual(await engramFetchResult("/doctor/read"), { data: { status: "healthy" } });
+    assert.equal(calls, 2);
+    assert.deepEqual(waits, [150]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("generic GET body timeout exhausts three read attempts at 10000ms", async () => {
+  const originalFetch = globalThis.fetch;
+  const timeouts = [];
+  const waits = [];
+  globalThis.fetch = async (_url, init) => {
+    timeouts.push(init.signal);
+    return { status: 200, ok: true, async json() { throw new DOMException("deadline", "TimeoutError"); } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({
+      wait: async (ms) => { waits.push(ms); },
+      abortSignal: { timeout: (ms) => ms },
+    });
+    assert.deepEqual(await engramFetchResult("/observations"), {
+      data: null,
+      transportFailure: { operation: "read", outcome: "timed_out", timeoutMs: 10000 },
+    });
+    assert.deepEqual(timeouts, [10000, 10000, 10000]);
+    assert.deepEqual(waits, [150, 300]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("read body timeout exhausts exactly three attempts; registration body timeout retries only twice", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 200, ok: true, async json() { throw new DOMException("deadline", "TimeoutError"); } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({ wait: async () => {} });
+    assert.deepEqual(await engramFetchResult("/doctor/read"), { data: null, transportFailure: { operation: "doctor", outcome: "timed_out", timeoutMs: 15000 } });
+    assert.equal(calls, 3);
+    assert.deepEqual(await engramFetchResult("/sessions", { method: "POST" }), { data: null, transportFailure: { operation: "session-registration", outcome: "unknown", timeoutMs: 5000 } });
+    assert.equal(calls, 5);
+    assert.deepEqual(await engramFetchResult("/observations", { method: "POST" }), { data: null, transportFailure: { operation: "write", outcome: "unknown", timeoutMs: 3000 } });
+    assert.equal(calls, 6);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("non-success response retains known HTTP status when its body times out", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 503, ok: false, async json() { throw new DOMException("deadline", "TimeoutError"); } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    await assert.rejects(() => engramFetchResult("/doctor/read"), (error) => error.name === "EngramHttpError" && error.status === 503);
+    await assert.rejects(() => engramFetchResult("/observations", { method: "POST" }), (error) => error.name === "EngramHttpError" && error.status === 503);
+    assert.equal(calls, 2, "known HTTP errors must not be retried or called unknown");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("a terminated successful write body is unknown without replay; safe reads retry", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 200, ok: true, async json() { throw new TypeError("terminated", { cause: Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" }) }); } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest({ wait: async () => {} });
+    assert.deepEqual(await engramFetchResult("/observations", { method: "POST" }), {
+      data: null, transportFailure: { operation: "write", outcome: "unknown", timeoutMs: 3000 },
+    });
+    assert.equal(calls, 1, "an acknowledged write must never be replayed");
+    await assert.rejects(() => engramFetchResult("/observations"), /could not reach the Engram HTTP server/);
+    assert.equal(calls, 4, "read-body socket failures should exhaust the bounded retry policy");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("a truncated successful write body may be committed even when JSON parsing throws SyntaxError", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { status: 200, ok: true, async json() { throw new SyntaxError("Unexpected end of JSON input"); } };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    assert.deepEqual(await engramFetchResult("/observations", { method: "POST" }), {
+      data: null, transportFailure: { operation: "write", outcome: "unknown", timeoutMs: 3000 },
+    });
+    assert.equal(calls, 1);
+    await assert.rejects(() => engramFetchResult("/observations"), SyntaxError, "malformed reads remain parse errors");
+    assert.equal(calls, 2);
+    const { engramFetchResult: registrationFetch } = buildEngramFetchForTest({ wait: async () => {} });
+    assert.deepEqual(await registrationFetch("/sessions", { method: "POST" }), {
+      data: null, transportFailure: { operation: "session-registration", outcome: "unknown", timeoutMs: 5000 },
+    });
+    assert.equal(calls, 4, "idempotent registration retries exactly once after truncated JSON");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("caller abort propagates instead of being classified as transport timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+    init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+  });
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    const pending = engramFetchResult("/observations", { method: "POST", body: { title: "t" }, signal: controller.signal });
+    controller.abort(new DOMException("caller cancelled", "AbortError"));
+    await assert.rejects(pending, /caller cancelled/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("safe reads and doctor retry timeouts, while socket failures leave writes unknown", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    const error = new Error("timeout"); error.name = "TimeoutError"; throw error;
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    for (const [path, operation] of [["/observations", "read"], ["/doctor", "doctor"]]) {
+      calls = 0;
+      assert.deepEqual(await engramFetchResult(path), { data: null, transportFailure: { operation, outcome: "timed_out", timeoutMs: operation === "doctor" ? 15000 : 10000 } });
+      assert.equal(calls, 3);
+    }
+    globalThis.fetch = async () => { calls++; throw new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }); };
+    calls = 0;
+    assert.deepEqual(await engramFetchResult("/observations", { method: "POST" }), { data: null, transportFailure: { operation: "write", outcome: "unknown", timeoutMs: 3000 } });
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("definite pre-dispatch failures are not mislabeled as committed writes", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    throw new TypeError("fetch failed", { cause: Object.assign(new Error("lookup failed"), { code: "ENOTFOUND" }) });
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    await assert.rejects(() => engramFetchResult("/observations", { method: "POST" }), /could not reach/);
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("session registration retries only the idempotent request", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) { const error = new Error("timeout"); error.name = "TimeoutError"; throw error; }
+    return { status: 200, ok: true, json: async () => ({ status: "created" }) };
+  };
+  try {
+    const { engramFetchResult } = buildEngramFetchForTest();
+    assert.deepEqual(await engramFetchResult("/sessions", { method: "POST" }), { data: { status: "created" } });
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("a timed-out write is not re-sent, so a slow-but-applied mem_save cannot be duplicated", async () => {
@@ -1582,7 +1836,7 @@ test("a timeout resolves to null like any other failure, so callers keep their f
   try {
     const { engramFetch, engramFetchResult } = buildEngramFetchForTest();
     assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    assert.deepEqual(await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }), { data: null, timedOutMethod: "POST" });
+    assert.deepEqual(await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }), { data: null, transportFailure: { operation: "session-registration", outcome: "unknown", timeoutMs: 5000 } });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1604,31 +1858,23 @@ test("an unsafe write connection failure reports the generic unavailable error",
   }
 });
 
-test("the tool layer reports unknown write outcome instead of inviting a blind retry", () => {
-  const factory = new Function(
-    "ENGRAM_FETCH_TIMEOUT_MS",
-    "ENGRAM_URL",
-    `return function unreachableMessage(timedOutMethod) {
-      ${extractFunctionBody("unreachableMessage", "{\n  if (timedOutMethod")}
-    };`,
-  );
-  const unreachableMessage = factory(3000, "http://127.0.0.1:7437");
-
-  // A write whose outcome is genuinely unknown must not be presented as a plain outage.
-  const write = unreachableMessage("POST");
-  assert.match(write, /may already have been applied/);
+test("the tool layer distinguishes uncertain writes from safe reads and registration", () => {
+  const factory = new Function("ENGRAM_URL", `return function unreachableMessage(failure) {
+    ${extractFunctionBody("unreachableMessage", "{\n  if (failure")}
+  };`);
+  const unreachableMessage = factory("http://127.0.0.1:7437");
+  const write = unreachableMessage({ operation: "write", outcome: "unknown", timeoutMs: 1000 });
+  assert.match(write, /outcome is unknown/);
   assert.match(write, /do NOT blindly retry/);
-  assert.doesNotMatch(write, /could not reach/);
-
-  // A read carries no duplicate-write risk, so it must not carry the scary warning.
-  const read = unreachableMessage("GET");
-  assert.match(read, /did not respond/);
-  assert.doesNotMatch(read, /may already have been applied/);
-
-  // A genuine unreachable server keeps the original wording other tests pin.
-  const unreachable = unreachableMessage(undefined);
-  assert.match(unreachable, /could not reach the Engram HTTP server/);
-  assert.doesNotMatch(unreachable, /timed out/);
+  const registration = unreachableMessage({ operation: "session-registration", outcome: "unknown", timeoutMs: 5000 });
+  assert.match(registration, /No memory write was sent/);
+  assert.doesNotMatch(registration, /do NOT blindly retry/);
+  for (const operation of ["read", "doctor"]) {
+    const read = unreachableMessage({ operation, outcome: "timed_out", timeoutMs: 10000 });
+    assert.match(read, /bounded read policy was exhausted/);
+    assert.doesNotMatch(read, /outcome is unknown/);
+  }
+  assert.match(unreachableMessage(undefined), /could not reach the Engram HTTP server/);
 });
 
 test("session registration requires acknowledgement and failed acknowledgement remains retryable", async () => {
@@ -1677,12 +1923,13 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(compactEnd, -1, "session_compact handler end not found");
   const compactHandler = source.slice(compactStart, compactEnd);
 
-  const registration = compactHandler.indexOf("await ensureSession(sessionId, project, engramFetch, true);");
-  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(sessionId, summary);");
+  const registration = compactHandler.indexOf("await registerEffectiveSession(");
+  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(effectiveID, summary, sessionId, observed);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
+  assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
   assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
 });
 
@@ -1726,7 +1973,7 @@ test("a timeout on the session leg does not mislabel an unrelated failure on the
     const { engramFetch, engramFetchResult } = buildEngramFetchForTest();
     assert.deepEqual(
       await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }),
-      { data: null, timedOutMethod: "POST" },
+      { data: null, transportFailure: { operation: "session-registration", outcome: "unknown", timeoutMs: 5000 } },
     );
     await assert.rejects(
       () => engramFetch("/observations", { method: "POST", body: { title: "t" } }),
@@ -1967,18 +2214,18 @@ test("mem_stats explicitly requests its global aggregate contract", () => {
   assert.match(source, /case "mem_stats":[\s\S]*fetch\(`\/stats\$\{queryString\(\{ all_projects: true \}\)\}`\)/);
 });
 
-test("best-effort capture failures are surfaced instead of silently discarded", () => {
-  // A passive capture that the server rejects (for example because the parent
-  // session carries no project ownership) must not vanish: the operator has no
-  // other signal that memories stopped being saved.
-  assert.match(source, /function warnEngramFailure\(/);
-  assert.match(source, /process\.stderr\.write/);
-  assert.match(
-    source,
-    /async function bestEffortEngramFetch[\s\S]*catch \(error\) \{[\s\S]*warnEngramFailure\(path, error\)/,
-  );
-  assert.doesNotMatch(
-    source,
-    /async function bestEffortEngramFetch[\s\S]{0,200}catch \{\s*\n\s*return null;/,
-  );
+test("background diagnostics remain safe when formatting or delivery fails", () => {
+  const body = extractFunctionBody("warnEngramFailure", "{\n  try");
+  const stderr = [];
+  const warn = new Function("process", "redactPrivateTags", "redactUrlPath", `
+    return function(path, error, ctx) { ${body} };
+  `)({ stderr: { write: (text) => stderr.push(text) } }, (text) => text.replace(/<private>.*?<\/private>/g, "[REDACTED]"), (path) => path);
+  const notifications = [];
+  warn("/prompts", new Error("hidden <private>secret</private>"), {
+    hasUI: true, ui: { notify: (...args) => notifications.push(args) },
+  });
+  assert.deepEqual(notifications, [["[engram] background capture to /prompts failed: hidden [REDACTED]", "warning"]]);
+  assert.doesNotThrow(() => warn("/prompts", { toString() { throw new Error("format failed"); } }));
+  assert.doesNotThrow(() => warn("/prompts", "failure", { hasUI: true, ui: {} }));
+  assert.equal(stderr.length, 0);
 });

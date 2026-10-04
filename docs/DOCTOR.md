@@ -1,6 +1,6 @@
 # Engram Doctor
 
-`engram doctor` runs read-only operational diagnostics against the local SQLite store. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
+`engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
 ## CLI
 
@@ -19,7 +19,57 @@ Flags:
 - `--json` prints the stable diagnostic envelope for agents.
 - `--project PROJECT` scopes checks to a normalized project name.
 - `--check CODE` runs one registered check and fails loudly for unknown codes.
-- `doctor repair` supports exactly `invalid_session_identity`, `manual_session_name_project_mismatch`, `orphaned_observation_session`, `session_project_directory_mismatch`, `sync_mutation_required_fields`, and `sync_target_closed_space`. It requires `--project`, `--check`, and exactly one mode: `--plan`, `--dry-run`, or `--apply`. `sync_mutation_required_fields` may omit `--project` and the mode; an omitted mode defaults to `--dry-run`. Its optional project scopes title repair, supersession, quarantine, and source-title repair. The diagnostic-only checks are `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project`; a rejected repair names the corresponding `engram doctor --check <code>` continuation.
+- `doctor repair` supports exactly `invalid_session_identity`, `manual_session_name_project_mismatch`, `orphaned_observation_session`, `orphaned_pending_relations`, `session_project_directory_mismatch`, `sync_mutation_required_fields`, and `sync_target_closed_space`. It requires `--check` and exactly one mode: `--plan`, `--dry-run`, or `--apply`, plus `--project` for every check except `sync_mutation_required_fields` (optional project scoping) and `orphaned_pending_relations` (spans all projects). `sync_mutation_required_fields` may also omit the mode; an omitted mode defaults to `--dry-run`. Its optional project scopes session-directory backfill, title repair, supersession, quarantine, and source-title repair. The diagnostic-only checks are `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project`; a rejected repair names the corresponding `engram doctor --check <code>` continuation.
+
+An unfiltered CLI `engram doctor` also reports generic adapter Engram MCP entries whose absolute executable command no longer exists and whose parsed fields match the entry shape written by setup (apart from the executable path). Each finding names the client and recommends `engram setup <slug>` to refresh its registration; doctor never runs the configured executable or edits the config. Missing configs/entries, bare commands, and entries with different or extra fields are skipped. Matching the setup shape cannot prove who created an entry: check for custom launchers before rerunning setup, which replaces the `engram` registration. This CLI-only inspection is not a registered `--check` or MCP `mem_doctor` check.
+
+For `invalid_session_identity`, supply an unused canonical `--replacement-id`. Without it repair remains a nonmutating `noop`. Plan and dry-run show `identity_repair` with exact source, replacement, reference and retired journal counts; `blockers` explains collisions and unsafe evidence. For multiple whitespace-only sources specify the exact `--source-id SOURCE` (use `--source-id ''` for the empty string). The repair JSON `counts.corrected_mutations_planned` estimates corrected current-state publications as one session plus each observation and prompt for an enrolled project; local-only projects report zero. `counts.corrected_mutations_applied` is zero for plan, dry-run, blocked and noop results, and on apply reports the number actually published by the store. Both count fields are always present (zero outside applicable work); neither counts retired historical journal rows, which remain in `identity_repair.retired_mutations`. Apply revalidates under the SQLite writer lock, backs up the database, atomically remaps references and retires legacy journal evidence; corrected state is published only for enrolled projects. Quarantined pulled identities are not locally repairable. Unrepaired findings remain in `skipped`; an apply that repairs one source while others remain reports `partial`. Re-run doctor after apply; other malformed sources may remain. To roll back, stop Engram and manually restore the reported backup.
+
+```bash
+engram doctor repair --project engram --check invalid_session_identity --replacement-id canonical-session --plan
+engram doctor repair --project engram --check invalid_session_identity --replacement-id canonical-session --apply
+```
+
+## Explicit legacy empty prompt discard
+
+This separate command discards **one exact prompt identity**, not a project or bulk backlog. It is not part of generic `doctor repair`:
+
+```bash
+engram doctor discard-empty-prompt --project PROJECT --seq SEQ [--dry-run|--apply --backup PATH] [--json]
+```
+
+Both project and a positive int64 journal sequence are required. Explicit projects use the usual strict CLI normalization; selection must still match that project's prompt. Omitted mode is **dry-run**. `--dry-run` and `--apply` are mutually exclusive. Apply requires an explicit unused backup filename whose parent directory already exists; `--backup` without apply is rejected. Unknown arguments, repeated flags and malformed sequences fail closed. `--help` does not open the database.
+
+### Review before applying
+
+1. Run the existing diagnosis and inspect `checks[].findings[].evidence`. For a pending blank prompt upsert, evidence includes `seq`, `project`, `entity`, `op`, `entity_key` and `missing_fields`. Choose the exact `entity: "prompt"`, `op: "upsert"` finding with missing content. Do not confuse a sequence with a canonical prompt ID. Diagnosis alone does not establish discard eligibility.
+2. Preview that exact sequence and review the identity, all `sequences`, and planned effects. The following examples assume the selected finding belongs to `project` and reports sequence `2`; replace them with the reviewed evidence. Test examples on a synthetic fixture/backup clone, never by experimenting on the production database.
+3. Only after accepting irreversible local content retirement, apply with a new backup filename in an existing trusted directory.
+
+```bash
+engram doctor --project project --check sync_mutation_required_fields --json
+engram doctor discard-empty-prompt --project project --seq 2 --json
+engram doctor discard-empty-prompt --project project --seq 2 --dry-run
+engram doctor discard-empty-prompt --project project --seq 2 --apply --backup /trusted/existing-directory/unused.db --json
+```
+
+Preview creates no backup and calls no mutation API (normal Store opening/initialization still applies). Apply independently replans the current database, keeps that same in-memory Store-bound plan, and delegates preflight, backup and transactional revalidation to the Store. A preview from an earlier process is workflow guidance, **not frozen authorization** for later state.
+
+### Eligibility and effects
+
+Initial support requires an enrolled project, an exact pending unacknowledged local default-cloud prompt upsert, and consistent canonical/session/sync/inbox identities. Canonical, frozen and historical content must all be irrecoverably blank. Unenrolled projects (`not_enrolled`), recoverable content (`recoverable_content`), unsupported or inconsistent lineage, missing/ambiguous identity and conflicting tombstones are blocked; do not auto-enroll or discard valid historical content to bypass a blocker.
+
+The selected sequence identifies the prompt; `sequences` can enumerate multiple eligible blank upserts for that same identity. Apply backs up current WAL-inclusive state first, then atomically supersedes those original journal rows with audit evidence, creates a prompt tombstone, removes the canonical prompt and FTS entry, and queues one later valid prompt delete. Original journal sequences, payloads, occurrence/ack/provenance are preserved; no acknowledgement is fabricated and no cursor is reset.
+
+The separate snake_case report includes `status`, `project`, `selected_seq`, `prompt_id`, `sync_id`, `session_id`, `source_inbox_id`, `sequences`, `planned_effects`, `tombstone`, `delete_queued`, `delete_seq`, `backup_path` and `remote_confirmation`. It exposes no private plan snapshot or database contents. Preview reports `status: "dry_run"`, no applied tombstone/delete and an empty backup path. Its planned effects are `supersede_exact_blank_upserts`, `create_prompt_tombstone`, `delete_canonical_prompt_and_fts`, and `enqueue_one_prompt_delete`. Successful apply reports **`status: "delete_queued"`**, the original superseded `sequences`, new `delete_seq`, successful backup path and `backup_path_meaning: "successful backup"`. `remote_confirmation` is always false; readable output explicitly states **NO REMOTE CONFIRMATION**.
+
+Errors return nonzero and include `blocker: {"code": "...", "detail": "..."}`; with `--json`, stdout is a single parseable report without status chatter. If apply returns a nonempty `backup_path` on error, `backup_path_meaning` describes an **INTENDED destination** which may contain a backup or empty reservation, not proof of a valid backup. Failed publication can leave a replacement at that path. The command never unlinks it on rollback/errors. Check the actual file before treating it as recovery evidence. A collision or missing parent is rejected without overwriting existing bytes. Repeating an already-applied selection currently fails with `ambiguous_canonical` because the canonical prompt is gone; it is not idempotent success and queues no duplicate delete.
+
+### Trust, concurrency and rollback boundary
+
+Operate only in a trusted database namespace and process. Private snapshot safety assumes trusted directory permissions and, on Windows, appropriately inherited ACLs; this is not protection against malicious same-identity/admin tampering. Backup destination parents must also be trusted. Local transaction revalidation does not fence exporters or other devices: **an older in-flight send or another device can write afterward**. A queued delete is neither remote delivery confirmation nor a permanent-absence guarantee.
+
+Database changes roll back together if apply fails; an already-created backup/reservation remains. To undo a successful local discard, stop all Engram processes and manually restore a verified backup with normal SQLite/WAL recovery precautions. Restoring local data cannot retract a delete already sent remotely. Re-run diagnosis after apply: other unrelated invalid mutations may remain.
 
 ## MCP
 
@@ -59,11 +109,12 @@ The CLI `--json` and MCP tool return:
 
 ## MVP check catalog
 
-- `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. A known exact `manual-save-{project}` target takes precedence over directory inference, so it does not produce this competing finding. Unknown manual suffixes and non-manual sessions retain normal trusted-directory behavior. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
-- `manual_session_name_project_mismatch` — warns when a known `manual-save-{suffix}` session name disagrees with its persisted project. The suffix must normalize to a project already evidenced by a local session; a name alone never establishes `project_owned` ownership.
+- `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
+- `manual_session_name_project_mismatch` — warns when a known `manual-save-{suffix}` session name disagrees with its persisted project. Trusted Git directory evidence precedes manual-name inference for repair: manual-name repair applies only when that evidence does not establish ownership. The suffix must normalize to a project already evidenced by a local session; a name alone never establishes `project_owned` ownership. Basename evidence can corroborate persisted ownership only and cannot authorize a move that conflicts with trusted directory evidence.
 - `ambiguous_active_runtime_sessions` — warns once per project when two or more active runtime candidates match the same directory. Evidence contains the active-candidate count, involved directories, and session IDs. It uses the same lease-aware selection as omitted-session resolution: valid unexpired local leases take precedence in their own directory, expired or malformed nonblank leases are excluded, and the legacy seven-day effective-activity window applies only when that directory has no live lease. Multiple live leases remain ambiguous. Doctor is diagnostic-only: it never selects, ends, or modifies sessions. End only confirmed stale IDs with `mem_session_end`; otherwise keep explicit runtime attribution with `session_id` on writes.
 - `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: any pending non-enrolled row there is legacy or otherwise pre-existing backlog, because new unenrolled local writes are not journaled.
 - `orphaned_observation_session` — warns when active or soft-deleted observations reference a missing session. Findings are grouped by the stored observation project and session ID. After reviewing a plan, `doctor repair` can create an immediately-ended, local-only, project-owned placeholder for a group with complete evidence; it preserves observations and never emits sync state. Apply revalidates the current observations inside the same transaction and derives the placeholder's start time and observation count from them, so a stale plan or a concurrent change cannot persist outdated placeholder metadata; a planned orphan that resolves before apply reports `noop` with zero applied rows.
+- `orphaned_pending_relations` — warns when pending `memory_relations` rows reference missing observations on both endpoints (no active row with that `sync_id`; a soft-deleted endpoint counts as absent, matching the conflicts listing). Such rows can never show a title in `engram conflicts show` and no verdict can ever be recorded against them, so they only inflate the pending backlog. The finding aggregates counts (candidates, one-endpoint-missing pending, live pending) with a bounded sample of candidate rows. The listing is deliberately unscoped: a relation with both endpoints absent belongs to no project. After review, `engram doctor repair --check orphaned_pending_relations --plan|--dry-run|--apply` reclassifies only those rows into the audited `orphaned` disposition — the same terminal state the hard-delete orphaning writers already produce — without recreating observations, fabricating verdicts, deleting audit rows, or touching relations that still have a live endpoint. Apply revalidates the predicate inside the transaction (a row judged after planning is never reclassified), backs up the database first, emits no sync journal mutation, and is idempotent; a rerun reports `noop` with zero applied rows. To roll back, stop Engram and manually restore the reported backup.
 - `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. The listing is deliberately unscoped.
 - Session modes are `shared` and `project_owned`. Runtime and HTTP-created sessions default to `shared`; deterministic CLI and MCP manual-save sessions are `project_owned`. Shared sync can use old peers. Project-owned sync requires a mode-capable manifest (version 2); returning to an older manifest after project-owned sessions exist is unsupported and fails loudly.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
@@ -72,16 +123,36 @@ The CLI `--json` and MCP tool return:
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
 
+### Network filesystem startup rejection
+
+Persistent SQLite WAL is unsafe on known NFS and SMB/CIFS data directories. When startup rejects one, stop **all** Engram processes; copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage; set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected); start Engram; then run `engram doctor`. Run the integrity check for your shell:
+
+```bash
+# POSIX shell or Git Bash
+sqlite3 "$ENGRAM_DATA_DIR/engram.db" "PRAGMA integrity_check;"
+```
+
+```powershell
+# PowerShell
+sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
+```
+
+This condition has no automatic repair, quarantine, checkpoint, or rollback-journal fallback.
+
 `engram doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth. Project reclassification supports:
 
 - `session_project_directory_mismatch`, using trusted `git_remote` or `git_root` evidence from doctor findings.
-- `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions. The known manual target takes precedence over trusted directory evidence; unknown suffixes remain unrepaired.
+- `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions when trusted Git directory evidence does not establish ownership. Unknown suffixes remain unrepaired; basename evidence can corroborate persisted ownership but cannot authorize a conflicting move.
+
+Session-directory backfill under `sync_mutation_required_fields` repairs pending session upserts with a valid payload ID matching the journal entity key and a missing directory, when the local session belongs to the same project and has a nonblank authoritative directory. It needs no cloud enrollment. Run `engram doctor repair --check sync_mutation_required_fields --plan` or `--dry-run` to inspect `directory_repairs` before `--apply`; add `--project <project>` to limit the repair. Apply rewrites only the payload in place, retaining sequence and disposition metadata. Already-quarantined rows are never backfilled. This repair does not create a SQLite backup.
+
+Orphaned-pending-relation reclassification under `orphaned_pending_relations` is similarly narrow: it moves only pending rows whose source AND target endpoints are both absent into the existing `orphaned` disposition (no schema migration), reports `relations_planned` and `relations_applied`, and surfaces its `backup_path` on apply. Plan and dry-run never mutate. It needs no `--project`; a provided one is accepted but cannot scope rows that belong to no project.
 
 Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. Run `engram doctor repair --check sync_mutation_required_fields --dry-run` first (add `--project <project>` to scope it); cloud-upgrade tooling instead requires configured cloud sync. The repair derives a sanitized, bounded title from local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
 
 The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Superseded evidence missing its reason, evidence, or timestamp remains blocking until manually repaired; complete terminal quarantined and superseded rows remain informational without keeping doctor in warning or blocked status.
 
-Repair never deletes or deduplicates rows, never edits sync cursors, never acknowledges undelivered mutations, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
+Project reclassification never deletes or deduplicates rows. Identity repair replaces the malformed source session row after remapping its references; it retains old journal rows as auditable retired evidence rather than deleting their payload history. Repair never edits sync cursors, acknowledges undelivered mutations, or writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
 
 - `sessions.project`
 - `sessions.ownership_mode` (`project_owned` for a session named `manual-save-{target_project}`, otherwise `shared`)
@@ -92,18 +163,20 @@ Title restoration does not create a SQLite backup.
 
 `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project` are diagnostic-only and are not supported by `engram doctor repair`. SQLite lock contention has no repair.
 
+A strict `project_owned` registration of an ended legacy session with no project may establish its owner only when no live observation or prompt belongs to another project. The session remains ended and the registration still returns `409 session_already_ended`; a later strict `project_owned` registration from a different project returns `409 session_project_conflict`. This is not a general repair for ambiguous legacy ownership. Use `engram projects rescue-ownership` when existing records require an explicit operator decision.
+
 ### Repair JSON envelope
 
 All repair modes print stable JSON to stdout:
 
-For `sync_mutation_required_fields`, `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence.
+For `sync_mutation_required_fields`, `directory_repairs` lists pending session-directory payload backfills (`seq`, `project`, `entity_key`); `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence.
 
 ```json
 {
   "project": "sias-app",
   "check": "session_project_directory_mismatch",
   "mode": "plan|dry_run|apply",
-  "status": "planned|dry_run|applied|noop",
+  "status": "planned|dry_run|applied|partial|blocked|noop",
   "actions": [
     {
       "session_id": "session-id",
@@ -120,13 +193,15 @@ For `sync_mutation_required_fields`, `repairs` lists title-only observation upse
     "prompts_planned": 1,
     "sessions_applied": 0,
     "observations_applied": 0,
-    "prompts_applied": 0
+    "prompts_applied": 0,
+    "corrected_mutations_planned": 0,
+    "corrected_mutations_applied": 0
   },
   "backup_path": ""
 }
 ```
 
-On `--apply`, `backup_path` contains the backup database path and `*_applied` counts report the rows updated.
+On `--apply`, `backup_path` contains the backup database path. `sessions_applied`, `observations_applied`, and `prompts_applied` count local records addressed by the repair; `corrected_mutations_applied` counts mutations published by the store.
 
 ### Clone-safe verification workflow
 

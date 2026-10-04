@@ -33,11 +33,11 @@ Use this skill when:
 1. Verify issue has `status:approved` label
 2. Create branch: feat/*, fix/*, docs/*, refactor/*, chore/*
 3. Implement changes
-4. Run tests locally (unit + e2e)
+4. For behavior changes, run a focused regression test and affected package tests locally; record commands and outcomes. For docs-only changes, record N/A for Go tests and verify the documentation.
 5. Check every changed path against the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
 6. Open PR using the template
 7. Add exactly one type:* label
-8. Wait for all required automated checks to pass
+8. After pushing/opening the PR, wait for GitHub CI's full unit/E2E/lint and applicable platform checks; report results only after they run
 ```
 
 ---
@@ -110,18 +110,20 @@ Check exactly ONE in the template and add the matching label:
 ### 5. Test Plan
 
 ```markdown
-- [x] Unit tests pass locally: `go test ./...`
-- [x] E2E tests pass locally: `go test -tags e2e ./internal/server/...`
-- [x] Manually tested the affected functionality
+- [ ] Focused regression (behavior change): `<actual command>` — `<actual outcome or N/A: documentation-only>`
+- [ ] Affected package (behavior change): `<actual command>` — `<actual outcome or N/A: documentation-only>`
+- [ ] GitHub CI full unit/E2E/lint and applicable platform checks — pending until they run
 ```
+
+Replace example commands and outcomes with actual evidence. For docs-only changes, record `N/A — documentation-only; no Go behavior changed` for local Go tests and list the documentation checks actually run. Targeted coverage can help find missed branches; no total module coverage or per-PR numeric gate applies. Without a PR (or before pushing), and for high-risk changes, run additional applicable local checks and identify any missing CI evidence.
 
 ### 6. Contributor Checklist
 
 All boxes must be checked:
 - Linked an approved issue
 - Added exactly one `type:*` label
-- Ran unit tests locally
-- Ran e2e tests locally
+- Recorded actual focused regression and affected package test commands/outcomes for behavior changes, or N/A for docs-only changes
+- Ran additional applicable local checks without a PR or for high-risk changes; identified missing CI evidence
 - Docs updated if behavior changed
 - Conventional commit format
 - No `Co-Authored-By` trailers
@@ -129,18 +131,22 @@ All boxes must be checked:
 
 ---
 
-## Automated Checks (all required checks must pass)
+## Automated Checks
+
+The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#step-4-automated-pr-checks); all six must pass before merge. Lint, transient-artifact checks, `Windows Setup Test`, and `Cloud Sync Wrapper Tests (Windows)` run for PRs but not merge groups, and are not among the six required contexts. Report their actual outcomes without treating pending checks as passed.
 
 | Check | Job name | What it verifies |
 |-------|----------|-----------------|
 | PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
 | PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
-| PR Validation | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
+| PR Label Policy | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
 | Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
 | CI | `Unit Tests` | `go test ./...` passes |
 | CI | `E2E Tests` | `go test -tags e2e ./internal/server/...` passes |
 | CI | `Plugin Tests` | `npm test` passes in `plugin/pi` |
 | CI | `Lint` | golangci-lint reports no new findings in Go changes |
+| CI | `Windows Setup Test` | Windows setup preserves absolute paths and MCP job-object parent-lifetime tests pass |
+| CI | `Cloud Sync Wrapper Tests (Windows)` | Cloud sync wrapper and missing-PowerShell-Engram tests pass on Windows |
 
 ---
 
@@ -211,9 +217,14 @@ update docs                      ← no conventional commit format
 # Create branch
 git checkout -b feat/my-feature main
 
-# Run tests before pushing
-go test ./...                                    # unit tests
-go test -tags e2e ./internal/server/...          # e2e tests
+# For behavior changes, run actual focused regression and affected package commands:
+# go test ./internal/store -run '<actual regression test name>'
+# go test ./internal/store
+# Record actual commands and outcomes in the PR test plan.
+# For docs-only changes, record N/A for Go tests and the documentation checks run.
+# Without a PR or for high-risk changes, run additional applicable local checks.
+# After pushing, GitHub CI runs broad unit/E2E/lint and applicable platform checks;
+# do not claim their results until the checks actually pass.
 
 # Push and create PR
 git push -u origin feat/my-feature

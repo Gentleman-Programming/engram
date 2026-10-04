@@ -14,10 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/command"
+	"github.com/Gentleman-Programming/engram/v3/internal/command"
 )
 
 // ErrAmbiguousProject is returned when the working directory is a parent of
@@ -45,6 +46,12 @@ const (
 	SourceConfig                            = "config"           // derived from .engram/config.json project_name
 	SourceAllProjects                       = "all_projects"     // caller asked for cross-project search (no single project resolved)
 	SourceProcessOverride                   = "process_override" // resolved from the process-level project override
+	// SourceStoredProject means the observation record itself carries the
+	// project. ID-anchored tools (mem_get_observation, mem_update) fall back to
+	// it when cwd resolution fails only because the current directory is
+	// ambiguous: the integer id fully identifies the record, so its stored
+	// project is a safe anchor.
+	SourceStoredProject = "stored_project"
 )
 
 // EnvProjectOverride names the environment variable that carries the
@@ -124,10 +131,26 @@ type DetectionResult struct {
 //  0. config     — nearest .engram/config.json inside the enclosing repo/root
 //  1. git_remote — Git repo currently has origin: initialize an absent private binding from the remote name; otherwise reuse it
 //  2. git_root   — Git repo currently has no origin: initialize an absent private binding from the root basename; otherwise reuse it
-//  3. git_child  — cwd has exactly one git-repo child → auto-promote it
+//  3. git_child  — cwd has exactly one git-repo child → resolve its canonical identity and auto-promote it
 //  4. ambiguous  — cwd has multiple git-repo children → return ErrAmbiguousProject
 //  5. dir_basename — none of the above → use filepath.Base(dir)
+//
+// DetectionOptions supplies local history only when establishing a Git binding.
+// InspectOnly never initializes a binding; an unbound candidate is not authority.
+type DetectionOptions struct {
+	HistoryLookup func(string) ([]string, error)
+	InspectOnly   bool
+}
+
 func DetectProjectFull(dir string) DetectionResult {
+	return DetectProjectFullWithOptions(dir, DetectionOptions{})
+}
+
+func DetectProjectFullWithOptions(dir string, options DetectionOptions) DetectionResult {
+	return detectProjectFull(dir, options, DirectoryIdentity(dir))
+}
+
+func detectProjectFull(dir string, options DetectionOptions, historyDirectory string) DetectionResult {
 	if dir == "" {
 		dir = "."
 	}
@@ -141,7 +164,7 @@ func DetectProjectFull(dir string) DetectionResult {
 	}
 
 	// ── Cases 1 & 2: Git repository binding ─────────────────────────────
-	if res, ok := detectFromGitBinding(dir); ok {
+	if res, ok := detectFromGitBinding(dir, options, historyDirectory); ok {
 		return res
 	}
 
@@ -155,13 +178,15 @@ func DetectProjectFull(dir string) DetectionResult {
 	case 1:
 		// Case 3: exactly one child repo — auto-promote.
 		child := children[0]
-		childName := normalize(filepath.Base(child))
-		absChild, _ := filepath.Abs(child)
+		childResult := detectProjectFull(child, options, historyDirectory)
+		if childResult.Error != nil {
+			return childResult
+		}
 		return DetectionResult{
-			Project: childName,
+			Project: childResult.Project,
 			Source:  SourceGitChild,
-			Path:    absChild,
-			Warning: "auto-promoted child repository: " + childName,
+			Path:    childResult.Path,
+			Warning: "auto-promoted child repository: " + childResult.Project,
 		}
 	default:
 		if len(children) > 1 {
@@ -170,9 +195,10 @@ func DetectProjectFull(dir string) DetectionResult {
 			for i, c := range children {
 				names[i] = normalizeAvailableProject(filepath.Base(c))
 			}
+			slices.Sort(names)
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
-			// DetectProject wrapper handles CLI compat by using filepath.Base on error.
+			// Consumers retain the error rather than inventing a basename identity.
 			// JW3: use SourceAmbiguous (not SourceDirBasename) to avoid misleading consumers.
 			return DetectionResult{
 				Project:           "",
@@ -197,7 +223,7 @@ basename:
 // detectFromGitBinding preserves the first legacy Git-derived project label in
 // the repository's shared Git metadata. The binding is private to a clone and
 // shared by linked worktrees; mutable remotes are only consulted at creation.
-func detectFromGitBinding(dir string) (DetectionResult, bool) {
+func detectFromGitBinding(dir string, options DetectionOptions, historyDirectory string) (DetectionResult, bool) {
 	commonDir := detectGitCommonDir(dir)
 	if commonDir == "" {
 		return DetectionResult{}, false
@@ -216,7 +242,28 @@ func detectFromGitBinding(dir string) (DetectionResult, bool) {
 		legacyProject = normalize(name)
 		source = SourceGitRemote
 	}
-	binding, err := loadOrCreateRepositoryBinding(commonDir, legacyProject)
+	binding, err := readRepositoryBinding(commonDir)
+	if errors.Is(err, os.ErrNotExist) {
+		if options.HistoryLookup != nil {
+			history, lookupErr := options.HistoryLookup(historyDirectory)
+			if lookupErr != nil {
+				return DetectionResult{Source: source, Path: root, Error: fmt.Errorf("%w: %v", ErrProjectHistoryUnavailable, lookupErr)}, true
+			}
+			for _, previous := range history {
+				if previous != legacyProject {
+					choices := append([]string{legacyProject}, history...)
+					slices.Sort(choices)
+					return DetectionResult{Source: source, Path: root, AvailableProjects: slices.Compact(choices), Error: &ProjectTransitionError{Candidate: legacyProject, HistoricalProjects: history}}, true
+				}
+			}
+		}
+		if options.InspectOnly {
+			return DetectionResult{Project: legacyProject, Source: SourceUnboundGit, Path: root}, true
+		}
+		// The history lookup is a snapshot, not a transaction across stores and
+		// Git metadata. Atomic publication still accepts an established winner.
+		binding, err = loadOrCreateRepositoryBinding(commonDir, legacyProject)
+	}
 	if err != nil {
 		return DetectionResult{Source: source, Path: root, Error: err}, true
 	}
@@ -325,6 +372,15 @@ func RuntimeWorktreeDirectory(dir string) string {
 		return runtimeCanonicalizePath(worktreeRoot)
 	}
 	return runtimeCanonicalizePath(dir)
+}
+
+// DirectoryIdentity compares exact directories without promoting them to a
+// repository root. Historical subdirectories and worktrees remain distinct.
+func DirectoryIdentity(path string) string {
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	return runtimeCanonicalizePath(path)
 }
 
 func runtimeCanonicalizePath(path string) string {
@@ -478,30 +534,8 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 	}
 }
 
-// DetectProject detects the project name for a given directory.
-// Git detection uses a clone-private binding, initialized once from the remote
-// origin name or repository root basename; later calls reuse that binding.
-// The returned name is always non-empty and already normalized (lowercase, trimmed).
-// This function is a backward-compatible wrapper around DetectProjectFull.
-// On ErrAmbiguousProject, falls back to filepath.Base(dir) so CLI callers
-// never receive an empty string (design §9 backward-compat requirement).
-func DetectProject(dir string) string {
-	res := DetectProjectFull(dir)
-	if errors.Is(res.Error, ErrAmbiguousProject) {
-		// CLI compat: return basename rather than empty string.
-		if dir == "" {
-			return "unknown"
-		}
-		return fallbackProjectName(dir)
-	}
-	if res.Project == "" {
-		return "unknown"
-	}
-	return res.Project
-}
-
 // normalize applies the shared canonical project name rules and maps empty or
-// path-like values to unknown so DetectProject always returns a valid name.
+// path-like values to unknown so basename detection always returns a valid name.
 func normalize(name string) string {
 	n := CanonicalizeProjectName(name)
 	if n == "" || strings.ContainsAny(n, `/\\`) {

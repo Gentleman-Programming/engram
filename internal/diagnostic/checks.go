@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const (
@@ -19,6 +19,7 @@ const (
 	CheckSyncTargetClosedSpace            = "sync_target_closed_space"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
 	CheckOrphanedObservationSession       = "orphaned_observation_session"
+	CheckOrphanedPendingRelations         = "orphaned_pending_relations"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
@@ -34,12 +35,20 @@ const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_ident
 // targets.
 const ReasonForeignSyncTarget = "foreign_sync_target"
 
+// orphanedPendingRelationSampleLimit bounds how many candidate relations the
+// store's bounded diagnostic read returns to the aggregate doctor finding, so
+// a large legacy backlog cannot flood diagnostic output. The full candidate
+// set is re-derived by the repair plan and apply path from the same store
+// evidence.
+const orphanedPendingRelationSampleLimit = 10
+
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type SyncTargetClosedSpaceCheck struct{}
 type InvalidSessionIdentityCheck struct{}
 type OrphanedObservationSessionCheck struct{}
+type OrphanedPendingRelationsCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 type AmbiguousActiveRuntimeSessionsCheck struct{}
@@ -54,6 +63,7 @@ func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationR
 func (SyncTargetClosedSpaceCheck) Code() string      { return CheckSyncTargetClosedSpace }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
 func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
+func (OrphanedPendingRelationsCheck) Code() string   { return CheckOrphanedPendingRelations }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
@@ -145,13 +155,14 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 	findings := make([]Finding, 0)
 	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
-		if _, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects); knownManualTarget {
-			continue
-		}
+		nameTarget, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
 		directory := strings.TrimSpace(session.Directory)
 		directoryProject, ok := detectSessionDirectoryProject(scope, detected, directory)
-		sessionProject := normalizeProjectName(session.Project)
-		if !ok || directoryProject.Project == "" || sessionProject == "" || directoryProject.Project == sessionProject {
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameTarget, knownManualTarget, directoryProject)
+		if !decision.shouldReportDirectoryMismatch() {
 			continue
 		}
 		findings = append(findings, Finding{
@@ -177,14 +188,20 @@ func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject
 	}
 	if scope.DetectProject != nil {
 		detected, ok := scope.DetectProject(directory)
+		if !ok || !isAcceptedDirectoryAuthoritySource(detected.Source) {
+			return DetectedProject{}, false
+		}
 		cache[directory] = detected
-		return detected, ok && detected.Project != ""
+		return detected, detected.Project != ""
 	}
 	if _, err := os.Stat(directory); err != nil {
 		return DetectedProject{}, false
 	}
-	res := projectpkg.DetectProjectFull(directory)
-	if res.Error != nil || (res.Source != projectpkg.SourceGitRemote && res.Source != projectpkg.SourceGitRoot) {
+	res := projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{InspectOnly: true})
+	if res.Error != nil {
+		return DetectedProject{}, false
+	}
+	if !isAcceptedDirectoryAuthoritySource(res.Source) {
 		return DetectedProject{}, false
 	}
 	detected := DetectedProject{Project: normalizeProjectName(res.Project), Source: res.Source, Path: res.Path}
@@ -203,10 +220,15 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 		return CheckResult{}, err
 	}
 	findings := make([]Finding, 0)
+	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
 		nameProject, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
-		sessionProject := normalizeProjectName(session.Project)
-		if nameProject == "" || sessionProject == "" || nameProject == sessionProject || !knownManualTarget {
+		directoryProject, ok := detectSessionDirectoryProject(scope, detected, strings.TrimSpace(session.Directory))
+		if !ok {
+			directoryProject = DetectedProject{}
+		}
+		decision := decideSessionProjectAuthority(session.Project, nameProject, knownManualTarget, directoryProject)
+		if !decision.shouldReportManualNameMismatch() {
 			continue
 		}
 		findings = append(findings, Finding{
@@ -223,15 +245,101 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
 }
 
+// sessionProjectAuthorityDecision centralizes the evidence hierarchy shared by
+// doctor findings and repair planning. Trusted Git evidence can establish a
+// move. A basename can only corroborate the persisted project and veto a
+// conflicting manual-name move; it can never establish a new target.
+type sessionProjectAuthority string
+
+const (
+	sessionProjectAuthorityNone             sessionProjectAuthority = ""
+	sessionProjectAuthorityTrustedDirectory sessionProjectAuthority = "trusted_directory"
+	sessionProjectAuthorityManualName       sessionProjectAuthority = "manual_name"
+)
+
+type sessionProjectAuthorityDecision struct {
+	persistedProject                       string
+	directoryProject                       string
+	directorySource                        string
+	directoryPath                          string
+	knownManualTarget                      bool
+	directoryBasenameCorroboratesPersisted bool
+	authority                              sessionProjectAuthority
+	repairTarget                           string
+	repairEvidenceSource                   string
+	repairEvidencePath                     string
+}
+
+func decideSessionProjectAuthority(persistedProject, manualTarget string, knownManualTarget bool, directory DetectedProject) sessionProjectAuthorityDecision {
+	decision := sessionProjectAuthorityDecision{
+		persistedProject:  normalizeProjectName(persistedProject),
+		directoryProject:  normalizeProjectName(directory.Project),
+		directorySource:   strings.TrimSpace(directory.Source),
+		directoryPath:     directory.Path,
+		knownManualTarget: knownManualTarget,
+	}
+	manualTarget = normalizeProjectName(manualTarget)
+	if decision.persistedProject == "" {
+		return decision
+	}
+	if isTrustedDirectoryEvidence(decision.directorySource) && decision.directoryProject != "" {
+		if decision.directoryProject != decision.persistedProject {
+			decision.authority = sessionProjectAuthorityTrustedDirectory
+			decision.repairTarget = decision.directoryProject
+			decision.repairEvidenceSource = decision.directorySource
+			decision.repairEvidencePath = decision.directoryPath
+		}
+		return decision
+	}
+	if decision.directorySource == projectpkg.SourceDirBasename {
+		decision.directoryBasenameCorroboratesPersisted = decision.directoryProject == decision.persistedProject
+		return decision
+	}
+	if knownManualTarget && manualTarget != "" && manualTarget != decision.persistedProject {
+		decision.authority = sessionProjectAuthorityManualName
+		decision.repairTarget = manualTarget
+	}
+	return decision
+}
+
+func (d sessionProjectAuthorityDecision) shouldReportDirectoryMismatch() bool {
+	return d.authority == sessionProjectAuthorityTrustedDirectory
+}
+
+func (d sessionProjectAuthorityDecision) shouldReportManualNameMismatch() bool {
+	return d.authority == sessionProjectAuthorityManualName
+}
+
+func (d sessionProjectAuthorityDecision) shouldRepairFromTrustedDirectory() bool {
+	return d.authority == sessionProjectAuthorityTrustedDirectory
+}
+
+func (d sessionProjectAuthorityDecision) shouldRepairFromManualName() bool {
+	return d.authority == sessionProjectAuthorityManualName
+}
+
+func isAcceptedDirectoryAuthoritySource(source string) bool {
+	switch strings.TrimSpace(source) {
+	case projectpkg.SourceGitRemote, projectpkg.SourceGitRoot, projectpkg.SourceDirBasename:
+		return true
+	default:
+		return false
+	}
+}
+
 // knownManualSessionTarget recognizes the exact manual session name convention
 // only when its normalized target is evidenced by a local session project. A
 // manual-looking name without that local evidence remains untrusted.
 func knownManualSessionTarget(name string, knownProjects map[string]bool) (string, bool) {
-	if !strings.HasPrefix(name, "manual-save-") {
-		return "", false
-	}
-	target := normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
+	target := manualSessionNameTarget(name)
 	return target, target != "" && knownProjects[target]
+}
+
+func manualSessionNameTarget(name string) string {
+	if !strings.HasPrefix(name, "manual-save-") {
+		return ""
+	}
+	return normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
 }
 
 func knownSessionProjects(scope Scope) (map[string]bool, error) {
@@ -626,6 +734,45 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"orphaned_session_references_evaluated": len(evidence)}, findings), nil
+}
+
+// Run reports legacy pending relations whose source AND target observations
+// are absent from the active observation set. Such rows can never show a title
+// in `engram conflicts show` and no verdict can ever be recorded against them,
+// so they only inflate the pending backlog. The listing is deliberately
+// unscoped even when scope.Project is set: a relation with both endpoints
+// absent belongs to no project, so a project-scoped query could never return
+// the rows it exists to surface (the same reasoning as
+// UnownedSessionProjectCheck).
+func (c OrphanedPendingRelationsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListOrphanedPendingRelationEvidenceBounded(orphanedPendingRelationSampleLimit)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, 1)
+	if evidence.CandidateCount > 0 {
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: CheckOrphanedPendingRelations,
+			Message:    fmt.Sprintf("%d pending relation(s) reference missing observations on both endpoints and can never be judged.", evidence.CandidateCount),
+			Why:        "A pending relation without an active source or target observation shows no titles and no verdict can ever be recorded against it, so it only inflates the pending backlog; reclassifying it into the audited `orphaned` disposition preserves the row as history without fabricating a verdict.",
+			Evidence: mustJSON(map[string]any{
+				"candidate_count":      evidence.CandidateCount,
+				"one_endpoint_missing": evidence.OneEndpointMissing,
+				"live_pending":         evidence.LivePending,
+				"sample":               evidence.Sample,
+			}),
+			SafeNextStep:         "Review the sample, then run `engram doctor repair --check orphaned_pending_relations --dry-run`; apply reclassifies only these rows into the audited `orphaned` disposition after creating a SQLite backup.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{
+		"candidate_count":      evidence.CandidateCount,
+		"one_endpoint_missing": evidence.OneEndpointMissing,
+		"live_pending":         evidence.LivePending,
+	}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

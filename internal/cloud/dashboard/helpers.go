@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
 )
 
 // ─── Pagination ─────────────────────────────────────────────────────────────
@@ -169,6 +169,26 @@ func reclampPagination(page, pageSize, totalItems int) (Pagination, bool) {
 		TotalItems: totalItems,
 		TotalPages: totalPages,
 	}, clamped != page
+}
+
+// recoverPaginationRows retries at the clamped offset, retaining the original rows
+// on error. Only an empty original result permits a first-page fallback. Error
+// callbacks run synchronously, so retry diagnostics precede the fallback call.
+// Recovery totals are intentionally ignored: pagination belongs to the caller.
+func recoverPaginationRows[T any](rows []T, offset int, fetch func(int) ([]T, int, error), onRetryError, onFallbackError func(error)) []T {
+	refetched, _, err := fetch(offset)
+	if err == nil {
+		return refetched
+	}
+	onRetryError(err)
+	if len(rows) == 0 {
+		fallback, _, err := fetch(0)
+		if err == nil {
+			return fallback
+		}
+		onFallbackError(err)
+	}
+	return rows
 }
 
 // paginationURL builds a URL with page, pageSize, and extra params preserved.
@@ -517,7 +537,7 @@ func formatTimeValue(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.UTC().Format(dashboardTimestampLayout)
+	return timeutil.FormatTimeWithLayout(t, dashboardTimestampLayout)
 }
 
 // formatTimePtr renders an optional time.Time pointer, returning "Never" when
