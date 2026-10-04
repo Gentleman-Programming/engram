@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 )
@@ -192,6 +193,110 @@ func TestAddObservationWithOperationIDReturnsExpiredAfterObservationDeletion(t *
 	}
 	if got != 0 {
 		t.Fatalf("GetObservationSaveResult returned %d, want 0 for tombstoned operation", got)
+	}
+}
+
+func TestObservationOperationNULBoundaryConflict(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("nul", "test-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	p := AddObservationParams{SessionID: "nul", Project: "test-project", Type: "manual", Title: "A\x00B", Content: "C", OperationID: "nul"}
+	if _, err := s.AddObservation(p); err != nil {
+		t.Fatal(err)
+	}
+	p.Title, p.Content = "A", "B\x00C"
+	if _, err := s.AddObservation(p); !errors.Is(err, ErrObservationOperationConflict) {
+		t.Fatalf("NUL boundary replay: %v, want conflict", err)
+	}
+}
+
+func TestObservationOperationUnsupportedFingerprint(t *testing.T) {
+	for _, expression := range []string{"replace(fingerprint, 'v1:', '')", "'v2:unsupported'"} {
+		t.Run(expression, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("legacy", "test-project", "/tmp"); err != nil {
+				t.Fatal(err)
+			}
+			p := AddObservationParams{SessionID: "legacy", Project: "test-project", Type: "manual", Title: "Legacy", Content: "Content", OperationID: "legacy"}
+			if _, err := s.AddObservation(p); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`UPDATE observation_save_operations SET fingerprint = ` + expression); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddObservation(p); !errors.Is(err, ErrObservationOperationExpired) {
+				t.Fatalf("unsupported fingerprint: %v, want expired", err)
+			}
+		})
+	}
+}
+
+func TestObservationOperationReplayBeforeOwnershipResolution(t *testing.T) {
+	for _, project := range []string{" TEST-PROJECT ", ""} {
+		t.Run(project, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("replay", "test-project", "/tmp"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.EnrollProject("test-project"); err != nil {
+				t.Fatal(err)
+			}
+			p := AddObservationParams{SessionID: "replay", Project: project, Type: "manual", Title: "Replay", Content: "Content", OperationID: "replay"}
+			id, err := s.AddObservation(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := p
+			if project == "" {
+				changed.Project = "test-project"
+			} else {
+				changed.Project = ""
+			}
+			if _, err := s.AddObservation(changed); !errors.Is(err, ErrObservationOperationConflict) {
+				t.Errorf("changed request selector: %v, want conflict", err)
+			}
+			// Simulate legacy unowned state after commit; acknowledged sync cannot mask adoption.
+			if _, err := s.db.Exec(`UPDATE sessions SET project = '', ownership_mode = NULL WHERE id = 'replay'; UPDATE sync_mutations SET acked_at = datetime('now')`); err != nil {
+				t.Fatal(err)
+			}
+			var before, after int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.AddObservation(p); err != nil || got != id {
+				t.Errorf("replay = %d, %v; want %d, nil", got, err, id)
+			}
+			var owner string
+			if err := s.db.QueryRow(`SELECT project, (SELECT COUNT(*) FROM sync_mutations) FROM sessions WHERE id = 'replay'`).Scan(&owner, &after); err != nil {
+				t.Fatal(err)
+			}
+			if owner != "" || after != before {
+				t.Fatalf("replay mutated ownership/sync: owner=%q, mutations=%d -> %d", owner, before, after)
+			}
+		})
+	}
+}
+
+func TestObservationOperationDuplicateLedgerInsertFails(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("duplicate", "test-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	p := AddObservationParams{SessionID: "duplicate", Project: "test-project", Type: "manual", Title: "Duplicate", Content: "Content", OperationID: "duplicate"}
+	id, err := s.AddObservation(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.withTx(func(tx *sql.Tx) error {
+		obs, err := s.getObservationTx(tx, id)
+		if err != nil {
+			return err
+		}
+		return s.recordObservationSaveOperationTx(tx, p.OperationID, "v1:replacement", id, obs)
+	})
+	if err == nil {
+		t.Fatal("duplicate ledger insert succeeded")
 	}
 }
 

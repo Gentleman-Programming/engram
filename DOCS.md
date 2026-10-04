@@ -331,8 +331,18 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?, operation_id?}`
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
+  - For recoverable saves, generate a UUID **once per logical save** as `operation_id`; retain it with the payload, rather than generating a new ID for each attempt. The ID is ledger-wide, not scoped to a session or project. Omitting it preserves the existing save behavior without operation-ledger recovery.
+  - `201` returns `{id, status: "saved"}`. An unknown operation ID proceeds through normal save logic; exact normalized request payload reuse returns the original observation ID before session ownership resolution, without observation or session/sync mutation. The fingerprint includes the normalized **requested project selector**: omitting `project` is different from explicitly selecting the session's project.
+  - `409` with `{error: "observation operation id conflicts with a different payload"}` when an existing supported operation ID has a different normalized request payload, including after hard deletion.
+  - `410 Gone` with `{error: "observation operation id is outside the replay horizon"}` when the same normalized request payload reuses an operation ID whose observation was hard-deleted, or when the retained fingerprint version is unsupported. Rejected replays leave observation and sync state unchanged.
+  - The local operation ledger is retained indefinitely, including tombstones left by hard deletion (`observation_id = NULL`). There is no pruning or TTL implementation; "replay horizon" does not mean elapsed time. Fingerprints use versioned length-prefixed encoding (`v1:`); legacy unversioned and unsupported versions are retained and fail closed with `410`, never rehashed from mutable observations or reused for new writes.
+- `GET /observations/save-result?operation_id=UUID` — Read-only recovery lookup after a timeout or unknown POST outcome; use the original operation ID before deciding whether to retry.
+  - `200` returns `{id, status: "committed"}` for a retained committed result; missing/empty `operation_id` returns `400`.
+  - `404` with `{error: "no committed result found for operation_id"}` for both an unknown ID and a tombstoned operation. Lookup does not distinguish them; POST does (normal save vs `410` for the same payload, or `409` for a changed tombstoned payload).
+  - A lookup miss is **not proof that the original request cannot commit later**. It neither cancels an in-flight POST nor authorizes a fresh operation ID for the same logical save.
+  - The Pi plugin supplies an operation UUID and attempts lookup recovery after an ambiguous transport outcome. It currently performs **no automatic exact POST replay**; an unsuccessful lookup preserves the original uncertain outcome.
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)

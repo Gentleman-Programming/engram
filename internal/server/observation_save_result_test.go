@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -98,6 +99,77 @@ func TestHandleGetObservationSaveResultReturnsNotFoundForTombstonedOperation(t *
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for tombstoned operation, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAddObservationAfterHardDeletion(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("sess-expired", "proj-expired", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := st.EnrollProject("proj-expired"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+	srv := New(st, 0)
+	payload := `{"session_id":"sess-expired","type":"manual","title":"Expired title","content":"Original content.","project":"proj-expired","scope":"project","operation_id":"op-post-expired"}`
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(payload)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var saved struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode saved: %v", err)
+	}
+	if err := st.DeleteObservation(saved.ID, true); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+	before, err := st.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations: %v", err)
+	}
+	writes := 0
+	srv.SetOnWrite(func() { writes++ })
+	for _, tc := range []struct {
+		name    string
+		payload string
+		status  int
+		err     error
+	}{
+		{"same payload", payload, http.StatusGone, store.ErrObservationOperationExpired},
+		{"changed payload", strings.Replace(payload, "Original content.", "Changed content.", 1), http.StatusConflict, store.ErrObservationOperationConflict},
+		{"same payload after conflict", payload, http.StatusGone, store.ErrObservationOperationExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(tc.payload)))
+			if rec.Code != tc.status {
+				t.Errorf("expected %d, got %d body=%s", tc.status, rec.Code, rec.Body.String())
+			}
+			var body map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error: %v", err)
+			}
+			if body["error"] != tc.err.Error() {
+				t.Errorf("error = %q, want %q", body["error"], tc.err.Error())
+			}
+			stats, err := st.Stats()
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if stats.TotalObservations != 0 || writes != 0 {
+				t.Errorf("rejected replay mutated state: observations=%d notifications=%d", stats.TotalObservations, writes)
+			}
+			after, err := st.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+			if err != nil {
+				t.Fatalf("ListPendingSyncMutations: %v", err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Error("rejected replay changed sync mutations")
+			}
+		})
 	}
 }
 

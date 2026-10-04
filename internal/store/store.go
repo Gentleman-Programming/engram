@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -3758,14 +3759,16 @@ func ValidateObservationTitle(title string) error {
 // observationSaveFingerprint returns a stable, canonical fingerprint of the
 // effect-bearing inputs for an observation save. It must include every input
 // that would change the persisted state if it differed, and it must be
-// computed after the same normalization the store applies before persistence.
+// computed from normalized request fields, before resolving session ownership.
 func observationSaveFingerprint(p AddObservationParams, title, content, project, scope, topicKey string) string {
 	h := sha256.New()
+	var length [8]byte
 	for _, v := range []string{p.SessionID, p.Type, title, content, p.ToolName, project, scope, topicKey} {
+		binary.BigEndian.PutUint64(length[:], uint64(len(v)))
+		h.Write(length[:])
 		h.Write([]byte(v))
-		h.Write([]byte{0})
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return "v1:" + hex.EncodeToString(h.Sum(nil))
 }
 
 // GetObservationSaveResult returns the committed observation ID for a previous
@@ -3802,8 +3805,7 @@ func (s *Store) recordObservationSaveOperationTx(tx *sql.Tx, operationID, finger
 	if operationID != "" {
 		if _, err := tx.Exec(
 			`INSERT INTO observation_save_operations (operation_id, fingerprint, observation_id)
-				 VALUES (?, ?, ?)
-				 ON CONFLICT(operation_id) DO UPDATE SET fingerprint=excluded.fingerprint, observation_id=excluded.observation_id`,
+				 VALUES (?, ?, ?)`,
 			operationID, fingerprint, observationID,
 		); err != nil {
 			return fmt.Errorf("record observation save operation: %w", err)
@@ -3834,21 +3836,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	scope := normalizeScope(p.Scope)
 	normHash := hashNormalized(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
+	fingerprint := observationSaveFingerprint(p, title, content, p.Project, scope, topicKey)
 
 	var observationID int64
 	err := s.withTx(func(tx *sql.Tx) error {
-		{
-			// Settle ownership first: an unowned legacy session adopts this
-			// write's project rather than rejecting the write forever.
-			resolved, err := s.resolveWriteProjectTx(tx, p.SessionID, p.Project)
-			if err != nil {
-				return err
-			}
-			p.Project = resolved
-		}
-
-		fingerprint := observationSaveFingerprint(p, title, content, p.Project, scope, topicKey)
-
 		// If the caller supplied an operation ID, check for a committed result first
 		// so a replay can return the original outcome without repeating mutations.
 		// The check runs inside the transaction so it races safely with concurrent
@@ -3861,6 +3852,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				p.OperationID,
 			).Scan(&committedID, &committedFingerprint)
 			if err == nil {
+				if !strings.HasPrefix(committedFingerprint, "v1:") {
+					return ErrObservationOperationExpired
+				}
 				if committedFingerprint == fingerprint {
 					if !committedID.Valid {
 						return ErrObservationOperationExpired
@@ -3873,6 +3867,14 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			if err != sql.ErrNoRows {
 				return err
 			}
+		}
+		{
+			// Only a genuinely new save may adopt an unowned legacy session.
+			resolved, err := s.resolveWriteProjectTx(tx, p.SessionID, p.Project)
+			if err != nil {
+				return err
+			}
+			p.Project = resolved
 		}
 		var obs *Observation
 		if topicKey != "" {
@@ -12470,8 +12472,7 @@ func (s *Store) migrateObservationSaveOperationsNullable() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
+		return closeRowsWithError(rows, err)
 	}
 	if err := rows.Close(); err != nil {
 		return err

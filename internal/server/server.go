@@ -719,6 +719,8 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, store.ErrObservationOperationConflict):
 			jsonError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrObservationOperationExpired):
+			jsonError(w, http.StatusGone, err.Error())
 		case writeOwnershipError(w, body.SessionID, err):
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())
