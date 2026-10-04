@@ -476,6 +476,10 @@ func (s *Server) routes() {
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
 
+	// Replay-safe observation save: committed-result lookup for clients that
+	// lost the acknowledgement of an earlier save.
+	s.mux.HandleFunc("GET /observations/save-result", s.handleGetObservationSaveResult)
+
 	// Timeline
 	s.mux.HandleFunc("GET /timeline", s.handleTimeline)
 	s.mux.HandleFunc("GET /observations/{id}", s.handleGetObservation)
@@ -660,6 +664,24 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, session)
 }
 
+func (s *Server) handleGetObservationSaveResult(w http.ResponseWriter, r *http.Request) {
+	operationID := r.URL.Query().Get("operation_id")
+	if operationID == "" {
+		jsonError(w, http.StatusBadRequest, "operation_id is required")
+		return
+	}
+	observationID, err := s.store.GetObservationSaveResult(operationID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if observationID == 0 {
+		jsonError(w, http.StatusNotFound, "no committed result found for operation_id")
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"id": observationID, "status": "committed"})
+}
+
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	var body store.AddObservationParams
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -689,6 +711,8 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrObservationTitleRequired),
 			errors.Is(err, store.ErrObservationContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationOperationConflict):
+			jsonError(w, http.StatusConflict, err.Error())
 		case writeOwnershipError(w, body.SessionID, err):
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())

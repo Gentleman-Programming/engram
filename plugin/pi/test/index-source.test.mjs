@@ -1930,7 +1930,7 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
   assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
-  assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
+  assert.match(source, /async function archiveCompactionSummary[\s\S]*postObservationWithReplayRecovery/);
 });
 
 test("session compaction never captures or reads stale Pi context", () => {

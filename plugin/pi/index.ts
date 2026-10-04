@@ -392,7 +392,39 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   throw new Error(unreachableMessage(undefined));
 }
 
+// postObservationWithReplayRecovery sends an idempotent observation save and,
+// if the transport failure makes the server-side outcome ambiguous, attempts
+// to recover the committed result from the replay ledger. It returns the post
+// result unchanged when recovery is not possible so callers can fail safe.
+async function postObservationWithReplayRecovery<TResponse = unknown>(opts: FetchOptions, signal?: AbortSignal): Promise<EngramFetchResult<TResponse>> {
+  const body = opts.body && typeof opts.body === "object" ? { ...(opts.body as Record<string, unknown>) } : {};
+  if (!body.operation_id) {
+    body.operation_id = observationOperationID(body);
+  }
+  const postResult = await engramFetchResult<TResponse>("/observations", { ...opts, body, signal });
+  if (!postResult.transportFailure) return postResult;
+  try {
+    const lookup = await engramFetchResult<{ id: number; status: string }>(
+      `/observations/save-result${queryString({ operation_id: String(body.operation_id) })}`,
+      { signal },
+    );
+    if (lookup.data && typeof lookup.data.id === "number") {
+      return { data: lookup.data as TResponse };
+    }
+  } catch {
+    // The lookup is a best-effort recovery. If it fails (server unreachable,
+    // ledger pruned, etc.) the original transport failure remains the
+    // authoritative signal so callers can report an unknown outcome.
+  }
+  return postResult;
+}
+
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+  if (path === "/observations" && (opts.method ?? "GET") === "POST") {
+    const result = await postObservationWithReplayRecovery<TResponse>(opts);
+    if (result.transportFailure) throw new Error(unreachableMessage(result.transportFailure));
+    return result.data;
+  }
   const result = await engramFetchResult<TResponse>(path, opts);
   // Background registration has no native-tool side channel for transport diagnostics.
   if (result.transportFailure?.operation === "session-registration") {
@@ -405,6 +437,11 @@ function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher
   let failure: EngramTransportFailure | undefined;
   return {
     async fetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+      if (path === "/observations" && (opts.method ?? "GET") === "POST") {
+        const result = await postObservationWithReplayRecovery<TResponse>(opts, signal);
+        if (result.transportFailure) failure = result.transportFailure;
+        return result.data;
+      }
       const result = await engramFetchResult<TResponse>(path, { ...opts, signal });
       if (result.transportFailure) failure = result.transportFailure;
       return result.data;
@@ -1723,7 +1760,7 @@ async function archiveCompactionSummary(sessionId: string, summary: string, runt
   try {
     // Ambiguity is checked against Pi's host identity; attribution uses Engram's effective ID.
     if (soleActiveRuntimeSessionID() !== runtimeID) return ArchiveOutcome.Unavailable;
-    const result = await engramFetchResult("/observations", {
+    const result = await postObservationWithReplayRecovery<{ id: number; status: string }>({
       method: "POST",
       body: {
         session_id: sessionId,
@@ -1771,6 +1808,30 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
   return slug || "memory";
+}
+
+// Stable operation identifier for observation saves. It is derived from the
+// effect-bearing fields so that automatic retries of the same logical save
+// replay with the same id, while intentionally distinct saves get distinct
+// ids. The server uses this id to return the original committed result for
+// replays and to reject saves whose payload changed under the same id.
+function observationOperationID(body: Record<string, unknown>): string {
+  const h = createHash("sha256");
+  const keys = Object.keys(body).sort();
+  for (const k of keys) {
+    h.update(k);
+    h.update("\0");
+    const v = body[k];
+    if (v === undefined || v === null) {
+      h.update("");
+    } else if (typeof v === "string") {
+      h.update(v);
+    } else {
+      h.update(JSON.stringify(v));
+    }
+    h.update("\0");
+  }
+  return "op-" + h.digest("hex").slice(0, 32);
 }
 
 async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
