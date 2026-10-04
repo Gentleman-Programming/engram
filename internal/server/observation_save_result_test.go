@@ -70,6 +70,37 @@ func TestHandleGetObservationSaveResultReturnsNotFoundForUnknown(t *testing.T) {
 	}
 }
 
+func TestHandleGetObservationSaveResultReturnsNotFoundForTombstonedOperation(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("sess-tombstone", "proj-tombstone", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	committedID, err := st.AddObservation(store.AddObservationParams{
+		SessionID:   "sess-tombstone",
+		Type:        "manual",
+		Title:       "Tombstone title",
+		Content:     "Tombstone content.",
+		Project:     "proj-tombstone",
+		Scope:       "project",
+		OperationID: "op-server-tombstone-1",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if err := st.DeleteObservation(committedID, true); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+
+	srv := New(st, 0)
+	req := httptest.NewRequest(http.MethodGet, "/observations/save-result?operation_id=op-server-tombstone-1", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for tombstoned operation, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleAddObservationAcceptsOperationID(t *testing.T) {
 	st := newServerTestStore(t)
 	if err := st.CreateSession("sess-op", "proj-op", "/tmp"); err != nil {

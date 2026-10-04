@@ -157,6 +157,44 @@ func TestGetObservationSaveResultIgnoresEmptyID(t *testing.T) {
 	}
 }
 
+func TestAddObservationWithOperationIDReturnsExpiredAfterObservationDeletion(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("session-1", "test-project", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	params := AddObservationParams{
+		SessionID:   "session-1",
+		Type:        "manual",
+		Title:       "Ephemeral",
+		Content:     "Will be deleted.",
+		Project:     "test-project",
+		Scope:       "project",
+		OperationID: "op-expired-1",
+	}
+
+	id, err := s.AddObservation(params)
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if err := s.DeleteObservation(id, true); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+
+	_, err = s.AddObservation(params)
+	if !errors.Is(err, ErrObservationOperationExpired) {
+		t.Fatalf("replay after deletion error = %v, want ErrObservationOperationExpired", err)
+	}
+
+	got, err := s.GetObservationSaveResult("op-expired-1")
+	if err != nil {
+		t.Fatalf("GetObservationSaveResult: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("GetObservationSaveResult returned %d, want 0 for tombstoned operation", got)
+	}
+}
+
 func countObservationSaveOperations(s *Store) (int, error) {
 	var count int
 	row := s.db.QueryRow(`SELECT COUNT(*) FROM observation_save_operations`)

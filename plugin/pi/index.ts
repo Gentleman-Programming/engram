@@ -8,7 +8,7 @@
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -399,7 +399,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
 async function postObservationWithReplayRecovery<TResponse = unknown>(opts: FetchOptions, signal?: AbortSignal): Promise<EngramFetchResult<TResponse>> {
   const body = opts.body && typeof opts.body === "object" ? { ...(opts.body as Record<string, unknown>) } : {};
   if (!body.operation_id) {
-    body.operation_id = observationOperationID(body);
+    body.operation_id = newObservationOperationID();
   }
   const postResult = await engramFetchResult<TResponse>("/observations", { ...opts, body, signal });
   if (!postResult.transportFailure) return postResult;
@@ -1810,28 +1810,14 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
-// Stable operation identifier for observation saves. It is derived from the
-// effect-bearing fields so that automatic retries of the same logical save
-// replay with the same id, while intentionally distinct saves get distinct
-// ids. The server uses this id to return the original committed result for
-// replays and to reject saves whose payload changed under the same id.
-function observationOperationID(body: Record<string, unknown>): string {
-  const h = createHash("sha256");
-  const keys = Object.keys(body).sort();
-  for (const k of keys) {
-    h.update(k);
-    h.update("\0");
-    const v = body[k];
-    if (v === undefined || v === null) {
-      h.update("");
-    } else if (typeof v === "string") {
-      h.update(v);
-    } else {
-      h.update(JSON.stringify(v));
-    }
-    h.update("\0");
-  }
-  return "op-" + h.digest("hex").slice(0, 32);
+// newObservationOperationID returns a fresh random operation identifier for an
+// observation save. The id is generated once per logical save and reused only
+// for automatic retries of that same save inside postObservationWithReplayRecovery;
+// intentionally distinct saves get distinct ids. The server uses the id to
+// return the original committed result for replays and to reject saves whose
+// payload changed under the same id.
+function newObservationOperationID(): string {
+  return randomUUID();
 }
 
 async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {

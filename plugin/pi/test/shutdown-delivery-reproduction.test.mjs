@@ -63,7 +63,7 @@ async function scenario(interrupted, fault) {
           { session_id: body.session_id, title: body.title, content: body.content, type: body.type, project: body.project, scope: body.scope },
           { session_id: identity, title: 'disposable', content: 'synthetic fixture only', type: 'manual', project: 'synthetic-1632', scope: 'project' },
         );
-        assert.match(body.operation_id, /^op-[a-f0-9]{32}$/, 'observation save must carry a stable operation id');
+        assert.match(body.operation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'observation save must carry a random operation id');
         return res.end('{"id":1}');
       }
       assert.equal(path, `/sessions/${identity}/end`, 'unexpected request');

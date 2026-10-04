@@ -478,6 +478,12 @@ func (s *Server) routes() {
 
 	// Replay-safe observation save: committed-result lookup for clients that
 	// lost the acknowledgement of an earlier save.
+	//
+	// Query parameter: operation_id (required)
+	// Responses:
+	//   200 {id, status:"committed"}
+	//   400 missing operation_id
+	//   404 no committed result known for the operation
 	s.mux.HandleFunc("GET /observations/save-result", s.handleGetObservationSaveResult)
 
 	// Timeline
