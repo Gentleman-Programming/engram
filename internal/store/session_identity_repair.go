@@ -79,8 +79,8 @@ func (s *Store) ApplySessionIdentityRepair(plan SessionIdentityRepairPlan) (Sess
 			return errors.New("session identity repair evidence changed since plan")
 		}
 		result.SessionIdentityRepairPlan = current.plan
-		insert, err := s.execHook(tx, `INSERT INTO sessions(id,project,ownership_mode,directory,started_at,ended_at,summary,runtime_lease_expires_at)
-			SELECT ?,project,ownership_mode,directory,started_at,ended_at,summary,runtime_lease_expires_at FROM sessions WHERE id=?`, plan.ReplacementID, plan.SourceID)
+		insert, err := s.execHook(tx, `INSERT INTO sessions(id,project,ownership_mode,directory,started_at,ended_at,summary,runtime_lease_expires_at,local_creation_project)
+			SELECT ?,project,ownership_mode,directory,started_at,ended_at,summary,runtime_lease_expires_at,local_creation_project FROM sessions WHERE id=?`, plan.ReplacementID, plan.SourceID)
 		if err := identityAffected(insert, err, 1, "insert canonical session"); err != nil {
 			return err
 		}
@@ -183,9 +183,10 @@ func (s *Store) inspectSessionIdentityTx(tx *sql.Tx, source, replacement string)
 	}
 	plan := SessionIdentityRepairPlan{SourceID: source, ReplacementID: replacement}
 	var mode, directory, started string
+	var creationProject sql.NullString
 	var ended, summary, lease sql.NullString
-	err := tx.QueryRow(`SELECT ifnull(project,''),ifnull(ownership_mode,''),directory,started_at,ended_at,summary,runtime_lease_expires_at
-		FROM sessions WHERE id=?`, source).Scan(&plan.Project, &mode, &directory, &started, &ended, &summary, &lease)
+	err := tx.QueryRow(`SELECT ifnull(project,''),ifnull(ownership_mode,''),directory,started_at,ended_at,summary,runtime_lease_expires_at,local_creation_project
+		FROM sessions WHERE id=?`, source).Scan(&plan.Project, &mode, &directory, &started, &ended, &summary, &lease, &creationProject)
 	if err != nil {
 		return snapshot, fmt.Errorf("session identity source: %w", err)
 	}
@@ -205,7 +206,7 @@ func (s *Store) inspectSessionIdentityTx(tx *sql.Tx, source, replacement string)
 	// Fingerprint source values and all dependent columns, not merely their counts.
 	// A matching hash is a stale-plan check, not proof that a row is safe: the
 	// explicit ownership, journal, tombstone, and delivery checks below provide that.
-	evidence := []any{source, replacement, plan.Project, mode, directory, started, ended, summary, lease}
+	evidence := []any{source, replacement, plan.Project, mode, directory, started, ended, summary, lease, creationProject}
 	if err := inspectIdentityObservations(tx, source, &snapshot, &evidence); err != nil {
 		return snapshot, err
 	}

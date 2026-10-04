@@ -59,11 +59,15 @@ All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
-Non-required PR checks, including lint, Windows setup and wrapper coverage, and transient-artifact validation, still run for pull requests. They are not active `main` required contexts and do not run as merge-group CI jobs.
+Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the merge-queue, label-policy, and transient-artifacts script suites), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
 ### Merge Queue Activation (administrators)
 
 Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
+
+## Claude Plugin Version Rule
+
+When changing any file under `plugin/claude-code/` (including renames or deletions), increase the semantic version in both `plugin/claude-code/.claude-plugin/plugin.json` and the `engram` entry of `.claude-plugin/marketplace.json` to the same higher version. The PR and merge queue guard compare against the event's base commit; malformed, missing, or inconsistent versions fail. Changes outside the Claude plugin subtree need no version bump. The guard runs the policy from the trusted base whenever it exists. On the first PR introducing the policy, the base has no script, so CI must temporarily run the candidate's policy; this bootstrap cannot prevent that PR from weakening its own guard. After merge, subsequent PRs use the base policy.
 
 ## Transient Artifact Policy
 
@@ -92,6 +96,24 @@ packages with `golang.org/x/tools/cmd/deadcode@v0.30.0` and compares stable
 functions fail CI. Removed entries pass and report that the debt tightened;
 review and deliberately refresh the baseline with `make deadcode-baseline` in
 the same change. Do not update a baseline merely to accept new debt.
+
+The default analyzer runs with command-scoped `GOTOOLCHAIN=go<version>+auto`,
+where `<version>` comes from the `go` directive in the repository's `go.mod`,
+not its optional `toolchain` directive or your ambient `GOTOOLCHAIN`. Go may
+automatically download that toolchain (or a newer required toolchain); the default
+analyzer requires a Go 1.21 or newer launcher for toolchain selection. Allow
+download access or provide the toolchain locally. Missing or invalid module
+minimums and analyzer/toolchain failures stop the check; a failed analyzer never
+refreshes the baseline.
+
+`DEADCODE_RATCHET_ANALYZER` bypasses this selection entirely: owners of that
+explicit executable override are responsible for its compatible toolchain and
+analyzer behavior. `--compare <baseline> <candidate>` only compares identity
+files and does not invoke Go.
+
+Patchless minimums from Go 1.21 onward select the `.0` release (for example,
+`go 1.24` selects `go1.24.0+auto`). Explicit patches and historical release
+names through Go 1.20 are preserved.
 
 ### Performance Ratchet
 

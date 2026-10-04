@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
 )
 
 func EnsureInstanceID(dataDir string) (string, error) {
@@ -56,7 +58,7 @@ func EnsureInstanceID(dataDir string) (string, error) {
 			_ = os.Remove(temporaryPath)
 			return "", fmt.Errorf("engram: close instance identity: %w", err)
 		}
-		err = os.Link(temporaryPath, path)
+		err = identityfile.Publish(temporaryPath, path)
 		_ = os.Remove(temporaryPath)
 		if err == nil {
 			return id, nil

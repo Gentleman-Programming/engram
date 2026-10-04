@@ -1,5 +1,9 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { createRequire, syncBuiltinESMExports } from "node:module"
+const require = createRequire(import.meta.url)
+const childProcess = require("node:child_process")
+const fs = require("node:fs")
 
 import { shouldNudgeForObservations } from "./engram.ts"
 
@@ -50,6 +54,8 @@ function sessionInfo(id: string, parentID?: string, projectID = PROJECT_ID) {
 function httpResponse(data: any = { status: "created" }, ok = true) {
   return {
     ok,
+    status: ok ? 200 : 500,
+    async text() { return JSON.stringify(data) },
     async json() {
       return data
     },
@@ -67,6 +73,13 @@ interface RuntimeOptions {
 }
 
 async function createRuntime(t: any, { sessionGet, sessionRegistration, sessionEnd }: RuntimeOptions = {}) {
+  const originalSpawnSync = childProcess.spawnSync
+  const originalSpawn = childProcess.spawn
+  const originalExistsSync = fs.existsSync
+  childProcess.spawnSync = () => ({ status: 0, stdout: "00000000000000000000000000000000\n" })
+  childProcess.spawn = () => ({ on() { return this }, unref() {} })
+  fs.existsSync = () => false
+  syncBuiltinESMExports()
   const originalFetch = globalThis.fetch
   const originalBun = (globalThis as any).Bun
   const originalEngramURL = process.env.ENGRAM_URL
@@ -99,16 +112,20 @@ async function createRuntime(t: any, { sessionGet, sessionRegistration, sessionE
       return httpResponse({ project: "engram", project_source: "git_remote" })
     if (path === "/sessions") {
       registeredIDs.push(body.id)
-      return sessionRegistration ? await sessionRegistration(body.id) : httpResponse()
+      return sessionRegistration ? await sessionRegistration(body.id) : httpResponse({ id: body.id, status: "created" })
     }
     if (path.endsWith("/end")) {
       const sessionID = path.split("/")[2]
-      return sessionEnd ? await sessionEnd(sessionID) : httpResponse({})
+      return sessionEnd ? await sessionEnd(sessionID) : httpResponse({ id: sessionID, status: "completed" })
     }
     return httpResponse({})
   }) as typeof fetch
 
   t.after(() => {
+    childProcess.spawnSync = originalSpawnSync
+    childProcess.spawn = originalSpawn
+    fs.existsSync = originalExistsSync
+    syncBuiltinESMExports()
     globalThis.fetch = originalFetch
     bun.Bun = originalBun
     if (originalEngramURL === undefined) delete process.env.ENGRAM_URL

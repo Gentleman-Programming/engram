@@ -99,7 +99,7 @@ func TestDashboardPrincipalScopeHonorsDeploymentWildcardAndZeroGrants(t *testing
 	}
 }
 
-func TestDashboardPrincipalSyncControlsIntersectDeploymentAndGrants(t *testing.T) {
+func TestDashboardPrincipalScopeSyncControlsUseGrantsOnly(t *testing.T) {
 	store := &CloudStore{
 		dashboardAllowedScopes: map[string]struct{}{"project-a": {}},
 		dashboardReadModel:     dashboardPrincipalReadModel(),
@@ -110,20 +110,20 @@ func TestDashboardPrincipalSyncControlsIntersectDeploymentAndGrants(t *testing.T
 	if err != nil {
 		t.Fatalf("DashboardStoreForProjects wildcard: %v", err)
 	}
-	assertDashboardPrincipalProjects(t, wildcard, "project-a")
-	if _, err := wildcard.scopedProject("project-b"); !errors.Is(err, ErrDashboardProjectForbidden) {
-		t.Fatalf("expected explicit deployment scope to forbid project-b, got %v", err)
+	if rows, err := wildcard.ListProjects(""); err != nil || len(rows) != 2 {
+		t.Fatalf("explicit managed wildcard must include both projects: %+v %v", rows, err)
+	}
+	if _, err := wildcard.scopedProject("project-b"); err != nil {
+		t.Fatalf("managed wildcard must allow project-b controls: %v", err)
 	}
 
 	stale, err := store.DashboardStoreForProjects([]string{"project-b"})
 	if err != nil {
 		t.Fatalf("DashboardStoreForProjects stale grant: %v", err)
 	}
-	if projects, err := stale.ListProjects(""); err != nil || len(projects) != 0 {
-		t.Fatalf("expected stale grant to expose no projects, projects=%+v err=%v", projects, err)
-	}
-	if _, err := stale.scopedProject("project-b"); !errors.Is(err, ErrDashboardProjectForbidden) {
-		t.Fatalf("expected stale grant to forbid project-b controls, got %v", err)
+	assertDashboardPrincipalProjects(t, stale, "project-b")
+	if _, err := stale.scopedProject("project-b"); err != nil {
+		t.Fatalf("grant outside legacy scope must allow controls: %v", err)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestDashboardPrincipalSyncControlsRejectInvalidRecords(t *testing.T) {
 		dashboardReadModel:     dashboardPrincipalReadModel(),
 		dashboardReadModelOK:   true,
 	}
-	view, err := store.DashboardStoreForProjects([]string{"*"})
+	view, err := store.DashboardStoreForProjects([]string{"project-a"})
 	if err != nil {
 		t.Fatalf("DashboardStoreForProjects: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestDashboardPrincipalSyncControlsRejectInvalidRecords(t *testing.T) {
 }
 
 func TestDashboardPrincipalScopeKeepsSharedCacheIsolatedBetweenSequentialPrincipals(t *testing.T) {
-	store := &CloudStore{dashboardReadModel: dashboardPrincipalReadModel(), dashboardReadModelOK: true}
+	store := &CloudStore{dashboardReadModel: dashboardPrincipalReadModel(), dashboardReadModelOK: true, dashboardAllowedScopes: map[string]struct{}{"project-a": {}}}
 
 	alice, err := store.DashboardStoreForProjects([]string{"project-a"})
 	if err != nil {
@@ -164,6 +164,50 @@ func TestDashboardPrincipalScopeKeepsSharedCacheIsolatedBetweenSequentialPrincip
 	assertDashboardPrincipalProjects(t, alice, "project-a")
 	assertDashboardPrincipalProjects(t, bob, "project-b")
 	assertDashboardPrincipalProjects(t, alice, "project-a")
+}
+
+func TestDashboardPrincipalScopeOutsideLegacyAndEmptyRegistration(t *testing.T) {
+	model := dashboardPrincipalReadModel().withRegisteredProjects([]ProjectSyncControl{{Project: "empty"}})
+	store := &CloudStore{dashboardReadModel: model, dashboardReadModelOK: true, dashboardAllowedScopes: map[string]struct{}{"project-a": {}}}
+	view, err := store.DashboardStoreForProjects([]string{"project-b", "empty"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := view.ListProjects("")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("managed inventory: %+v %v", rows, err)
+	}
+	empty, err := view.ProjectDetail("empty")
+	if err != nil || empty.Stats != (DashboardProjectRow{Project: "empty"}) {
+		t.Fatalf("empty registration: %+v %v", empty, err)
+	}
+	if _, err := view.ProjectDetail("project-a"); !errors.Is(err, ErrDashboardProjectForbidden) {
+		t.Fatalf("ungranted detail: %v", err)
+	}
+	if obs := mustDashboardPrincipalObservations(t, view); len(obs) != 1 || obs[0].Project != "project-b" {
+		t.Fatalf("observations: %+v", obs)
+	}
+	if sessions := mustDashboardPrincipalSessions(t, view); len(sessions) != 1 || sessions[0].Project != "project-b" {
+		t.Fatalf("sessions: %+v", sessions)
+	}
+	if prompts := mustDashboardPrincipalPrompts(t, view); len(prompts) != 1 || prompts[0].Project != "project-b" {
+		t.Fatalf("prompts: %+v", prompts)
+	}
+	if overview, err := view.AdminOverview(); err != nil || overview != (DashboardAdminOverview{Projects: 2, Contributors: 1, Chunks: 3}) {
+		t.Fatalf("managed stats: %+v %v", overview, err)
+	}
+	legacy, err := store.ListProjects("")
+	if err != nil || len(legacy) != 1 || legacy[0].Project != "project-a" {
+		t.Fatalf("legacy inventory: %+v %v", legacy, err)
+	}
+	if _, err := store.ProjectDetail("project-b"); !errors.Is(err, ErrDashboardProjectForbidden) {
+		t.Fatalf("legacy exclusion: %v", err)
+	}
+	store.dashboardAllowedScopes = map[string]struct{}{"*": {}}
+	store.dashboardAllowedAll = true
+	if rows, err := store.ListProjects(""); err != nil || len(rows) != 3 {
+		t.Fatalf("legacy explicit wildcard: %+v %v", rows, err)
+	}
 }
 
 func mustDashboardPrincipalObservations(t *testing.T, view *DashboardScopedStore) []DashboardObservationRow {

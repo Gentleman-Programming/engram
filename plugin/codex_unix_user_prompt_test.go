@@ -91,6 +91,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 	requireCodexUnixTools(t, bashPath)
 	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh")
 
+	sessionID := "pipe-test-" + time.Now().Format("150405.000000000")
 	postStarted := make(chan struct{})
 	releasePost := make(chan struct{})
 	var postOnce sync.Once
@@ -102,6 +103,17 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 		switch r.URL.Path {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
+		case "/sessions":
+			var request struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.ID != sessionID || r.Method != http.MethodPost {
+				t.Errorf("invalid session registration: method=%s id=%q err=%v", r.Method, request.ID, err)
+				http.Error(w, "invalid registration", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"id":%q,"status":"created"}`, sessionID)
 		case "/prompts":
 			postOnce.Do(func() { close(postStarted) })
 			<-releasePost
@@ -144,7 +156,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 	_ = inputReader.Close()
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
-	if _, err := io.WriteString(inputWriter, `{"cwd":"/tmp/test","session_id":"pipe-test-`+time.Now().Format("150405.000000000")+`","prompt":"capture this"}`); err != nil {
+	if _, err := io.WriteString(inputWriter, `{"cwd":"/tmp/test","session_id":"`+sessionID+`","prompt":"capture this"}`); err != nil {
 		t.Fatalf("write hook input: %v", err)
 	}
 	if err := inputWriter.Close(); err != nil {
@@ -199,7 +211,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	binDir := t.TempDir()
 	markerPath := filepath.Join(binDir, "stdin-result")
 	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "cat"), "#!/bin/bash\nprintf '%s' '{\"cwd\":\"/tmp/test\",\"session_id\":\"stdin-pipe-test\",\"prompt\":\"capture this\"}'\n")
-	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *'/prompts'*) if IFS= read -r _; then printf data > \"$PROMPT_STDIN_MARKER\"; else printf eof > \"$PROMPT_STDIN_MARKER\"; fi ;;\n  *) exit 0 ;;\nesac\n")
+	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *'/sessions'*) printf '%s\\n201' '{\"id\":\"stdin-pipe-test\",\"status\":\"created\"}' ;;\n  *'/prompts'*) if IFS= read -r _; then printf data > \"$PROMPT_STDIN_MARKER\"; else printf eof > \"$PROMPT_STDIN_MARKER\"; fi ;;\n  *) exit 0 ;;\nesac\n")
 
 	stdinReader, stdinWriter, err := os.Pipe()
 	if err != nil {

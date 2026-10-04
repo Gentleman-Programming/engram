@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readFileSync, mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createInterface } from "node:readline"
 import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
 
@@ -34,9 +37,15 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true, onJSON, jsonError) {
+function httpResponse(data = { id: "runtime", status: "created" }, ok = true, onJSON, jsonError) {
   return {
     ok,
+    status: ok ? 200 : 500,
+    async text() {
+      onJSON?.()
+      if (jsonError) return "{broken"
+      return JSON.stringify(data)
+    },
     async json() {
       onJSON?.()
       if (jsonError) throw jsonError
@@ -82,6 +91,7 @@ function buildEnsureResolvedProjectForTest(resolveProjectName) {
     let project = "unknown"
     let projectResolutionError = ""
     let projectResolutionGeneration = 0
+    let projectAmbiguous = false
     let localReady = true; const ctx = { directory: "/work/engram" }
 		async function ensureLocalReady() { return localReady }
     async function ensureResolvedProject() {${body}}
@@ -114,8 +124,11 @@ async function createRuntime(t, {
 	manifestExists = false,
   identityLookupFails = false,
   emitSpawnError = false,
+  emitSpawnExit = false,
+  spawnExit = [1, null],
   installBun = true,
   configuredEngramURL,
+  realServerFetch = false,
   engramBin,
   engramPort,
   healthOK = true,
@@ -125,6 +138,7 @@ async function createRuntime(t, {
     sessionEndResponse,
     contextResponse,
     nudgeSessionResponse,
+    recoveryResponse,
     nudgeObservationsResponse,
     nudgeObservationsError,
 } = {}) {
@@ -170,9 +184,11 @@ async function createRuntime(t, {
   })
   childProcess.spawn = (command, args, options) => {
     let errorListener
+    let exitListener
     const child = {
       events: [],
       on(event, listener) {
+        if (event === "exit") exitListener = listener
         if (event === "error" && typeof listener === "function") {
           this.events.push(event)
           errorListener = listener
@@ -181,6 +197,7 @@ async function createRuntime(t, {
       },
       unref() {
         this.events.push("unref")
+        if (emitSpawnExit) queueMicrotask(() => exitListener?.(...spawnExit))
         if (emitSpawnError) queueMicrotask(() => {
           this.events.push("error:emitted")
           errorListener?.(new Error("simulated spawn failure"))
@@ -207,13 +224,16 @@ async function createRuntime(t, {
 		}
     if (path === "/sessions") {
       registeredIDs.push(body.id)
-      if (registrationResponse) return registrationResponse(registeredIDs.length)
-      return httpResponse()
+      if (registrationResponse) return registrationResponse(registeredIDs.length, body.id)
+      if (realServerFetch) return originalFetch(url, init)
+      return httpResponse({ id: body.id, status: "created" })
     }
+    if (realServerFetch) return originalFetch(url, init)
     if (path.startsWith("/sessions/") && path.endsWith("/end")) {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
-      return httpResponse({})
+      return httpResponse({ id: decodeURIComponent(path.split("/")[2]), status: "completed" })
     }
+    if (path.startsWith("/sessions/") && recoveryResponse) return recoveryResponse(path)
     if (path.startsWith("/sessions/") && nudgeSessionResponse) return httpResponse(nudgeSessionResponse)
     if (path === "/observations" && (nudgeObservationsResponse !== undefined || nudgeObservationsError)) {
       return httpResponse(nudgeObservationsResponse, true, undefined, nudgeObservationsError)
@@ -276,6 +296,266 @@ async function createRuntime(t, {
 		startupEvents,
   }
 }
+
+for (const body of ["", "   ", "{broken", "null", "{}", '{"id":"wrong","status":"completed"}', '{"id":"runtime","status":"ok"}']) {
+  test(`session end acknowledgement rejects ${JSON.stringify(body)} and retries`, async (t) => {
+    const runtime = await createRuntime(t, { sessionEndResponse: (count) => count === 1
+      ? { ok: true, status: 200, async text() { return body }, async json() { return JSON.parse(body) } }
+      : httpResponse({ id: "runtime", status: "completed" }) })
+    await runtime.event("session.created", session("runtime"))
+    await runtime.event("session.deleted", session("runtime"))
+    await runtime.event("session.deleted", session("runtime"))
+    assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 2)
+    await runtime.event("session.deleted", session("runtime"))
+    assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 2)
+  })
+}
+
+for (const failure of ["HTTP", "transport"]) {
+  test(`session end acknowledgement retains ${failure} failure for disposal retry`, async (t) => {
+    const runtime = await createRuntime(t, { sessionEndResponse: (count) => {
+      if (count > 1) return httpResponse({ id: "runtime", status: "completed" })
+      if (failure === "transport") throw new Error("private transport detail")
+      return httpResponse({}, false)
+    } })
+    await runtime.event("session.created", session("runtime"))
+    await runtime.event("session.deleted", session("runtime"))
+    await runtime.dispose()
+    assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 2)
+  })
+}
+
+for (const kind of ["error", "exit", "signal"]) {
+  test(`degraded startup warning retains asynchronous serve ${kind}`, async (t) => {
+    const runtime = await createRuntime(t, { healthOK: false, emitSpawnError: kind === "error", emitSpawnExit: kind !== "error", spawnExit: kind === "signal" ? [null, "SIGTERM"] : [1, null] })
+    const output = { output: "original" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.match(output.output, /Engram degraded.*startup/)
+    assert.equal(output.output.match(/Engram degraded/g).length, 1)
+    assert.ok(output.output.length < 400)
+    const next = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, next)
+    assert.doesNotMatch(next.output, /startup/)
+  })
+  test(`degraded import warning retains observable ${kind}`, async (t) => {
+    const runtime = await createRuntime(t, { manifestExists: true, emitSpawnError: kind === "error", emitSpawnExit: kind !== "error", spawnExit: kind === "signal" ? [null, "SIGTERM"] : [1, null] })
+    const output = { output: "original" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.match(output.output, /Engram degraded.*import/)
+    assert.equal(output.output.match(/Engram degraded/g).length, 1)
+    assert.ok(output.output.length < 400)
+    const next = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, next)
+    assert.equal(next.output, "next")
+  })
+}
+
+test("degraded import warning ignores normal child exit", async (t) => {
+  const runtime = await createRuntime(t, { manifestExists: true, emitSpawnExit: true, spawnExit: [0, null] })
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.equal(output.output, "original")
+})
+
+test("degraded startup warning ignores normal child exit", async (t) => {
+  const runtime = await createRuntime(t, { healthOK: false, emitSpawnExit: true, spawnExit: [0, null] })
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.doesNotMatch(output.output, /startup/)
+  assert.match(output.output, /readiness/)
+})
+
+const runtimeGlobalsBeforeIsolation = {
+  spawnSync: childProcess.spawnSync,
+  spawn: childProcess.spawn,
+  existsSync: fs.existsSync,
+  fetch: globalThis.fetch,
+}
+
+test("degraded startup warning does not leak across plugin instances", async (t) => {
+  await createRuntime(t, { identityLookupFails: true })
+  await t.test("healthy instance", async (t) => {
+    const healthy = await createRuntime(t)
+    const output = { output: "original" }
+    await healthy.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.equal(output.output, "original")
+  })
+})
+
+test("runtime mocks restore globals after nested contexts", () => {
+  // This separate test runs after both instance contexts have finished teardown.
+  assert.strictEqual(childProcess.spawnSync, runtimeGlobalsBeforeIsolation.spawnSync)
+  assert.strictEqual(childProcess.spawn, runtimeGlobalsBeforeIsolation.spawn)
+  assert.strictEqual(fs.existsSync, runtimeGlobalsBeforeIsolation.existsSync)
+  assert.strictEqual(globalThis.fetch, runtimeGlobalsBeforeIsolation.fetch)
+})
+
+test("degraded HTTP warning does not conflate expected registration refusal with downtime", async (t) => {
+  const runtime = await createRuntime(t, { registrationResponse: () => registrationFailure("session_project_conflict") })
+  const output = { output: "original" }
+  await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+  assert.equal(output.output, "original")
+})
+
+for (const category of ["startup", "import", "transport", "HTTP"]) {
+  test(`degraded ${category} warning is retained and deduplicated`, async (t) => {
+    const runtime = await createRuntime(t, category === "startup" ? { identityLookupFails: true }
+      : category === "import" ? { manifestExists: true, emitSpawnError: true } : {})
+    if (category === "transport") globalThis.fetch = async () => { throw new Error("private path") }
+    if (category === "HTTP") globalThis.fetch = async () => httpResponse({}, false)
+    const unknown = { output: 42 }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, unknown)
+    assert.equal(unknown.output, 42)
+    const output = { output: "original", metadata: { keep: true } }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, output)
+    assert.match(output.output, /Engram degraded/)
+    assert.doesNotMatch(output.output, /private path/)
+    assert.deepEqual(output.metadata, { keep: true })
+    const again = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, again)
+    assert.equal(again.output, "next")
+  })
+}
+
+function registrationFailure(code) {
+  return { ...httpResponse({ code }, false), status: 409 }
+}
+
+for (const endedCount of [1, 2]) {
+  test(`ended roots advance to resume:${endedCount + 1} for every session-bound hook`, async (t) => {
+    const runtime = await createRuntime(t, {
+      registrationResponse: () => httpResponse({ id: `runtime:resume:${endedCount + 1}`, status: "created" }),
+      contextResponse: () => httpResponse({ context: "resumed context" }),
+    })
+    const effective = `runtime:resume:${endedCount + 1}`
+    await runtime.chat({ sessionID: "runtime" }, { parts: [{ type: "text", text: "Continue the previous conversation" }], message: {} })
+    await runtime.after({ sessionID: "runtime", tool: "Task" }, "A reusable learning from this completed task that exceeds fifty characters")
+    const output = toolOutput()
+    await runtime.before({ sessionID: "runtime", tool: "engram_mem_save" }, output)
+    assert.equal(output.args.session_id, effective)
+    for (const path of ["/prompts", "/observations/passive"]) {
+      assert.equal(runtime.requests.find((r) => r.path === path).body.session_id, effective)
+    }
+    await runtime.compact({ sessionID: "runtime" }, { context: [] })
+    assert.equal(new URL(runtime.requests.find((r) => r.path === "/context/compaction").url).searchParams.get("session_id"), effective)
+    await runtime.dispose()
+    assert.deepEqual(runtime.requests.filter((r) => r.path.endsWith("/end")).map((r) => r.path), [`/sessions/${encodeURIComponent(effective)}/end`])
+  })
+}
+
+test("concurrent resumed writes share one resume request", async (t) => {
+  const runtime = await createRuntime(t, {
+    registrationResponse: () => httpResponse({ id: "runtime:resume:2", status: "created" }),
+  })
+  const outputs = [toolOutput(), toolOutput(), toolOutput()]
+  await Promise.all(outputs.map((output) => runtime.before({ sessionID: "runtime", tool: "mem_save" }, output)))
+  assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  assert.equal(runtime.requests.find((r) => r.path === "/sessions").body.resume, true)
+  assert.ok(outputs.every((o) => o.args.session_id === "runtime:resume:2"))
+})
+
+for (const code of ["session_project_conflict", "session_already_ended"]) {
+  test(`${code} refuses writes with a specific cause and warns once`, async (t) => {
+    const warnings = []
+    const originalWarn = console.warn
+    console.warn = (message) => warnings.push(message)
+    t.after(() => { console.warn = originalWarn })
+    const runtime = await createRuntime(t, { registrationResponse: () => registrationFailure(code) })
+    for (let i = 0; i < 2; i++) {
+      const output = toolOutput()
+      await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, output), new RegExp(code))
+      assert.equal(output.args.session_id, MODEL_SESSION_ID)
+    }
+    assert.deepEqual(runtime.registeredIDs, ["runtime", "runtime"])
+    assert.equal(warnings.length, 1)
+    await runtime.dispose()
+    assert.equal(runtime.requests.filter((r) => r.path.endsWith("/end")).length, 0, "rejected registrations do not own cleanup")
+  })
+}
+
+test("renewal advances again when another instance ends the effective session", async (t) => {
+  let effective = "runtime:resume:2"
+  const runtime = await createRuntime(t, { registrationResponse: () => httpResponse({ id: effective, status: "created" }) })
+  const output = toolOutput()
+  await runtime.before({ sessionID: "runtime", tool: "mem_save" }, output)
+  effective = "runtime:resume:3"
+  await runtime.before({ sessionID: "runtime", tool: "mem_save" }, output)
+  assert.equal(output.args.session_id, "runtime:resume:3")
+})
+
+test("an uncertain renewal failure keeps cleanup ownership of the registered session", async (t) => {
+  let failRenewal = false
+  const runtime = await createRuntime(t, { registrationResponse: () => failRenewal
+    ? httpResponse({ error: "unavailable" }, false) : httpResponse({ id: "runtime:resume:2", status: "created" }) })
+  await runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput())
+  failRenewal = true
+  await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput()), /could not confirm/)
+  await runtime.dispose()
+  assert.deepEqual(runtime.requests.filter((r) => r.path.endsWith("/end")).map((r) => r.path),
+    [`/sessions/${encodeURIComponent("runtime:resume:2")}/end`], "a failed renewal must not drop the owned effective session")
+})
+
+test("an uncertain initial resume never guesses a cleanup identity", async (t) => {
+  const runtime = await createRuntime(t, { registrationResponse: () => httpResponse({}, true, undefined, new Error("lost acknowledgement")) })
+  await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput()), /could not confirm/)
+  await runtime.dispose()
+  assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  assert.equal(runtime.requests.filter((r) => r.path.endsWith("/end")).length, 0)
+})
+
+test("a timed-out registration followed by refusal never guesses an effective ID", async (t) => {
+  const runtime = await createRuntime(t, {
+    registrationResponse: (attempt) => {
+      if (attempt === 1) throw new Error("registration timed out")
+      return registrationFailure("session_already_ended")
+    },
+  })
+  for (const error of [/could not confirm/, /session_already_ended/]) {
+    const output = toolOutput()
+    await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, output), error)
+    assert.equal(output.args.session_id, MODEL_SESSION_ID, "no MCP session_id is injected without an acknowledgement")
+  }
+  await runtime.chat({ sessionID: "runtime" }, { parts: [{ type: "text", text: "Continue the conversation" }], message: {} })
+  await runtime.after({ sessionID: "runtime", tool: "Task" }, "A reusable learning from this completed task that exceeds fifty characters")
+  assert.ok(runtime.registeredIDs.length >= 2)
+  assert.ok(runtime.registeredIDs.every((id) => id === "runtime"), "registration never invents a continuation ID")
+  assert.equal(runtime.requests.filter((r) => ["/prompts", "/observations/passive"].includes(r.path)).length, 0, "refused sessions accept no writes")
+  await runtime.dispose()
+  assert.equal(runtime.requests.filter((r) => r.path.endsWith("/end")).length, 0, "dispose never ends an unacknowledged or guessed ID")
+})
+
+test("separate plugin instances converge on the same resumed identity", async (t) => {
+  const options = { registrationResponse: () => httpResponse({ id: "runtime:resume:2", status: "created" }) }
+  const first = await createRuntime(t, options)
+  await t.test("second instance", async (t) => {
+    const second = await createRuntime(t, options)
+    const outputs = [toolOutput(), toolOutput()]
+    await Promise.all([first, second].map((runtime, i) => runtime.before({ sessionID: "runtime", tool: "mem_save" }, outputs[i])))
+    assert.ok(outputs.every((o) => o.args.session_id === "runtime:resume:2"))
+  })
+})
+
+test("unknown refusals and mismatched resumed acknowledgements never advance", async (t) => {
+  for (const response of [registrationFailure("other_conflict"), httpResponse({ id: "foreign", status: "created" }), httpResponse({ id: "runtime-other:resume:2", status: "created" }), httpResponse({ id: "runtime:resume:2", status: "rejected" }), httpResponse({}, false)]) {
+    await t.test(JSON.stringify(response), async (t) => {
+      const runtime = await createRuntime(t, { registrationResponse: () => response })
+      await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput()), /could not confirm/)
+      assert.deepEqual(runtime.registeredIDs, ["runtime"])
+    })
+  }
+})
+
+test("resumed save nudge looks up the effective session", async (t) => {
+  const runtime = await createRuntime(t, { registrationResponse: () => httpResponse({ id: "runtime:resume:2", status: "created" }),
+    nudgeSessionResponse: { started_at: "2020-01-01 00:00:00" }, nudgeObservationsResponse: [] })
+  const output = { system: [] }
+  await runtime.transform({ sessionID: "runtime" }, { system: [] })
+  assert.equal(runtime.registeredIDs.length, 0, "the nudge never registers a session")
+  await runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput())
+  await runtime.transform({ sessionID: "runtime" }, output)
+  assert.ok(runtime.requests.some((r) => r.path === "/sessions/runtime%3Aresume%3A2"))
+  assert.match(output.system.join(""), /MEMORY REMINDER/)
+})
 
 test("V1 default selection initializes only the Engram factory once", async (t) => {
   const runtime = await createRuntime(t, { selectLegacyDefault: true })
@@ -420,6 +700,83 @@ test("project identity delegates Windows paths and worktrees to the canonical se
 		}
     })
   }
+})
+
+test("ambiguous recovery unavailable acknowledgement never registers or captures", async (t) => {
+  const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] }, recoveryResponse: () => { throw new Error("HTTP store unavailable") } })
+  await runtime.before({ tool: "mem_save", sessionID: "root" }, { args: { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+  await runtime.after({ tool: "mem_save", sessionID: "root" }, { output: "saved" })
+  await runtime.chat({ sessionID: "root" }, { message: {}, parts: [{ type: "text", text: "Automatic prompt must not bypass unavailable acknowledgement" }] })
+  await runtime.after({ tool: "Task", sessionID: "root" }, "Passive content".repeat(10))
+  await runtime.compact({ sessionID: "root" }, { context: [] })
+  assert.equal(runtime.requests.some(({ method }) => method === "POST"), false)
+  assert.equal(runtime.requests.some(({ path }) => path === "/context/compaction"), false)
+})
+
+test("ambiguous recovery preserves resumed effective identity and explicit arguments", async (t) => {
+  let registrations = 0
+  const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] },
+    recoveryResponse: (path) => httpResponse({ id: decodeURIComponent(path.split("/")[2]), project: "repo-a", ownership_mode: "project_owned" }),
+    registrationResponse: () => ++registrations === 1 ? httpResponse({ id: "root:resume:2", status: "created" }) : httpResponse({}, false) })
+  const selection = { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" }
+  await runtime.before({ tool: "mem_save", sessionID: "root" }, { args: { ...selection } })
+  await runtime.after({ tool: "mem_save", sessionID: "root" }, { output: "saved" })
+  await runtime.chat({ sessionID: "root" }, { message: {}, parts: [{ type: "text", text: "Resume the acknowledged runtime root" }] })
+  assert.equal(runtime.requests.find(({ path }) => path === "/prompts")?.body.session_id, "root:resume:2")
+  const output = { args: { ...selection, session_id: "invented" } }
+  await runtime.before({ tool: "mem_save", sessionID: "root" }, output)
+  assert.deepEqual(output.args, { ...selection, session_id: "root:resume:2" })
+})
+
+test("ambiguous recovery authorization stays isolated to each runtime root", async (t) => {
+  const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] }, recoveryResponse: (path) => { const id = decodeURIComponent(path.split("/")[2]); return httpResponse({ id, project: id === "root-a" ? "repo-a" : "repo-b", ownership_mode: "project_owned" }) }, contextResponse: () => httpResponse({ context: "root context" }) })
+  await runtime.before({ tool: "mem_save", sessionID: "root-a" }, { args: { project: "repo-a", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+  await runtime.after({ tool: "mem_save", sessionID: "root-a" }, { output: "saved" })
+  const start = runtime.requests.length
+  await runtime.chat({ sessionID: "root-b" }, { message: {}, parts: [{ type: "text", text: "Unselected root must not capture this prompt" }] })
+  await runtime.after({ tool: "Task", sessionID: "root-b" }, "Passive content".repeat(10))
+  await runtime.compact({ sessionID: "root-b" }, { context: [] })
+  assert.equal(runtime.requests.slice(start).some(({ path, method }) => method === "POST" || path === "/context/compaction"), false)
+  await runtime.chat({ sessionID: "root-a" }, { message: {}, parts: [{ type: "text", text: "Selected root may capture its own prompt" }] })
+  assert.equal(runtime.requests.find(({ path }) => path === "/prompts")?.body.project, "repo-a")
+  await runtime.after({ tool: "Task", sessionID: "root-a" }, "Own passive output".repeat(10))
+  assert.equal(runtime.requests.find(({ path }) => path === "/observations/passive")?.body.project, "repo-a")
+  const context = { context: [] }
+  await runtime.compact({ sessionID: "root-a" }, context)
+  assert.match(context.context.join("\n"), /Use project: 'repo-a'/)
+  await runtime.before({ tool: "mem_save", sessionID: "root-b" }, { args: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "second-token" } })
+  await runtime.after({ tool: "mem_save", sessionID: "root-b" }, { output: "saved" })
+  await runtime.chat({ sessionID: "root-b" }, { message: {}, parts: [{ type: "text", text: "Separately selected root can capture its own prompt" }] })
+  assert.equal(runtime.requests.filter(({ path }) => path === "/prompts").at(-1).body.project, "repo-b")
+})
+
+test("ambiguous recovery requires matching HTTP association before automatic capture", async (t) => {
+  for (const scenario of [
+    { name: "missing", ack: {}, capture: false },
+    { name: "different store project", ack: { id: "runtime", project: "other", ownership_mode: "project_owned" }, capture: false },
+    { name: "terminal", ack: { id: "runtime", project: "repo-b", ownership_mode: "project_owned", ended_at: "2026-01-01" }, capture: false },
+    { name: "matching", ack: { id: "runtime", project: "repo-b", ownership_mode: "project_owned" }, capture: true },
+  ]) await t.test(scenario.name, async (t) => {
+    const runtime = await createRuntime(t, { projectCurrentResponse: { project: "", project_source: "ambiguous", error_hint: "ambiguous", available_projects: ["repo-a", "repo-b"] }, nudgeSessionResponse: scenario.ack })
+    await runtime.before({ tool: "mem_save", sessionID: "runtime" }, { args: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "token" } })
+    await runtime.after({ tool: "mem_save", sessionID: "runtime" }, { output: "saved" })
+    await runtime.chat({ sessionID: "runtime" }, { message: {}, parts: [{ type: "text", text: "Automatic prompt after explicit recovery" }] })
+    assert.equal(runtime.requests.some(({ path }) => path === "/prompts"), scenario.capture)
+    if (!scenario.capture) assert.equal(runtime.requests.some(({ path }) => path === "/sessions"), false)
+  })
+})
+
+test("ambiguous recovery explicit writes retain selection and runtime identity", async (t) => {
+  const runtime = await createRuntime(t, {
+    projectCurrentResponse: { project: "", project_source: "ambiguous", available_projects: ["repo-a", "repo-b"], error_hint: "ambiguous project" },
+    sessions: new Map([["runtime", session("runtime")]]),
+  })
+  const output = { args: { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "mcp-token", session_id: "invented" } }
+  await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
+  assert.deepEqual(output.args, { project: "repo-b", project_choice_reason: "user_selected_after_ambiguous_project", recovery_token: "mcp-token", session_id: "runtime" })
+  assert.equal(runtime.requests.some(({ path }) => path === "/sessions"), false)
+  await runtime.chat({ sessionID: "runtime" }, { message: {}, parts: [{ type: "text", text: "Long automatic prompt must remain disabled" }] })
+  assert.equal(runtime.requests.some(({ path }) => path === "/prompts"), false)
 })
 
 test("project identity resolution failures fail closed for automatic writes", async (t) => {
@@ -597,7 +954,7 @@ test("OpenCode activity renews a cached root session once per activity wave", as
 test("write tool hook binds only the four attributed writes to authoritative runtime identity", () => {
   assert.match(source, /SESSION_ATTRIBUTED_WRITE_TOOLS = new Set\(\[[\s\S]*"mem_save"[\s\S]*"mem_save_prompt"[\s\S]*"mem_session_summary"[\s\S]*"mem_capture_passive"/)
   assert.match(source, /"tool.execute.before"/)
-  assert.match(source, /output\.args\.session_id = authoritativeSessionID/)
+  assert.match(source, /output\.args\.session_id = effectiveSessions\.get\(authoritativeSessionID\)!\.id/)
   assert.doesNotMatch(source, /delete output\.args\.session_id/)
   assert.match(source, /throw new Error/)
   assert.doesNotMatch(source, /knownSessions\.add\(sessionId\)[\s\S]{0,160}await engramFetch\("\/sessions"/)
@@ -920,7 +1277,7 @@ test("write tool hook revalidates leaf and ancestor ownership after registration
       const pending = runtime.before({ tool: "mem_save", sessionID: "leaf" }, output)
       await registration.started
       const mutation = scenario.mutate(runtime)
-      registration.resolve(httpResponse())
+      registration.resolve(httpResponse({ id: "old-root", status: "created" }))
 
       await Promise.all([mutation, assertNoForward(pending, output)])
       if (scenario.name === "root ancestor deleted")
@@ -929,6 +1286,17 @@ test("write tool hook revalidates leaf and ancestor ownership after registration
       assert.deepEqual(runtime.sessionGetIDs, [])
     })
   }
+})
+
+test("chat.message redacts a private block that straddles the truncation limit", async (t) => {
+  const runtime = await createRuntime(t)
+  const text = `${"a".repeat(1980)}<private>PIN=42</private> trailing`
+  await runtime.chat({ sessionID: "runtime" }, { message: {}, parts: [{ type: "text", text }] })
+
+  const prompts = runtime.requests.filter(({ path }) => path === "/prompts")
+  assert.equal(prompts.length, 1)
+  assert.equal(JSON.stringify(prompts[0].body).includes("PIN=42"), false)
+  assert.equal(prompts[0].body.content.includes("[REDACTED]"), true)
 })
 
 test("chat.message resolves an unobserved child and skips its prompt", async (t) => {
@@ -1050,6 +1418,34 @@ test("automatic hooks omit writes when ownership changes during registration", a
   }
 })
 
+test("registration acknowledgement must match each runtime ID and created status", async (t) => {
+  for (const acknowledgement of [
+    { status: "created" },
+    { id: "other", status: "created" },
+    { id: "runtime" },
+    { id: "runtime", status: "rejected" },
+  ]) {
+    await t.test(JSON.stringify(acknowledgement), async (t) => {
+      const runtime = await createRuntime(t, { registrationResponse: () => httpResponse(acknowledgement) })
+      const output = toolOutput()
+      await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "runtime" }, output), /could not confirm Engram session registration/)
+      assert.equal(output.args.session_id, MODEL_SESSION_ID)
+    })
+  }
+  await t.test("distinct IDs cannot accept swapped acknowledgements", async (t) => {
+    const runtime = await createRuntime(t, {
+      registrationResponse: (attempt) => httpResponse({ id: attempt === 1 ? "second" : "first", status: "created" }),
+    })
+    const first = toolOutput()
+    const second = toolOutput()
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "first" }, first), /could not confirm Engram session registration/)
+    await assert.rejects(runtime.before({ tool: "mem_save", sessionID: "second" }, second), /could not confirm Engram session registration/)
+    assert.equal(first.args.session_id, MODEL_SESSION_ID)
+    assert.equal(second.args.session_id, MODEL_SESSION_ID)
+    assert.deepEqual(runtime.registeredIDs, ["first", "second"])
+  })
+})
+
 test("runtime hook rejects failed bindings, retries registration, and binds children to parents", async (t) => {
   const runtime = await createRuntime(t, {
     sessionGet: async ({ path }) => ["unresolved", "orphan"].includes(path.id)
@@ -1139,7 +1535,7 @@ test("failed root session end retries on a duplicate deletion without confirming
   const runtime = await createRuntime(t, {
     sessionEndResponse: (attempt) => attempt === 1
       ? httpResponse({ error: "unavailable" }, false)
-      : httpResponse({}),
+      : httpResponse({ id: "root", status: "completed" }),
   })
   await runtime.event("session.created", session("root"))
   await runtime.event("session.deleted", { id: "root" })
@@ -1192,10 +1588,128 @@ test("plugin disposal closes registered roots, not children, and waits for sessi
   await end.started
   await Promise.resolve()
   assert.equal(settled, false)
-  end.resolve(httpResponse({}))
+  end.resolve(httpResponse({ id: rootID, status: "completed" }))
   await pending
 
   const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))
   assert.equal(endRequests.length, 1)
   assert.equal(endRequests[0].path, `/sessions/${encodeURIComponent(rootID)}/end`)
+})
+
+// OpenCode owns the hook, not the external MCP tool wrapper. Forwarding below models only
+// that wrapper's HTTP POST after the exported hook has rewritten its arguments.
+test("OpenCode host bindings survive real server persistence and replace ended registration", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "engram-opencode-real-"))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => assert.equal(fs.existsSync(dir), false, `test directory remains: ${dir}`))
+  const executable = join(dir, process.platform === "win32" ? "real-server.exe" : "real-server")
+  const build = childProcess.spawnSync("go", ["build", "-o", executable, "./plugin/opencode/test/support/real-server"], {
+    cwd: new URL("../..", import.meta.url), timeout: 60000, encoding: "utf8",
+  })
+  assert.ifError(build.error)
+  assert.equal(build.status, 0, build.stderr)
+  const child = childProcess.spawn(executable, [join(dir, "store")], {
+    env: { ...process.env, HOME: dir, ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_CLOUD_AUTOSYNC: "0" },
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  let stderr = ""
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk })
+  const lines = createInterface({ input: child.stdout })
+  async function bounded(promise, message, ms = 5000) {
+    let timer
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${message}: ${stderr}`)), ms)
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  let shutdownError
+  try {
+    const url = await new Promise((resolve, reject) => {
+      let settled = false
+      const cleanup = () => {
+        clearTimeout(timeout)
+        lines.off("line", onLine)
+        child.off("error", onError)
+        child.off("exit", onExit)
+      }
+      const settle = (finish, value) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        finish(value)
+      }
+      const onLine = line => settle(resolve, line)
+      const onError = error => settle(reject, error)
+      const onExit = code => settle(reject, new Error(`server exited ${code}: ${stderr}`))
+      const timeout = setTimeout(() => settle(reject, new Error(`server startup timed out: ${stderr}`)), 60000)
+      lines.on("line", onLine)
+      child.on("error", onError)
+      child.on("exit", onExit)
+    })
+    const runtime = await createRuntime(t, {
+      configuredEngramURL: url, realServerFetch: true, directory: dir,
+      sessionGet: async () => { throw new Error("event-cached roots should not query SDK") },
+    })
+    const ids = ["opencode-host-alpha", "opencode-host-beta"]
+    for (const id of ids) await runtime.event("session.created", session(id))
+    // The external MCP wrapper is deliberately not imported: direct/manual MCP callers
+    // retain their own session semantics; only hook-mediated calls are tested here.
+    let observationPosts = 0
+    const forward = async (output) => {
+      observationPosts += 1
+      return fetch(`${url}/observations`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(output.args),
+      })
+    }
+    for (const [index, host] of [ids[0], ids[1], ids[0], ids[1]].entries()) {
+      const output = { args: {
+        title: `opencode-persisted-${index}`, content: `persistence ${index}`,
+        project: "engram", session_id: `model-conflict-${index}`,
+      } }
+      await runtime.before({ tool: "mem_save", sessionID: host }, output)
+      assert.equal(output.args.session_id, host)
+      const response = await forward(output)
+      assert.equal(response.status, 201, await response.text())
+    }
+    const persisted = async () => {
+      const response = await fetch(`${url}/observations?project=engram&limit=20`)
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    const rows = await persisted()
+    assert.equal(rows.length, 4, JSON.stringify(rows))
+    for (let index = 0; index < 4; index++) {
+      const matching = rows.filter(row => row.title === `opencode-persisted-${index}`)
+      assert.equal(matching.length, 1)
+      assert.equal(matching[0].session_id, ids[index % 2])
+    }
+    const ended = await fetch(`${url}/sessions/${ids[0]}/end`, { method: "POST", body: "{}" })
+    assert.equal(ended.status, 200)
+    const conflict = await fetch(`${url}/sessions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: ids[0], project: "engram", directory: dir }),
+    })
+    assert.equal(conflict.status, 409, "the real server refuses ended registration")
+    const resumed = { args: { title: "resumed", content: "resumed", session_id: "model-conflict" } }
+    const postsBefore = observationPosts
+    await runtime.before({ tool: "mem_save", sessionID: ids[0] }, resumed)
+    assert.equal(resumed.args.session_id, `${ids[0]}:resume:2`)
+    assert.equal(observationPosts, postsBefore, "registration does not itself forward an observation")
+    assert.equal((await persisted()).length, 4)
+  } finally {
+    lines.close()
+    if (child.exitCode === null && child.signalCode === null && child.pid) {
+      const exited = new Promise(resolve => child.once("exit", resolve))
+      child.stdin.end()
+      try { await bounded(exited, "server shutdown timed out") }
+      catch (error) {
+        shutdownError = error
+        child.kill()
+        try { await bounded(exited, "server kill timed out") }
+        catch (killError) { shutdownError = killError }
+      }
+    }
+  }
+  if (shutdownError) throw shutdownError
 })
