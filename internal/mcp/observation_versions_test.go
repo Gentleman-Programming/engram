@@ -3,12 +3,39 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 )
+
+func TestHistoryCursorArgInt64Boundary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   float64
+		want    int64
+		wantErr bool
+	}{
+		{name: "boundary", value: 0x1p63, wantErr: true},
+		{name: "below boundary", value: math.Nextafter(0x1p63, 0), want: math.MaxInt64 - 1023},
+		{name: "zero", value: 0, want: 0},
+		{name: "ordinary", value: 42, want: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := historyCursorArg(mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"history_cursor": tc.value,
+			}}})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("historyCursorArg(%v) error = %v, wantErr %v", tc.value, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Fatalf("historyCursorArg(%v) = %d, want %d", tc.value, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestGetObservationWithoutIncludeHistoryIsUnchanged(t *testing.T) {
 	s := newMCPTestStore(t)

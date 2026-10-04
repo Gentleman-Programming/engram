@@ -3606,7 +3606,7 @@ func historyCursorArg(req mcp.CallToolRequest) (int64, error) {
 		return 0, nil
 	}
 	f, ok := raw.(float64)
-	if !ok || f < 0 || math.Trunc(f) != f || f > float64(math.MaxInt64) {
+	if !ok || f < 0 || math.Trunc(f) != f || f >= 0x1p63 {
 		return 0, fmt.Errorf("history_cursor must be a non-negative integer")
 	}
 	return int64(f), nil
