@@ -666,6 +666,81 @@ func TestCmdServeGenerationChangeStopsAutosyncAndReturnsTerminalError(t *testing
 	}
 }
 
+func TestCmdServeResultShutdownGenerationPrecedence(t *testing.T) {
+	for _, generation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late_generation=%t", generation), func(t *testing.T) {
+			stubRuntimeHooks(t)
+			withArgs(t, "engram", "serve")
+			t.Setenv("ENGRAM_SOCKET", "")
+			t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+			t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+			t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+			oldManager, oldGeneration := newAutosyncManager, serveGenerationInvalidated
+			oldNotify, oldStop := notifySignals, stopSignals
+			t.Cleanup(func() {
+				newAutosyncManager, serveGenerationInvalidated = oldManager, oldGeneration
+				notifySignals, stopSignals = oldNotify, oldStop
+			})
+			notification := make(chan struct{}, 1)
+			serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+			notifySignals = func(chan<- os.Signal, ...os.Signal) {}
+			stopSignals = func(chan<- os.Signal) {}
+			serveErr := errors.New("serving loop failed")
+			startHTTP = func(*engramsrv.Server) error { return serveErr }
+			ctxSeen := make(chan context.Context, 1)
+			var stopped int
+			newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+				return &fakeStartableManager{
+					runFn: func(ctx context.Context) { ctxSeen <- ctx },
+					stopFn: func() {
+						stopped++
+						// Only serveResult is ready; invalidation arrives during cleanup.
+						if generation {
+							notification <- struct{}{}
+						}
+					},
+				}
+			}
+			cfg := testConfig(t)
+			var opened *store.Store
+			storeNew = func(cfg store.Config) (*store.Store, error) {
+				var err error
+				opened, err = store.New(cfg)
+				return opened, err
+			}
+			var diagnostic bytes.Buffer
+			oldLog := log.Writer()
+			log.SetOutput(&diagnostic)
+			t.Cleanup(func() { log.SetOutput(oldLog) })
+			err := cmdServe(cfg)
+			if stopped != 1 {
+				t.Fatalf("Stop calls = %d, want 1", stopped)
+			}
+			select {
+			case <-(<-ctxSeen).Done():
+			default:
+				t.Fatal("background context not canceled before return")
+			}
+			if _, err := opened.Stats(); err == nil {
+				t.Fatal("store not closed before return")
+			}
+			wantErr := serveErr
+			wantDiagnostics := 0
+			if generation {
+				wantErr = store.ErrDatabaseGenerationChanged
+				wantDiagnostics = 1
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("terminal cause = %v, want %v", err, wantErr)
+			}
+			const message = "[engram] database generation changed; stopping server; restart Engram"
+			if strings.Count(diagnostic.String(), message) != wantDiagnostics {
+				t.Fatalf("diagnostic = %q, want count %d", diagnostic.String(), wantDiagnostics)
+			}
+		})
+	}
+}
+
 func TestCmdServeSignalShutdownGenerationPrecedence(t *testing.T) {
 	for _, generation := range []bool{false, true} {
 		t.Run(fmt.Sprintf("late_generation=%t", generation), func(t *testing.T) {

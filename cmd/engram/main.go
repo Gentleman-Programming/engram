@@ -940,26 +940,20 @@ func cmdServe(cfg store.Config) error {
 	defer stopSignals(sigCh)
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- startHTTP(srv) }()
-	var terminal error
+	var terminal, serveErr error
 	select {
 	case <-serveGenerationInvalidated(srv):
 		terminal = store.ErrDatabaseGenerationChanged
 	case <-sigCh:
 		log.Println("[engram] shutting down...")
-	case err := <-serveResult:
-		// A request notification can race with the serving loop's return.
-		select {
-		case <-serveGenerationInvalidated(srv):
-			terminal = store.ErrDatabaseGenerationChanged
-		default:
-			return err
-		}
+	case serveErr = <-serveResult:
+		// Preserve the serving result while sharing cleanup and the late generation check.
 	}
 	stopBackground()
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
 	_ = srv.Shutdown(drainCtx) // expiry forces active connections closed
-	// A signal can win selection before a request reports invalidation during
+	// A signal or serving result can win before a request reports invalidation during
 	// background cleanup or draining. Preserve that permanent terminal cause.
 	if terminal == nil {
 		select {
@@ -971,7 +965,10 @@ func cmdServe(cfg store.Config) error {
 	if terminal != nil {
 		log.Println("[engram] database generation changed; stopping server; restart Engram")
 	}
-	return terminal
+	if terminal != nil {
+		return terminal
+	}
+	return serveErr
 }
 
 type serveOptions struct {

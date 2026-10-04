@@ -126,7 +126,7 @@ func TestShutdownDrainsInflightRequestAndReleasesListener(t *testing.T) {
 	go func() {
 		res, err := http.Get("http://" + ln.Addr().String() + "/gate")
 		if err == nil {
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			var b bytes.Buffer
 			_, err = b.ReadFrom(res.Body)
 			if b.String() != "drained" {
@@ -188,7 +188,7 @@ func TestShutdownDrainsExpiryForcesClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	<-entered
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // deterministic expired drain budget, no wall-clock sleep
