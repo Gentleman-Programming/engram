@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -26,6 +28,11 @@ type cloudPullMutationsStore interface {
 // the end of the command, so tests can inject a close failure and assert the
 // command reports it instead of discarding it.
 var closeCloudPullMutationsStore = func(s cloudPullMutationsStore) error { return s.Close() }
+
+// newCloudPullMutationsContext allows cancellation tests without process signals.
+var newCloudPullMutationsContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt)
+}
 
 // newCloudPullMutationsStore opens the local store for the pull command. It is
 // a deterministic seam so tests can inject a store whose deferred-replay
@@ -86,7 +93,9 @@ func executeCloudPullMutations(s cloudPullMutationsStore, cfg store.Config) (aut
 	}
 	transport := &mutationTransportAdapter{remote: remoteMT}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	signalCtx, stop := newCloudPullMutationsContext()
+	defer stop()
+	ctx, cancel := context.WithTimeout(signalCtx, 30*time.Minute)
 	defer cancel()
 
 	targetKey := store.DefaultSyncTargetKey

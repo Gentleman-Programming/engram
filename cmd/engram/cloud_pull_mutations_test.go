@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,9 +21,21 @@ import (
 // GET /sync/mutations/pull?since_seq=N&limit=M over the whole mutation journal.
 func mutationPullTestServer(t *testing.T, mutations []map[string]any) *httptest.Server {
 	t.Helper()
+	return mutationPullAuthPolicyServer(t, mutations, false)
+}
+
+// mutationPullAuthPolicyServer models a construction-time auth policy, not the
+// real cloudserver's auth implementation (which requires a PostgreSQL store).
+func mutationPullAuthPolicyServer(t *testing.T, mutations []map[string]any, allowNoAuth bool) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/sync/mutations/pull":
+			if !allowNoAuth && r.Header.Get("Authorization") != "Bearer test-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error_class":"auth","error_code":"auth_required","error":"unauthorized"}`))
+				return
+			}
 			sinceSeq := int64(0)
 			if v := r.URL.Query().Get("since_seq"); v != "" {
 				sinceSeq, _ = strconv.ParseInt(v, 10, 64)
@@ -234,29 +248,95 @@ func TestCloudPullMutations_AuthFailure(t *testing.T) {
 	if _, ok := recovered.(exitCode); !ok {
 		t.Fatal("expected fatal on 401, got success")
 	}
-	if !strings.Contains(stderr, "cloud sync") && !strings.Contains(stderr, "401") {
-		t.Fatalf("expected actionable auth guidance in stderr, got:\n%s", stderr)
+	assertPullAuthRequired(t, cfg, stderr)
+}
+
+func assertPullAuthRequired(t *testing.T, cfg store.Config, stderr string) {
+	t.Helper()
+	if !strings.Contains(stderr, "401") {
+		t.Fatalf("expected authentication failure in stderr, got:\n%s", stderr)
+	}
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	state, err := s.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil || state.Lifecycle != store.SyncLifecycleDegraded || state.ReasonCode == nil || *state.ReasonCode != "auth_required" {
+		t.Fatalf("expected persisted degraded/auth_required state: state=%+v err=%v", state, err)
 	}
 }
 
-// TestCloudPullMutations_NoAuthMode asserts that the command works when the
-// cloud config has no token and the server runs in insecure local-dev mode:
-// ENGRAM_CLOUD_INSECURE_NO_AUTH=1 servers accept unauthenticated mutation pull
-// (issue #327, code review follow-up). The env var is set explicitly so the
-// test exercises the documented no-auth configuration.
+// TestCloudPullMutations_NoAuthMode proves client behavior against an explicit
+// fake server policy; it does not validate real cloudserver auth configuration.
 func TestCloudPullMutations_NoAuthMode(t *testing.T) {
-	srv := mutationPullTestServer(t, []map[string]any{
-		mutationTestSession(7, "sess-7", "proj-a"),
-	})
-	cfg := setupPullMutationsConfig(t, srv.URL, "")
-	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
-
-	stdout, _, recovered := runCloudPullMutations(t, cfg)
-	if _, ok := recovered.(exitCode); ok {
-		t.Fatal("cloud pull-mutations fataled without a token; expected success in no-auth mode")
+	for _, mode := range []string{"", "1"} {
+		t.Run("no_auth="+mode, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", mode)
+			srv := mutationPullAuthPolicyServer(t, []map[string]any{
+				mutationTestSession(7, "sess-7", "proj-a"),
+			}, envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH"))
+			cfg := setupPullMutationsConfig(t, srv.URL, "")
+			stdout, stderr, recovered := runCloudPullMutations(t, cfg)
+			if mode == "" {
+				if _, ok := recovered.(exitCode); !ok {
+					t.Fatal("expected unauthenticated pull to be rejected by default")
+				}
+				assertPullAuthRequired(t, cfg, stderr)
+				return
+			}
+			if recovered != nil || !strings.Contains(stdout, "Pulled 1") {
+				t.Fatalf("expected no-auth success: recovered=%v stdout=%s stderr=%s", recovered, stdout, stderr)
+			}
+		})
 	}
-	if !strings.Contains(stdout, "Pulled 1") {
-		t.Fatalf("expected 1 pulled mutation in no-auth mode, got stdout:\n%s", stdout)
+}
+
+// TestCloudPullMutations_CancelInFlight avoids sending SIGINT to the test process.
+func TestCloudPullMutations_CancelInFlight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requestCanceled := make(chan bool, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel() // Cancel only after the request is in flight.
+		select {
+		case <-r.Context().Done():
+			requestCanceled <- true
+		case <-time.After(2 * time.Second):
+			requestCanceled <- false
+			w.WriteHeader(http.StatusGatewayTimeout)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+	oldContext := newCloudPullMutationsContext
+	stopped := false
+	newCloudPullMutationsContext = func() (context.Context, context.CancelFunc) {
+		return ctx, func() { stopped = true; cancel() }
+	}
+	t.Cleanup(func() { newCloudPullMutationsContext = oldContext })
+	cfg := setupPullMutationsConfig(t, srv.URL, "test-token")
+
+	stdout, stderr, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "context canceled") {
+		t.Fatalf("expected cancellation failure, recovered=%v stderr=%s", recovered, stderr)
+	}
+	if !<-requestCanceled || !stopped {
+		t.Fatal("in-flight request must be canceled and context notification stopped")
+	}
+	if strings.Contains(stdout, "Pulled") || strings.Contains(stdout, "No new cloud mutations") {
+		t.Fatalf("canceled pull must not report success: %s", stdout)
+	}
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	state, err := s.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil || state.Lifecycle != store.SyncLifecycleDegraded || state.LastPulledSeq != 0 {
+		t.Fatalf("canceled pull must stay degraded without advancing cursor: state=%+v err=%v", state, err)
 	}
 }
 
@@ -273,8 +353,7 @@ func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
 
 	oldClose := closeCloudPullMutationsStore
 	closeCloudPullMutationsStore = func(s cloudPullMutationsStore) error {
-		_ = s.Close()
-		return fmt.Errorf("injected close failure")
+		return errors.Join(s.Close(), fmt.Errorf("injected close failure"))
 	}
 	t.Cleanup(func() { closeCloudPullMutationsStore = oldClose })
 
@@ -288,6 +367,26 @@ func TestCloudPullMutations_CloseFailureSurfaces(t *testing.T) {
 	if !strings.Contains(stderr, "injected close failure") {
 		t.Fatalf("expected close error in stderr, got:\n%s", stderr)
 	}
+}
+
+func TestCloudPullMutations_CloseFailureJoinsPullFailure(t *testing.T) {
+	srv := mutationPullStatusServer(t, http.StatusUnauthorized,
+		`{"error_class":"auth","error_code":"auth_required","error":"unauthorized"}`)
+	cfg := setupPullMutationsConfig(t, srv.URL, "bad-token")
+	oldClose := closeCloudPullMutationsStore
+	closeCloudPullMutationsStore = func(s cloudPullMutationsStore) error {
+		return errors.Join(s.Close(), fmt.Errorf("injected close failure"))
+	}
+	t.Cleanup(func() { closeCloudPullMutationsStore = oldClose })
+
+	stdout, stderr, recovered := runCloudPullMutations(t, cfg)
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatal("expected fatal on pull and close failures")
+	}
+	if !strings.Contains(stderr, "injected close failure") || stdout != "" {
+		t.Fatalf("expected both failures without success output: stdout=%s stderr=%s", stdout, stderr)
+	}
+	assertPullAuthRequired(t, cfg, stderr)
 }
 
 // TestCloudPullMutations_PolicyForbidden asserts a 403 surfaced by the server
