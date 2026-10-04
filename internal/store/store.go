@@ -1216,6 +1216,78 @@ func (s *Store) setUserVersion(v int) error {
 	return err
 }
 
+// manualSessionIDPrefix is the literal prefix of the manual-save session
+// identity convention.
+const manualSessionIDPrefix = "manual-save-"
+
+// manualSaveOwnerProject reports whether a session id names project under the
+// manual-save convention. Both sides are canonicalized, so a suffix that
+// normalizes to the project qualifies even when it is not byte-identical. The
+// prefix itself stays exact, matching the manual-name rule the diagnostic
+// applies in internal/diagnostic/checks.go.
+func manualSaveOwnerProject(id, project string) bool {
+	suffix, ok := strings.CutPrefix(id, manualSessionIDPrefix)
+	if !ok {
+		return false
+	}
+	canonicalProject, _ := NormalizeProject(project)
+	if canonicalProject == "" {
+		return false
+	}
+	canonicalSuffix, _ := NormalizeProject(suffix)
+	return canonicalSuffix == canonicalProject
+}
+
+// backfillLegacySessionOwnershipModes classifies rows that predate the
+// ownership column. The non-manual branch stays one set-based statement so
+// SQLite's case-insensitive LIKE keeps deciding what "not a manual-save id"
+// means; only the owner test needs canonicalization, which SQL cannot express.
+// Both phases are idempotent and keyed on a still-NULL mode, so an interrupted
+// backfill is completed by the next migration run.
+func (s *Store) backfillLegacySessionOwnershipModes() error {
+	if _, err := s.execHook(s.db, `
+		UPDATE sessions SET ownership_mode = ?
+		WHERE ownership_mode IS NULL
+			AND id NOT LIKE 'manual-save-%'
+			AND ifnull(trim(project), '') <> ''`, SessionOwnershipShared); err != nil {
+		return err
+	}
+	rows, err := s.db.Query(`
+		SELECT id, ifnull(project, '')
+		FROM sessions
+		WHERE ownership_mode IS NULL AND ifnull(trim(project), '') <> ''`)
+	if err != nil {
+		return err
+	}
+	// Owners are collected before any write: the read cursor holds the
+	// connection open, so executing the stamp while it is still live would
+	// contend with it.
+	var owners []string
+	for rows.Next() {
+		var id, project string
+		if err := rows.Scan(&id, &project); err != nil {
+			rows.Close()
+			return err
+		}
+		if manualSaveOwnerProject(id, project) {
+			owners = append(owners, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range owners {
+		if _, err := s.execHook(s.db, `UPDATE sessions SET ownership_mode = ? WHERE id = ? AND ownership_mode IS NULL`, SessionOwnershipProjectOwned, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	schema := `
 			CREATE TABLE IF NOT EXISTS sessions (
@@ -1445,12 +1517,7 @@ func (s *Store) migrate() error {
 	}
 	// Legacy rows remain unclassified unless their persisted identity proves a
 	// deterministic manual-save owner. Never infer ownership from an ID alone.
-	if _, err := s.execHook(s.db, `
-		UPDATE sessions SET ownership_mode = CASE
-			WHEN id = 'manual-save-' || project AND ifnull(trim(project), '') <> '' THEN 'project_owned'
-			WHEN id NOT LIKE 'manual-save-%' AND ifnull(trim(project), '') <> '' THEN 'shared'
-			ELSE ownership_mode END
-		WHERE ownership_mode IS NULL`); err != nil {
+	if err := s.backfillLegacySessionOwnershipModes(); err != nil {
 		return err
 	}
 
@@ -8359,8 +8426,14 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 			if !plan.stampOwnershipMode[sessionID] {
 				continue
 			}
-			res, err := s.execHook(tx, rescueSessionQuery.updateOwnershipMode,
-				target, target, SessionOwnershipProjectOwned, SessionOwnershipShared, sessionID, sqlWhitespaceTrimSet,
+			// The owner test is canonical, so it cannot be one SQL CASE over
+			// `id = 'manual-save-' || project`.
+			mode := SessionOwnershipShared
+			if manualSaveOwnerProject(sessionID, target) {
+				mode = SessionOwnershipProjectOwned
+			}
+			res, err := s.execHook(tx, rescueSessionQuery.stampOwnershipMode,
+				target, mode, sessionID, sqlWhitespaceTrimSet,
 			)
 			if err != nil {
 				return err
@@ -8525,10 +8598,10 @@ func (r *ProjectRescueResult) countOutcome(outcome rescueOutcome) {
 type rescueRecordQuery struct {
 	// selectSessionID reads the parent session id of one record. It is empty for
 	// sessions, which have no parent.
-	selectSessionID     string
-	selectProject       string
-	updateProject       string
-	updateOwnershipMode string
+	selectSessionID    string
+	selectProject      string
+	updateProject      string
+	stampOwnershipMode string
 }
 
 var (
@@ -8543,9 +8616,9 @@ var (
 		updateProject:   `UPDATE user_prompts SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
 	}
 	rescueSessionQuery = rescueRecordQuery{
-		selectProject:       `SELECT project FROM sessions WHERE id = ?`,
-		updateProject:       `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
-		updateOwnershipMode: `UPDATE sessions SET project = ?, ownership_mode = CASE WHEN id = 'manual-save-' || ? THEN ? ELSE ? END WHERE id = ? AND ifnull(trim(ownership_mode, ?), '') = ''`,
+		selectProject:      `SELECT project FROM sessions WHERE id = ?`,
+		updateProject:      `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
+		stampOwnershipMode: `UPDATE sessions SET project = ?, ownership_mode = ? WHERE id = ? AND ifnull(trim(ownership_mode, ?), '') = ''`,
 	}
 )
 

@@ -1259,11 +1259,15 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	result.BackupPath = backupPath
 	err = s.withTx(func(tx *sql.Tx) error {
 		for _, action := range normalized {
+			// The owner test is canonical, so it cannot be one SQL CASE over
+			// `id = 'manual-save-' || project`.
+			mode := SessionOwnershipShared
+			if manualSaveOwnerProject(action.SessionID, action.ToProject) {
+				mode = SessionOwnershipProjectOwned
+			}
 			res, err := s.execHook(tx, `UPDATE sessions
-				SET project = ?, ownership_mode = CASE
-					WHEN id = 'manual-save-' || ? THEN 'project_owned'
-					ELSE 'shared' END
-				WHERE id = ? AND project = ?`, action.ToProject, action.ToProject, action.SessionID, action.FromProject)
+				SET project = ?, ownership_mode = ?
+				WHERE id = ? AND project = ?`, action.ToProject, mode, action.SessionID, action.FromProject)
 			if err != nil {
 				return fmt.Errorf("reclassify session %q: %w", action.SessionID, err)
 			}

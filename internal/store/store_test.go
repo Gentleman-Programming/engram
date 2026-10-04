@@ -622,6 +622,7 @@ func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *test
 		ownershipMode                                      any
 	}{
 		{"manual save session", "manual-save-target", "target", "target", SessionOwnershipProjectOwned, ""},
+		{"manual save session with non-canonical suffix", "manual-save-Target", "target", "target", SessionOwnershipProjectOwned, ""},
 		{"shared session", "agent-session", "target", "target", SessionOwnershipShared, ""},
 		{"legacy NULL mode", "legacy-null-mode", "target", "target", SessionOwnershipShared, nil},
 		{"whitespace-only mode", "whitespace-mode", "target", "target", SessionOwnershipShared, " \t "},
@@ -719,7 +720,7 @@ func TestRescueNullProjectOwnershipRollsBackWhenOwnershipModeSealCannotConfirmOn
 			originalExec := s.hooks.exec
 			hookCalled := false
 			s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-				if query == rescueSessionQuery.updateOwnershipMode {
+				if query == rescueSessionQuery.stampOwnershipMode {
 					hookCalled = true
 					return tc.result, nil
 				}

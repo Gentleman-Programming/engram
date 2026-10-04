@@ -426,6 +426,20 @@ func TestApplySessionProjectReclassificationClassifiesManualSessionsAndCreatesBa
 	}
 }
 
+// A manual-save session whose suffix differs from the reclassified project only
+// by case must still be recognized as project-owned: the suffix test is
+// normalization, not byte equality.
+func TestApplySessionProjectReclassificationCanonicalizesManualSessionSuffix(t *testing.T) {
+	s := newTestStore(t)
+	seedRepairRows(t, s, "manual-save-Engram", "sias-app")
+	if _, err := s.ApplySessionProjectReclassification([]SessionProjectReclassification{{SessionID: "manual-save-Engram", FromProject: "sias-app", ToProject: "engram"}}); err != nil {
+		t.Fatalf("ApplySessionProjectReclassification: %v", err)
+	}
+	if got := scalarString(t, s, `SELECT ownership_mode FROM sessions WHERE id = ?`, "manual-save-Engram"); got != SessionOwnershipProjectOwned {
+		t.Fatalf("reclassified ownership mode=%q, want %q", got, SessionOwnershipProjectOwned)
+	}
+}
+
 func seedRepairRows(t *testing.T, s *Store, sessionID, project string) {
 	t.Helper()
 	if err := s.CreateSession(sessionID, project, "/work/engram"); err != nil {

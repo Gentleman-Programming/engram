@@ -195,6 +195,8 @@ func TestSessionOwnershipModeCreationAndMigration(t *testing.T) {
 	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES
 		('manual-save-project-c', 'project-c', '/tmp/c', NULL),
 		('manual-save-other', 'project-d', '/tmp/d', NULL),
+		('manual-save-Project-D', 'project-d', '/tmp/d2', NULL),
+		('MANUAL-SAVE-project-h', 'project-h', '/tmp/h', NULL),
 		('legacy-runtime', 'project-e', '/tmp/e', NULL)`); err != nil {
 		t.Fatalf("seed legacy sessions: %v", err)
 	}
@@ -204,6 +206,10 @@ func TestSessionOwnershipModeCreationAndMigration(t *testing.T) {
 	for _, tc := range []struct{ id, want string }{
 		{"manual-save-project-c", SessionOwnershipProjectOwned},
 		{"manual-save-other", ""},
+		// A suffix that normalizes to its project owns the session even when it
+		// is not byte-identical; the manual-save prefix itself stays exact.
+		{"manual-save-Project-D", SessionOwnershipProjectOwned},
+		{"MANUAL-SAVE-project-h", ""},
 		{"legacy-runtime", SessionOwnershipShared},
 	} {
 		session, err := s.GetSession(tc.id)
