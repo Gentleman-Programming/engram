@@ -69,6 +69,7 @@ var (
 	newHTTPServer              = server.New
 	startHTTP                  = (*server.Server).Start
 	serveGenerationInvalidated = (*server.Server).GenerationInvalidated
+	serveGenerationError       = (*store.Store).GenerationError
 
 	newMCPServer           = mcp.NewServer
 	newMCPServerWithTools  = mcp.NewServerWithTools
@@ -953,8 +954,13 @@ func cmdServe(cfg store.Config) error {
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
 	_ = srv.Shutdown(drainCtx) // expiry forces active connections closed
-	// A signal or serving result can win before a request reports invalidation during
-	// background cleanup or draining. Preserve that permanent terminal cause.
+	// Forced connection closure does not join handlers: the store may already be
+	// sticky-invalidated before middleware can notify us. Read only that observed
+	// state, without probing the filesystem or waiting for a handler to return.
+	if errors.Is(serveGenerationError(s), store.ErrDatabaseGenerationChanged) {
+		terminal = store.ErrDatabaseGenerationChanged
+	}
+	// Also preserve notifications that arrived during background cleanup or draining.
 	if terminal == nil {
 		select {
 		case <-serveGenerationInvalidated(srv):

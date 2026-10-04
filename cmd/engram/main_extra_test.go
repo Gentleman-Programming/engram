@@ -666,6 +666,102 @@ func TestCmdServeGenerationChangeStopsAutosyncAndReturnsTerminalError(t *testing
 	}
 }
 
+// This accessor seam proves owner consultation before store close, not a blocked
+// handler integration or real store invalidation. The notification stays empty.
+func TestCmdServeStickyGenerationWithoutNotification(t *testing.T) {
+	for _, trigger := range []string{"signal", "serve_error", "serve_nil"} {
+		for _, state := range []string{"sticky", "nil", "transient"} {
+			t.Run(trigger+"/"+state, func(t *testing.T) {
+				stubRuntimeHooks(t)
+				withArgs(t, "engram", "serve")
+				t.Setenv("ENGRAM_SOCKET", "")
+				t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+				t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+				t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+				oldManager, oldGeneration := newAutosyncManager, serveGenerationInvalidated
+				oldAccessor, oldNotify, oldStop := serveGenerationError, notifySignals, stopSignals
+				t.Cleanup(func() {
+					newAutosyncManager, serveGenerationInvalidated = oldManager, oldGeneration
+					serveGenerationError, notifySignals, stopSignals = oldAccessor, oldNotify, oldStop
+				})
+				notification := make(chan struct{})
+				serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+				notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) {
+					if trigger == "signal" {
+						ch <- syscall.SIGTERM
+					}
+				}
+				stopSignals = func(chan<- os.Signal) {}
+				var original error
+				if trigger == "serve_error" {
+					original = errors.New("serving loop failed")
+				}
+				release, serverDone := make(chan struct{}), make(chan struct{})
+				startHTTP = func(*engramsrv.Server) error {
+					defer close(serverDone)
+					if trigger == "signal" {
+						<-release
+					}
+					return original
+				}
+				var stopped, reads int
+				var observed error
+				newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+					return &fakeStartableManager{stopFn: func() {
+						stopped++
+						switch state {
+						case "sticky":
+							observed = fmt.Errorf("private fixture detail: %w", store.ErrDatabaseGenerationChanged)
+						case "transient":
+							observed = errors.New("private transient fixture detail")
+						}
+						close(release)
+					}}
+				}
+				serveGenerationError = func(s *store.Store) error {
+					reads++
+					if stopped != 1 {
+						t.Fatal("sticky accessor consulted before background cleanup")
+					}
+					if _, err := s.Stats(); err != nil {
+						t.Fatalf("store closed before sticky accessor: %v", err)
+					}
+					return observed
+				}
+				var diagnostic bytes.Buffer
+				oldLog := log.Writer()
+				log.SetOutput(&diagnostic)
+				t.Cleanup(func() { log.SetOutput(oldLog) })
+				var opened *store.Store
+				storeNew = func(cfg store.Config) (*store.Store, error) {
+					var err error
+					opened, err = store.New(cfg)
+					return opened, err
+				}
+				err := cmdServe(testConfig(t))
+				<-serverDone
+				if _, err := opened.Stats(); err == nil {
+					t.Fatal("store not closed before return")
+				}
+				want, count := original, 0
+				if state == "sticky" {
+					want, count = store.ErrDatabaseGenerationChanged, 1
+				}
+				if err != want {
+					t.Fatalf("terminal cause = %v, want %v", err, want)
+				}
+				if reads != 1 || stopped != 1 {
+					t.Fatalf("accessor reads = %d, Stop calls = %d, want 1 each", reads, stopped)
+				}
+				const message = "[engram] database generation changed; stopping server; restart Engram"
+				if strings.Count(diagnostic.String(), message) != count || strings.Contains(diagnostic.String(), "private") {
+					t.Fatalf("diagnostic = %q, want %d privacy-safe generation messages", diagnostic.String(), count)
+				}
+			})
+		}
+	}
+}
+
 func TestCmdServeResultShutdownGenerationPrecedence(t *testing.T) {
 	for _, generation := range []bool{false, true} {
 		t.Run(fmt.Sprintf("late_generation=%t", generation), func(t *testing.T) {
