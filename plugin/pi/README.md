@@ -19,6 +19,55 @@ Pi is great at doing the work in front of it. The problem is everything around t
 
 Engram is persistent memory for AI coding agents. `gentle-engram` connects Pi to that memory so your agent can save the useful parts of a session and retrieve them later — without stuffing raw tool output back into the prompt.
 
+## Local bridge ownership protocol
+
+Native Engram exposes a session-scoped responder on the local `pi.events` bus after
+`session_start`. This is routing context, **not authentication**, and does not itself
+suppress any Claude hooks. Consumers must route to the bus for the exact Pi runtime
+session; ownership of a parent never establishes ownership of a nested session.
+
+- Request channel: `engram:bridge:claim:v1`
+- Request fields: `{ runtimeSessionId: string, nonce: string, operation: "session-register" | "prompt-capture", promptDigest?: string }`
+- Reply channel: `engram:bridge:decision:v1`
+- Reply fields: the exact three required request fields, the supplied `promptDigest`
+  when it is a string, and `status: "owned" | "unknown"`.
+
+Runtime IDs are opaque and compared without trimming. Nonces must be nonblank
+strings of at most 256 JavaScript string units; consumers generate a fresh nonce
+per query and correlate all three fields. Invalid requests and foreign IDs receive
+no reply. Since `emit` does not await listeners, subscribe before emitting and use
+a bounded consumer timeout (allow for the responder's 1000 ms decision budget).
+No reply is not proof that native Engram is absent.
+
+An eligible `session-register` claim can confirm registration using the existing
+native registration path before the provider spawns, joining a pending registration.
+Only its validated server acknowledgement permits `owned`; UI readiness never does.
+
+A `prompt-capture` claim **never registers or captures a prompt**. It requires
+`promptDigest`: exactly 64 lowercase hexadecimal characters encoding SHA-256 of
+UTF-8 bytes of the original prompt after JavaScript `.trim()`. Only a matching
+current native turn with a confirmed `/prompts` reply `{ id: <positive safe integer>,
+status: "saved" }` permits `owned`. Missing, invalid, or mismatched digests return
+`unknown`. The proof stores only the digest and routing identities, not plaintext,
+private content, or durable metadata. Every `before_agent_start` clears prior proof
+before initialization or early returns; lifecycle changes also invalidate it.
+Short prompts (trimmed length <=10) retain the existing native skip policy and
+therefore cannot establish prompt ownership. Failed or ambiguous delivery cannot
+reuse a previous turn's proof, even for repeated identical prompts.
+
+Digest matching identifies the original input, **not full-fidelity storage**:
+native persistence still redacts private tags before truncating to 2000 JavaScript
+string units plus an ellipsis when needed. Consumers must account for this policy
+when deciding which capture is duplicate; ownership does not assert that private
+or truncated content was stored. Failed, unresolved, stale, closing, or timed-out
+claims cannot return `owned`. Timeout does not cancel an existing registration or
+trigger a retry, and never emits a late positive decision. Unknown retains hooks.
+
+Listeners and pending reply delivery are removed on shutdown **and reload**;
+reload still skips persistence shutdown. Each new native session must establish
+its own registration. Cross-runtime bridge routing and hook suppression are
+consumer responsibilities, not a process-global readiness signal.
+
 ## At a glance
 
 | You want                    | Engram gives Pi                                  |
