@@ -18,6 +18,17 @@ import (
 // this process was running. Restart Engram before accessing the store again.
 var ErrDatabaseGenerationChanged = errors.New("Engram database generation changed; restart Engram")
 
+// GenerationError returns only an already observed permanent invalidation.
+// It performs no filesystem probes and does not initiate a generation check.
+func (s *Store) GenerationError() error {
+	if s == nil || s.generation == nil {
+		return nil
+	}
+	s.generation.mu.Lock()
+	defer s.generation.mu.Unlock()
+	return s.generation.err
+}
+
 var statFile = os.Stat
 
 type databaseGeneration struct {

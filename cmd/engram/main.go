@@ -64,10 +64,11 @@ func init() {
 }
 
 var (
-	storeNew           = store.New
-	storeDefaultConfig = store.DefaultConfig
-	newHTTPServer      = server.New
-	startHTTP          = (*server.Server).Start
+	storeNew                   = store.New
+	storeDefaultConfig         = store.DefaultConfig
+	newHTTPServer              = server.New
+	startHTTP                  = (*server.Server).Start
+	serveGenerationInvalidated = (*server.Server).GenerationInvalidated
 
 	newMCPServer           = mcp.NewServer
 	newMCPServerWithTools  = mcp.NewServerWithTools
@@ -778,7 +779,9 @@ func main() {
 
 	switch os.Args[1] {
 	case "serve":
-		cmdServe(cfg)
+		if err := cmdServe(cfg); err != nil {
+			fatal(err)
+		}
 	case "mcp":
 		cmdMCP(cfg)
 	case "tui":
@@ -880,16 +883,15 @@ func printUpdateCheckResult(result versioncheck.CheckResult) {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-func cmdServe(cfg store.Config) {
+func cmdServe(cfg store.Config) error {
 	options, err := resolveServeOptions(os.Args[2:])
 	if err != nil {
-		fatal(err)
-		return
+		return err
 	}
 
 	s, err := storeNew(cfg)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 	defer s.Close()
 
@@ -920,30 +922,56 @@ func cmdServe(cfg store.Config) {
 		srv.SetSyncStatus(fallback)
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
+	// The process owner handles notification, never the request goroutine.
+	// All exit paths stop background work before closing the store.
+	stopBackground := func() {
+		cancel()
+		if mgrStop != nil {
+			mgrStop()
+			mgrStop = nil
+		}
+	}
+	defer func() {
+		stopBackground()
+		_ = srv.Close()
+	}()
 	sigCh := make(chan os.Signal, 1)
 	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals(sigCh)
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- startHTTP(srv) }()
+	var terminal error
+	select {
+	case <-serveGenerationInvalidated(srv):
+		terminal = store.ErrDatabaseGenerationChanged
+	case <-sigCh:
+		log.Println("[engram] shutting down...")
+	case err := <-serveResult:
+		// A request notification can race with the serving loop's return.
 		select {
-		case <-sigCh:
-			log.Println("[engram] shutting down...")
-			cancel()
-			if mgrStop != nil {
-				mgrStop()
-			}
-			if err := srv.Close(); err != nil {
-				log.Printf("[engram] close server: %v", err)
-			}
-		case <-done:
+		case <-serveGenerationInvalidated(srv):
+			terminal = store.ErrDatabaseGenerationChanged
+		default:
+			return err
 		}
-	}()
-
-	if err := startHTTP(srv); err != nil {
-		fatal(err)
 	}
+	stopBackground()
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	_ = srv.Shutdown(drainCtx) // expiry forces active connections closed
+	// A signal can win selection before a request reports invalidation during
+	// background cleanup or draining. Preserve that permanent terminal cause.
+	if terminal == nil {
+		select {
+		case <-serveGenerationInvalidated(srv):
+			terminal = store.ErrDatabaseGenerationChanged
+		default:
+		}
+	}
+	if terminal != nil {
+		log.Println("[engram] database generation changed; stopping server; restart Engram")
+	}
+	return terminal
 }
 
 type serveOptions struct {

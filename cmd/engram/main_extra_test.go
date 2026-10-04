@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -441,7 +445,9 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 			}
 
 			_, stderr, recovered := captureOutputAndRecover(t, func() {
-				cmdServe(cfg)
+				if err := cmdServe(cfg); err != nil {
+					fatal(err)
+				}
 			})
 
 			if seenPort != tc.wantPort {
@@ -605,6 +611,139 @@ func TestCmdServeStartsWithoutAutosync(t *testing.T) {
 // BR2-3: Stubs newAutosyncManager with a fully deterministic fake that has no
 // goroutines, no WaitGroup, and no real network calls — eliminating the racy
 // wg.Add/wg.Wait interleave that occurred when using the real *autosync.Manager.
+func TestCmdServeGenerationChangeStopsAutosyncAndReturnsTerminalError(t *testing.T) {
+	run, ok := any(cmdServe).(func(store.Config) error)
+	if !ok {
+		t.Fatal("cmdServe cannot return a terminal cause after cleanup")
+	}
+	stubRuntimeHooks(t)
+	withArgs(t, "engram", "serve")
+	t.Setenv("ENGRAM_SOCKET", "")
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+	oldManager := newAutosyncManager
+	t.Cleanup(func() { newAutosyncManager = oldManager })
+	var stopped atomic.Int32
+	ctxSeen := make(chan context.Context, 1)
+	newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+		return &fakeStartableManager{runFn: func(ctx context.Context) { ctxSeen <- ctx }, stopFn: func() { stopped.Add(1) }}
+	}
+	oldNotify := serveGenerationInvalidated
+	t.Cleanup(func() { serveGenerationInvalidated = oldNotify })
+	notification := make(chan struct{}, 1)
+	serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+	startHTTP = func(*engramsrv.Server) error { notification <- struct{}{}; return nil }
+	var diagnostic bytes.Buffer
+	oldLog := log.Writer()
+	log.SetOutput(&diagnostic)
+	t.Cleanup(func() { log.SetOutput(oldLog) })
+	cfg := testConfig(t)
+	var opened *store.Store
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		var err error
+		opened, err = store.New(cfg)
+		return opened, err
+	}
+	err := run(cfg)
+	if _, err := opened.Stats(); err == nil {
+		t.Fatal("store not closed before return")
+	}
+	const message = "[engram] database generation changed; stopping server; restart Engram"
+	if strings.Count(diagnostic.String(), message) != 1 || strings.Contains(diagnostic.String(), cfg.DataDir) {
+		t.Fatalf("unsafe or duplicate diagnostic: %q", diagnostic.String())
+	}
+	if !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+		t.Fatalf("terminal cause = %v", err)
+	}
+	if stopped.Load() != 1 {
+		t.Fatalf("stop calls = %d", stopped.Load())
+	}
+	select {
+	case <-(<-ctxSeen).Done():
+	default:
+		t.Fatal("autosync context not canceled before return")
+	}
+}
+
+func TestCmdServeSignalShutdownGenerationPrecedence(t *testing.T) {
+	for _, generation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late_generation=%t", generation), func(t *testing.T) {
+			stubRuntimeHooks(t)
+			withArgs(t, "engram", "serve")
+			t.Setenv("ENGRAM_SOCKET", "")
+			t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+			t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+			t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+			oldManager, oldGeneration := newAutosyncManager, serveGenerationInvalidated
+			oldNotify, oldStop := notifySignals, stopSignals
+			t.Cleanup(func() {
+				newAutosyncManager, serveGenerationInvalidated = oldManager, oldGeneration
+				notifySignals, stopSignals = oldNotify, oldStop
+			})
+			notification := make(chan struct{}, 1)
+			serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+			notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) { ch <- syscall.SIGTERM }
+			stopSignals = func(chan<- os.Signal) {}
+			release, serverDone := make(chan struct{}), make(chan struct{})
+			startHTTP = func(*engramsrv.Server) error { defer close(serverDone); <-release; return nil }
+			ctxSeen := make(chan context.Context, 1)
+			var stopped atomic.Int32
+			newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+				return &fakeStartableManager{
+					runFn: func(ctx context.Context) { ctxSeen <- ctx },
+					stopFn: func() {
+						stopped.Add(1)
+						// Only signal selection can reach Stop: both other select cases remain blocked.
+						if generation {
+							notification <- struct{}{}
+						}
+						close(release)
+					},
+				}
+			}
+			cfg := testConfig(t)
+			var opened *store.Store
+			storeNew = func(cfg store.Config) (*store.Store, error) {
+				var err error
+				opened, err = store.New(cfg)
+				return opened, err
+			}
+			var diagnostic bytes.Buffer
+			oldLog := log.Writer()
+			log.SetOutput(&diagnostic)
+			t.Cleanup(func() { log.SetOutput(oldLog) })
+			err := cmdServe(cfg)
+			<-serverDone
+			if stopped.Load() != 1 {
+				t.Fatalf("Stop calls = %d, want 1", stopped.Load())
+			}
+			select {
+			case <-(<-ctxSeen).Done():
+			default:
+				t.Fatal("background context not canceled")
+			}
+			if _, err := opened.Stats(); err == nil {
+				t.Fatal("store not closed before return")
+			}
+			if generation && !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+				t.Fatalf("late generation terminal cause = %v, want ErrDatabaseGenerationChanged", err)
+			}
+			if !generation && err != nil {
+				t.Fatalf("signal-only terminal cause = %v, want nil", err)
+			}
+			wantDiagnostics := 0
+			if generation {
+				wantDiagnostics = 1
+			}
+			const message = "[engram] database generation changed; stopping server; restart Engram"
+			if strings.Count(diagnostic.String(), message) != wantDiagnostics || strings.Contains(diagnostic.String(), cfg.DataDir) {
+				t.Fatalf("unsafe or duplicate diagnostic: %q", diagnostic.String())
+			}
+		})
+	}
+}
+
 func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
@@ -2944,7 +3083,11 @@ func TestStoreInitFailurePaths(t *testing.T) {
 	}
 
 	cmds := []func(store.Config){
-		cmdServe,
+		func(cfg store.Config) {
+			if err := cmdServe(cfg); err != nil {
+				fatal(err)
+			}
+		},
 		cmdMCP,
 		cmdTUI,
 		cmdSearch,

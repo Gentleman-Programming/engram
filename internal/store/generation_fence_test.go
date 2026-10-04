@@ -12,6 +12,35 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
+func TestGenerationStickyAccessor(t *testing.T) {
+	g, path := newTestDatabaseGeneration(t, false, false)
+	s := &Store{generation: g}
+	accessor, ok := any(s).(interface{ GenerationError() error })
+	if !ok {
+		t.Fatal("store does not expose already observed generation error")
+	}
+	original := statFile
+	t.Cleanup(func() { statFile = original })
+	statFile = func(string) (os.FileInfo, error) {
+		t.Fatal("accessor probed filesystem")
+		return nil, nil
+	}
+	if err := accessor.GenerationError(); err != nil {
+		t.Fatalf("healthy accessor: %v", err)
+	}
+	statFile = original
+	replaceTestFile(t, path)
+	if err := accessor.GenerationError(); err != nil {
+		t.Fatalf("unobserved replacement: %v", err)
+	}
+	assertGenerationChanged(t, g.check())
+	statFile = func(string) (os.FileInfo, error) {
+		t.Fatal("sticky accessor probed filesystem")
+		return nil, nil
+	}
+	assertGenerationChanged(t, accessor.GenerationError())
+}
+
 func TestDatabaseGeneration(t *testing.T) {
 	t.Run("adopts sidecars when first observed", func(t *testing.T) {
 		generation, dbPath := newTestDatabaseGeneration(t, false, false)
