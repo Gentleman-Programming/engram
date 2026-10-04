@@ -460,7 +460,7 @@ exec `+quote(binary[0])+` "$@"`)
       -sf) shift ;;
       --max-time)
         [ "$#" -ge 2 ] || return 1
-        case "$2" in 1|2|3) ;; *) return 1 ;; esac
+        case "$2" in 0.2|1|2|3) ;; *) return 1 ;; esac
         shift 2 ;;
       -d)
         [ "$#" -ge 2 ] || return 1
