@@ -52,7 +52,7 @@ type PullReport struct {
 //
 // The HTTP requests issued by the transport are bound to ctx so cancellation
 // aborts an in-flight pull instead of waiting between batches.
-func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTransport, targetKey string, batchSize int) (PullReport, error) {
+func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTransport, targetKey string, batchSize int, preserveSyncState bool) (PullReport, error) {
 	var report PullReport
 
 	if ctx.Err() != nil {
@@ -97,8 +97,14 @@ func PullMutations(ctx context.Context, localStore LocalStore, transport CloudTr
 				Source:     store.SyncSourceRemote,
 				OccurredAt: rm.OccurredAt,
 			}
-			if err := localStore.ApplyPulledMutation(targetKey, localMut); err != nil {
-				return report, fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, err)
+			var applyErr error
+			if preserveSyncState {
+				applyErr = localStore.ApplyPulledMutationPreservingSyncState(targetKey, localMut)
+			} else {
+				applyErr = localStore.ApplyPulledMutation(targetKey, localMut)
+			}
+			if applyErr != nil {
+				return report, fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, applyErr)
 			}
 			report.Applied++
 			project := strings.TrimSpace(rm.Project)

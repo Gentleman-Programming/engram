@@ -142,7 +142,7 @@ func TestPullMutations_MultiPagePullAdvancesCursor(t *testing.T) {
 		},
 	}}
 
-	report, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100)
+	report, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100, false)
 	if err != nil {
 		t.Fatalf("PullMutations: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestPullMutations_NonProgressPageFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newPullTestStore(t)
 			transport := &pagedPullTransport{pages: tc.pages}
-			_, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100)
+			_, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100, false)
 			if err == nil {
 				t.Fatal("expected protocol error on a page that does not advance the cursor")
 			}
@@ -230,7 +230,7 @@ func TestPullMutations_CountsOnlyNewlyApplied(t *testing.T) {
 		},
 		HasMore: false,
 	}}}
-	report1, err := PullMutations(context.Background(), s, transport1, store.DefaultSyncTargetKey, 100)
+	report1, err := PullMutations(context.Background(), s, transport1, store.DefaultSyncTargetKey, 100, false)
 	if err != nil {
 		t.Fatalf("first pull: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestPullMutations_CountsOnlyNewlyApplied(t *testing.T) {
 		},
 		HasMore: false,
 	}}}
-	report2, err := PullMutations(context.Background(), s, transport2, store.DefaultSyncTargetKey, 100)
+	report2, err := PullMutations(context.Background(), s, transport2, store.DefaultSyncTargetKey, 100, false)
 	if err != nil {
 		t.Fatalf("second pull: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestPullMutations_DeferredListFailureSurfaces(t *testing.T) {
 	s := &deferredListFailureStore{Store: newPullTestStore(t), err: errors.New("injected list failure")}
 	transport := &pagedPullTransport{pages: []*PullMutationsResponse{{Mutations: nil, HasMore: false}}}
 
-	_, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100)
+	_, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100, false)
 	if err == nil {
 		t.Fatal("expected error when deferred-project enumeration fails")
 	}
@@ -282,7 +282,7 @@ func TestPullMutations_DeferredReplayFailureSurfaces(t *testing.T) {
 	seedDeferredRow(t, s.Store, "proj-a")
 	transport := &pagedPullTransport{pages: []*PullMutationsResponse{{Mutations: nil, HasMore: false}}}
 
-	_, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100)
+	_, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100, false)
 	if err == nil {
 		t.Fatal("expected error when deferred replay fails")
 	}
@@ -299,7 +299,7 @@ func TestPullMutations_EmptyPullReplaysPendingDeferredWork(t *testing.T) {
 	seedDeferredRow(t, s, "proj-a")
 	transport := &pagedPullTransport{pages: []*PullMutationsResponse{{Mutations: nil, HasMore: false}}}
 
-	report, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100)
+	report, err := PullMutations(context.Background(), s, transport, store.DefaultSyncTargetKey, 100, false)
 	if err != nil {
 		t.Fatalf("PullMutations: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestPullMutations_PartialApplyFailureKeepsCursorAndResumes(t *testing.T) {
 		HasMore: false,
 	}}}
 
-	_, err := PullMutations(context.Background(), s, transport1, store.DefaultSyncTargetKey, 100)
+	_, err := PullMutations(context.Background(), s, transport1, store.DefaultSyncTargetKey, 100, false)
 	if err == nil {
 		t.Fatal("expected error on partial apply failure")
 	}
@@ -357,7 +357,7 @@ func TestPullMutations_PartialApplyFailureKeepsCursorAndResumes(t *testing.T) {
 		},
 		HasMore: false,
 	}}}
-	report, err := PullMutations(context.Background(), realStore, transport2, store.DefaultSyncTargetKey, 100)
+	report, err := PullMutations(context.Background(), realStore, transport2, store.DefaultSyncTargetKey, 100, false)
 	if err != nil {
 		t.Fatalf("resumed pull: %v", err)
 	}

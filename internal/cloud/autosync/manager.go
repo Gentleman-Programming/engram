@@ -857,7 +857,7 @@ func (m *Manager) pullWithSyncState(ctx context.Context, preserveSyncState bool)
 
 	m.setPhase(PhasePulling)
 
-	report, err := PullMutations(ctx, m.store, m.transport, m.cfg.TargetKey, m.cfg.PullBatchSize)
+	report, err := PullMutations(ctx, m.store, m.transport, m.cfg.TargetKey, m.cfg.PullBatchSize, preserveSyncState)
 	if err != nil {
 		return err
 	}

@@ -90,7 +90,7 @@ func executeCloudPullMutations(s cloudPullMutationsStore, cfg store.Config) (aut
 	defer cancel()
 
 	targetKey := store.DefaultSyncTargetKey
-	report, err := autosync.PullMutations(ctx, s, transport, targetKey, autosync.DefaultConfig().PullBatchSize)
+	report, err := autosync.PullMutations(ctx, s, transport, targetKey, autosync.DefaultConfig().PullBatchSize, false)
 	if err != nil {
 		markCloudSyncFailure(s, targetKey, err)
 		return autosync.PullReport{}, errors.New(cloudSyncFailureMessage("", err))
