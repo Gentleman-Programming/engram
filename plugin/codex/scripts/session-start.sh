@@ -42,7 +42,11 @@ if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
   else
     ENGRAM_SERVE_ERR_LOG="${TMPDIR:-/tmp}/engram-serve.err.log"
   fi
-  ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
+  if [ "${OS:-}" = "Windows_NT" ]; then
+    ENGRAM_CLOUD_AUTOSYNC=1 engram serve-background "$ENGRAM_SERVE_ERR_LOG" || true
+  else
+    ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
+  fi
   sleep 0.5
 fi
 if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
@@ -54,7 +58,7 @@ fi
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Register and retain only the server-confirmed runtime identity.
-SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD")
+SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD") && SESSION_REGISTERED=1 || SESSION_REGISTERED=0
 
 # Auto-import git-synced chunks
 if [ -f "${CWD}/.engram/manifest.json" ]; then
@@ -149,6 +153,7 @@ fi
 
 # Inject Memory Protocol + context — stdout is returned to Codex as additionalContext
 printf '%s\n' "$SESSION_HANDOFF"
+if [ "$SESSION_REGISTERED" = 1 ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
@@ -187,6 +192,7 @@ Memory operations are internal bookkeeping, never the user-facing answer. Comple
 ### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
+fi
 
 # Inject memory context if available
 if [ -n "$CONTEXT" ]; then

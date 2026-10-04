@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -945,9 +946,6 @@ func healthyServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard verifies session-start.sh's MCP-migration guard honors CLAUDE_CONFIG_DIR (issue #1081).
-// TestSessionStartAlwaysDelegatesClaudeMCPRegistration confirms the hook has no
-// config-file authority: setup owns inspection, conflict detection, and writes.
 func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 	requireHookBinaries(t)
 
@@ -998,12 +996,29 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 	}
 }
 
-func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
+func TestSessionStartSkipsClaudeMCPRegistration(t *testing.T) {
 	requireHookBinaries(t)
 
 	run := func(t *testing.T, setupFails bool) ([]string, string) {
 		t.Helper()
-		srv := healthyServer(t)
+		var registrations, contexts atomic.Int64
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/health":
+				_, _ = io.WriteString(w, `{"instance_id":"00000000000000000000000000000000"}`)
+			case "/project/current":
+				_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+			case "/sessions":
+				registrations.Add(1)
+				w.WriteHeader(http.StatusCreated)
+			case "/context":
+				contexts.Add(1)
+				_, _ = io.WriteString(w, `{"context":"isolated session memory"}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
 		stubDir := t.TempDir()
 		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
 		stub := filepath.Join(stubDir, "engram")
@@ -1028,24 +1043,36 @@ func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
 			"ENGRAM_PORT":            serverPort(t, srv),
 			"ENGRAM_MANAGED_LOCAL":   "0",
 			"CLAUDE_CONFIG_DIR":      configDir,
+			"HOME":                   t.TempDir(),
 			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
 			"ENGRAM_TEST_ENGRAM_LOG": logPath,
 		}
 		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
-		_, stderr := runHookWithStderr(t, "session-start.sh", stdin, env)
+		var stderr string
+		for i := 0; i < 2; i++ {
+			stdout, errOutput := runHookWithStderr(t, "session-start.sh", stdin, env)
+			stderr += errOutput
+			if !strings.Contains(stdout, "isolated session memory") {
+				t.Fatalf("invocation %d missing memory context: %q", i+1, stdout)
+			}
+		}
+		if gotRegistrations, gotContexts := registrations.Load(), contexts.Load(); gotRegistrations != 2 || gotContexts != 2 {
+			t.Fatalf("registrations/context requests = %d/%d, want 2/2", gotRegistrations, gotContexts)
+		}
 		return readEngramInvocations(t, logPath), stderr
 	}
 
-	invocations, stderr := run(t, false)
-	if stderr != "" {
-		t.Fatalf("successful setup stderr = %q", stderr)
-	}
-	if got := strings.Count(strings.Join(invocations, "\n"), "setup claude-code --mcp-only"); got != 1 {
-		t.Fatalf("setup invocations = %d, want one despite stale legacy config: %v", got, invocations)
-	}
-
-	_, stderr = run(t, true)
-	if !strings.Contains(stderr, "warning: Engram MCP registration failed") {
-		t.Fatalf("failed setup stderr = %q, want actionable warning", stderr)
+	for _, setupFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("setupFails=%t", setupFails), func(t *testing.T) {
+			invocations, stderr := run(t, setupFails)
+			for _, invocation := range invocations {
+				if strings.HasPrefix(invocation, "setup ") {
+					t.Fatalf("SessionStart must not invoke setup: %v", invocations)
+				}
+			}
+			if stderr != "" {
+				t.Fatalf("SessionStart stderr = %q, want no registration warning", stderr)
+			}
+		})
 	}
 }

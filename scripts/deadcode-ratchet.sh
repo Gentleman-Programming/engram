@@ -23,7 +23,28 @@ run_analyzer() {
 		"${DEADCODE_RATCHET_ANALYZER}" "$@"
 		return
 	fi
-	go run "golang.org/x/tools/cmd/deadcode@${analyzer_version}" "$@"
+	local go_version
+	# Read the module minimum, not its optional preferred toolchain directive.
+	if [[ ! -r "${repo_root}/go.mod" ]] || ! go_version="$(awk '
+		$1 == "go" {
+			count++
+			if ($2 !~ /^[0-9]+\.[0-9]+(\.[0-9]+)?$/ || (NF > 2 && $3 !~ /^\/\//)) invalid=1
+			version=$2
+		}
+		END {
+			if (count != 1 || invalid) exit 1
+			parts=split(version, release, ".")
+			if (parts == 2 && (release[1] > 1 || (release[1] == 1 && release[2] >= 21))) version=version ".0"
+			print version
+		}
+	' "${repo_root}/go.mod")"; then
+		printf 'deadcode requires a valid go directive in %s/go.mod (for example, go 1.25.10); fix the module minimum before retrying\n' "${repo_root}" >&2
+		return 1
+	fi
+	if ! GOTOOLCHAIN="go${go_version}+auto" go run "golang.org/x/tools/cmd/deadcode@${analyzer_version}" "$@"; then
+		printf 'deadcode default analyzer failed with GOTOOLCHAIN=go%s+auto; ensure Go supports toolchain selection and the selected toolchain is available or can be downloaded, then retry\n' "${go_version}" >&2
+		return 1
+	fi
 }
 
 normalize() {
@@ -102,7 +123,10 @@ case "${1:-}" in
 		if [[ $# -ne 1 ]]; then usage >&2; exit 2; fi
 		raw="$(mktemp)"
 		trap 'rm -f "${raw}"' EXIT
-		run_analyzer ./... >"${raw}"
+		if ! run_analyzer ./... >"${raw}"; then
+			printf 'deadcode analyzer failed; refusing to overwrite the baseline\n' >&2
+			exit 1
+		fi
 		normalize "${raw}" "${baseline}"
 		printf 'updated %s with deadcode %s output\n' "${baseline}" "${analyzer_version}"
 		;;

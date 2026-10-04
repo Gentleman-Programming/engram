@@ -108,7 +108,9 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 	}
 
 	// Machine B: seed the same observations so FK preconditions are met.
-	machineB.CreateSession("ses-int-b-obs", "proj-int", "/tmp/int-b-obs") //nolint: check
+	if err := machineB.CreateSession("ses-int-b-obs", "proj-int", "/tmp/int-b-obs"); err != nil {
+		t.Fatalf("B: CreateSession observations: %v", err)
+	}
 	addTestObsSession(t, machineB, "ses-int-b-obs", "Decision X for integration", "decision", "proj-int", "project")
 	addTestObsSession(t, machineB, "ses-int-b-obs", "Decision Y for integration", "decision", "proj-int", "project")
 

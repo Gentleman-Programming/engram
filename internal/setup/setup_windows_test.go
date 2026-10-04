@@ -42,7 +42,8 @@ func TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath(t *testing.T) {
 func TestInstallCodexPinsAndRefreshesWindowsExecutable(t *testing.T) {
 	resetSetupSeams(t)
 	useIsolatedProfile(t)
-	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	lookPathFn = func(string) (string, error) { return "mock-codex", nil }
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
 
 	first := filepath.Join(t.TempDir(), "renamed-first.exe")
 	second := filepath.Join(t.TempDir(), "renamed-second.exe")
@@ -120,7 +121,8 @@ func TestInstallCodexWritesActiveWindowsConfig(t *testing.T) {
 			}
 			exe := filepath.Join(t.TempDir(), "engram.exe")
 			osExecutable = func() (string, error) { return exe, nil }
-			lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+			lookPathFn = func(string) (string, error) { return "mock-codex", nil }
+			runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
 			if _, err := Install("codex"); err != nil {
 				t.Fatal(err)
 			}
