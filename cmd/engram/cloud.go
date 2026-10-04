@@ -10,16 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudserver"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudserver"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 )
 
 type cloudManifestReader interface {
@@ -222,12 +222,12 @@ var runUpgradeRemirror = func(s *store.Store, project string, cc *cloudconfig.Co
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
+		fmt.Fprintln(os.Stderr, "supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, attest-prompt-source")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: engram cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
+		fmt.Println("supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, attest-prompt-source")
 		return
 	}
 
@@ -250,9 +250,11 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudRepair()
 	case "bootstrap":
 		cmdCloudBootstrap()
+	case "attest-prompt-source":
+		cmdCloudAttestPromptSource(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap")
+		fmt.Fprintln(os.Stderr, "supported subcommands: pull-mutations, status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, attest-prompt-source")
 		exitFunc(1)
 	}
 }
@@ -852,21 +854,58 @@ func printCloudStatusSyncDiagnostic(cfg store.Config, projects ...string) {
 	}
 }
 
-func cmdCloudEnroll(cfg store.Config) {
-	if len(os.Args) >= 4 {
-		arg := strings.TrimSpace(os.Args[3])
+func parseCloudProjectArgs(command string) (string, bool, bool, error) {
+	for _, arg := range os.Args[3:] {
+		if arg == "--" {
+			break
+		}
 		if arg == "--help" || arg == "-h" || arg == "help" {
-			fmt.Println("usage: engram cloud enroll <project>")
-			fmt.Println("Enroll a local-first project for explicit cloud replication.")
-			return
+			fmt.Printf("usage: engram cloud %s <project> [--literal-project]\n", command)
+			if command == "enroll" {
+				fmt.Println("Enroll a local-first project for explicit cloud replication.")
+			} else {
+				fmt.Println("Stop future cloud replication for a project without deleting local or remote data.")
+			}
+			fmt.Println("--literal-project skips URL decoding; project normalization still applies.")
+			return "", false, true, nil
 		}
 	}
-	if len(os.Args) < 4 || strings.TrimSpace(os.Args[3]) == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud enroll <project>")
-		exitFunc(1)
+	project, literal := "", false
+	positional := false
+	for _, arg := range os.Args[3:] {
+		if !positional && arg == "--" {
+			positional = true
+			continue
+		}
+		if !positional && arg == "--literal-project" {
+			literal = true
+		} else if !positional && strings.HasPrefix(arg, "-") {
+			return "", false, false, fmt.Errorf("unknown option: %s", arg)
+		} else if project != "" {
+			return "", false, false, fmt.Errorf("cloud %s requires exactly one project", command)
+		} else {
+			project = strings.TrimSpace(arg)
+			if project == "" {
+				return "", false, false, fmt.Errorf("cloud %s requires a non-empty project", command)
+			}
+		}
 	}
+	if project == "" {
+		return "", false, false, fmt.Errorf("usage: engram cloud %s <project> [--literal-project]", command)
+	}
+	return project, literal, false, nil
+}
 
-	projectName, warning, err := normalizeCloudCLIProjectInput(os.Args[3])
+func cmdCloudEnroll(cfg store.Config) {
+	input, literal, help, err := parseCloudProjectArgs("enroll")
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if help {
+		return
+	}
+	projectName, warning, err := normalizeCloudCLIProjectInput(input, literal)
 	if err != nil {
 		fatal(err)
 		return
@@ -889,31 +928,29 @@ func cmdCloudEnroll(cfg store.Config) {
 	fmt.Printf("✓ Project %q enrolled for cloud sync\n", projectName)
 }
 
-func normalizeCloudCLIProjectInput(input string) (string, string, error) {
-	decoded, err := url.PathUnescape(strings.TrimSpace(input))
-	if err != nil {
-		return "", "", fmt.Errorf("invalid cloud project URL encoding %q: %w", input, err)
+func normalizeCloudCLIProjectInput(input string, literal bool) (string, string, error) {
+	decoded := strings.TrimSpace(input)
+	if !literal {
+		var err error
+		decoded, err = url.PathUnescape(decoded)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid cloud project URL encoding %q: %w", input, err)
+		}
 	}
 	projectName, warning := store.NormalizeProject(decoded)
 	return projectName, warning, nil
 }
 
 func cmdCloudUnenroll(cfg store.Config) {
-	if len(os.Args) >= 4 {
-		arg := strings.TrimSpace(os.Args[3])
-		if arg == "--help" || arg == "-h" || arg == "help" {
-			fmt.Println("usage: engram cloud unenroll <project>")
-			fmt.Println("Stop future cloud replication for a project without deleting local or remote data.")
-			return
-		}
-	}
-	if len(os.Args) < 4 || strings.TrimSpace(os.Args[3]) == "" {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud unenroll <project>")
-		exitFunc(1)
+	input, literal, help, err := parseCloudProjectArgs("unenroll")
+	if err != nil {
+		fatal(err)
 		return
 	}
-
-	projectName, warning, err := normalizeCloudCLIProjectInput(os.Args[3])
+	if help {
+		return
+	}
+	projectName, warning, err := normalizeCloudCLIProjectInput(input, literal)
 	if err != nil {
 		fatal(err)
 		return

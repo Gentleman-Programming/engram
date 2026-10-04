@@ -20,7 +20,7 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Register and retain only the server-confirmed runtime identity.
-SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD")
+SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD") && REGISTERED=1 || REGISTERED=0
 
 # Fetch context from previous sessions
 CONTEXT=""
@@ -31,6 +31,13 @@ fi
 
 # Inject Memory Protocol + compaction instruction + context
 printf '%s\n' "$SESSION_HANDOFF"
+if [ "$REGISTERED" -ne 1 ]; then
+  printf '%s\n' 'Registration was not confirmed after compaction. Keep the compacted summary and any retained context for the current task; do not invoke agent-attributed memory tools until the host hook re-registers the runtime session.'
+  if [ -n "$CONTEXT" ]; then
+    printf '\n%s\n' "$CONTEXT"
+  fi
+  exit 0
+fi
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 

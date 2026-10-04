@@ -17,7 +17,6 @@ internal/diagnostic/diagnostic.go	NewRunnerWithRegistry
 internal/mcp/activity.go	SessionActivity.NudgeIfNeeded
 internal/mcp/activity.go	SessionActivity.RecordSave
 internal/mcp/mcp.go	DoctorToolHandler
-internal/server/server.go	Server.Handler
 internal/server/server.go	Server.SetOnWrite
 internal/store/store.go	ClassifyTool
 internal/store/store.go	Store.projectNeedsBackfill

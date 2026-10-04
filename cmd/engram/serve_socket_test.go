@@ -66,7 +66,23 @@ func TestCmdServeSignalClosesUnixSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-domain sockets are not supported on Windows")
 	}
-	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	socketDir, err := os.MkdirTemp(os.TempDir(), "engram-cli-uds-")
+	if err != nil {
+		t.Fatalf("create private socket parent: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketDir); err != nil {
+			t.Errorf("remove private socket parent: %v", err)
+		}
+	})
+	info, err := os.Stat(socketDir)
+	if err != nil {
+		t.Fatalf("stat private socket parent: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("socket parent permissions = %04o, want 0700", info.Mode().Perm())
+	}
+	socketPath := filepath.Join(socketDir, "engram.sock")
 	t.Setenv("ENGRAM_SOCKET", "")
 	t.Setenv("ENGRAM_PORT", "")
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "")

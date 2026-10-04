@@ -27,7 +27,6 @@ const ENGRAM_PORT = parseInt(optionalEnvironmentValue(process.env.ENGRAM_PORT) ?
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL)
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
-let localReady = CONFIGURED_ENGRAM_URL !== undefined
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
 const ENGRAM_TOOLS = new Set([
@@ -148,10 +147,25 @@ Do not skip step 1. Without it, everything done before compaction is lost from m
 
 // ─── HTTP Client ─────────────────────────────────────────────────────────────
 
+type DegradedReason = "readiness" | "startup" | "import" | "transport" | "HTTP" | "parse" | "acknowledgement"
+
+function createEngramClient(warn: (reason: DegradedReason) => void) {
+let localReady = CONFIGURED_ENGRAM_URL !== undefined
+
 async function engramFetch(
   path: string,
   opts: { method?: string; body?: any } = {}
 ): Promise<any> {
+  const result = await engramFetchResult(path, opts)
+  return result?.ok ? result.body : null
+}
+
+// Registration needs the refusal code; other callers retain null-on-failure.
+async function engramFetchResult(
+  path: string,
+  opts: { method?: string; body?: any } = {},
+  readRefusal = false
+): Promise<{ ok: boolean; status: number; body: any } | null> {
 	if (!await ensureLocalReady()) return null
   try {
     const res = await fetch(`${ENGRAM_URL}${path}`, {
@@ -160,14 +174,23 @@ async function engramFetch(
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       signal: AbortSignal.timeout(3000),
     })
-    if (!res.ok) return null
-    try {
-      return await res.json()
-    } catch {
-      return {}
+    if (!res.ok && !readRefusal) {
+      warn("HTTP")
+      return { ok: false, status: res.status, body: null }
     }
+    let body: any
+    try {
+      const text = await res.text()
+      body = text.trim() ? JSON.parse(text) : {}
+    } catch {
+      warn("parse")
+      return { ok: false, status: res.status, body: null }
+    }
+    if (!res.ok && !(readRefusal && res.status === 409 &&
+        ["session_project_conflict", "session_already_ended"].includes(body?.code))) warn("HTTP")
+    return { ok: res.ok, status: res.status, body }
   } catch {
-    // Engram server not running — silently fail
+    warn("transport")
     return null
   }
 }
@@ -199,12 +222,13 @@ async function ensureLocalReady(): Promise<boolean> {
       localReady = false
     }
   }
+  if (!localReady) warn("readiness")
   return localReady
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function resolveProjectName(directory: string): Promise<{ project: string; error?: string }> {
+async function resolveProjectName(directory: string): Promise<{ project: string; error?: string; ambiguous?: boolean }> {
   const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
   const project = typeof data?.project === "string" ? data.project.trim() : ""
   if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project)) {
@@ -218,8 +242,13 @@ async function resolveProjectName(directory: string): Promise<{ project: string;
     : ""
   return {
     project: "unknown",
+    ambiguous: data?.project_source === "ambiguous" && Array.isArray(data?.available_projects) && data.available_projects.length > 1,
     error: `gentle-engram could not resolve a safe project identity.${reason}${choices} Retry when project resolution is available.`,
   }
+}
+
+return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning,
+  get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
 function truncate(str: string, max: number): string {
@@ -270,10 +299,32 @@ export function shouldNudgeForObservations(
 
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
+// Hidden hooks-object key through which the V2 adapter reaches the shared prompt
+// capture. A symbol keeps it out of the V1 hook names OpenCode enumerates.
+const CAPTURE_PROMPT = Symbol("engram.capturePrompt")
+const DELIVER_WARNING = Symbol("engram.deliverWarning")
+type CapturePrompt = (sourceSessionID: string, content: string, sourceInboxID?: string) => Promise<void>
+
 export const Engram: Plugin = async (ctx) => {
+  // Finite categories bound deduplication and pending memory per instance.
+  const seenWarnings = new Set<DegradedReason>()
+  const pendingWarnings = new Set<DegradedReason>()
+  const warn = (reason: DegradedReason): void => {
+    if (seenWarnings.has(reason)) return
+    seenWarnings.add(reason)
+    pendingWarnings.add(reason)
+  }
+  const client = createEngramClient(warn)
+  const { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning } = client
+  const deliverWarning = (append: (text: string) => boolean): void => {
+    if (!pendingWarnings.size) return
+    const text = `Engram degraded (${[...pendingWarnings].join(", ")}); automatic memory operations may be incomplete. Verify Engram availability before relying on persistence.`
+    if (append(text)) pendingWarnings.clear()
+  }
 	let project = "unknown"
 	let projectResolutionError = ""
 	let projectResolutionGeneration = 0
+  let projectAmbiguous = false
     let disposed = false
 
 	async function ensureResolvedProject(): Promise<boolean> {
@@ -284,6 +335,7 @@ export const Engram: Plugin = async (ctx) => {
 		if (generation !== projectResolutionGeneration) return project !== "unknown" && !projectResolutionError
 		project = resolved.project
 		projectResolutionError = resolved.error ?? ""
+    projectAmbiguous = resolved.ambiguous === true
 		return projectResolutionError === ""
 	}
 
@@ -315,6 +367,25 @@ export const Engram: Plugin = async (ctx) => {
   const deletedRootSessions = new Set<string>()
   const registrationAttempts = new Set<string>()
   const registeringSessions = new Map<string, Promise<boolean>>()
+  // Ownership/lifecycle sets remain keyed by OpenCode root, never by a suffix.
+  const effectiveSessions = new Map<string, { id: string }>()
+  const cleanupSessions = new Map<string, Set<string>>()
+  // Recovery never assumes the HTTP and MCP clients share a store.
+  const recoverySessions = new Map<string, { id: string; project: string; completed: boolean }>()
+  // A recovery acknowledgement authorizes only its runtime root, never the cwd.
+  const recoveredProjects = new Map<string, string>()
+  const projectForSession = (sessionId: string): string => recoveredProjects.get(sessionId) ?? project
+  const registrationErrors = new Map<string, string>()
+  const warnedSessions = new Set<string>()
+
+  function registrationFailed(sessionId: string, cause: string): false {
+    registrationErrors.set(sessionId, cause)
+    if (!warnedSessions.has(sessionId)) {
+      warnedSessions.add(sessionId)
+      console.warn(`gentle-engram session ${sessionId}: ${cause}; verify Engram project ownership and server availability, or start a new OpenCode session and retry`)
+    }
+    return false
+  }
   const closeRequestedSessions = new Set<string>()
   const closedSessions = new Set<string>()
   const closingSessions = new Map<string, Promise<boolean>>()
@@ -355,10 +426,16 @@ export const Engram: Plugin = async (ctx) => {
     const inFlight = closingSessions.get(sessionId)
     if (inFlight) return inFlight
 
-    const close = engramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
-      method: "POST",
-    }).then((acknowledgement) => {
-      if (acknowledgement === null) return false
+    const close = Promise.all([...(cleanupSessions.get(sessionId) ?? [])].map(async (effectiveID) => {
+      const acknowledgement = await engramFetch(`/sessions/${encodeURIComponent(effectiveID)}/end`, { method: "POST" })
+      if (acknowledgement?.id !== effectiveID || acknowledgement?.status !== "completed") {
+        warn("acknowledgement")
+        return false
+      }
+      cleanupSessions.get(sessionId)?.delete(effectiveID)
+      return true
+    })).then((acknowledgements) => {
+      if (acknowledgements.some((acknowledged) => !acknowledged)) return false
       closedSessions.add(sessionId)
       for (const sessions of [knownSessions, registrationAttempts, deletedRootSessions, closeRequestedSessions])
         sessions.delete(sessionId)
@@ -515,13 +592,32 @@ export const Engram: Plugin = async (ctx) => {
   }
 
   /**
-   * Ensure a session exists in engram. Idempotent — calls POST /sessions
-   * which uses INSERT OR IGNORE. Safe to call multiple times.
+   * Register or renew the root through the core resume API, retaining only
+   * its acknowledged effective identity for session-bound writes.
    *
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
+  async function acknowledgeRecovery(sessionId: string): Promise<boolean> {
+    const recovery = recoverySessions.get(sessionId)
+    if (!recovery || !recovery.completed || !recovery.project || disposed || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId)) return false
+    const result = await engramFetchResult(`/sessions/${encodeURIComponent(recovery.id)}`)
+    const body = result?.body
+    if (disposed || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId) || subAgentSessions.has(sessionId) || recoverySessions.get(sessionId) !== recovery) return false
+    if (!result?.ok || body?.id !== recovery.id || body?.project !== recovery.project || body?.ended_at || body?.ownership_mode !== "project_owned") return false
+    recoveredProjects.set(sessionId, recovery.project)
+    effectiveSessions.set(sessionId, { id: recovery.id })
+    knownSessions.add(sessionId)
+    registrationAttempts.add(sessionId)
+    const cleanup = cleanupSessions.get(sessionId) ?? new Set<string>()
+    cleanup.add(recovery.id)
+    cleanupSessions.set(sessionId, cleanup)
+    recoverySessions.delete(sessionId)
+    return true
+  }
+
   async function ensureSession(sessionId: string, renew = false): Promise<boolean> {
-      if (disposed || !await ensureResolvedProject() || disposed) return false
+    if (recoverySessions.has(sessionId)) return acknowledgeRecovery(sessionId)
+    if (disposed || (!recoveredProjects.has(sessionId) && !await ensureResolvedProject()) || disposed) return false
     if (!sessionId || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId)) return false
     if (!renew && knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
@@ -529,33 +625,81 @@ export const Engram: Plugin = async (ctx) => {
     const inFlight = registeringSessions.get(sessionId)
     if (inFlight) return await inFlight && !closeRequestedSessions.has(sessionId)
     registrationAttempts.add(sessionId)
-    const registration = engramFetch("/sessions", {
-      method: "POST",
-      body: { id: sessionId, project, directory: ctx.directory },
-    }).then((acknowledgement) => {
-      if (acknowledgement === null) return false
-      knownSessions.add(sessionId)
-      return true
-    }).finally(() => registeringSessions.delete(sessionId))
+    const registration = (async () => {
+      const cleanup = cleanupSessions.get(sessionId) ?? new Set<string>()
+      cleanupSessions.set(sessionId, cleanup)
+      knownSessions.delete(sessionId)
+      registrationErrors.delete(sessionId)
+      const result = await engramFetchResult("/sessions", {
+        method: "POST",
+        body: { id: sessionId, project: projectForSession(sessionId), directory: ctx.directory, resume: true },
+      }, true)
+      const id = result?.body?.id
+      if (result?.ok && result.body?.status === "created" && typeof id === "string" &&
+          (id === sessionId || id.startsWith(`${sessionId}:resume:`))) {
+        effectiveSessions.set(sessionId, { id })
+        cleanup.add(id)
+        knownSessions.add(sessionId)
+        return true
+      }
+      // Failed or uncertain renewals retain previously acknowledged cleanup
+      // ownership. The server chooses new identities, so a newly created but
+      // unacknowledged continuation may remain open; never guess its identity.
+      const cause = result?.status === 409 &&
+          (result.body?.code === "session_project_conflict" || result.body?.code === "session_already_ended")
+        ? `HTTP 409 ${result.body.code}`
+        : result && !result.ok ? `HTTP ${result.status} session registration refused` : "session registration was not acknowledged"
+      return registrationFailed(sessionId, cause)
+    })().finally(() => registeringSessions.delete(sessionId))
     registeringSessions.set(sessionId, registration)
     return await registration && !invalidSessions.has(sessionId) && !closeRequestedSessions.has(sessionId)
+  }
+
+  /**
+   * Capture one user prompt for its authoritative root session. A durable
+   * `sourceInboxID` lets the server treat replays as no-ops and refuse deleted
+   * identities (HTTP 409); engramFetch drops that response like any other failure.
+   */
+  const capturePrompt: CapturePrompt = async (sourceSessionID, content, sourceInboxID) => {
+    const sessionId = await resolveAuthoritativeSessionID(sourceSessionID)
+    // Skip child prompts even when ownership was discovered through the SDK.
+    if (!sessionId || subAgentSessions.has(sourceSessionID)) return
+
+    // Only capture non-trivial prompts (>10 chars)
+    if (content.length <= 10) return
+    const registered = await ensureSession(sessionId, true)
+    const confirmedSessionID = await resolveAuthoritativeSessionID(sourceSessionID)
+    if (!registered || confirmedSessionID !== sessionId) return
+    await engramFetch("/prompts", {
+      method: "POST",
+      body: {
+        session_id: effectiveSessions.get(sessionId)!.id,
+        // Redact before truncating: a <private> block straddling the
+        // limit would otherwise lose its closing tag and leak.
+        content: truncate(stripPrivateTags(content), 2000),
+        project: projectForSession(sessionId),
+        ...(sourceInboxID ? { source_inbox_id: sourceInboxID } : {}),
+      },
+    })
   }
 
   // Try to start engram server if not running
 	try {
 		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
-		localReady = await isEngramRunning(expectedID)
-		if (!localReady && !CONFIGURED_ENGRAM_URL) {
+		client.localReady = await isEngramRunning(expectedID)
+		if (!client.localReady && !CONFIGURED_ENGRAM_URL) {
       const serverChild = spawn(ENGRAM_BIN, ["serve"], {
         detached: true,
         stdio: "ignore",
       })
-      serverChild.on("error", () => {})
+      serverChild.on("error", () => warn("startup"))
+      serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
       serverChild.unref()
 			await new Promise((r) => setTimeout(r, 500))
-			localReady = await isEngramRunning(expectedID)
+			client.localReady = await isEngramRunning(expectedID)
 		}
-	} catch {}
+    if (!client.localReady) warn("readiness")
+	} catch { warn("startup") }
 
 	if (await ensureResolvedProject()) {
 		// Auto-import: if .engram/manifest.json exists in the project repo,
@@ -570,18 +714,22 @@ export const Engram: Plugin = async (ctx) => {
           detached: true,
           stdio: "ignore",
         })
-        importChild.on("error", () => {})
+        importChild.on("error", () => warn("import"))
+        importChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("import") })
         importChild.unref()
 			}
 		} catch {
-			// Manifest doesn't exist or binary not found — silently skip
+      warn("import")
 		}
 	}
 
   return {
+    [CAPTURE_PROMPT]: capturePrompt,
+    [DELIVER_WARNING]: deliverWarning,
+
 		dispose: async () => {
       disposed = true
-			if (!localReady) return
+			if (!client.localReady) return
       // Every registration attempt owns an Engram lifecycle (#1131), including
       // children misregistered before their parentID was known.
       await Promise.all([...registrationAttempts].map(closeKnownSession))
@@ -642,10 +790,6 @@ export const Engram: Plugin = async (ctx) => {
     // output.parts contains TextPart[] with the actual message text.
 
     "chat.message": async (input, output) => {
-      const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
-      // Skip child prompts even when ownership was discovered through the SDK.
-      if (!sessionId || subAgentSessions.has(input.sessionID)) return
-
       // Extract text from parts (type:"text")
       const content = output.parts
         .filter((p) => p.type === "text")
@@ -658,22 +802,7 @@ export const Engram: Plugin = async (ctx) => {
         ? `${output.message.summary.title ?? ""}\n${output.message.summary.body ?? ""}`.trim()
         : ""
 
-      const finalContent = content || fallback
-
-      // Only capture non-trivial prompts (>10 chars)
-      if (finalContent.length > 10) {
-        const registered = await ensureSession(sessionId, true)
-        const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
-        if (!registered || confirmedSessionID !== sessionId) return
-        await engramFetch("/prompts", {
-          method: "POST",
-          body: {
-            session_id: sessionId,
-            content: stripPrivateTags(truncate(finalContent, 2000)),
-            project,
-          },
-        })
-      }
+      await capturePrompt(input.sessionID, content || fallback)
     },
 
     // ─── Tool Execution Hook ─────────────────────────────────────
@@ -694,14 +823,29 @@ export const Engram: Plugin = async (ctx) => {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
       }
       if (!registered) {
+        const tool = canonicalEngramToolName(input.tool)
+        if (!disposed && projectAmbiguous && ["mem_save", "mem_save_prompt", "mem_session_summary"].includes(tool)) {
+          const id = effectiveSessions.get(authoritativeSessionID)?.id ?? authoritativeSessionID
+          recoverySessions.set(authoritativeSessionID, { id, project: typeof output.args.project === "string" ? output.args.project : "", completed: false })
+          output.args.session_id = id
+          return
+        }
 			if (projectResolutionError) throw new Error(projectResolutionError)
-        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}; verify that the Engram server is available and retry`)
+        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}${registrationErrors.has(authoritativeSessionID) ? `: ${registrationErrors.get(authoritativeSessionID)}` : ""}; verify that the Engram server is available and retry`)
       }
-      output.args.session_id = authoritativeSessionID
+      output.args.session_id = effectiveSessions.get(authoritativeSessionID)!.id
     },
 
     "tool.execute.after": async (input, output) => {
-      if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) return
+      try {
+      if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) {
+        const root = await resolveAuthoritativeSessionID(input.sessionID)
+        if (root && recoverySessions.has(root)) {
+          recoverySessions.get(root)!.completed = true
+          await acknowledgeRecovery(root)
+        }
+        return
+      }
 
       // input.sessionID comes from OpenCode — always available
       const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
@@ -718,13 +862,20 @@ export const Engram: Plugin = async (ctx) => {
           await engramFetch("/observations/passive", {
             method: "POST",
             body: {
-              session_id: sessionId,
+              session_id: effectiveSessions.get(sessionId)!.id,
               content: stripPrivateTags(text),
-              project,
+              project: projectForSession(sessionId),
               source: "task-complete",
             },
           })
         }
+      }
+      } finally {
+        deliverWarning((text) => {
+          if (typeof output?.output !== "string") return false
+          output.output += `\n\n${text}`
+          return true
+        })
       }
     },
 
@@ -750,9 +901,12 @@ export const Engram: Plugin = async (ctx) => {
       // to the system prompt so the agent notices. All fetches are fire-and-
       // forget with short timeouts — any failure silently skips the nudge.
       try {
-			if (!await ensureResolvedProject()) return
-        const sessionID: string = input.sessionID ?? ""
-        if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
+        const rootID: string = input.sessionID ?? ""
+        if (!recoveredProjects.has(rootID) && !await ensureResolvedProject()) return
+        if (!rootID || invalidSessions.has(rootID) || subAgentSessions.has(rootID)) return
+        // Read-only: never registers. A resumed root is looked up by the
+        // effective session its writes already use.
+        const sessionID = effectiveSessions.get(rootID)?.id ?? rootID
 
         const cooldownSecs = parseInt(process.env.ENGRAM_NUDGE_COOLDOWN_SECS ?? "900", 10)
         const nowSecs = Math.floor(Date.now() / 1000)
@@ -768,13 +922,15 @@ export const Engram: Plugin = async (ctx) => {
             signal: AbortSignal.timeout(200),
           })
           if (sessionRes.ok) {
-            const sessionData = await sessionRes.json()
+            let sessionData: any
+            try { sessionData = await sessionRes.json() } catch { warn("parse"); return }
             const startedAt: string = sessionData?.started_at ?? ""
             if (startedAt) {
               sessionStartEpoch = toEpochSecs(startedAt)
             }
-          }
+          } else warn("HTTP")
         } catch {
+          warn("transport")
           // Server unreachable or timed out — skip nudge
           return
         }
@@ -785,14 +941,15 @@ export const Engram: Plugin = async (ctx) => {
         let observationsResponseOK = false
         try {
           const obsRes = await fetch(
-            `${ENGRAM_URL}/observations?project=${encodeURIComponent(project)}&limit=1&sort=created_at:desc`,
+            `${ENGRAM_URL}/observations?project=${encodeURIComponent(projectForSession(rootID))}&limit=1&sort=created_at:desc`,
             { signal: AbortSignal.timeout(200) }
           )
           if (obsRes.ok) {
             observationsResponseOK = true
-            obsData = await obsRes.json()
-          }
+            try { obsData = await obsRes.json() } catch { warn("parse"); return }
+          } else warn("HTTP")
         } catch {
+          warn("transport")
           // Server unreachable or timed out — skip nudge
           return
         }
@@ -824,13 +981,13 @@ export const Engram: Plugin = async (ctx) => {
     // 3. Tell the compressor to remind the new agent to save memories
 
     "experimental.session.compacting": async (input, output) => {
-		if (!await ensureResolvedProject()) {
-			output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
-			return
-		}
       let sessionId = ""
       if (input.sessionID) {
         sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+      }
+      if (!recoveredProjects.has(sessionId) && !await ensureResolvedProject()) {
+        output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
+        return
       }
 
       // Runtime compaction context must never cross session boundaries. If the
@@ -838,7 +995,7 @@ export const Engram: Plugin = async (ctx) => {
       // injection rather than falling back to project-wide manual context.
       if (sessionId && await ensureSession(sessionId, true)) {
         const data = await engramFetch(
-          `/context/compaction?session_id=${encodeURIComponent(sessionId)}`
+          `/context/compaction?session_id=${encodeURIComponent(effectiveSessions.get(sessionId)!.id)}`
         )
         if (data?.context) {
           output.context.push(data.context)
@@ -853,11 +1010,209 @@ export const Engram: Plugin = async (ctx) => {
         `The agent has access to Engram persistent memory via MCP tools.\n` +
         `You MUST include the following instruction at the TOP of the compacted summary:\n\n` +
         `"FIRST ACTION REQUIRED: Call mem_session_summary with the content of this compacted summary. ` +
-        `Use project: '${project}'. This preserves what was accomplished before compaction. Do this BEFORE any other work."\n\n` +
+        `Use project: '${projectForSession(sessionId)}'. This preserves what was accomplished before compaction. Do this BEFORE any other work."\n\n` +
         `This is NOT optional. Without this, everything done before compaction is lost from memory.`
       )
     },
   }
 }
 
-export default { id: "engram", server: Engram }
+// ─── OpenCode V2 Adapter ─────────────────────────────────────────────────────
+// OpenCode V2 calls `setup(ctx)` instead of `server`. It exposes hooks through
+// per-domain registrations and session lifecycle through an event stream, so
+// this adapter translates them onto the V1 hooks above and adds no behavior.
+// Types are declared structurally: V1 hosts may not ship `@opencode/plugin`.
+//
+// Not exported by name on purpose: older V1 loaders call every exported
+// function as a plugin factory.
+
+type V2SystemPart = { type: "text"; text: string }
+type V2Registration = { dispose: () => Promise<void> }
+type V2Hook = (name: string, callback: (input: any) => Promise<void> | void) => Promise<V2Registration>
+type V2Context = {
+  location: { directory: string; project?: { id?: string } }
+  event: { subscribe: (options?: { signal?: AbortSignal }) => AsyncIterable<any> }
+  session: { get: (input: { sessionID: string }) => Promise<any>; hook: V2Hook }
+  tool: { hook: V2Hook }
+}
+
+// V1 hooks append to the last system string; V2 carries system text parts.
+function appendSystemText(system: V2SystemPart[], text: string): void {
+  const last = system[system.length - 1]
+  if (last) system[system.length - 1] = { ...last, text: `${last.text}\n\n${text}` }
+  else system.push({ type: "text", text })
+}
+
+async function withSystemStrings(system: V2SystemPart[], run: (texts: string[]) => Promise<void>): Promise<void> {
+  const texts = system.map((part) => part.text)
+  await run(texts)
+  texts.forEach((text, index) => {
+    if (index >= system.length) system.push({ type: "text", text })
+    else if (text !== system[index].text) system[index] = { ...system[index], text }
+  })
+}
+
+// V2 `Tool.Result.content` is `string | Content[]`; `subagent` returns a string.
+function v2ToolResultText(result: any): string {
+  const text = typeof result?.content === "string"
+    ? result.content
+    : Array.isArray(result?.content)
+    ? result.content.filter((part: any) => part?.type === "text").map((part: any) => part.text ?? "").join("\n")
+    : ""
+  if (text) return text
+  if (typeof result?.output === "string") return result.output
+  return result?.output === undefined ? "" : JSON.stringify(result.output)
+}
+
+// V2 session events carry `data.sessionID`; V1 hooks expect `properties.info.id`.
+function v1SessionEvent(event: any, directory: string): any {
+  const data = event?.data
+  if (typeof data?.sessionID !== "string") return undefined
+  if (event.type === "session.created" || event.type === "session.updated") {
+    // The V2 server is shared across locations; V1 only saw its own instance.
+    if (data.location?.directory && data.location.directory !== directory) return undefined
+    return { type: event.type, properties: { info: { id: data.sessionID, parentID: data.parentID, projectID: data.projectID } } }
+  }
+  if (event.type === "session.deleted") {
+    return { type: event.type, properties: { info: { id: data.sessionID } } }
+  }
+  return undefined
+}
+
+// V2 admits each human prompt as a durable `user` inbox item. Its inboxID is the
+// prompt's identity: replays reuse it, distinct items with equal text do not.
+function v2InboxPrompt(event: any, directory: string): { sessionID: string; inboxID: string; text: string } | undefined {
+  if (event?.type !== "session.inbox.enqueued") return undefined
+  // The envelope location is optional; the authoritative session lookup still
+  // rejects sessions outside this instance's project.
+  if (event.location?.directory && event.location.directory !== directory) return undefined
+  const data = event.data
+  const item = data?.item
+  if (typeof data?.sessionID !== "string" || !data.sessionID) return undefined
+  if (typeof data.inboxID !== "string" || !data.inboxID) return undefined
+  if (item?.type !== "user" || typeof item.payload?.text !== "string") return undefined
+  return { sessionID: data.sessionID, inboxID: data.inboxID, text: item.payload.text.trim() }
+}
+
+// The V2 event stream ends or throws when the server restarts; reconnect with
+// a bounded doubling delay that resets once events flow again.
+const V2_EVENT_RETRY_MIN_MS = 50
+const V2_EVENT_RETRY_MAX_MS = 5000
+
+function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal.removeEventListener("abort", done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal.addEventListener("abort", done, { once: true })
+  })
+}
+
+async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
+  const hooks: Record<string | symbol, any> = await Engram({
+    directory: ctx.location.directory,
+    project: { id: ctx.location.project?.id },
+    client: {
+      session: {
+        // V1 SDK results carry `{ data, error }`; the V2 client throws instead.
+        async get({ path }: { path: { id: string } }) {
+          try {
+            return { data: await ctx.session.get({ sessionID: path.id }) }
+          } catch (error) {
+            return { error }
+          }
+        },
+      },
+    },
+  } as any)
+
+  const abort = new AbortController()
+  const registrations: V2Registration[] = []
+  let listening: Promise<void> = Promise.resolve()
+  const cleanup = async () => {
+    abort.abort()
+    await Promise.all(registrations.map((registration) => registration.dispose()))
+    await listening
+    await hooks.dispose?.()
+  }
+
+  try {
+    // No `prompt` hook: it lacks a durable identity, so prompts are captured
+    // from `session.inbox.enqueued` below instead.
+    registrations.push(await ctx.session.hook("context", async (request) => {
+      await withSystemStrings(request.system, (system) =>
+        hooks["experimental.chat.system.transform"]({ sessionID: request.sessionID, model: request.model }, { system }))
+    }))
+
+    registrations.push(await ctx.session.hook("compaction", async (request) => {
+      const context: string[] = []
+      await hooks["experimental.session.compacting"]({ sessionID: request.sessionID }, { context })
+      if (context.length > 0) appendSystemText(request.system, context.join("\n\n"))
+    }))
+
+    registrations.push(await ctx.tool.hook("execute.before", async (call) => {
+      const args = call.input && typeof call.input === "object" ? call.input : {}
+      await hooks["tool.execute.before"]({ tool: call.tool, sessionID: call.sessionID, callID: call.id }, { args })
+      if (args !== call.input && Object.keys(args).length > 0) call.input = args
+    }))
+
+    registrations.push(await ctx.tool.hook("execute.after", async (call) => {
+      // V2 renamed the V1 `Task` delegation tool to `subagent`.
+      const tool = call.tool === "subagent" ? "Task" : call.tool
+      const output = call.status === "completed" ? v2ToolResultText(call.result) : ""
+      await hooks["tool.execute.after"]({ tool, sessionID: call.sessionID, callID: call.id }, output)
+      if (call.status !== "completed") return
+      hooks[DELIVER_WARNING]((text: string) => {
+        const result = call.result
+        if (!result || typeof result !== "object") return false
+        if (typeof result.content === "string") {
+          call.result = { ...result, content: `${result.content}\n\n${text}` }
+        } else if (Array.isArray(result.content) && result.content.every((part: any) =>
+          part && (part.type === "text" && typeof part.text === "string" ||
+            part.type === "file" && typeof part.uri === "string" && typeof part.mime === "string"))) {
+          call.result = { ...result, content: [...result.content, { type: "text", text }] }
+        } else return false
+        return true
+      })
+    }))
+
+    listening = (async () => {
+      let retryMs = V2_EVENT_RETRY_MIN_MS
+      while (!abort.signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+            if (abort.signal.aborted) break
+            // Every subscription opens with a server.connected handshake; only a
+            // real event proves the stream is healthy enough to reset the backoff.
+            if (event?.type !== "server.connected") retryMs = V2_EVENT_RETRY_MIN_MS
+            try {
+              const prompt = v2InboxPrompt(event, ctx.location.directory)
+              if (prompt) await (hooks[CAPTURE_PROMPT] as CapturePrompt)(prompt.sessionID, prompt.text, prompt.inboxID)
+              const translated = v1SessionEvent(event, ctx.location.directory)
+              if (translated) await hooks.event({ event: translated })
+            } catch {
+              // One failing event must not stop lifecycle tracking.
+            }
+          }
+        } catch {
+          // Events missed while disconnected are lost; hooks still bind sessions lazily.
+        }
+        if (abort.signal.aborted) break
+        await delayUnlessAborted(retryMs, abort.signal)
+        retryMs = Math.min(retryMs * 2, V2_EVENT_RETRY_MAX_MS)
+      }
+    })()
+  } catch (cause) {
+    await cleanup()
+    throw cause
+  }
+
+  return cleanup
+}
+
+// V1 (1.18.29+) calls server(); V2 calls setup().
+export default { id: "engram", server: Engram, setup: setupEngramV2 }

@@ -17,10 +17,7 @@ if (installerPinMatches.length !== 1) {
 
 const installerVersion = installerPinMatches[0][1];
 if (installerVersion !== packageMetadata.version) {
-	throw new Error(`Pi installer pin npm:gentle-engram@${installerVersion} must match plugin/pi/package.json version ${packageMetadata.version}`);
-}
-if (installerVersion === "0.1.14") {
-	throw new Error("Pi installer must not retain 0.1.14 as its current gentle-engram pin");
+	throw new Error(`Pi installer pin npm:gentle-engram@${installerVersion} must match package version ${packageMetadata.version}`);
 }
 const releaseRef = process.argv[2];
 const cliPath = fileURLToPath(new URL("../cli.js", import.meta.url));

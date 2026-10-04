@@ -15,27 +15,29 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
 const (
-	sourceProcessOverride         = projectpkg.SourceProcessOverride
+	sourceProcessOverride        = projectpkg.SourceProcessOverride
 	sessionIDPropertyDescription = "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed."
 )
 
@@ -560,6 +562,7 @@ Examples:
 					mcp.Required(),
 					mcp.Description("Observation ID to update"),
 				),
+				mcp.WithString("expected_project", mcp.Required(), mcp.Description("Explicit expected owner; does not bypass current-project checks")),
 				mcp.WithString("title",
 					mcp.Description("New title"),
 				),
@@ -647,6 +650,7 @@ Examples:
 					mcp.Required(),
 					mcp.Description("Observation ID to delete"),
 				),
+				mcp.WithString("expected_project", mcp.Required(), mcp.Description("Explicit expected owner of the observation")),
 				mcp.WithBoolean("hard_delete",
 					mcp.Description("If true, permanently deletes the observation"),
 				),
@@ -809,6 +813,12 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
+				),
+				mcp.WithBoolean("include_history",
+					mcp.Description("When true, render the observation's bounded version history: the 50 most recent prior title/content snapshots, oldest first, with version_count set to the total stored count in the envelope. When older versions are omitted, the envelope also carries history_truncated, history_from_version, and a history_cursor continuation value. Omit for the historical default output."),
+				),
+				mcp.WithNumber("history_cursor",
+					mcp.Description("Optional non-negative integer cursor returned as history_cursor by a previous truncated include_history response; submit it in a follow-up call to fetch the older page. Omit for the most recent page."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional project for response context, validated against known projects. Omit to use the process override or cwd detection. ID-based lookup is not filtered by project ownership."),
@@ -1173,13 +1183,15 @@ func handleListProjects(s *store.Store) server.ToolHandlerFunc {
 func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cwd, _ := os.Getwd()
-		res := projectpkg.DetectProjectFull(cwd)
+		var res projectpkg.DetectionResult
 		if processRes, ok, err := processProjectResult(cfg.DefaultProject); ok {
 			if err != nil {
 				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err}
 			} else {
 				res = processRes
 			}
+		} else {
+			res = s.DetectProject(cwd)
 		}
 
 		envelope := map[string]any{
@@ -1657,6 +1669,10 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 
 func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		expected, _ := req.GetArguments()["expected_project"].(string)
+		if _, err := store.ValidateExpectedProject(expected); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
@@ -1689,13 +1705,14 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 
-		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, true)
-		if err != nil {
-			return writeProjectErrorResult(nil, "", detRes, err), nil
-		}
 		obs, err := s.GetObservation(id)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
+		}
+
+		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, true)
+		if err != nil {
+			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
 		resolvedProject, _ := store.NormalizeProject(detRes.Project)
 		storedProject := ""
@@ -1721,7 +1738,7 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			truncation = &metadata
 		}
 
-		obs, err = s.UpdateObservation(id, update)
+		obs, err = s.UpdateObservationForProject(id, expected, update)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
 		}
@@ -1846,13 +1863,17 @@ func handleReview(s *store.Store, cfg MCPConfig, activities ...*SessionActivity)
 
 func handleDelete(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		expected, _ := req.GetArguments()["expected_project"].(string)
+		if _, err := store.ValidateExpectedProject(expected); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
 
 		hardDelete := boolArg(req, "hard_delete", false)
-		if err := s.DeleteObservation(id, hardDelete); err != nil {
+		if err := s.DeleteObservationForProject(id, expected, hardDelete); err != nil {
 			return mcp.NewToolResultError("Failed to delete memory: " + err.Error()), nil
 		}
 
@@ -1885,7 +1906,18 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		var detRes projectpkg.DetectionResult
 		var err error
 		if strings.TrimSpace(sessionID) != "" {
-			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, "", false, "", sessionID, nil, cfg.DefaultProject)
+			// Ordinary prompts retain session authority. A recovery reason alone
+			// cannot admit an explicit override outside genuine detector ambiguity.
+			if strings.TrimSpace(projectChoiceReason) == projectpkg.SourceUserSelectedAfterAmbiguousProject {
+				detRes, err = resolveWriteProject(s)
+				if errors.Is(err, projectpkg.ErrInvalidConfig) {
+					return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
+				}
+			}
+			if !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+				projectChoice, projectChoiceReason = "", ""
+			}
+			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, projectChoice, strings.TrimSpace(projectChoice) != "", projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
 		} else {
 			detRes, err = resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
 		}
@@ -2140,7 +2172,7 @@ func handleDoctor(s *store.Store, cfg MCPConfig, activities ...*SessionActivity)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		check, _ := req.GetArguments()["check"].(string)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+		detRes, err := resolveMCPProjectWithDetector(s, projectOverride, cfg.DefaultProject, true, s.InspectProject)
 		if err != nil {
 			return readProjectErrorResult(activity, detRes, err), nil
 		}
@@ -2258,6 +2290,9 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		// this ID-based lookup.
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		detRes, detErr := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+		// Get-by-ID is anchored on the record identity: when cwd resolution fails
+		// only because the directory is ambiguous, fall back to the stored project.
+		detRes, detErr = storedProjectFallback(obs, detRes, detErr)
 
 		obsProject := ""
 		if obs.Project != nil {
@@ -2282,10 +2317,72 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
 
+		extra := map[string]any{}
+		if boolArg(req, "include_history", false) {
+			// Bounded paginated history (#1286): a single page of the most recent
+			// versions (or the page continuing before an emitted history_cursor),
+			// a truthful total, and a continuation cursor only when an older page
+			// still exists.
+			cursor, err := historyCursorArg(req)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			page, err := s.GetObservationVersionPage(id, store.DefaultObservationVersionPageSize, cursor)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to read observation history: %v", err)), nil
+			}
+			versions := page.Versions
+			extra["version_count"] = page.Total
+			history := make([]map[string]any, 0, len(versions))
+			if len(versions) > 0 {
+				var b strings.Builder
+				if page.HasMore {
+					b.WriteString("\n\nHistory (")
+					b.WriteString(strconv.Itoa(len(versions)))
+					b.WriteString(" of ")
+					b.WriteString(strconv.Itoa(page.Total))
+					b.WriteString(" previous versions — older versions omitted):")
+				} else {
+					b.WriteString("\n\nHistory (")
+					b.WriteString(strconv.Itoa(len(versions)))
+					b.WriteString(" previous version")
+					if len(versions) != 1 {
+						b.WriteString("s")
+					}
+					b.WriteString("):")
+				}
+				for _, v := range versions {
+					fmt.Fprintf(&b, "\n\n--- Version %d (%s) ---\n%s\n%s",
+						v.Version,
+						timeutil.FormatLocal(v.CreatedAt),
+						v.Title,
+						v.Content,
+					)
+					history = append(history, map[string]any{
+						"version":    v.Version,
+						"title":      v.Title,
+						"content":    v.Content,
+						"created_at": v.CreatedAt,
+					})
+				}
+				result += b.String()
+			}
+			extra["history"] = history
+			if page.HasMore {
+				// versions is ascending (oldest first): the oldest shown version
+				// is the first entry, and the next page continues strictly before
+				// it via the same value the store exposes as NextCursor.
+				oldest := versions[0].Version
+				extra["history_truncated"] = true
+				extra["history_from_version"] = oldest
+				extra["history_cursor"] = page.NextCursor
+			}
+		}
+
 		if detErr != nil {
 			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
-		return respondWithProject(detRes, result, nil), nil
+		return respondWithProject(detRes, result, extra), nil
 	}
 }
 
@@ -2406,7 +2503,7 @@ func resolveSessionStartProject(s *store.Store, explicitDirectory, defaultProjec
 	if explicitDirectory == "" {
 		return resolveWriteProjectWithProcessOverride(s, defaultProject, false)
 	}
-	res := projectpkg.DetectProjectFull(explicitDirectory)
+	res := s.DetectProject(explicitDirectory)
 	if res.Error != nil {
 		return res, res.Error
 	}
@@ -2428,7 +2525,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			// Use basename fallback.
 			cwd, _ := os.Getwd()
 			detRes = projectpkg.DetectionResult{
-				Project: projectpkg.DetectProject(cwd),
+				Project: projectpkg.CanonicalizeProjectName(filepath.Base(cwd)),
 				Source:  "dir_basename",
 				Path:    cwd,
 			}
@@ -2770,12 +2867,12 @@ func sessionProjectResolutionError(sessionID, sessionProject, sessionMode, reque
 
 // resolveWriteProject detects the current project from the process working
 // directory. Returns ErrAmbiguousProject if cwd is a parent of multiple repos.
-func resolveWriteProject() (projectpkg.DetectionResult, error) {
+func resolveWriteProject(s *store.Store) (projectpkg.DetectionResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
 	}
-	res := projectpkg.DetectProjectFull(cwd)
+	res := s.DetectProject(cwd)
 	if res.Error != nil {
 		return res, res.Error
 	}
@@ -2801,19 +2898,39 @@ func resolveWriteProjectWithProcessOverride(s *store.Store, defaultProject strin
 	return resolveMCPProjectWithPolicy(s, "", defaultProject, requireKnownProcess)
 }
 
+// storedProjectFallback anchors resolution on the observation's own project
+// when cwd resolution fails only because the current directory is ambiguous
+// (ErrAmbiguousProject). Only the read-only mem_get_observation uses this
+// fallback; mutations must preserve independent caller context and ownership
+// assertions. Non-ambiguous errors and
+// observations without a stored project keep the caller's original error path.
+func storedProjectFallback(obs *store.Observation, detRes projectpkg.DetectionResult, detErr error) (projectpkg.DetectionResult, error) {
+	if !errors.Is(detErr, projectpkg.ErrAmbiguousProject) || obs == nil || obs.Project == nil {
+		return detRes, detErr
+	}
+	if strings.TrimSpace(*obs.Project) == "" {
+		return detRes, detErr
+	}
+	detRes.Project = *obs.Project
+	detRes.Source = projectpkg.SourceStoredProject
+	detRes.Path = ""
+	detRes.Error = nil
+	return detRes, nil
+}
+
 type ambiguousRecoveryTokenValidator func(projectpkg.DetectionResult, string) (provided bool, valid bool)
 
 func resolveWriteProjectWithChoiceAndProcessOverride(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
 	if strings.TrimSpace(projectChoice) == "" {
 		return resolveWriteProjectWithProcessOverride(s, defaultProject, false)
 	}
-	return resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
+	return resolveWriteProjectWithChoice(s, projectChoice, reason, validateToken)
 }
 
 // resolveWriteProjectWithChoice preserves normal write resolution authority and
 // only uses an explicit project choice as a recovery path from ErrAmbiguousProject.
-func resolveWriteProjectWithChoice(projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
-	res, err := resolveWriteProject()
+func resolveWriteProjectWithChoice(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
+	res, err := resolveWriteProject(s)
 	if err == nil {
 		// Non-ambiguous config/git/autodetect remains authoritative. Ignore any
 		// supplied project choice so agents cannot drift writes to arbitrary buckets.
@@ -2891,7 +3008,30 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	if trimmedSessionID != "" {
 		sess, err := s.GetSession(trimmedSessionID)
 		if err != nil {
-			return projectpkg.DetectionResult{}, &unknownSessionError{SessionID: trimmedSessionID}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return projectpkg.DetectionResult{}, err
+			}
+			// Only genuine detector ambiguity admits an unregistered runtime ID.
+			// A bare explicit project (even an existing bucket) cannot bootstrap it.
+			res, detErr := resolveWriteProject(s)
+			if !errors.Is(detErr, projectpkg.ErrAmbiguousProject) {
+				return projectpkg.DetectionResult{}, &unknownSessionError{SessionID: trimmedSessionID}
+			}
+			if trimmedReason != projectpkg.SourceUserSelectedAfterAmbiguousProject || trimmedProjectChoice == "" {
+				return res, detErr
+			}
+			res, detErr = resolveWriteProjectWithChoice(s, projectChoice, reason, validateToken)
+			if detErr != nil {
+				return res, detErr
+			}
+			project, normalizeErr := normalizeExplicitWriteProject(res.Project)
+			if normalizeErr != nil {
+				return res, normalizeErr
+			}
+			if err := s.StartSessionWithOwnershipMode(trimmedSessionID, project, res.Path, store.SessionOwnershipProjectOwned); err != nil {
+				return res, err
+			}
+			return res, nil
 		}
 		sessionProject, err = normalizeExplicitWriteProject(sess.Project)
 		if err != nil {
@@ -2906,7 +3046,12 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	}
 
 	if trimmedProjectChoice != "" {
-		cwdRes, cwdErr := resolveWriteProject()
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return projectpkg.DetectionResult{}, cwdErr
+		}
+		cwdRes := projectpkg.DetectProjectFullWithOptions(cwd, projectpkg.DetectionOptions{InspectOnly: true})
+		cwdErr = cwdRes.Error
 		if cwdErr != nil {
 			if errors.Is(cwdErr, projectpkg.ErrInvalidConfig) {
 				return cwdRes, cwdErr
@@ -2935,6 +3080,9 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 			return projectpkg.DetectionResult{}, err
 		}
 
+		if errors.Is(cwdErr, projectpkg.ErrAmbiguousProject) && trimmedReason == projectpkg.SourceUserSelectedAfterAmbiguousProject {
+			return resolveWriteProjectWithChoice(s, projectChoice, reason, validateToken)
+		}
 		exists, err := s.ProjectExists(project)
 		if err != nil {
 			return projectpkg.DetectionResult{}, err
@@ -2968,7 +3116,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 			}
 			if errors.Is(cwdErr, projectpkg.ErrAmbiguousProject) {
 				if trimmedReason == projectpkg.SourceUserSelectedAfterAmbiguousProject {
-					return resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
+					return resolveWriteProjectWithChoice(s, projectChoice, reason, validateToken)
 				}
 				return cwdRes, cwdErr
 			}
@@ -2996,7 +3144,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	}
 
 	if trimmedReason == projectpkg.SourceUserSelectedAfterAmbiguousProject && trimmedProjectChoice != "" {
-		res, err := resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
+		res, err := resolveWriteProjectWithChoice(s, projectChoice, reason, validateToken)
 		if err != nil {
 			return res, err
 		}
@@ -3020,7 +3168,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		}, nil
 	}
 
-	return resolveWriteProject()
+	return resolveWriteProject(s)
 }
 
 func explicitWriteProjectCollision(trimmedRawProject, normalizedProject, sessionProject string, cwdRes projectpkg.DetectionResult) *normalizedProjectCollisionError {
@@ -3175,6 +3323,7 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 	if err != nil {
 		return ""
 	}
+	matchedPath := ""
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -3189,13 +3338,17 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 		if _, err := os.Stat(filepath.Join(childPath, ".git")); err != nil {
 			continue
 		}
-		absChild, err := filepath.Abs(childPath)
+		absChild, err := filepath.EvalSymlinks(childPath)
 		if err != nil {
-			return childPath
+			return ""
 		}
-		return absChild
+		absChild, err = filepath.Abs(absChild)
+		if err != nil || matchedPath != "" {
+			return ""
+		}
+		matchedPath = absChild
 	}
-	return ""
+	return matchedPath
 }
 
 // resolveReadProject validates an optional project override against the store.
@@ -3218,6 +3371,10 @@ func resolveMCPProject(s *store.Store, explicit, defaultProject string) (project
 }
 
 func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string, requireKnownProcess bool) (projectpkg.DetectionResult, error) {
+	return resolveMCPProjectWithDetector(s, explicit, defaultProject, requireKnownProcess, s.DetectProject)
+}
+
+func resolveMCPProjectWithDetector(s *store.Store, explicit, defaultProject string, requireKnownProcess bool, detect func(string) projectpkg.DetectionResult) (projectpkg.DetectionResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
@@ -3228,6 +3385,7 @@ func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string
 		ProcessOverride:      defaultProject,
 		Directory:            cwd,
 		ProjectExists:        s.ProjectExists,
+		Detect:               detect,
 		RequireKnownExplicit: strings.TrimSpace(explicit) != "",
 		RequireKnownProcess:  requireKnownProcess,
 	})
@@ -3282,6 +3440,13 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 // resolution fails. It handles ambiguous project errors and invalid configs.
 func writeProjectErrorResult(activity *SessionActivity, sessionID string, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
 	code := "ambiguous_project"
+	var transition *projectpkg.ProjectTransitionError
+	if errors.As(err, &transition) {
+		return errorWithMeta("project_transition_conflict", err.Error(), res.AvailableProjects)
+	}
+	if errors.Is(err, projectpkg.ErrProjectHistoryUnavailable) {
+		return errorWithMeta("project_history_unavailable", err.Error(), nil)
+	}
 	if errors.Is(err, store.ErrDatabaseGenerationChanged) {
 		return errorWithMeta("database_generation_changed", err.Error(), res.AvailableProjects)
 	}
@@ -3398,6 +3563,9 @@ func readProjectErrorResult(activity *SessionActivity, res projectpkg.DetectionR
 		)
 	} else {
 		result = writeProjectErrorResult(activity, defaultSessionID(""), res, err)
+	}
+	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		addErrorMetadata(result, map[string]any{"hint": "Ask the user to choose a project, then retry the same read tool with its project filter; alternatively cd into the target repo or configure repo .engram/config.json. Do not retry a write tool to recover this read."})
 	}
 	addErrorMetadata(result, map[string]any{
 		"project":        res.Project,
@@ -3525,6 +3693,22 @@ func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return int(v)
+}
+
+// historyCursorArg reads the optional history_cursor argument as a
+// non-negative integer, defaulting to 0 (the most recent page) when omitted.
+// Invalid values return an error that the handler surfaces as a tool error, so
+// a malformed cursor can never be silently misread.
+func historyCursorArg(req mcp.CallToolRequest) (int64, error) {
+	raw, ok := req.GetArguments()["history_cursor"]
+	if !ok {
+		return 0, nil
+	}
+	f, ok := raw.(float64)
+	if !ok || f < 0 || math.Trunc(f) != f || f >= 0x1p63 {
+		return 0, fmt.Errorf("history_cursor must be a non-negative integer")
+	}
+	return int64(f), nil
 }
 
 func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {
