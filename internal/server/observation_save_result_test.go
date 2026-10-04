@@ -233,3 +233,88 @@ func TestHandleAddObservationReturnsConflictForMismatchedReplay(t *testing.T) {
 		t.Fatalf("expected 409, got %d body=%s", rec2.Code, rec2.Body.String())
 	}
 }
+
+func TestHandleAddObservationReplaySkipsOwnershipValidation(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("sess-replay-owner", "proj-original", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	srv := New(st, 0)
+	payload := `{"session_id":"sess-replay-owner","type":"manual","title":"Owner title","content":"Owner content.","project":"proj-original","scope":"project","operation_id":"op-owner-replay"}`
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(payload)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first save: expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var first struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+
+	// Simulate a session ownership change after the original commit.
+	if _, err := st.DB().Exec(`UPDATE sessions SET project = 'proj-new' WHERE id = 'sess-replay-owner'`); err != nil {
+		t.Fatalf("change session project: %v", err)
+	}
+
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(payload)))
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("replay after ownership change: expected 201, got %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	var second struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("replay id changed: got %d, want %d", second.ID, first.ID)
+	}
+}
+
+func TestHandleAddObservationNewOperationIDSessionProjectMismatch(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("sess-mismatch", "proj-a", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	before, err := st.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	srv := New(st, 0)
+	payload := `{"session_id":"sess-mismatch","type":"manual","title":"Mismatch title","content":"Mismatch content.","project":"proj-b","scope":"project","operation_id":"op-mismatch"}`
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(payload)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["code"] != "session_project_mismatch" {
+		t.Fatalf("code = %v, want session_project_mismatch", body["code"])
+	}
+
+	after, err := st.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if after.TotalObservations != before.TotalObservations {
+		t.Fatalf("mismatch saved observation despite 400: before=%d after=%d", before.TotalObservations, after.TotalObservations)
+	}
+
+	var ledgerCount int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM observation_save_operations WHERE operation_id = 'op-mismatch'`).Scan(&ledgerCount); err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
+	if ledgerCount != 0 {
+		t.Fatalf("ledger has %d rows for rejected operation, want 0", ledgerCount)
+	}
+}

@@ -26,7 +26,8 @@ const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 
-// Writes are single-attempt: once dispatched, their server-side outcome may be unknown.
+// Observation writes attempt bounded exact replay after an ambiguous transport outcome;
+// other writes are single-attempt and report unknown when their server-side outcome is unresolved.
 const ENGRAM_WRITE_TIMEOUT_MS = 3000;
 const ENGRAM_READ_TIMEOUT_MS = 10000;
 const ENGRAM_DOCTOR_TIMEOUT_MS = 15000;
@@ -42,6 +43,7 @@ const ENGRAM_STARTUP_RETRY_BASE_MS = 1000;
 const ENGRAM_STARTUP_RETRY_MAX_MS = 60000;
 const ENGRAM_VERSION_PROBE_TIMEOUT_MS = 2000;
 const ENGRAM_DETERMINISTIC_RETRY_MS = 5000;
+const ENGRAM_OBSERVATION_REPLAY_MAX_ATTEMPTS = 3;
 
 const ENGRAM_TOOLS = [
   "mem_search",
@@ -392,39 +394,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   throw new Error(unreachableMessage(undefined));
 }
 
-// postObservationWithReplayRecovery sends an idempotent observation save and,
-// if the transport failure makes the server-side outcome ambiguous, attempts
-// to recover the committed result from the replay ledger. It returns the post
-// result unchanged when recovery is not possible so callers can fail safe.
-async function postObservationWithReplayRecovery<TResponse = unknown>(opts: FetchOptions, signal?: AbortSignal): Promise<EngramFetchResult<TResponse>> {
-  const body = opts.body && typeof opts.body === "object" ? { ...(opts.body as Record<string, unknown>) } : {};
-  if (!body.operation_id) {
-    body.operation_id = newObservationOperationID();
-  }
-  const postResult = await engramFetchResult<TResponse>("/observations", { ...opts, body, signal });
-  if (!postResult.transportFailure) return postResult;
-  try {
-    const lookup = await engramFetchResult<{ id: number; status: string }>(
-      `/observations/save-result${queryString({ operation_id: String(body.operation_id) })}`,
-      { signal },
-    );
-    if (lookup.data && typeof lookup.data.id === "number") {
-      return { data: lookup.data as TResponse };
-    }
-  } catch {
-    // The lookup is a best-effort recovery. If it fails (server unreachable,
-    // ledger pruned, etc.) the original transport failure remains the
-    // authoritative signal so callers can report an unknown outcome.
-  }
-  return postResult;
-}
-
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
-  if (path === "/observations" && (opts.method ?? "GET") === "POST") {
-    const result = await postObservationWithReplayRecovery<TResponse>(opts);
-    if (result.transportFailure) throw new Error(unreachableMessage(result.transportFailure));
-    return result.data;
-  }
   const result = await engramFetchResult<TResponse>(path, opts);
   // Background registration has no native-tool side channel for transport diagnostics.
   if (result.transportFailure?.operation === "session-registration") {
@@ -433,20 +403,75 @@ async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions
   return result.data;
 }
 
-function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; transportFailure: () => EngramTransportFailure | undefined } {
+interface ObservationSaveResponse {
+  id: number;
+  status: string;
+}
+
+// Bounded, backoff-based EXACT replay of an observation save after an ambiguous transport
+// outcome. The same operation_id and payload are reused for every attempt. A lookup miss is
+// not proof of non-commit, and the original uncertain outcome is preserved until evidence
+// (a committed lookup or a successful POST acknowledgement) establishes the result.
+async function postObservationWithReplayRecovery(body: Record<string, unknown>, signal?: AbortSignal): Promise<EngramFetchResult<ObservationSaveResponse>> {
+  const operationId = randomUUID();
+  const payload = { ...body, operation_id: operationId };
+
+  const initial = await engramFetchResult<ObservationSaveResponse>("/observations", { method: "POST", body: payload, signal });
+  if (!initial.transportFailure) return initial;
+  const originalFailure = initial.transportFailure;
+
+  async function lookupCommitted(): Promise<ObservationSaveResponse | null> {
+    try {
+      const result = await engramFetchResult<ObservationSaveResponse>(`/observations/save-result?operation_id=${encodeURIComponent(operationId)}`, { signal });
+      if (result.data?.status === "committed") return result.data;
+    } catch {
+      // A lookup miss, HTTP error, or transport failure is not proof the original did not commit.
+    }
+    return null;
+  }
+
+  for (let attempt = 0; attempt < ENGRAM_OBSERVATION_REPLAY_MAX_ATTEMPTS; attempt += 1) {
+    if (signal?.aborted) break;
+
+    const committed = await lookupCommitted();
+    if (committed) return { data: committed };
+
+    if (signal?.aborted) break;
+
+    let attemptResult: EngramFetchResult<ObservationSaveResponse> | undefined;
+    try {
+      attemptResult = await engramFetchResult<ObservationSaveResponse>("/observations", { method: "POST", body: payload, signal });
+    } catch {
+      // A definitive HTTP error during replay does not prove the original outcome; stop
+      // replay attempts and fall through to the final lookup before returning unknown.
+      break;
+    }
+
+    if (!attemptResult.transportFailure) return attemptResult;
+
+    if (attempt < ENGRAM_OBSERVATION_REPLAY_MAX_ATTEMPTS - 1) {
+      await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+    }
+  }
+
+  if (!signal?.aborted) {
+    const committed = await lookupCommitted();
+    if (committed) return { data: committed };
+  }
+
+  return { data: null, transportFailure: originalFailure };
+}
+
+function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; transportFailure: () => EngramTransportFailure | undefined; setTransportFailure: (failure: EngramTransportFailure) => void } {
   let failure: EngramTransportFailure | undefined;
   return {
     async fetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
-      if (path === "/observations" && (opts.method ?? "GET") === "POST") {
-        const result = await postObservationWithReplayRecovery<TResponse>(opts, signal);
-        if (result.transportFailure) failure = result.transportFailure;
-        return result.data;
-      }
       const result = await engramFetchResult<TResponse>(path, { ...opts, signal });
       if (result.transportFailure) failure = result.transportFailure;
       return result.data;
     },
     transportFailure: () => failure,
+    setTransportFailure: (f) => { failure = f; },
   };
 }
 
@@ -1760,7 +1785,7 @@ async function archiveCompactionSummary(sessionId: string, summary: string, runt
   try {
     // Ambiguity is checked against Pi's host identity; attribution uses Engram's effective ID.
     if (soleActiveRuntimeSessionID() !== runtimeID) return ArchiveOutcome.Unavailable;
-    const result = await postObservationWithReplayRecovery<{ id: number; status: string }>({
+    const result = await engramFetchResult("/observations", {
       method: "POST",
       body: {
         session_id: sessionId,
@@ -1810,17 +1835,7 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
-// newObservationOperationID returns a fresh random operation identifier for an
-// observation save. The id is generated once per logical save and reused only
-// for automatic retries of that same save inside postObservationWithReplayRecovery;
-// intentionally distinct saves get distinct ids. The server uses the id to
-// return the original committed result for replays and to reject saves whose
-// payload changed under the same id.
-function newObservationOperationID(): string {
-  return randomUUID();
-}
-
-async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
+async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined, setTransportFailure?: (failure: EngramTransportFailure) => void, signal?: AbortSignal): Promise<unknown> {
   const sessionId = getSessionId(ctx);
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
   const writeState = sessionId ? lifecycle(ctx, sessionId) : undefined;
@@ -1868,18 +1883,17 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (writeState) assertOpen(writeState, writeEpoch!);
       const activeSessionId = await registeredSessionForWrite(activeProject);
       if (writeState) assertOpen(writeState, writeEpoch!);
-      return fetch("/observations", {
-        method: "POST",
-        body: {
-          session_id: activeSessionId,
-          title: params.title,
-          content: params.content,
-          type: params.type || "manual",
-          project: activeProject,
-          scope: params.scope || "project",
-          topic_key: params.topic_key,
-        },
-      });
+      const result = await postObservationWithReplayRecovery({
+        session_id: activeSessionId,
+        title: params.title,
+        content: params.content,
+        type: params.type || "manual",
+        project: activeProject,
+        scope: params.scope || "project",
+        topic_key: params.topic_key,
+      }, signal);
+      if (result.transportFailure) setTransportFailure?.(result.transportFailure);
+      return result.data;
     }
     case "mem_update":
       return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ expected_project: params.expected_project })}`, {
@@ -1912,17 +1926,16 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (writeState) assertOpen(writeState, writeEpoch!);
       const summarySessionId = await registeredSessionForWrite(activeProject);
       if (writeState) assertOpen(writeState, writeEpoch!);
-      return fetch("/observations", {
-        method: "POST",
-        body: {
-          session_id: summarySessionId,
-          type: "session_summary",
-          title: "Session summary",
-          content: params.content,
-          project: activeProject,
-          scope: "project",
-        },
-      });
+      const result = await postObservationWithReplayRecovery({
+        session_id: summarySessionId,
+        type: "session_summary",
+        title: "Session summary",
+        content: params.content,
+        project: activeProject,
+        scope: "project",
+      }, signal);
+      if (result.transportFailure) setTransportFailure?.(result.transportFailure);
+      return result.data;
     }
     case "mem_session_start":
       requireResolvedProject();
@@ -2088,7 +2101,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     await awaitWithAbort(initOnce(ctx.cwd), signal);
     await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
-    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry, transport.transportFailure), signal);
+    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry, transport.transportFailure, transport.setTransportFailure, signal), signal);
     const failure = transport.transportFailure();
     if (failure) throw new Error(unreachableMessage(failure));
 

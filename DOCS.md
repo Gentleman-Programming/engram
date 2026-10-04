@@ -342,7 +342,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - `200` returns `{id, status: "committed"}` for a retained committed result; missing/empty `operation_id` returns `400`.
   - `404` with `{error: "no committed result found for operation_id"}` for both an unknown ID and a tombstoned operation. Lookup does not distinguish them; POST does (normal save vs `410` for the same payload, or `409` for a changed tombstoned payload).
   - A lookup miss is **not proof that the original request cannot commit later**. It neither cancels an in-flight POST nor authorizes a fresh operation ID for the same logical save.
-  - The Pi plugin supplies an operation UUID and attempts lookup recovery after an ambiguous transport outcome. It currently performs **no automatic exact POST replay**; an unsuccessful lookup preserves the original uncertain outcome.
+  - The Pi plugin supplies an operation UUID and attempts lookup recovery after an ambiguous transport outcome. It then performs a bounded exact POST replay (up to three attempts with exponential backoff) using the same operation ID and payload. If the outcome is still unresolved after the bounded attempts and a final lookup, the original uncertain outcome is preserved.
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
@@ -360,6 +360,8 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - Both PATCH and DELETE require an explicit `expected_project` owner assertion: missing, blank, or invalid names return `400`; normalized owner mismatch or immutable project reassignment through PATCH returns `409` without changing the observation, revision, or sync queue. Personal/global scopes do not bypass ownership. The assertion and mutation run in one store transaction; project metadata remains immutable.
 - `POST /topic-keys/suggest` — Suggest a stable topic key using the same heuristic as `mem_suggest_topic_key`. Body: `{type?, title?, content?}`. Returns `{topic_key}`.
   - At least one of `title` or `content` must be non-empty; invalid JSON or missing suggestion input returns `400`
+
+This unit delivers the committed-result lookup and HTTP admission path; automatic exact POST replay, telemetry, concurrency/restart fault harness, and Pi-side changes are planned for later units.
 
 ### Review
 

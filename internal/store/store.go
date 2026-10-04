@@ -1811,11 +1811,6 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	// Older copies of this branch created the table with a NOT NULL
-	// observation_id and ON DELETE CASCADE. Migrate them without losing rows.
-	if err := s.migrateObservationSaveOperationsNullable(); err != nil {
-		return err
-	}
 
 	return nil
 }
@@ -3795,6 +3790,28 @@ func (s *Store) GetObservationSaveResult(operationID string) (observationID int6
 		return 0, nil
 	}
 	return nullableID.Int64, nil
+}
+
+// ObservationOperationRecorded is a cheap existence probe for the operation
+// ledger. It returns true when any row exists for the operation ID, including
+// tombstones left by hard deletion, so callers can short-circuit session
+// ownership pre-validation for committed operations.
+func (s *Store) ObservationOperationRecorded(operationID string) (bool, error) {
+	if operationID == "" {
+		return false, nil
+	}
+	var exists bool
+	err := s.db.QueryRow(
+		`SELECT 1 FROM observation_save_operations WHERE operation_id = ? LIMIT 1`,
+		operationID,
+	).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // recordObservationSaveOperationTx persists the idempotent operation ledger row
@@ -12442,81 +12459,6 @@ func (s *Store) migrateSyncChunksTable() error {
 		return err
 	}
 
-	return s.commitHook(tx)
-}
-
-// migrateObservationSaveOperationsNullable recreates the operation ledger with
-// a nullable observation_id and ON DELETE SET NULL if an older copy of this
-// branch created it with NOT NULL / ON DELETE CASCADE. This keeps tombstone
-// rows after observation deletion so replays fail closed with
-// ErrObservationOperationExpired instead of being reusable for new payloads.
-func (s *Store) migrateObservationSaveOperationsNullable() error {
-	rows, err := s.queryItHook(s.db, "PRAGMA table_info(observation_save_operations)")
-	if err != nil {
-		return err
-	}
-	var hasTable bool
-	var observationIDNotNull bool
-	for rows.Next() {
-		hasTable = true
-		var cid int
-		var name, typ string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return closeRowsWithError(rows, err)
-		}
-		if name == "observation_id" && notNull == 1 {
-			observationIDNotNull = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return closeRowsWithError(rows, err)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if !hasTable || !observationIDNotNull {
-		return nil
-	}
-
-	tx, err := s.beginTxHook()
-	if err != nil {
-		return fmt.Errorf("migrate observation save operations: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := s.execHook(tx, `
-		CREATE TABLE observation_save_operations_new (
-			operation_id     TEXT    NOT NULL PRIMARY KEY,
-			fingerprint      TEXT    NOT NULL,
-			observation_id   INTEGER,
-			created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
-			FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE SET NULL
-		)
-	`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(tx, `
-		INSERT OR IGNORE INTO observation_save_operations_new (operation_id, fingerprint, observation_id, created_at)
-		SELECT operation_id, fingerprint, observation_id, created_at
-		FROM observation_save_operations
-	`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(tx, `DROP TABLE observation_save_operations`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(tx, `ALTER TABLE observation_save_operations_new RENAME TO observation_save_operations`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(tx, `
-		CREATE INDEX IF NOT EXISTS idx_obs_save_op_created
-			ON observation_save_operations(created_at)
-	`); err != nil {
-		return err
-	}
 	return s.commitHook(tx)
 }
 

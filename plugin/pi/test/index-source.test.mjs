@@ -1613,7 +1613,7 @@ test("already-cancelled preflight observes a later shared initialization rejecti
   await flush();
 
   assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
-  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry, transport\.transportFailure\), signal\);/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry, transport\.transportFailure, transport\.setTransportFailure, signal\), signal\);/);
 });
 
 test("transport policies bound read, doctor and registration retries independently of writes", () => {
@@ -1930,7 +1930,7 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
   assert.match(source, /async function registerEffectiveSession[\s\S]*return register\(runtimeID, canPersist, true\)/);
-  assert.match(source, /async function archiveCompactionSummary[\s\S]*postObservationWithReplayRecovery/);
+  assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
 });
 
 test("session compaction never captures or reads stale Pi context", () => {

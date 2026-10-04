@@ -465,6 +465,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
+	// Committed-result lookup for replay-safe observation saves.
+	s.mux.HandleFunc("GET /observations/save-result", s.handleGetObservationSaveResult)
 	// Pin state is local-only metadata and remains open with ENGRAM_HTTP_TOKEN like other non-destructive local HTTP writes.
 	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
@@ -475,16 +477,6 @@ func (s *Server) routes() {
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
-
-	// Replay-safe observation save: committed-result lookup for clients that
-	// lost the acknowledgement of an earlier save.
-	//
-	// Query parameter: operation_id (required)
-	// Responses:
-	//   200 {id, status:"committed"}
-	//   400 missing operation_id
-	//   404 no committed result known for the operation
-	s.mux.HandleFunc("GET /observations/save-result", s.handleGetObservationSaveResult)
 
 	// Timeline
 	s.mux.HandleFunc("GET /timeline", s.handleTimeline)
@@ -705,7 +697,20 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "session_id and content are required")
 		return
 	}
-	if !s.validateSessionProject(w, body.SessionID, body.Project) {
+	// A committed operation ID reaches the transactional replay path before
+	// session-ownership pre-validation, so a later ownership change cannot
+	// lock out an acknowledged save. Unknown or missing operation IDs still
+	// run the normal pre-validation gate.
+	recorded := false
+	if body.OperationID != "" {
+		var err error
+		recorded, err = s.store.ObservationOperationRecorded(body.OperationID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if !recorded && !s.validateSessionProject(w, body.SessionID, body.Project) {
 		return
 	}
 

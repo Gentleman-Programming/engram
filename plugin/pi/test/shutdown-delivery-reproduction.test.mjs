@@ -59,11 +59,13 @@ async function scenario(interrupted, fault) {
         return res.end(JSON.stringify({ id: identity, status: 'created' }));
       }
       if (path === '/observations') {
-        assert.deepEqual(
-          { session_id: body.session_id, title: body.title, content: body.content, type: body.type, project: body.project, scope: body.scope },
-          { session_id: identity, title: 'disposable', content: 'synthetic fixture only', type: 'manual', project: 'synthetic-1632', scope: 'project' },
-        );
-        assert.match(body.operation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'observation save must carry a random operation id');
+        assert.equal(body.session_id, identity);
+        assert.equal(body.title, 'disposable');
+        assert.equal(body.content, 'synthetic fixture only');
+        assert.equal(body.type, 'manual');
+        assert.equal(body.project, 'synthetic-1632');
+        assert.equal(body.scope, 'project');
+        assert.match(body.operation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
         return res.end('{"id":1}');
       }
       assert.equal(path, `/sessions/${identity}/end`, 'unexpected request');
