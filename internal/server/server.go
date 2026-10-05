@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/subtle"
 	"database/sql"
@@ -27,6 +28,8 @@ import (
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+var observedGenerationError = (*store.Store).GenerationError
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
@@ -66,18 +69,21 @@ type SemanticRunnerFactory func(name string) (store.SemanticRunner, error)
 type SemanticPromptBuilder func(a, b store.ObservationSnippet) string
 
 type Server struct {
-	store      *store.Store
-	mux        *http.ServeMux
-	port       int
-	listen     func(network, address string) (net.Listener, error)
-	serve      func(net.Listener, http.Handler) error
-	socketPath string
-	listener   net.Listener
-	socketInfo os.FileInfo
-	closeMu    sync.Mutex
-	closed     bool
-	onWrite    func() // called after successful local writes (for autosync notification)
-	syncStatus SyncStatusProvider
+	httpServer            *http.Server
+	generationInvalidated chan struct{}
+	generationOnce        sync.Once
+	store                 *store.Store
+	mux                   *http.ServeMux
+	port                  int
+	listen                func(network, address string) (net.Listener, error)
+	serve                 func(net.Listener, http.Handler) error
+	socketPath            string
+	listener              net.Listener
+	socketInfo            os.FileInfo
+	closeMu               sync.Mutex
+	closed                bool
+	onWrite               func() // called after successful local writes (for autosync notification)
+	syncStatus            SyncStatusProvider
 
 	// runnerFactory resolves a SemanticRunner by CLI name (read from ENGRAM_AGENT_CLI).
 	// When nil, semantic=true requests fail with 500.
@@ -91,7 +97,9 @@ type Server struct {
 }
 
 func New(s *store.Store, port int) *Server {
-	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve, version: "dev"}
+	srv := &Server{store: s, port: port, listen: net.Listen, version: "dev", generationInvalidated: make(chan struct{}, 1)}
+	srv.httpServer = &http.Server{Handler: srv.Handler()}
+	srv.serve = func(ln net.Listener, h http.Handler) error { return srv.httpServer.Serve(ln) }
 	if s != nil {
 		srv.instanceID = s.InstanceID()
 	}
@@ -249,7 +257,7 @@ func (s *Server) Start() error {
 	}
 	serveFn := s.serve
 	if serveFn == nil {
-		serveFn = http.Serve
+		serveFn = func(ln net.Listener, h http.Handler) error { return s.httpServer.Serve(ln) }
 	}
 
 	var (
@@ -287,8 +295,8 @@ func (s *Server) Start() error {
 	defer s.Close()
 
 	log.Printf("[engram] HTTP server listening on %s", addr)
-	err = serveFn(ln, s.mux)
-	if errors.Is(err, net.ErrClosed) {
+	err = serveFn(ln, s.Handler())
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
@@ -413,8 +421,33 @@ func removeOwnedUnixSocket(socketPath string, expected os.FileInfo) error {
 	return os.Remove(socketPath)
 }
 
+// GenerationInvalidated notifies the process owner once without blocking requests.
+func (s *Server) GenerationInvalidated() <-chan struct{} {
+	return s.generationInvalidated
+}
+
+// Shutdown drains active requests until ctx expires, then closes connections.
+// Call it from the process owner, never from a request handler.
+func (s *Server) Shutdown(ctx context.Context) error {
+	err := s.httpServer.Shutdown(ctx)
+	if err != nil {
+		_ = s.httpServer.Close()
+	}
+	return errors.Join(err, s.Close())
+}
+
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mux.ServeHTTP(w, r)
+		if errors.Is(observedGenerationError(s.store), store.ErrDatabaseGenerationChanged) {
+			s.generationOnce.Do(func() {
+				select {
+				case s.generationInvalidated <- struct{}{}:
+				default:
+				}
+			})
+		}
+	})
 }
 
 func (s *Server) routes() {
@@ -495,7 +528,7 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.store.Stats(); err != nil {
+	if _, err := loadServerStats(s.store); err != nil {
 		jsonError(w, http.StatusInternalServerError, "health check failed")
 		return
 	}
@@ -504,7 +537,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"service":      "engram",
 		"version":      s.version,
 		"instance_id":  s.instanceID,
-		"capabilities": map[string]bool{"isolated_session_registration": true},
+		"capabilities": map[string]bool{"isolated_session_registration": true, "root_session_resume": true},
 	})
 }
 

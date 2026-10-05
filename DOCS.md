@@ -303,6 +303,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+- When a local HTTP request observes permanent database generation invalidation, its existing error response is preserved. After the handler returns, `engram serve` logs one restart diagnostic, stops autosync, drains HTTP requests for up to five seconds (then force-closes remaining connections), releases its listener, and exits nonzero after cleanup. Ordinary transient health failures remain generic `500` responses and do not stop the server. Detection is request-triggered, not a background watchdog; the database is not reopened automatically.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
@@ -1255,6 +1256,21 @@ Parameters:
 - **id** (required): int — observation ID to retrieve
 - **project** (optional): string — explicit project context; unknown names return a structured error with `available_projects`
 
+Optional argument `include_history` (boolean, default false): when true, the
+result also renders the captured version history of the observation (each
+snapshot is the title/content saved before a `topic_key` upsert or a
+content-changing `mem_update` overwrote it, numbered per observation starting at
+1). The response envelope gains `version_count` (the truthful total stored
+count, always) and `history` (an array of `{version, title, content, created_at}`
+objects). When more than 50 versions are stored, the response renders the most
+recent 50 (oldest first) and adds `history_truncated` (true),
+`history_from_version` (the oldest version still rendered), and `history_cursor`
+(a non-negative continuation value). To fetch the older page, pass that value as
+the optional `history_cursor` argument of a follow-up
+`mem_get_observation(id, include_history: true)` call; the older page is emitted
+without truncation fields once version 1 is reached. Omitting the argument keeps
+the input and output identical to prior releases.
+
 ### mem_session_summary
 
 Save comprehensive end-of-session summary:
@@ -1625,7 +1641,7 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 ## Running as a Service
 
-Without a service supervisor, `engram serve` dies whenever the binary is replaced (e.g. on `brew upgrade engram`) or the host reboots, and autosync stops silently. The templates below restart it automatically. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
+Use a service supervisor to start `engram serve` after reboot and restart it after failures. Replacing the binary alone does not guarantee that an existing process exits. In this version, permanent database generation invalidation observed by an HTTP request triggers autosync cancellation, up to five seconds of HTTP draining, listener release, and a nonzero exit after cleanup. Restart belongs to the supervisor or operator, not Engram itself; already-running older binaries do not gain this behavior. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
 
 ### Using systemd (Linux)
 
@@ -1657,7 +1673,7 @@ WantedBy=default.target
 
 ### Using launchd (macOS)
 
-This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` automatically after `brew upgrade engram` replaces the binary, so autosync survives upgrades.
+This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` when it exits. A binary upgrade alone is not an exit trigger; request-observed permanent database generation invalidation is.
 
 1. Find your binary path: `which engram` (typically `/opt/homebrew/bin/engram` on Apple Silicon or `/usr/local/bin/engram` on Intel)
 2. Create the data dir if missing: `mkdir -p ~/.engram`

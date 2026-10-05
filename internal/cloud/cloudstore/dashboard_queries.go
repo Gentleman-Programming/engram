@@ -1124,6 +1124,18 @@ func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardSc
 	if err != nil {
 		return nil, err
 	}
+	// Grants carry normalized identities, while the read model retains canonical
+	// names. An ambiguous identity must authorize neither project, even when a
+	// canonical name itself equals that identity.
+	canonicalByGrant := make(map[string]string, len(model.projects))
+	for _, row := range model.projects {
+		key := NormalizeProjectGrant(row.Project)
+		if _, exists := canonicalByGrant[key]; exists {
+			canonicalByGrant[key] = ""
+		} else {
+			canonicalByGrant[key] = row.Project
+		}
+	}
 	principalAllowed := make(map[string]struct{}, len(projects))
 	principalAll := false
 	for _, project := range projects {
@@ -1131,9 +1143,9 @@ func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardSc
 			principalAll = true
 			continue
 		}
-		project = NormalizeProjectGrant(project)
-		if project != "" {
-			principalAllowed[project] = struct{}{}
+		key := NormalizeProjectGrant(project)
+		if canonical := canonicalByGrant[key]; key != "" && canonical != "" {
+			principalAllowed[canonical] = struct{}{}
 		}
 	}
 

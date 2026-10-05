@@ -50,7 +50,9 @@
     "mem_get_observation": {
       "type": ["object"],
       "properties": {
+        "history_cursor": {"type":["number"],"additionalProperties":true},
         "id": {"type":["number"],"additionalProperties":true},
+        "include_history": {"type":["boolean"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true}
       },
       "required": ["id"],
