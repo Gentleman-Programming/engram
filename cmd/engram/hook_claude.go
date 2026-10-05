@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -39,6 +40,12 @@ var claudeEngramToolPrefixes = []string{
 	"mcp__engram__",
 	"mcp__plugin_engram_engram__",
 }
+
+// Leave one second of the Claude hook's five-second timeout for process startup
+// and emitting the verdict. Project resolution and registration share this budget.
+const hookSessionConfirmationTimeout = 4 * time.Second
+
+var errHookSessionUnconfirmed = errors.New("host session registration could not be confirmed")
 
 var claudeHookOutput = func(response []byte) error {
 	_, err := os.Stdout.Write(response)
@@ -88,17 +95,23 @@ func guardClaudePreToolUse(input []byte) []byte {
 	}
 	id, idOK := claudeHookRequiredString(payload, "session_id")
 	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
-	if !idOK || !cwdOK || !confirmClaudeSession(id, cwd) {
-		return claudePreToolUseDeny("Claude host session registration could not be confirmed")
+	if !idOK || !cwdOK {
+		return claudePreToolUseDeny("Claude " + errHookSessionUnconfirmed.Error())
+	}
+	if err := confirmHookSession(id, cwd, true); err != nil {
+		return hookSessionConfirmationDeny("Claude", err)
 	}
 	return transformClaudePreToolUse(input)
 }
 
-func confirmClaudeSession(id, cwd string) bool {
-	return confirmHookSession(id, cwd, true)
+func hookSessionConfirmationDeny(agent string, err error) []byte {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return claudePreToolUseDeny(agent + " host session confirmation timed out (server slow or unavailable)")
+	}
+	return claudePreToolUseDeny(agent + " " + errHookSessionUnconfirmed.Error())
 }
 
-func confirmHookSession(id, cwd string, projectOwned bool) bool {
+func confirmHookSession(id, cwd string, projectOwned bool) (confirmationErr error) {
 	base := strings.TrimSpace(os.Getenv("ENGRAM_URL"))
 	client := &http.Client{}
 	if base == "" {
@@ -113,21 +126,28 @@ func confirmHookSession(id, cwd string, projectOwned bool) bool {
 			if port == "" {
 				n = 7437
 			} else if err != nil || n < 1 || n > 65535 {
-				return false
+				return errHookSessionUnconfirmed
 			}
 			base = fmt.Sprintf("http://127.0.0.1:%d", n)
 		}
 	}
 	base = strings.TrimRight(base, "/")
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationTimeout)
+	defer func() {
+		// Preserve timeout information even when a transport/JSON helper returns
+		// only a failed confirmation. Other failures keep the existing denial.
+		if confirmationErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			confirmationErr = context.DeadlineExceeded
+		}
+		cancel()
+	}()
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	project, ok := codexProjectAuthority(authority)
 	if !ok {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	registration := map[string]string{"id": id, "project": project, "directory": cwd}
 	if projectOwned {
@@ -136,22 +156,25 @@ func confirmHookSession(id, cwd string, projectOwned bool) bool {
 	body, _ := json.Marshal(registration)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/sessions", strings.NewReader(string(body)))
 	if err != nil {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil || resp == nil {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	var result struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
-	return json.NewDecoder(resp.Body).Decode(&result) == nil && result.ID == id && result.Status == "created"
+	if json.NewDecoder(resp.Body).Decode(&result) != nil || result.ID != id || result.Status != "created" {
+		return errHookSessionUnconfirmed
+	}
+	return nil
 }
 
 // transformClaudePreToolUse consumes Claude Code's authoritative PreToolUse
@@ -214,8 +237,11 @@ func guardCodexPreToolUse(input []byte) []byte {
 	}
 	id, idOK := claudeHookRequiredString(payload, "session_id")
 	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
-	if !idOK || !cwdOK || !confirmHookSession(id, cwd, false) {
-		return claudePreToolUseDeny("Codex host session registration could not be confirmed")
+	if !idOK || !cwdOK {
+		return claudePreToolUseDeny("Codex " + errHookSessionUnconfirmed.Error())
+	}
+	if err := confirmHookSession(id, cwd, false); err != nil {
+		return hookSessionConfirmationDeny("Codex", err)
 	}
 	return transformCodexPreToolUse(input)
 }

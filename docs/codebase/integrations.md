@@ -72,6 +72,15 @@ persistence or decide which session an omitted ID should select.
 | Codex | SessionStart posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model only after matching HTTP 201, `id`, and `status: "created"`. Failed confirmation withholds the active memory-tool protocol on startup, resume, clear, and post-compaction while preserving the warning and fetched context; independent CLI/manual saves are not a session-attribution fallback. | Prompt capture requires confirmed registration of the host session before posting; before allowing and binding a classified Engram write/session tool, PreToolUse re-confirms the host ID and cwd using shared session ownership, and failed or ended registration denies the call. |
 | OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. The core selects a live continuation when the root has ended. | Before session-attributed tool writes it registers the root with `resume: true`, rechecks host ownership, and injects the acknowledged effective `id` as `session_id`. Injection requires an HTTP-success response with `status: "created"` and an `id` equal to the root or prefixed by `<root>:resume:`; missing or foreign acknowledgements block injection. |
 
+Claude and Codex PreToolUse confirmation share a four-second total HTTP budget
+for project resolution and session registration. A timeout denies the call with
+`Claude host session confirmation timed out (server slow or unavailable)` or
+`Codex host session confirmation timed out (server slow or unavailable)`.
+Other confirmation failures retain the existing registration-denial message.
+The hook still requires registration on every gated call, including strict
+response validation and the adapter's existing ownership mode; it does not cache
+registration or retry. Codex prompt capture uses its separate, unchanged budget.
+
 Parent/root translation is specific to OpenCode's session hierarchy, not a
 universal adapter rule. Hook-level binding cannot protect calls when a hook is
 skipped, bypassed, or timed out; independent direct/manual MCP saves remain

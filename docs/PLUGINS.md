@@ -151,6 +151,7 @@ plugin/claude-code/
 
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
+   Before rewriting input, the hook resolves the project and confirms project-owned session registration using one shared four-second HTTP budget. This leaves one second within the configured five-second hook timeout for process startup and verdict output. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; other registration failures retain `Claude host session registration could not be confirmed`. Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
 2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 

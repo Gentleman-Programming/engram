@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
 	"github.com/Gentleman-Programming/engram/v3/internal/server"
@@ -475,6 +476,116 @@ func TestClaudeInvalidExplicitPortDeniesWithoutDefaultServer(t *testing.T) {
 				t.Fatalf("explicit invalid port must deny: %s, %v", response, err)
 			}
 		})
+	}
+}
+
+func TestHookSessionConfirmationLatency(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		for _, tc := range []struct {
+			name      string
+			project   time.Duration
+			register  time.Duration
+			wantDeny  bool
+			wantPosts int32
+		}{
+			{"slow healthy server", 900 * time.Millisecond, 900 * time.Millisecond, false, 1},
+			{"project timeout", 5 * time.Second, 0, true, 0},
+			{"registration timeout", 0, 5 * time.Second, true, 1},
+		} {
+			t.Run(agent+"/"+tc.name, func(t *testing.T) {
+				var gets, posts, registrations atomic.Int32
+				endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					delay := tc.project
+					switch r.URL.Path {
+					case "/project/current":
+						gets.Add(1)
+					case "/sessions":
+						posts.Add(1)
+						delay = tc.register
+						var registration map[string]string
+						if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
+							t.Errorf("registration body: %v", err)
+						}
+						if registration["id"] != "host" || registration["project"] != "project-a" || registration["directory"] != "/work" {
+							t.Errorf("unexpected registration: %v", registration)
+						}
+						if (registration["ownership_mode"] == "project_owned") != (agent == "claude") {
+							t.Errorf("ownership mode changed: %v", registration)
+						}
+					default:
+						t.Errorf("unexpected endpoint: %s", r.URL.Path)
+						return
+					}
+					timer := time.NewTimer(delay)
+					defer timer.Stop()
+					select {
+					case <-r.Context().Done():
+						return
+					case <-timer.C:
+					}
+					if r.URL.Path == "/project/current" {
+						_, _ = io.WriteString(w, `{"project":"project-a","project_source":"config"}`)
+						return
+					}
+					registrations.Add(1)
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, `{"id":"host","status":"created"}`)
+				}))
+				defer endpoint.Close()
+				t.Setenv("ENGRAM_URL", endpoint.URL)
+				oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
+				t.Cleanup(func() { os.Stdin, claudeHookOutput, exitFunc = oldStdin, oldOutput, oldExit })
+				os.Stdin = claudeHookStdin(t, `{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","title":"preserved"}}`, false)
+				var output []byte
+				claudeHookOutput = func(value []byte) error { output = append([]byte(nil), value...); return nil }
+				exitFunc = func(code int) { t.Errorf("unexpected process exit: %d", code) }
+				started := time.Now()
+				cmdHook([]string{agent + "-pre-tool-use"})
+				elapsed := time.Since(started)
+				var response struct {
+					HookSpecificOutput struct {
+						HookEventName            string         `json:"hookEventName"`
+						PermissionDecision       string         `json:"permissionDecision"`
+						PermissionDecisionReason string         `json:"permissionDecisionReason"`
+						UpdatedInput             map[string]any `json:"updatedInput"`
+					} `json:"hookSpecificOutput"`
+				}
+				if err := json.Unmarshal(output, &response); err != nil {
+					t.Fatalf("invalid hook output %s: %v", output, err)
+				}
+				got := response.HookSpecificOutput
+				if got.HookEventName != "PreToolUse" {
+					t.Fatalf("wrong hook event: %s", output)
+				}
+				if tc.wantDeny {
+					prefix := "Claude"
+					if agent == "codex" {
+						prefix = "Codex"
+					}
+					wantReason := prefix + " host session confirmation timed out (server slow or unavailable)"
+					if got.PermissionDecision != "deny" || got.PermissionDecisionReason != wantReason || got.UpdatedInput != nil {
+						t.Errorf("want timeout denial without updated input, got %s", output)
+					}
+					if registrations.Load() != 0 {
+						t.Errorf("timed out registration completed")
+					}
+				} else {
+					wantDecision := ""
+					if agent == "codex" {
+						wantDecision = "allow"
+					}
+					if got.PermissionDecision != wantDecision || got.PermissionDecisionReason != "" || got.UpdatedInput["session_id"] != "host" || got.UpdatedInput["title"] != "preserved" || registrations.Load() != 1 {
+						t.Errorf("want confirmed bound input, got %s", output)
+					}
+				}
+				if gets.Load() != 1 || posts.Load() != tc.wantPosts {
+					t.Errorf("unexpected requests: GET=%d POST=%d", gets.Load(), posts.Load())
+				}
+				if elapsed >= 5*time.Second {
+					t.Errorf("confirmation exceeded outer hook timeout: %v", elapsed)
+				}
+			})
+		}
 	}
 }
 
