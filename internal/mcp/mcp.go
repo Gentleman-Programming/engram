@@ -1001,6 +1001,12 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("directory",
+					mcp.Description("Optional workspace directory to detect the project from. Defaults to the process working directory."),
+				),
+				mcp.WithString("cwd",
+					mcp.Description("Alias for directory."),
+				),
 			),
 			handleCurrentProject(s, cfg),
 		)
@@ -1183,6 +1189,11 @@ func handleListProjects(s *store.Store) server.ToolHandlerFunc {
 func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cwd, _ := os.Getwd()
+		if dir, _ := req.GetArguments()["directory"].(string); strings.TrimSpace(dir) != "" {
+			cwd = strings.TrimSpace(dir)
+		} else if dir, _ := req.GetArguments()["cwd"].(string); strings.TrimSpace(dir) != "" {
+			cwd = strings.TrimSpace(dir)
+		}
 		var res projectpkg.DetectionResult
 		if processRes, ok, err := processProjectResult(cfg.DefaultProject); ok {
 			if err != nil {

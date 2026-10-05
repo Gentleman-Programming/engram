@@ -7975,6 +7975,80 @@ func TestMemCurrentProject_WarningCase3(t *testing.T) {
 	}
 }
 
+// TestMemCurrentProject_ExplicitDirectory: explicit directory argument overrides cwd
+func TestMemCurrentProject_ExplicitDirectory(t *testing.T) {
+	targetDir := t.TempDir()
+	initTestGitRepo(t, targetDir)
+	cmd := exec.Command("git", "-C", targetDir, "remote", "add", "origin",
+		"git@github.com:user/explicit-directory-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	otherDir := t.TempDir()
+	t.Chdir(otherDir)
+
+	s := newMCPTestStore(t)
+	h := handleCurrentProject(s, MCPConfig{})
+
+	req := mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{
+			Arguments: map[string]any{
+				"directory": targetDir,
+			},
+		},
+	}
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "explicit-directory-project") {
+		t.Errorf("expected project name from explicit directory, got: %q", text)
+	}
+}
+
+// TestMemCurrentProject_ExplicitCwdAlias: cwd argument works as alias for directory
+func TestMemCurrentProject_ExplicitCwdAlias(t *testing.T) {
+	targetDir := t.TempDir()
+	initTestGitRepo(t, targetDir)
+	cmd := exec.Command("git", "-C", targetDir, "remote", "add", "origin",
+		"git@github.com:user/explicit-cwd-alias-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	otherDir := t.TempDir()
+	t.Chdir(otherDir)
+
+	s := newMCPTestStore(t)
+	h := handleCurrentProject(s, MCPConfig{})
+
+	req := mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{
+			Arguments: map[string]any{
+				"cwd": targetDir,
+			},
+		},
+	}
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "explicit-cwd-alias-project") {
+		t.Errorf("expected project name from explicit cwd alias, got: %q", text)
+	}
+}
+
 // ─── Test helpers (Batch 3) ───────────────────────────────────────────────────
 
 // initTestGitRepo creates a git repo in dir, configures user, and optionally

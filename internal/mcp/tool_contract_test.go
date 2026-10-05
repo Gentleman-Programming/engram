@@ -480,12 +480,34 @@ func TestMCPToolContractV1(t *testing.T) {
 	if err := removeApprovedExpectedProjectDelta(live); err != nil {
 		t.Fatal(err)
 	}
+	if err := removeApprovedCurrentProjectDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyMCPToolContract(fixture, live, before); err != nil {
 		t.Fatal(err)
 	}
 	if after, err := os.ReadFile("testdata/tool-contract-v1.json"); err != nil || string(before) != string(after) {
 		t.Fatalf("fixture changed: %v", err)
 	}
+}
+
+func removeApprovedCurrentProjectDelta(live map[string]mcpToolSchema) error {
+	tool, ok := live["mem_current_project"]
+	if !ok {
+		return fmt.Errorf("mem_current_project is missing")
+	}
+	for _, prop := range []string{"directory", "cwd"} {
+		field, ok := tool.Properties[prop]
+		if !ok || !slices.Equal(field.Types, []string{"string"}) || len(field.Properties) != 0 || len(field.Required) != 0 || field.Items != nil || len(field.Enum) != 0 || !field.Additional {
+			return fmt.Errorf("mem_current_project %s must retain optional string schema: %#v", prop, field)
+		}
+		if slices.Contains(tool.Required, prop) {
+			return fmt.Errorf("mem_current_project %s must be optional", prop)
+		}
+		delete(tool.Properties, prop)
+	}
+	live["mem_current_project"] = tool
+	return nil
 }
 
 // removeApprovedExpectedProjectDelta applies only the two approved v1 breaks.

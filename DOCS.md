@@ -1304,7 +1304,7 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 
 ### mem_current_project
 
-Detect the current project from the working directory. Returns `project`, `project_source`, `project_path`, `cwd`, `available_projects`, and `warning`. Never returns an error — even on ambiguous cwd it returns success with an empty `project` and non-empty `available_projects`. Recommended as the first call when starting a session.
+Detect the current project from the working directory (or optional `directory` / `cwd` argument). Returns `project`, `project_source`, `project_path`, `cwd`, `available_projects`, and `warning`. Never returns an error — even on ambiguous cwd it returns success with an empty `project` and non-empty `available_projects`. Recommended as the first call when starting a session.
 
 ### mem_list_projects
 
