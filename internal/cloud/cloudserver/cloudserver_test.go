@@ -2367,3 +2367,32 @@ func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) 
 		})
 	}
 }
+
+// TestWithVersionNormalizesLeadingV verifies that WithVersion accepts both
+// "v1.20.3" (the shape ldflags produces when the upstream passes a tagged
+// semver) and "1.20.3" (the shape after cmd/engram's debug.ReadBuildInfo
+// fallback already strips it), storing the canonical bare semver on
+// CloudServer. The Layout / LoginPage templ components prepend the "v" when
+// rendering, so the stored value must not carry one — otherwise the user-
+// visible chrome shows "vN.N.N" rendered as "vvN.N.N".
+func TestWithVersionNormalizesLeadingV(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "with leading v", in: "v3.0.0", want: "3.0.0"},
+		{name: "without leading v", in: "3.0.0", want: "3.0.0"},
+		{name: "with leading v and trailing whitespace", in: "  v1.20.3-rc.1  ", want: "1.20.3-rc.1"},
+		{name: "empty stays empty", in: "", want: ""},
+		{name: "only whitespace stays empty", in: "   ", want: ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{}, fakeAuth{}, 0, WithVersion(tt.in))
+			if srv.version != tt.want {
+				t.Fatalf("CloudServer.version = %q, want %q (input=%q)", srv.version, tt.want, tt.in)
+			}
+		})
+	}
+}
