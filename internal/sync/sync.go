@@ -106,6 +106,37 @@ type ChunkData struct {
 	Mutations    []store.SyncMutation `json:"mutations,omitempty"`
 }
 
+// UnmarshalJSON validates project-owned session directories before plain string
+// decoding could turn JSON null into an apparently valid isolated directory.
+func (c *ChunkData) UnmarshalJSON(raw []byte) error {
+	type plain ChunkData
+	var fields struct {
+		Sessions []json.RawMessage `json:"sessions"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for i, session := range fields.Sessions {
+		var owner struct {
+			Mode string `json:"ownership_mode"`
+		}
+		if err := json.Unmarshal(session, &owner); err != nil {
+			return err
+		}
+		if owner.Mode == store.SessionOwnershipProjectOwned {
+			if err := store.ValidateCloudSessionDirectory(session); err != nil {
+				return fmt.Errorf("sessions[%d]: %w", i, err)
+			}
+		}
+	}
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*c = ChunkData(decoded)
+	return nil
+}
+
 // SyncResult is returned after a sync operation.
 type SyncResult struct {
 	ChunkID              string `json:"chunk_id,omitempty"`
@@ -1155,8 +1186,8 @@ func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode impor
 // importMutationChunk applies one decoded chunk through the store's pulled
 // apply path. The import domain rides along explicitly (cloud=true for the
 // cloud mode selected in ImportWithProgress) instead of being inferred from the
-// chunk-tracking target key: cloud chunks must meet the strict cloud directory
-// admission, while local chunks keep the #1287 blank-directory acceptance.
+// chunk-tracking target key: cloud chunks allow directory-less project-owned
+// sessions, while local chunks also keep the #1287 partial-session acceptance.
 func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData, cloud bool) error {
 	mutations := buildImportMutations(chunk)
 	mutations = orderMutationsForApply(mutations)

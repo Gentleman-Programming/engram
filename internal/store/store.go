@@ -2434,7 +2434,12 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory conflicts with local session directory"), nil
 			}
 		}
-		if op == SyncOpUpsert && body.Directory == "" {
+		if op == SyncOpUpsert && body.OwnershipMode == SessionOwnershipProjectOwned {
+			if err := ValidateCloudSessionDirectory([]byte(payload)); err != nil {
+				return blocked(UpgradeReasonBlockedLegacyMutationManual, err.Error()), nil
+			}
+		}
+		if op == SyncOpUpsert && body.Directory == "" && body.OwnershipMode != SessionOwnershipProjectOwned {
 			var directory string
 			err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, body.ID).Scan(&directory)
 			if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(directory) == "" {
@@ -7978,7 +7983,7 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 // The domain must be carried explicitly by the caller; it is never inferred
 // from the target key, because a cloud chunk's tracking key and its admission
 // rule answer different questions. cloud=true runs the strict cloud-inbound
-// directory admission (validatePulledSessionDirectory), so a session upsert
+// directory admission (validatePulledSessionDirectory), so a shared session upsert
 // with a blank or missing directory fails the whole chunk atomically — no
 // session persisted, chunk not recorded — mirroring how ApplyPulledMutation
 // fails the same payload. cloud=false keeps the local partial-session domain:
@@ -11125,8 +11130,8 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 }
 
 // validatePulledSessionDirectoryForDomain selects the directory admission rule
-// for a pulled session upsert. Cloud inbound stays strict byte-for-byte; the
-// local pull domain (ApplyPulledChunk and the deferred replay it feeds) accepts
+// for a pulled session upsert. Cloud inbound admits isolated project-owned
+// sessions without a directory; the local pull domain also accepts
 // a blank directory as the intentional local partial-session state.
 func validatePulledSessionDirectoryForDomain(cloud bool, raw []byte) error {
 	if cloud {
@@ -11135,14 +11140,22 @@ func validatePulledSessionDirectoryForDomain(cloud bool, raw []byte) error {
 	return validatePulledSessionDirectoryLocal(raw)
 }
 
-// validatePulledSessionDirectory is the strict cloud-inbound admission check
-// (ApplyPulledMutation / autosync). A missing directory key and a blank value
-// are both rejected with the historical wording; cloud payloads must name a
-// concrete directory because the cloud has no local state to complete against.
 func validatePulledSessionDirectory(raw []byte) error {
+	return ValidateCloudSessionDirectory(raw)
+}
+
+// ValidateCloudSessionDirectory admits omitted or blank string directories for
+// project-owned sessions, including isolated registrations. Shared and legacy
+// sessions still require a concrete directory. Null and non-string values never
+// stand in for a blank directory.
+func ValidateCloudSessionDirectory(raw []byte) error {
 	var fields map[string]json.RawMessage
 	if err := decodeSyncPayload(raw, &fields); err != nil {
 		return err
+	}
+	var mode string
+	if err := json.Unmarshal(fields["ownership_mode"], &mode); err == nil && mode == SessionOwnershipProjectOwned {
+		return validatePulledSessionDirectoryLocal(raw)
 	}
 	directory, ok := fields["directory"]
 	if !ok {

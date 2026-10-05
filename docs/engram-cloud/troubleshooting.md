@@ -138,6 +138,8 @@ write chunk: cloud: push chunk ...: status 400: invalid push payload: observatio
 
 It means a historical `session` mutation in `sync_mutations` is missing `directory`, a local `sessions` row included in the project export still has an empty/null `directory`, a local `observations` row included in the project export is missing a cloud-push required field, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows, local session rows, or exported local observation rows may still need repair before first cloud upload.
 
+Isolated cross-project sessions are an exception: `ownership_mode: "project_owned"` with an omitted or blank string directory is valid and replicates without a repair. If an older client or cloud server rejects that payload, update both sides to a version supporting isolated cloud sessions. Do not use the directory rescue helper on these sessions: assigning a directory breaks their isolation contract. JSON null and non-string directory values are still invalid.
+
 ### Safe path: helper script
 
 Engram includes a temporary rescue helper. Despite the historical file name, it repairs missing session directories in both `sync_mutations` payloads and local `sessions.directory` rows, missing observation payload fields, and exported local `observations` rows whose required cloud-push fields are empty:

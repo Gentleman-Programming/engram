@@ -1004,7 +1004,13 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 			return result
 		}
 		if op == SyncOpUpsert {
-			require("directory")
+			if rawStringField("ownership_mode") == SessionOwnershipProjectOwned {
+				if err := ValidateCloudSessionDirectory([]byte(trimmed)); err != nil {
+					missing = append(missing, "directory")
+				}
+			} else {
+				require("directory")
+			}
 		}
 	case SyncEntityObservation:
 		if field("sync_id") == "" && strings.TrimSpace(entityKey) == "" {

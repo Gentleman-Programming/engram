@@ -83,7 +83,7 @@ identities found in the local `sessions` table as blocking findings. Neither is
 auto-repaired, because inventing a canonical session ID would fabricate identity
 data.
 
-### Session directory admission: local-partial, cloud-strict
+### Session directory admission: local-partial, cloud ownership-aware
 
 Session `directory` follows a two-domain contract (engram#1287).
 
@@ -93,12 +93,17 @@ only two states: the `directory` key is absent, or its value is a JSON string
 with `ErrPulledSessionDirectoryInvalid` — `null` is not a blank directory, it is
 a non-string value and never normalizes into one.
 
-**Cloud pulled chunks are strict.** A directory is required and must be
-non-blank. A cloud chunk carrying a session mutation with a blank or missing
-directory fails the entire chunk atomically: no session is persisted, the chunk
-is not recorded as imported, and the corrected chunk can be redelivered. This
-mirrors `Store.ApplyPulledMutation`, the strict single-mutation path used by
-cloud autosync.
+**Cloud requires a concrete directory for shared and legacy sessions.** A
+blank or missing directory fails their chunk atomically: no session is persisted,
+the chunk is not recorded as imported, and the corrected chunk can be redelivered.
+
+**Project-owned sessions may omit the directory or carry a blank string.**
+Isolated cross-project registrations intentionally have no directory; cloud
+push, pull, mutation canonicalization, and doctor preserve that state and the
+`ownership_mode: "project_owned"` field. JSON null and non-string directory
+values remain invalid. This also applies to `Store.ApplyPulledMutation`, the
+single-mutation path used by cloud autosync. No fabricated directory or manual
+database repair is needed for an isolated session.
 
 The domain is carried explicitly, never inferred from the target-key string:
 the syncer's import mode selects it, and it flows through
