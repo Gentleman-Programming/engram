@@ -2139,9 +2139,10 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 	project = strings.TrimSpace(project)
 	actions := make([]SyncMutationDirectoryRepairAction, 0)
 	run := func(tx *sql.Tx) error {
-		projects := []string{project}
-		if project == "" {
-			projects = nil
+		// Discover raw spellings even for a canonical --project filter. Exact
+		// journal lookups must retain those spellings; ownership checks must not.
+		var projects []string
+		{
 			rows, err := tx.Query(`SELECT DISTINCT project FROM sync_mutations WHERE target_key = ? AND disposition = ? AND acked_at IS NULL AND project != '' UNION SELECT DISTINCT s.project FROM sessions s JOIN sync_mutations m ON m.entity_key = s.id WHERE m.target_key = ? AND m.project = '' AND m.entity = 'session' AND m.op = 'upsert' AND m.disposition = ? AND m.acked_at IS NULL AND s.project != ''`, DefaultSyncTargetKey, SyncMutationDispositionPending, DefaultSyncTargetKey, SyncMutationDispositionPending)
 			if err != nil {
 				return err
@@ -2161,7 +2162,24 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 				return err
 			}
 		}
+		// Blank journal owners are selected by their normalized local project
+		// in listPendingProjectMutationsTx, so include each canonical spelling once.
+		seen := make(map[string]bool, len(projects))
 		for _, name := range projects {
+			seen[name] = true
+		}
+		for _, name := range projects {
+			canonical, _ := NormalizeProject(name)
+			if canonical != "" && !seen[canonical] {
+				projects = append(projects, canonical)
+				seen[canonical] = true
+			}
+		}
+		for _, name := range projects {
+			canonical, _ := NormalizeProject(name)
+			if canonical == "" || (project != "" && canonical != project) {
+				continue
+			}
 			mutations, err := s.listPendingProjectMutationsTx(tx, name)
 			if err != nil {
 				return err
@@ -2183,7 +2201,8 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 					return err
 				}
 				normalizedLocalProject, _ := NormalizeProject(localProject)
-				if strings.TrimSpace(normalizedLocalProject) != name || (mutation.Project != "" && mutation.Project != name) {
+				normalizedMutationProject, _ := NormalizeProject(mutation.Project)
+				if normalizedLocalProject != canonical || (mutation.Project != "" && normalizedMutationProject != canonical) {
 					continue
 				}
 				eval, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
@@ -2194,11 +2213,11 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 					continue
 				}
 				if apply {
-					if _, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ?, project = ? WHERE seq = ? AND target_key = ? AND project = ? AND acked_at IS NULL AND disposition = ?`, eval.repairedPayload, name, mutation.Seq, DefaultSyncTargetKey, mutation.Project, SyncMutationDispositionPending); err != nil {
+					if _, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ?, project = ? WHERE seq = ? AND target_key = ? AND project = ? AND acked_at IS NULL AND disposition = ?`, eval.repairedPayload, canonical, mutation.Seq, DefaultSyncTargetKey, mutation.Project, SyncMutationDispositionPending); err != nil {
 						return err
 					}
 				}
-				actions = append(actions, SyncMutationDirectoryRepairAction{Seq: mutation.Seq, Project: name, EntityKey: mutation.EntityKey})
+				actions = append(actions, SyncMutationDirectoryRepairAction{Seq: mutation.Seq, Project: canonical, EntityKey: mutation.EntityKey})
 			}
 		}
 		return nil
