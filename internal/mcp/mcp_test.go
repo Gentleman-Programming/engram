@@ -7975,77 +7975,90 @@ func TestMemCurrentProject_WarningCase3(t *testing.T) {
 	}
 }
 
-// TestMemCurrentProject_ExplicitDirectory: explicit directory argument overrides cwd
-func TestMemCurrentProject_ExplicitDirectory(t *testing.T) {
-	targetDir := t.TempDir()
-	initTestGitRepo(t, targetDir)
-	cmd := exec.Command("git", "-C", targetDir, "remote", "add", "origin",
-		"git@github.com:user/explicit-directory-project.git")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
+// TestMemCurrentProject_ExplicitWorkspace checks workspace selection and metadata.
+func TestMemCurrentProject_ExplicitWorkspace(t *testing.T) {
+	newRepo := func(project string) string {
+		t.Helper()
+		dir := t.TempDir()
+		initTestGitRepo(t, dir)
+		cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+			"git@github.com:user/"+project+".git")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add: %v\n%s", err, out)
+		}
+		return dir
 	}
-
-	otherDir := t.TempDir()
-	t.Chdir(otherDir)
-
-	s := newMCPTestStore(t)
-	h := handleCurrentProject(s, MCPConfig{})
-
-	req := mcppkg.CallToolRequest{
-		Params: mcppkg.CallToolParams{
-			Arguments: map[string]any{
-				"directory": targetDir,
-			},
-		},
-	}
-	res, err := h(context.Background(), req)
+	directory := newRepo("directory-project")
+	alias := newRepo("alias-project")
+	processDir := newRepo("process-project")
+	t.Chdir(processDir)
+	processCwd, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("unexpected error: %s", callResultText(t, res))
+		t.Fatal(err)
 	}
 
-	text := callResultText(t, res)
-	if !strings.Contains(text, "explicit-directory-project") {
-		t.Errorf("expected project name from explicit directory, got: %q", text)
+	tests := []struct {
+		name        string
+		args        map[string]any
+		wantProject string
+		wantDir     string
+	}{
+		{"directory", map[string]any{"directory": directory}, "directory-project", directory},
+		{"cwd alias", map[string]any{"cwd": alias}, "alias-project", alias},
+		{"directory takes precedence", map[string]any{"directory": directory, "cwd": alias}, "directory-project", directory},
+		{"empty directory uses alias", map[string]any{"directory": "", "cwd": alias}, "alias-project", alias},
+		{"whitespace directory uses alias", map[string]any{"directory": " \t ", "cwd": alias}, "alias-project", alias},
+		{"blank arguments use process cwd", map[string]any{"directory": " \t ", "cwd": " \t "}, "process-project", processCwd},
+		{"no arguments use process cwd", nil, "process-project", processCwd},
 	}
-}
-
-// TestMemCurrentProject_ExplicitCwdAlias: cwd argument works as alias for directory
-func TestMemCurrentProject_ExplicitCwdAlias(t *testing.T) {
-	targetDir := t.TempDir()
-	initTestGitRepo(t, targetDir)
-	cmd := exec.Command("git", "-C", targetDir, "remote", "add", "origin",
-		"git@github.com:user/explicit-cwd-alias-project.git")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-
-	otherDir := t.TempDir()
-	t.Chdir(otherDir)
-
-	s := newMCPTestStore(t)
-	h := handleCurrentProject(s, MCPConfig{})
-
-	req := mcppkg.CallToolRequest{
-		Params: mcppkg.CallToolParams{
-			Arguments: map[string]any{
-				"cwd": targetDir,
-			},
-		},
-	}
-	res, err := h(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("unexpected error: %s", callResultText(t, res))
-	}
-
-	text := callResultText(t, res)
-	if !strings.Contains(text, "explicit-cwd-alias-project") {
-		t.Errorf("expected project name from explicit cwd alias, got: %q", text)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			res, err := handleCurrentProject(s, MCPConfig{})(context.Background(),
+				mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: tt.args}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if res.IsError {
+				t.Fatalf("unexpected error: %s", callResultText(t, res))
+			}
+			var got struct {
+				Project       string `json:"project"`
+				ProjectSource string `json:"project_source"`
+				ProjectPath   string `json:"project_path"`
+				Cwd           string `json:"cwd"`
+			}
+			if err := json.Unmarshal([]byte(callResultText(t, res)), &got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if got.Project != tt.wantProject {
+				t.Errorf("project = %q, want %q", got.Project, tt.wantProject)
+			}
+			if got.ProjectSource != "git_remote" {
+				t.Errorf("project_source = %q, want git_remote", got.ProjectSource)
+			}
+			wantPath, err := filepath.EvalSymlinks(tt.wantDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotPath, err := filepath.EvalSymlinks(got.ProjectPath)
+			if err != nil {
+				t.Fatalf("resolve project_path %q: %v", got.ProjectPath, err)
+			}
+			if filepath.Clean(gotPath) != filepath.Clean(wantPath) {
+				t.Errorf("project_path = %q, want %q", got.ProjectPath, wantPath)
+			}
+			if got.Cwd != tt.wantDir {
+				t.Errorf("cwd = %q, want %q", got.Cwd, tt.wantDir)
+			}
+			afterCwd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if afterCwd != processCwd {
+				t.Errorf("process cwd changed to %q, want %q", afterCwd, processCwd)
+			}
+		})
 	}
 }
 
