@@ -1153,7 +1153,7 @@ func cmdMCP(cfg store.Config) {
 	}
 	defer stopAutosync()
 
-	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
+	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride, Version: version}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 
@@ -3530,6 +3530,7 @@ func printSetupUsage() {
 	fmt.Println("usage: engram setup [<agent>] [--protocol=slim|full]")
 	fmt.Println()
 	fmt.Println("Install an agent plugin (claude-code, opencode, codex, ...).")
+	fmt.Println("Claude Code: already-installed engram@engram is updated at user scope; update failures fail setup.")
 	fmt.Println("Without <agent>, shows an interactive menu.")
 	fmt.Println()
 	fmt.Println("Flags:")
@@ -3747,7 +3748,7 @@ Commands:
   serve [port]       Start HTTP API server (default: 7437)
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
-                        Profiles: agent (18 tools), admin (4 tools), all (default, 22)
+                        Profiles: agent (%d tools), admin (%d tools), all (default, %d)
                        Combine: --tools=agent,admin or pick individual tools
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).
@@ -3883,7 +3884,7 @@ MCP Configuration (add to your agent's config):
       }
     }
   }
-`, version)
+`, version, len(mcp.ProfileAgent), len(mcp.ProfileAdmin), len(mcp.ResolveTools("agent,admin")))
 }
 
 func fatal(err error) {

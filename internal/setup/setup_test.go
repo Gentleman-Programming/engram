@@ -2003,24 +2003,63 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("install already is success", func(t *testing.T) {
-		resetSetupSeams(t)
-		useTestHome(t)
-		lookPathFn = func(string) (string, error) { return "claude", nil }
-		writeClaudeCodeUserMCPFn = func() error { return nil }
-		calls := 0
-		runCommand = func(string, ...string) ([]byte, error) {
-			calls++
-			if calls == 1 {
+	for _, installErr := range []error{nil, errors.New("exit 1")} {
+		t.Run(fmt.Sprintf("already installed updates exit=%v", installErr), func(t *testing.T) {
+			resetSetupSeams(t)
+			useTestHome(t)
+			lookPathFn = func(string) (string, error) { return "claude", nil }
+			mcpCalls := 0
+			writeClaudeCodeUserMCPFn = func() error { mcpCalls++; return nil }
+			var commands []string
+			runCommand = func(_ string, args ...string) ([]byte, error) {
+				commands = append(commands, strings.Join(args, " "))
+				if len(commands) == 2 {
+					return []byte("Plugin already installed"), installErr
+				}
 				return []byte("ok"), nil
 			}
-			return []byte("already installed"), errors.New("exit 1")
-		}
+			result, err := installClaudeCode()
+			if err != nil || result == nil || !result.MCPConfigured {
+				t.Fatalf("expected configured success, got %#v, %v", result, err)
+			}
+			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram --scope user"}
+			if !reflect.DeepEqual(commands, want) || mcpCalls != 1 {
+				t.Fatalf("commands=%v MCP calls=%d, want %v and 1", commands, mcpCalls, want)
+			}
+		})
+	}
 
-		if _, err := installClaudeCode(); err != nil {
-			t.Fatalf("expected already-installed branch to succeed, got %v", err)
-		}
-	})
+	for _, failAt := range []int{3, 4} {
+		t.Run(fmt.Sprintf("update failure command %d", failAt), func(t *testing.T) {
+			resetSetupSeams(t)
+			useTestHome(t)
+			lookPathFn = func(string) (string, error) { return "claude", nil }
+			writeClaudeCodeUserMCPFn = func() error { t.Fatal("MCP registration must not run after update failure"); return nil }
+			var commands []string
+			runCommand = func(_ string, args ...string) ([]byte, error) {
+				commands = append(commands, strings.Join(args, " "))
+				if len(commands) == 2 {
+					return []byte("already installed"), nil
+				}
+				if len(commands) == failAt {
+					return []byte("already cached: network failure"), errors.New("exit 1")
+				}
+				return []byte("ok"), nil
+			}
+			result, err := installClaudeCode()
+			wantError := "plugin update failed: already cached: network failure"
+			if failAt == 3 {
+				wantError = "marketplace update failed: already cached: network failure"
+			}
+			if result != nil || err == nil || err.Error() != wantError {
+				t.Fatalf("result=%#v error=%v, want nil and %q", result, err, wantError)
+			}
+			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram --scope user"}
+			if !reflect.DeepEqual(commands, want[:failAt]) {
+				t.Fatalf("commands=%v, want %v", commands, want[:failAt])
+			}
+		})
+	}
 
 	t.Run("user mcp write failure is non-fatal", func(t *testing.T) {
 		resetSetupSeams(t)

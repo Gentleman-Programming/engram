@@ -991,6 +991,19 @@ func installClaudeCode() (*Result, error) {
 		}
 	}
 
+	// An existing installation is not necessarily current. Refresh the catalog
+	// before updating the cached plugin, regardless of install's exit status.
+	if strings.Contains(installOutputStr, "already") {
+		updateOut, updateErr := runCommand(claudeBin, "plugin", "marketplace", "update", "engram")
+		if updateErr != nil {
+			return nil, fmt.Errorf("marketplace update failed: %s", strings.TrimSpace(string(updateOut)))
+		}
+		updateOut, updateErr = runCommand(claudeBin, "plugin", "update", "engram@engram", "--scope", "user")
+		if updateErr != nil {
+			return nil, fmt.Errorf("plugin update failed: %s", strings.TrimSpace(string(updateOut)))
+		}
+	}
+
 	// Step 3: Claude CLI owns user-scope MCP writes. Engram only reads the
 	// documented config structure to make this idempotent and verify the result.
 	mcpConfigured := false

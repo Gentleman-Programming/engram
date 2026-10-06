@@ -10,7 +10,7 @@ import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ArchiveOutcome, buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
@@ -2212,8 +2212,19 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (event === "session_start") traceSessionRegistration({ stage: "lifecycle", event, identity });
     else traceSessionRegistration({ stage: "lifecycle", event, identity, reason: reason === "reload" ? "reload" : reason == null || reason === "" ? "missing" : "other" });
   };
+  // Pi's queued steer/follow-up inputs bypass before_agent_start. Only retain
+  // the latest idle input; a FIFO would assign queued provenance to later runs.
+  const pendingInput = new WeakMap<object, { sessionId: string; source: InputEvent["source"] }>();
   registerMemoryTools(pi);
+  pi.on("input", (event: InputEvent, ctx: SessionContext) => {
+    if (event.streamingBehavior) return { action: "continue" as const };
+    const sessionId = observeRuntimeSessionID(ctx);
+    if (sessionId) pendingInput.set(ctx.sessionManager, { sessionId, source: event.source });
+    else pendingInput.delete(ctx.sessionManager);
+    return { action: "continue" as const };
+  });
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
+    pendingInput.delete(ctx.sessionManager);
     removeBridgeResponders(ctx);
     const sessionId = observeRuntimeSessionID(ctx);
     traceLifecycle("session_start", sessionId);
@@ -2232,6 +2243,7 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event: { reason?: string }, ctx: SessionContext) => {
+    pendingInput.delete(ctx.sessionManager);
     removeBridgeResponders(ctx);
     // Pi reload replaces the extension runner but keeps its runtime session ID alive.
     if (event.reason === "reload") {
@@ -2331,13 +2343,18 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
+    // Consume before awaiting: another input must not change this turn's source.
+    const sessionId = observeRuntimeSessionID(ctx);
+    const input = pendingInput.get(ctx.sessionManager);
+    pendingInput.delete(ctx.sessionManager);
+    const syntheticInput = (input?.sessionId === sessionId && input?.source === "extension")
+      || Boolean(process.env.GENTLE_PI_AGENTS_CHILD);
     // Invalidate before any initialization or early return, including short/empty turns.
     for (const prior of lifecycles.get(ctx.sessionManager)?.values() || []) {
       prior.promptProof = undefined;
       prior.promptTurn = (prior.promptTurn || 0) + 1;
     }
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
-    const sessionId = observeRuntimeSessionID(ctx);
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     const epoch = state?.epoch;
     const promptTurn = state?.promptTurn;
@@ -2356,6 +2373,8 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (!(await initOnceForHook(ctx.cwd))) return result;
     await refreshProjectDetection(ctx.cwd);
 
+    // Unknown provenance and human-facing RPC retain the existing capture policy.
+    if (syntheticInput) return result;
     const finalContent = event.prompt?.trim();
     if ((projectDetectionPending || projectResolutionError) && sessionId && finalContent && finalContent.length > 10) {
       return result;

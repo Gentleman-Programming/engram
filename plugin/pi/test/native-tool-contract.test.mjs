@@ -206,6 +206,79 @@ function recordingFetch(routes) {
   return { calls, fetchStub };
 }
 
+// Issue #1673: drive the registered input/start hooks and inspect HTTP requests.
+// The input hook is optional here because the buggy plugin does not subscribe to it.
+for (const scenario of [
+  { name: "interactive", source: "interactive", capture: true },
+  { name: "human RPC host", source: "rpc", capture: true },
+  { name: "unknown provenance", capture: true },
+  { name: "expanded interactive input", source: "interactive", inputText: "/explain", capture: true },
+  { name: "extension", source: "extension", capture: false },
+  { name: "extension wake", source: "extension", wake: true, capture: false },
+  { name: "delegated-child", source: "rpc", child: true, capture: false },
+  { name: "queued steer before interactive", source: "interactive", queuedBefore: "extension", capture: true },
+  { name: "queued follow-up after extension", source: "extension", queuedAfter: "interactive", capture: false },
+  { name: "handled extension before interactive", source: "interactive", staleInput: true, capture: true },
+  { name: "session start clears provenance", staleInput: true, restart: true, capture: true },
+  { name: "runtime switch isolates provenance", staleInput: true, switchSession: true, capture: true },
+  { name: "reload clears provenance", staleInput: true, reload: true, capture: true },
+]) {
+  test(`prompt provenance regression: ${scenario.name}`, async () => {
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const originalFetch = globalThis.fetch;
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    if (scenario.child) process.env.GENTLE_PI_AGENTS_CHILD = "1";
+    else delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-provenance-", async ({ sandbox }) => {
+        const { eventHandlers } = await loadPluginHarness(sandbox);
+        let sessionId = `provenance-${scenario.name}`;
+        const ctx = runtimeContext(() => sessionId);
+        await eventHandlers.get("session_start")({}, ctx);
+        const input = async (source, text, streamingBehavior) => {
+          await eventHandlers.get("input")?.({ text, source, streamingBehavior, images: [] }, ctx);
+        };
+        if (scenario.staleInput) await input("extension", "An extension input that never starts an agent run.");
+        if (scenario.restart) await eventHandlers.get("session_start")({}, ctx);
+        if (scenario.reload) {
+          await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+          await eventHandlers.get("session_start")({}, ctx);
+        }
+        if (scenario.switchSession) sessionId += "-switched";
+        const prompt = scenario.wake
+          ? "[System-generated Gentle Agents notification, not written by the user] Subagent output was delivered to this session above. Review it and continue. [gentle-agents wake: regression]"
+          : scenario.child
+            ? "Independent read-only verification of the uncommitted changes."
+            : scenario.source === "extension"
+              ? "Continue automatically after receiving an extension update."
+              : "Please explain the root cause of this reported bug.";
+        if (scenario.queuedBefore) await input(scenario.queuedBefore, "Queued automatic steering update.", "steer");
+        if (scenario.source) await input(scenario.source, scenario.inputText ?? prompt);
+        if (scenario.queuedAfter) await input(scenario.queuedAfter, "Queued human follow-up request.", "followUp");
+        await eventHandlers.get("before_agent_start")({ prompt, systemPrompt: "base" }, ctx);
+        const writes = calls.filter(({ method, path }) => method === "POST" && path === "/prompts");
+        assert.deepEqual(writes.map(({ body }) => body), scenario.capture ? [{
+          session_id: sessionId, content: prompt, project: "engram",
+        }] : [], "only human-authored prompts may be persisted, exactly once");
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) {
+        if (originalEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = originalEnv[key];
+      }
+    }
+  });
+}
+
 test("Pi native saves persist under separate host sessions and stop on failed registration", async () => {
   await withPluginSandbox("engram-pi-real-", async ({ dir, sandbox }) => {
     const original = Object.fromEntries(["ENGRAM_URL", "ENGRAM_PROJECT", "ENGRAM_DATA_DIR", "ENGRAM_CLOUD_AUTOSYNC", "HOME"].map((key) => [key, process.env[key]]));

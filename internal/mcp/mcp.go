@@ -43,6 +43,10 @@ const (
 
 // MCPConfig holds configuration for the MCP server.
 type MCPConfig struct {
+	// Version is the binary version reported during the MCP handshake.
+	// An empty value defaults to "dev" for callers without build metadata.
+	Version string
+
 	// DefaultProject is a trusted process-level project override supplied by
 	// long-lived MCP hosts (for example, `engram mcp --project NAME` or
 	// ENGRAM_PROJECT). When set, it is used before cwd detection for MCP
@@ -409,9 +413,13 @@ func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]boo
 }
 
 func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
+	version := cfg.Version
+	if version == "" {
+		version = "dev"
+	}
 	srv := server.NewMCPServer(
 		"engram",
-		"0.1.0",
+		version,
 		server.WithToolCapabilities(true),
 		server.WithInstructions(buildServerInstructions(allowlist)),
 	)
