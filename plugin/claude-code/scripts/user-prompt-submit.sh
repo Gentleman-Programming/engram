@@ -17,7 +17,10 @@
 
 # Under Pi (PI_CODING_AGENT set) every hook is a silent no-op; this script checks it before the
 # Windows fast path below, which runs before _helpers.sh is sourced.
-[ -n "${PI_CODING_AGENT:-}" ] && exit 0
+if [ -n "${PI_CODING_AGENT:-}" ]; then
+  [ -t 0 ] || while IFS= read -r _engram_pi_line; do :; done
+  exit 0
+fi
 
 ENGRAM_HOOK_MAX_TIME="${ENGRAM_HOOK_MAX_TIME:-0.2}"
 

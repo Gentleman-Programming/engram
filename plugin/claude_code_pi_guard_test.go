@@ -77,7 +77,7 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 		env  string // value of PI_CODING_AGENT; "" means unset
 	}{
 		{"unset", ""},
-		{"empty", "empty"},
+		{"empty", "empty"}, // set to the empty string
 		{"true", "true"},
 	} {
 		piSet := tc.env != "" && tc.env != "empty"
@@ -85,9 +85,12 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 		for _, script := range shellHooks {
 			t.Run(tc.name+"/"+script, func(t *testing.T) {
 				srv, requests := piGuardServer(t)
-				env := map[string]string{"ENGRAM_URL": srv.URL, "HOME": t.TempDir(), "TMPDIR": t.TempDir(), "PI_CODING_AGENT": ""}
-				if piSet {
+				env := map[string]string{"ENGRAM_URL": srv.URL, "HOME": t.TempDir(), "TMPDIR": t.TempDir()}
+				switch {
+				case piSet:
 					env["PI_CODING_AGENT"] = tc.env
+				case tc.env == "empty":
+					env["PI_CODING_AGENT"] = ""
 				}
 				stdout := runHook(t, script, hookInput, env)
 				got := requests.list()
@@ -100,8 +103,9 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 					}
 					return
 				}
-				if script == "session-start.sh" && len(got) == 0 {
-					t.Errorf("session-start.sh sent no requests without PI_CODING_AGENT")
+				// Without the Pi marker every hook keeps contacting Engram.
+				if len(got) == 0 {
+					t.Errorf("%s sent no requests without PI_CODING_AGENT", script)
 				}
 			})
 		}
@@ -111,8 +115,11 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 			cmd := exec.Command(engramBin, "hook", "claude-pre-tool-use")
 			cmd.Stdin = strings.NewReader(hookInput)
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "ENGRAM_URL=" + srv.URL, "ENGRAM_DATA_DIR=" + t.TempDir()}
-			if piSet {
+			switch {
+			case piSet:
 				cmd.Env = append(cmd.Env, "PI_CODING_AGENT="+tc.env)
+			case tc.env == "empty":
+				cmd.Env = append(cmd.Env, "PI_CODING_AGENT=")
 			}
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr

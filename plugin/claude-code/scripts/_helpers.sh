@@ -4,7 +4,11 @@
 
 # Pi owns its Engram session natively (gentle-engram). When pi-claude-bridge runs
 # Claude Code inside a Pi turn (PI_CODING_AGENT is set), every hook is a silent no-op.
-[ -n "${PI_CODING_AGENT:-}" ] && exit 0
+# The hook input is drained (bash builtins only) because the hook exits right here.
+if [ -n "${PI_CODING_AGENT:-}" ]; then
+  [ -t 0 ] || while IFS= read -r _engram_pi_line; do :; done
+  exit 0
+fi
 
 trim_whitespace() {
   local value="$1"
