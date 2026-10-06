@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
@@ -480,9 +481,6 @@ func TestClaudeInvalidExplicitPortDeniesWithoutDefaultServer(t *testing.T) {
 }
 
 func TestHookSessionConfirmationLatency(t *testing.T) {
-	if hookSessionConfirmationTimeout != 4*time.Second {
-		t.Fatalf("confirmation budget = %v, want 4s", hookSessionConfirmationTimeout)
-	}
 	for _, agent := range []string{"claude", "codex"} {
 		for _, tc := range []struct {
 			name      string
@@ -492,7 +490,6 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 			wantPosts int32
 		}{
 			{"slow healthy server", 900 * time.Millisecond, 900 * time.Millisecond, false, 1},
-			{"combined confirmation timeout", 2100 * time.Millisecond, 2100 * time.Millisecond, true, 1},
 			{"project timeout", 5 * time.Second, 0, true, 0},
 			{"registration timeout", 0, 5 * time.Second, true, 1},
 		} {
@@ -585,6 +582,91 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestHookSessionConfirmationSharedDeadline uses virtual time and an in-memory
+// transport so scheduler load cannot move the timeout from registration to lookup.
+func TestHookSessionConfirmationSharedDeadline(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run(agent, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				t.Setenv("ENGRAM_URL", "http://hook.test")
+				oldTransport := http.DefaultTransport
+				oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
+				t.Cleanup(func() {
+					http.DefaultTransport = oldTransport
+					os.Stdin, claudeHookOutput, exitFunc = oldStdin, oldOutput, oldExit
+				})
+				started := time.Now()
+				var projectContext context.Context
+				var gets, posts, registrations int
+				http.DefaultTransport = codexRoundTripper(func(r *http.Request) (*http.Response, error) {
+					deadline, ok := r.Context().Deadline()
+					if !ok || !deadline.Equal(started.Add(4*time.Second)) {
+						t.Fatalf("confirmation deadline = %v, want start + 4s", deadline)
+					}
+					switch r.URL.Path {
+					case "/project/current":
+						gets++
+						projectContext = r.Context()
+						if r.Method != http.MethodGet || r.URL.Query().Get("cwd") != "/work" {
+							t.Fatalf("unexpected project request: %s %s", r.Method, r.URL)
+						}
+					case "/sessions":
+						posts++
+						if r.Context() != projectContext || time.Since(started) != 2100*time.Millisecond {
+							t.Fatal("registration did not start after lookup with the same context")
+						}
+						var registration map[string]string
+						if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
+							t.Fatal(err)
+						}
+						if r.Method != http.MethodPost || registration["id"] != "host" || registration["project"] != "project-a" || registration["directory"] != "/work" || (registration["ownership_mode"] == "project_owned") != (agent == "claude") {
+							t.Fatalf("unexpected registration: %s %v", r.Method, registration)
+						}
+					default:
+						t.Fatalf("unexpected request: %s", r.URL)
+					}
+					timer := time.NewTimer(2100 * time.Millisecond)
+					defer timer.Stop()
+					select {
+					case <-r.Context().Done():
+						return nil, r.Context().Err()
+					case <-timer.C:
+					}
+					body, status := `{"project":"project-a","project_source":"config"}`, http.StatusOK
+					if r.URL.Path == "/sessions" {
+						registrations++
+						body, status = `{"id":"host","status":"created"}`, http.StatusCreated
+					}
+					return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+				})
+				os.Stdin = claudeHookStdin(t, `{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","title":"preserved"}}`, false)
+				var output []byte
+				var writes int
+				claudeHookOutput = func(value []byte) error { output = append(output, value...); writes++; return nil }
+				exitFunc = func(code int) { t.Errorf("unexpected process exit: %d", code) }
+				cmdHook([]string{agent + "-pre-tool-use"})
+				prefix := "Claude"
+				if agent == "codex" {
+					prefix = "Codex"
+				}
+				want := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"` + prefix + ` host session confirmation timed out (server slow or unavailable)"}}`
+				if string(output) != want || writes != 1 {
+					t.Fatalf("hook output = %s (%d writes), want %s", output, writes, want)
+				}
+				if gets != 1 || posts != 1 || registrations != 0 {
+					t.Errorf("GET=%d POST=%d completed registrations=%d, want 1/1/0", gets, posts, registrations)
+				}
+				if elapsed := time.Since(started); elapsed != 4*time.Second {
+					t.Errorf("virtual confirmation duration = %v, want 4s", elapsed)
+				}
+				if !errors.Is(projectContext.Err(), context.DeadlineExceeded) {
+					t.Errorf("shared context error = %v, want deadline exceeded", projectContext.Err())
+				}
+			})
+		})
 	}
 }
 
