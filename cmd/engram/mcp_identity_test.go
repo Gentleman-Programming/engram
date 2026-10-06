@@ -64,7 +64,11 @@ func TestMCPHelpCountsMatchServedProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close test store: %v", err)
+		}
+	})
 	withArgs(t, "engram", "--help")
 	stdout, stderr := captureOutput(t, main)
 	if stderr != "" {
