@@ -136,6 +136,7 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 	}
 
 	requests := make(chan string, 1)
+	directories := make(chan string, 1)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -148,6 +149,9 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 		var payload struct{ ID, Project, Directory string }
 		if json.NewDecoder(r.Body).Decode(&payload) != nil || payload.Project != "end-project" || payload.Directory == "" {
 			t.Error("invalid canonical end payload")
+		}
+		if strings.HasPrefix(payload.ID, "session-é") {
+			directories <- payload.Directory
 		}
 		requests <- r.Method + " " + r.URL.EscapedPath() + " " + payload.ID
 		_, _ = w.Write([]byte(`{"id":"session id/with?characters","status":"ended"}`))
@@ -168,6 +172,33 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("adapter did not post to the loopback server")
+		}
+	})
+
+	t.Run("preserves UTF-8 identity and directory", func(t *testing.T) {
+		cwd := filepath.Join(t.TempDir(), "日本語-é")
+		if err := os.Mkdir(cwd, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		id := "session-é-日本語"
+		input, err := json.Marshal(map[string]string{"session_id": id, "cwd": cwd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code := runCodexWindowsPowerShell(t, adapterPath, string(input), &port, 3*time.Second)
+		if code != 0 || stdout != "" || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		select {
+		case got := <-requests:
+			if got != "POST /runtime-sessions/end "+id {
+				t.Fatalf("identity changed: %q", got)
+			}
+			if got := <-directories; got != cwd {
+				t.Fatalf("directory=%q, want %q", got, cwd)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing UTF-8 end request")
 		}
 	})
 
@@ -239,7 +270,7 @@ func codexWindowsEndEnv(t *testing.T, port string) []string {
 	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CURL_HOME", "CODEX_HOME", "ENGRAM_DATA_DIR", "TMPDIR", "TMP", "TEMP"} {
 		env = append(env, key+"="+root)
 	}
-	return append(env, "PATH="+filepath.Dir(binary)+string(os.PathListSeparator)+os.Getenv("PATH"), "ENGRAM_URL=http://127.0.0.1:"+port, "ENGRAM_PORT="+port)
+	return append(env, "PATH="+filepath.Dir(binary)+string(os.PathListSeparator)+os.Getenv("PATH"), "ENGRAM_URL=", "ENGRAM_SOCKET=", "ENGRAM_PORT="+port)
 }
 
 func runCodexWindowsSessionEnd(t *testing.T, adapterPath, input string, port *string) (string, string, int) {

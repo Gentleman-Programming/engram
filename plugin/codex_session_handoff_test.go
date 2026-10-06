@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -396,19 +397,42 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 }
 
 var codexFixtureBinaries sync.Map
+var codexFixtureOnce sync.Once
+var codexFixturePath, codexFixtureDir string
+var codexFixtureErr error
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if codexFixtureDir != "" {
+		if err := os.RemoveAll(codexFixtureDir); err != nil {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
 
 // Resolve tools without starting a login shell or inheriting subprocess settings.
 func buildCodexFixtureCLI(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "engram.exe")
-	cmd := exec.Command("go", "build", "-o", binary, "./cmd/engram")
-	cmd.Dir = repoRoot(t)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build fixture CLI: %v: %s", err, output)
+	root := repoRoot(t)
+	codexFixtureOnce.Do(func() {
+		codexFixtureDir, codexFixtureErr = os.MkdirTemp("", "engram-codex-fixture-")
+		if codexFixtureErr != nil {
+			return
+		}
+		codexFixturePath = filepath.ToSlash(filepath.Join(codexFixtureDir, "engram.exe"))
+		cmd := exec.Command("go", "build", "-o", codexFixturePath, "./cmd/engram")
+		cmd.Dir = root
+		if output, err := cmd.CombinedOutput(); err != nil {
+			codexFixtureErr = fmt.Errorf("build fixture CLI: %w: %s", err, output)
+			return
+		}
+		codexFixtureBinaries.Store(codexFixturePath, true)
+	})
+	if codexFixtureErr != nil {
+		t.Fatal(codexFixtureErr)
 	}
-	binary = filepath.ToSlash(binary)
-	codexFixtureBinaries.Store(binary, true)
-	return binary
+	return codexFixturePath
 }
 
 func codexHandoffEnv(t *testing.T, cwd, serverURL string, binary ...string) []string {
