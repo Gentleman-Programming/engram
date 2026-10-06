@@ -73,13 +73,16 @@ persistence or decide which session an omitted ID should select.
 | OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. The core selects a live continuation when the root has ended. | Before session-attributed tool writes it registers the root with `resume: true`, rechecks host ownership, and injects the acknowledged effective `id` as `session_id`. Injection requires an HTTP-success response with `status: "created"` and an `id` equal to the root or prefixed by `<root>:resume:`; missing or foreign acknowledgements block injection. |
 
 Claude and Codex PreToolUse confirmation share a four-second total HTTP budget
-for project resolution and session registration. A timeout denies the call with
+for project resolution followed by Claude registration or Codex runtime resolution.
+A timeout denies the call with
 `Claude host session confirmation timed out (server slow or unavailable)` or
 `Codex host session confirmation timed out (server slow or unavailable)`.
-Other confirmation failures retain the existing registration-denial message.
-The hook still requires registration on every gated call, including strict
-response validation and the adapter's existing ownership mode; it does not cache
-registration or retry. Codex prompt capture uses its separate, unchanged budget.
+Other failures use Claude's registration-denial message or
+`Codex host session resolution could not be confirmed`, respectively.
+Every gated call validates the response and the adapter's ownership requirements;
+Claude confirms registration while Codex resolves the existing identity without
+registering again. Neither guard caches confirmation or retries.
+Codex prompt capture uses its separate, unchanged budget.
 
 Parent/root translation is specific to OpenCode's session hierarchy, not a
 universal adapter rule. Hook-level binding cannot protect calls when a hook is

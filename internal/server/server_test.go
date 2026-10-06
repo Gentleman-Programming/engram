@@ -939,7 +939,7 @@ func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 				if session.Directory != want {
 					t.Errorf("stored directory = %q, want %q", session.Directory, want)
 				}
-				candidates, err := st.ActiveRuntimeSessions("engram", root)
+				candidates, err := st.ActiveRuntimeSessions("engram", want)
 				if err != nil {
 					t.Fatalf("active runtime sessions: %v", err)
 				}
