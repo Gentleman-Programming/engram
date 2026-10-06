@@ -25,9 +25,10 @@ func parseOpenCodeJSONC(data []byte) (*jsoncObject, error) {
 	inString := false
 	for i := 0; i < len(normalized); i++ {
 		if inString {
-			if normalized[i] == '\\' {
+			switch normalized[i] {
+			case '\\':
 				i++
-			} else if normalized[i] == '"' {
+			case '"':
 				inString = false
 			}
 			continue
@@ -48,7 +49,7 @@ func parseOpenCodeJSONC(data []byte) (*jsoncObject, error) {
 			}
 		case '*':
 			i += 2
-			for i+1 < len(normalized) && !(normalized[i] == '*' && normalized[i+1] == '/') {
+			for i+1 < len(normalized) && (normalized[i] != '*' || normalized[i+1] != '/') {
 				i++
 			}
 			if i+1 >= len(normalized) {
@@ -68,9 +69,10 @@ func parseOpenCodeJSONC(data []byte) (*jsoncObject, error) {
 	inString = false
 	for i := 0; i < len(normalized); i++ {
 		if inString {
-			if normalized[i] == '\\' {
+			switch normalized[i] {
+			case '\\':
 				i++
-			} else if normalized[i] == '"' {
+			case '"':
 				inString = false
 			}
 			continue
