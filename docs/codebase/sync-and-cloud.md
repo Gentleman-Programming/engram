@@ -83,9 +83,10 @@ identities found in the local `sessions` table as blocking findings. Neither is
 auto-repaired, because inventing a canonical session ID would fabricate identity
 data.
 
-### Session directory admission: local-partial, cloud ownership-aware
+### Session directory admission: local-partial, cloud ownership-aware, cloud-mutation-compatible
 
-Session `directory` follows a two-domain contract (engram#1287).
+Session `directory` follows a two-domain contract (engram#1287), with one Cloud
+compatibility exception for historical per-mutation events.
 
 **Local pulled chunks admit a partial directory.** The local validator accepts
 only two states: the `directory` key is absent, or its value is a JSON string
@@ -93,9 +94,10 @@ only two states: the `directory` key is absent, or its value is a JSON string
 with `ErrPulledSessionDirectoryInvalid` — `null` is not a blank directory, it is
 a non-string value and never normalizes into one.
 
-**Cloud requires a concrete directory for shared and legacy sessions.** A
-blank or missing directory fails their chunk atomically: no session is persisted,
-the chunk is not recorded as imported, and the corrected chunk can be redelivered.
+**Cloud pulled chunks require a concrete directory for shared and legacy
+sessions.** A blank or missing directory fails their chunk atomically: no
+session is persisted, the chunk is not recorded as imported, and the corrected
+chunk can be redelivered.
 
 **Project-owned sessions may omit the directory or carry a blank string.**
 Isolated cross-project registrations intentionally have no directory; cloud
@@ -105,10 +107,24 @@ values remain invalid. This also applies to `Store.ApplyPulledMutation`, the
 single-mutation path used by cloud autosync. No fabricated directory or manual
 database repair is needed for an isolated session.
 
+**Cloud pulled mutations admit a present blank string for shared and legacy
+sessions.** `Store.ApplyPulledMutation` requires the `directory` key of a
+shared or legacy session to be present as a JSON string; a blank or whitespace
+string is accepted because historical Cloud session events carry that shape.
+The session is applied as carried, as an inert partial session: no directory,
+`ended_at`, runtime lease, or owner is invented, a new row takes the default
+`shared` mode when the payload names none, and the cursor advances in the same
+transaction. A missing key, JSON `null`, or any non-string value is still
+rejected: nothing is persisted, nothing is dead-lettered, and the cursor does
+not advance. The completion upsert below still preserves an existing concrete
+directory and a `project_owned` owner. Because a new row is `shared`, isolated
+session registration refuses it with `session_isolation_conflict`.
+
 The domain is carried explicitly, never inferred from the target-key string:
 the syncer's import mode selects it, and it flows through
 `Store.ApplyPulledChunkForDomain(targetKey, chunkID, mutations, cloud)`.
-`Store.ApplyPulledChunk` remains the local-domain wrapper;
+`Store.ApplyPulledChunk` remains the local-domain wrapper and
+`Store.ApplyPulledMutation` always uses the Cloud mutation rule;
 `chunkTrackingTargetKey` still controls scoping and dedup, but it is not a
 domain signal.
 

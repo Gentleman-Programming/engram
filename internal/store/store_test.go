@@ -10238,7 +10238,9 @@ func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
 		id      string
 		payload string
 	}{
-		{name: "pulled mutation with blank directory", id: "blank-directory", payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`},
+		// A present blank string is admitted as an inert partial session; see
+		// TestCloudPulledMutationAcceptsOnlyPresentBlankStringDirectory.
+		{name: "pulled mutation with null directory", id: "null-directory", payload: `{"id":"null-directory","project":"engram","directory":null}`},
 		{name: "pulled mutation with omitted directory", id: "omitted-directory", payload: `{"id":"omitted-directory","project":"engram"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

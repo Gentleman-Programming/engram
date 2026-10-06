@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -287,8 +288,7 @@ func TestBlankDirectorySessionCompletesOnLaterConcreteDirectory(t *testing.T) {
 }
 
 // Matrix item 6 (cloud rejection unchanged): the strict validator variant used
-// by the cloud callers (ApplyPulledMutation / autosync, via the cloud domain)
-// still rejects present-but-blank and missing-key payloads with today's
+// by Cloud chunk import still rejects present-but-blank and missing-key payloads with today's
 // byte-identical error strings.
 func TestValidatePulledSessionDirectoryStrictRejectsBlankAndMissing(t *testing.T) {
 	t.Run("present but blank", func(t *testing.T) {
@@ -631,4 +631,164 @@ func TestImportJSONSnapshotDirectoryAdmission(t *testing.T) {
 			t.Fatalf("stored directory = %q, want exactly \"\"", sess.Directory)
 		}
 	})
+}
+
+// Cloud mutation compatibility: historical Cloud session events carry a present
+// blank-string directory. ApplyPulledMutation imports them as an inert partial
+// session — no invented directory, ended_at, lease or ownership — and advances
+// the cursor atomically with the row. Null, non-string and missing directories
+// keep failing closed without moving the cursor.
+func TestCloudPulledMutationAcceptsOnlyPresentBlankStringDirectory(t *testing.T) {
+	for _, directory := range []string{`""`, `" \t "`} {
+		t.Run("accepted "+directory, func(t *testing.T) {
+			s := newTestStore(t)
+			// Enrollment makes any outbound journal row for the project observable.
+			if err := s.EnrollProject("engram"); err != nil {
+				t.Fatal(err)
+			}
+			before := capturePublicRegistrationState(t, s, "legacy-blank")
+			payload := fmt.Sprintf(`{"id":"legacy-blank","project":"engram","directory":%s,"started_at":"2025-01-01 00:00:00"}`, directory)
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "legacy-blank", Op: SyncOpUpsert, Payload: payload}); err != nil {
+				t.Fatalf("ApplyPulledMutation: %v", err)
+			}
+			sess, err := s.GetSession("legacy-blank")
+			if err != nil {
+				t.Fatalf("GetSession: %v", err)
+			}
+			var want string
+			if err := json.Unmarshal([]byte(directory), &want); err != nil {
+				t.Fatal(err)
+			}
+			if sess.Directory != want || sess.EndedAt != nil || sess.RuntimeLeaseExpiresAt != nil || sess.Project != "engram" || sess.StartedAt != "2025-01-01 00:00:00" {
+				t.Fatalf("inert partial session = %#v", sess)
+			}
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil || state.LastPulledSeq != 1 {
+				t.Fatalf("cursor = %+v, %v; want 1", state, err)
+			}
+			// Pulled metadata induces no outbound session upsert, repair or lease row.
+			accepted := capturePublicRegistrationState(t, s, "legacy-blank")
+			if !reflect.DeepEqual(before.Journal, accepted.Journal) || accepted.Stats.TotalSessions != before.Stats.TotalSessions+1 {
+				t.Fatalf("accepted pull changed journal or counters: %#v -> %#v", before, accepted)
+			}
+			// The imported row defaults to shared and can never become an isolated satellite.
+			if _, err := s.RegisterIsolatedSession("legacy-blank", "engram", true); !errors.Is(err, ErrSessionIsolationConflict) {
+				t.Fatalf("isolated adoption of imported legacy row: %v", err)
+			}
+			if after, err := s.GetSession("legacy-blank"); err != nil || after.RuntimeLeaseExpiresAt != nil || after.OwnershipMode != sess.OwnershipMode {
+				t.Fatalf("rejected isolated adoption changed the row: %#v, %v", after, err)
+			}
+			if rejected := capturePublicRegistrationState(t, s, "legacy-blank"); !reflect.DeepEqual(accepted, rejected) {
+				t.Fatalf("rejected isolated adoption changed public state: %#v -> %#v", accepted, rejected)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, directory string
+		typed           bool
+	}{
+		{name: "null", directory: `,"directory":null`, typed: true},
+		{name: "number", directory: `,"directory":42`},
+		{name: "object", directory: `,"directory":{"path":"/a"}`},
+		{name: "missing", directory: ``, typed: true},
+	} {
+		t.Run("rejected "+tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			payload := `{"id":"legacy-invalid","project":"engram"` + tc.directory + `}`
+			// Non-string values already fail the typed payload decode.
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "legacy-invalid", Op: SyncOpUpsert, Payload: payload}); err == nil || (tc.typed && !errors.Is(err, ErrPulledSessionDirectoryInvalid)) {
+				t.Fatalf("error = %v, want a fail-closed rejection", err)
+			}
+			if _, err := s.GetSession("legacy-invalid"); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("rejected session persisted: %v", err)
+			}
+			state, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil || state.LastPulledSeq != 0 {
+				t.Fatalf("cursor = %+v, %v; want 0 (no skipping)", state, err)
+			}
+			if deferred, err := s.ListDeferred(ListDeferredOptions{}); err != nil || len(deferred) != 0 {
+				t.Fatalf("deferred = %+v, %v; want none", deferred, err)
+			}
+		})
+	}
+}
+
+// A blank-string Cloud mutation never erases an existing concrete directory,
+// mode or runtime lease, and induces no outbound journal row. A project_owned row
+// keeps its authoritative owner and provenance even when the pulled project
+// differs. A shared row has no exclusive owner: it adopts the pulled project,
+// which is the pre-existing pulled-upsert behavior this change does not alter.
+func TestCloudPulledBlankDirectoryPreservesExistingSession(t *testing.T) {
+	for _, mode := range []string{SessionOwnershipShared, SessionOwnershipProjectOwned} {
+		for _, incoming := range []string{"engram", "other"} {
+			t.Run(mode+"/incoming="+incoming, func(t *testing.T) {
+				s := newTestStore(t)
+				for _, project := range []string{"engram", "other"} {
+					if err := s.EnrollProject(project); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := s.StartSessionWithOwnershipMode("existing", "engram", "/repos/engram", mode); err != nil {
+					t.Fatal(err)
+				}
+				before := capturePublicRegistrationState(t, s, "existing")
+				owner, eligible, err := s.LocalSessionProvenance("existing")
+				if err != nil || before.Sessions["existing"] == nil || before.Sessions["existing"].RuntimeLeaseExpiresAt == nil {
+					t.Fatalf("fixture = %#v, %v", before.Sessions["existing"], err)
+				}
+				otherBefore, err := s.StatsProject("other")
+				if err != nil {
+					t.Fatal(err)
+				}
+				// started_at is carried as stored so only directory and project vary.
+				payload := fmt.Sprintf(`{"id":"existing","project":%q,"directory":"","started_at":%q}`, incoming, before.Sessions["existing"].StartedAt)
+				if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "existing", Op: SyncOpUpsert, Payload: payload}); err != nil {
+					t.Fatalf("ApplyPulledMutation: %v", err)
+				}
+				after := capturePublicRegistrationState(t, s, "existing")
+				if !reflect.DeepEqual(before.Journal, after.Journal) || !reflect.DeepEqual(before.Stats, after.Stats) {
+					t.Fatalf("pull changed journal or counters: %#v -> %#v", before, after)
+				}
+				want := *before.Sessions["existing"]
+				if mode == SessionOwnershipShared {
+					want.Project = incoming
+				}
+				if got := after.Sessions["existing"]; got == nil || !reflect.DeepEqual(want, *got) {
+					t.Fatalf("existing session = %#v, want %#v", got, want)
+				}
+				otherAfter, err := s.StatsProject("other")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == SessionOwnershipProjectOwned {
+					ownerAfter, eligibleAfter, err := s.LocalSessionProvenance("existing")
+					if err != nil || ownerAfter != owner || eligibleAfter != eligible || !reflect.DeepEqual(otherBefore, otherAfter) {
+						t.Fatalf("project_owned provenance %q/%t -> %q/%t, other stats %#v -> %#v, %v", owner, eligible, ownerAfter, eligibleAfter, otherBefore, otherAfter, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Cloud chunk import keeps the strict admission: one blank-directory session
+// fails the whole chunk atomically, leaving nothing applied or recorded.
+func TestCloudPulledChunkBlankDirectoryStaysStrict(t *testing.T) {
+	s := newTestStore(t)
+	mutations := []SyncMutation{
+		{Entity: SyncEntitySession, EntityKey: "chunk-valid", Op: SyncOpUpsert, Payload: `{"id":"chunk-valid","project":"engram","directory":"/repos/engram"}`},
+		{Entity: SyncEntitySession, EntityKey: "chunk-blank", Op: SyncOpUpsert, Payload: `{"id":"chunk-blank","project":"engram","directory":""}`},
+	}
+	if err := s.ApplyPulledChunkForDomain("cloud:engram", "chunk-blank-1", mutations, true); !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+		t.Fatalf("error = %v, want ErrPulledSessionDirectoryInvalid", err)
+	}
+	for _, id := range []string{"chunk-valid", "chunk-blank"} {
+		if _, err := s.GetSession(id); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("session %s persisted from a rejected chunk: %v", id, err)
+		}
+	}
+	synced, err := s.GetSyncedChunksForTarget("cloud:engram")
+	if err != nil || synced["chunk-blank-1"] {
+		t.Fatalf("rejected chunk recorded: %v, %v", synced, err)
+	}
 }
