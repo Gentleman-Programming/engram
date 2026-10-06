@@ -11,9 +11,9 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/mark3labs/mcp-go v0.44.0
-	golang.org/x/net v0.52.0
-	golang.org/x/sys v0.43.0
-	golang.org/x/text v0.36.0
+	golang.org/x/net v0.56.0
+	golang.org/x/sys v0.46.0
+	golang.org/x/text v0.39.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.46.2
 )
@@ -59,10 +59,10 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/tools v0.43.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
