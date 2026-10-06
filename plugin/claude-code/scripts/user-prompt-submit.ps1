@@ -65,6 +65,14 @@ function Resolve-EngramProject {
   }
 }
 
+<#
+.SYNOPSIS
+Persists a human Claude prompt through the canonical Engram project.
+.DESCRIPTION
+Skips empty inputs and known synthetic turn prefixes after leading whitespace,
+without changing the original persisted text or the hook bootstrap. HTTP errors
+are swallowed and the request timeout bounds submission latency.
+#>
 function Invoke-EngramPromptPersist {
   param(
     [string]$EngramUrl,

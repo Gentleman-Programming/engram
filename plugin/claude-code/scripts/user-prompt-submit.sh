@@ -365,8 +365,10 @@ resolve_project_without_jq() {
   printf '%s\n' "$project"
 }
 
-# Synthetic Claude turns share UserPromptSubmit with human requests. Filter only
-# persistence, not the ToolSearch bootstrap or save reminder. Keep this builtin-only.
+# should_capture_prompt returns success unless the leading-whitespace-trimmed
+# prompt starts with a known synthetic Claude turn prefix. It classifies only
+# persistence; the original text, ToolSearch bootstrap and save reminder are
+# unchanged. Bash builtins keep classification independent of subprocesses.
 should_capture_prompt() {
   local trimmed="$1"
   trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"

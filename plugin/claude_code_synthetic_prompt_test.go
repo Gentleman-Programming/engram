@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+// TestClaudeCodeSyntheticPromptCapture verifies persistence-only filtering across
+// Bash and PowerShell while preserving human text and the ToolSearch bootstrap.
 func TestClaudeCodeSyntheticPromptCapture(t *testing.T) {
 	for _, route := range []string{"jq", "no-jq", "powershell"} {
 		t.Run(route, func(t *testing.T) {
