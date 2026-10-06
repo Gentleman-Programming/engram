@@ -991,7 +991,7 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
   }
 });
 
-test("Pi forwards its resolved project for review mutations while preserving global review and stats contracts", async () => {
+test("Pi doctor forwards its resolved project while preserving global review and stats contracts", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -1013,7 +1013,10 @@ test("Pi forwards its resolved project for review mutations while preserving glo
       const ctx = runtimeContext("resolved-project-session");
 
       await registeredTools.get("mem_search").execute("search", { query: "override" }, undefined, undefined, ctx);
-      await registeredTools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+      const diagnostic = await registeredTools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+      assert.equal(diagnostic.details.data.status, "ok");
+      assert.equal(diagnostic.details.data.caller_binding.status, "unknown");
+      assert.equal(diagnostic.details.data.caller_binding.reason_code, "caller_binding_unavailable");
       await registeredTools.get("mem_review").execute("review", { action: "list" }, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("review-filtered", { action: "list", project: "override-project" }, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("mark-reviewed", { action: "mark_reviewed", observation_id: 42 }, undefined, undefined, ctx);

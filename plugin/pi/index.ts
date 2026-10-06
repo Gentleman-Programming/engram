@@ -1799,8 +1799,64 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
+// Per-invocation evidence stays separate from model parameters and host state.
+const callerAppendAvailability = new WeakMap<Record<string, unknown>, boolean | null>();
+
+const CALLER_NEXT_STEPS = [
+  "No action required; a later write is not guaranteed.",
+  "Collect caller context without registering a session.",
+  "Verify support and availability of the caller diagnostic.",
+  "Use the normal runtime registration path; diagnosis does not register sessions.",
+  "Inspect the runtime binding; diagnosis does not repair it.",
+  "Resume through a host that can persist effective identity; do not reopen the ended session.",
+];
+const CALLER_REASONS = ["caller_context_missing", "caller_binding_unavailable", "session_not_registered", "effective_session_missing", "session_project_conflict", "effective_mapping_invalid", "host_context_missing", "resume_required", "ended_session_without_persistence", "binding_observed"];
+
+function callerBindingProjection(value: unknown) {
+  const fallback = { status: "unknown", root_state: "unknown", effective_state: "unknown", reason_code: "caller_binding_unavailable", safe_next_step: CALLER_NEXT_STEPS[2], write_success_guaranteed: false };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const data = value as Record<string, unknown>;
+  const states = ["active", "ended", "missing", "unknown"];
+  if (["status", "root_state", "effective_state", "reason_code", "safe_next_step"].some(key => typeof data[key] !== "string")
+    || !["ok", "warning", "blocked", "unknown"].includes(String(data.status))
+    || !states.includes(String(data.root_state)) || !states.includes(String(data.effective_state))
+    || !CALLER_REASONS.includes(String(data.reason_code)) || !CALLER_NEXT_STEPS.includes(String(data.safe_next_step))
+    || data.write_success_guaranteed !== false) return fallback;
+  return { status: data.status, root_state: data.root_state, effective_state: data.effective_state,
+    reason_code: data.reason_code, safe_next_step: data.safe_next_step, write_success_guaranteed: false };
+}
+
+function callerBindingStatus(data: unknown): string | undefined {
+  return (data as { caller_binding?: { status?: string } } | null)?.caller_binding?.status;
+}
+
+function callerBindingContext(ctx: SessionContext, target: string, appendAvailable: boolean | null) {
+  let runtimeID: string | undefined;
+  let effectiveID: string | undefined;
+  let branchAvailable: boolean | null = null;
+  try {
+    const id = ctx.sessionManager?.getSessionId?.();
+    if (typeof id === "string" && id.trim()) runtimeID = id;
+  } catch { /* Missing host evidence is not a healthy binding. */ }
+  try {
+    const manager = ctx.sessionManager;
+    if (manager) {
+      branchAvailable = typeof manager.getBranch === "function";
+      if (runtimeID) {
+        // Match the write path, but never mutate registration or mapping entries.
+        effectiveID = effectiveSessionID(ctx, runtimeID);
+        const owner = pendingEffectiveSessionProject(ctx, runtimeID, effectiveID);
+        if ((owner && owner.toLowerCase() !== target.toLowerCase())
+          || (!owner && project.toLowerCase() !== target.toLowerCase())) effectiveID = undefined;
+      }
+    }
+  } catch { branchAvailable = null; effectiveID = undefined; }
+  return { project: target, runtime_session_id: runtimeID, effective_session_id: effectiveID,
+    host_context: { append_entry_available: appendAvailable, branch_available: branchAvailable } };
+}
+
 async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
-  const sessionId = getSessionId(ctx);
+  const sessionId = toolName === "mem_doctor" ? undefined : getSessionId(ctx);
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
   const writeState = sessionId ? lifecycle(ctx, sessionId) : undefined;
   const writeEpoch = writeState?.epoch;
@@ -1981,9 +2037,19 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         throw error;
       }
     }
-    case "mem_doctor":
+    case "mem_doctor": {
       if (!requestedProject) requireResolvedProject();
-      return fetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
+      const report = await fetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
+      let caller: unknown;
+      try {
+        // A separate transport isolates optional diagnostic failures from project checks.
+        const response = await engramFetchResult("/doctor/caller-binding", {
+          method: "POST", body: callerBindingContext(ctx, activeProject, callerAppendAvailability.has(params) ? callerAppendAvailability.get(params)! : !!appendEntry),
+        });
+        if (!response.transportFailure) caller = response.data;
+      } catch { /* Old servers and errors receive only the literal safe fallback. */ }
+      return { ...(report as Record<string, unknown>), caller_binding: callerBindingProjection(caller) };
+    }
     case "mem_capture_passive": {
       requireResolvedProject();
       if (writeState) assertOpen(writeState, writeEpoch!);
@@ -2077,7 +2143,10 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
       ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, errorResult)}`);
       return errorResult;
     }
-    ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, result)}`);
+    const callerStatus = toolName === "mem_doctor" && data && typeof data === "object" && "caller_binding" in data
+      ? `project checks: ${compactResultStatus(toolName, result)} · caller: ${callerBindingStatus(data)}`
+      : compactResultStatus(toolName, result);
+    ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${callerStatus}`);
     return result;
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -2107,13 +2176,22 @@ function registerMemoryTools(pi: ExtensionAPI): void {
       parameters: MEMORY_TOOL_SCHEMAS[toolName],
       renderShell: "self",
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        if (toolName === "mem_doctor") {
+          let available: boolean | null = null;
+          try { available = typeof pi.appendEntry === "function"; } catch { /* Host getter unavailable. */ }
+          const callerParams = { ...params } as Record<string, unknown>;
+          callerAppendAvailability.set(callerParams, available);
+          return executeMemoryTool(toolName, callerParams, ctx as MemoryToolContext, signal);
+        }
         return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal, pi.appendEntry?.bind(pi));
       },
       renderCall(args) {
         return new Text(renderCallText(toolName, args), 0, 0);
       },
       renderResult(result, options, _theme, context) {
-        return new Text(renderResultText(toolName, result, { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError }), 0, 0);
+        const rendered = renderResultText(toolName, result, { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError });
+        const caller = toolName === "mem_doctor" ? (result.details as { data?: { caller_binding?: { status: string } } } | undefined)?.data?.caller_binding : undefined;
+        return new Text(caller && !options.expanded ? `Project checks: ${rendered}\nCaller binding: ${caller.status} (later writes not guaranteed)` : rendered, 0, 0);
       },
     });
   }

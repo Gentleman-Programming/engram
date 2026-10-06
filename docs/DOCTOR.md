@@ -71,6 +71,62 @@ Operate only in a trusted database namespace and process. Private snapshot safet
 
 Database changes roll back together if apply fails; an already-created backup/reservation remains. To undo a successful local discard, stop all Engram processes and manually restore a verified backup with normal SQLite/WAL recovery precautions. Restoring local data cannot retract a delete already sent remotely. Re-run diagnosis after apply: other unrelated invalid mutations may remain.
 
+## Optional caller-binding diagnostic
+
+`POST /doctor/caller-binding` is read-only despite using POST: caller identities
+belong in the JSON body, never the URL. Existing project-only HTTP, CLI and MCP
+reports are unchanged. Project health and caller-binding assessment are separate;
+a healthy project does not establish a usable runtime binding.
+
+```json
+{
+  "project": "example",
+  "runtime_session_id": "runtime-root",
+  "effective_session_id": "runtime-root:resume:2",
+  "host_context": {"append_entry_available": true, "branch_available": true}
+}
+```
+
+All fields are optional; missing caller evidence reports `unknown`, not readiness.
+Host capability fields accept booleans or null. Unknown fields, malformed types,
+non-object bodies, trailing JSON and bodies exceeding 16 KiB return a sanitized
+400 error. Pi supplies actual execution-context/API facts, not model parameters.
+Go reads persisted root and effective session rows and evaluates project ownership
+and canonical continuation mapping (`root:resume:N`, N >= 2).
+
+The successful response is a direct assessment, not the project-report envelope:
+
+```json
+{
+  "status": "ok",
+  "root_state": "ended",
+  "effective_state": "active",
+  "reason_code": "binding_observed",
+  "safe_next_step": "No action required; a later write is not guaranteed.",
+  "write_success_guaranteed": false
+}
+```
+
+States are `active`, `ended`, `missing` or `unknown`; status is `ok`, `warning`,
+`blocked` or `unknown`. Missing identities/project, unregistered root, missing
+effective row and missing host capabilities have distinct unknown reasons.
+Project conflicts and invalid mappings block. A live valid effective continuation
+is not blocked merely because its root ended or host persistence is unavailable.
+An ended effective session blocks when either host API is known unavailable;
+when both are available it warns `resume_required`, without selecting or creating
+a continuation. Missing capability evidence remains unknown.
+
+Diagnosis performs no writes, lease renewal, registration, session ending or
+repair. Safe-resume guidance reflects Go continuation support, not a caller's
+claimed `safe_resume` flag. A passing assessment never promises a later write.
+Unavailable lookup reports `caller_binding_unavailable`; an adapter encountering
+an unsupported endpoint or transport error must return a sanitized unknown
+fallback. The optional Pi `caller_binding` section is separate from the unchanged
+project result. Only this new section is privacy-safe for sharing: it contains no
+identities, projects, paths, request bodies or raw errors. The original project
+report is not asserted privacy-safe. This diagnostic neither resolves #1622 or
+#1635 nor weakens session guards.
+
 ## MCP
 
 Agents can call `mem_doctor` with the same contract as `engram doctor --json`:

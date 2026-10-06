@@ -150,6 +150,30 @@ sufficient. The plugin never invents a continuation ID or adopts a failed
 registration. Read-only memory tools do not require resume support. Cross-project
 satellite saves still require `isolated_session_registration: true` separately.
 
+## Read-only caller-binding diagnostic
+
+Pi-native `mem_doctor` preserves the existing project/check request to `GET /doctor`
+and adds a separate `caller_binding` assessment from `POST /doctor/caller-binding`.
+Pi supplies observed runtime identity, a read-only effective mapping, and host API
+availability; Go evaluates persisted session state. Model parameters cannot supply
+these caller facts. A foreign project target does not inherit an unvalidated
+mapping or create a satellite.
+
+Project checks and caller binding are displayed separately. Healthy project checks
+can coexist with a blocked or unknown caller. An ended root is not itself a blocker:
+a live continuation may remain valid, or the normal registration path may support
+safe resume. Missing or throwing host APIs provide missing evidence, not readiness.
+An unsupported, failed, or malformed caller endpoint yields `unknown` with safe
+support-verification guidance while retaining the project report.
+
+Diagnosis never registers, renews leases, creates continuations, ends sessions,
+appends mapping entries, or repairs bindings. Even `ok` does not guarantee a later
+write. Only the six allowlisted fields in `caller_binding` are intended as shareable
+evidence: no identities, projects, paths, raw responses, or errors are included.
+The original project report is **not** asserted privacy-safe. CLI, HTTP project-only,
+and MCP doctor behavior are unchanged. This diagnostic relates to #1622 and #1635;
+it does not resolve either incident or weaken session guards.
+
 ## Opt-in Pi session registration trace
 
 For an affected quit/resume cycle, set `ENGRAM_PI_SESSION_TRACE=1` before launching

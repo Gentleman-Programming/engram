@@ -505,6 +505,7 @@ func (s *Server) routes() {
 	// `engram projects list`, all backed by the same ListProjectsWithStats store query.
 	s.mux.HandleFunc("GET /projects", s.handleListProjects)
 	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
+	s.mux.HandleFunc("POST /doctor/caller-binding", s.handleCallerBinding)
 
 	// Project detection / ownership rescue
 	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
