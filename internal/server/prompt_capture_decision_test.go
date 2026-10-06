@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -139,6 +142,78 @@ func TestPromptCaptureDecision(t *testing.T) {
 	}
 	if len(prompts) != 1 || prompts[0].Content != strings.TrimSpace(original) {
 		t.Fatalf("prompts = %+v", prompts)
+	}
+}
+
+// TestPromptCaptureDecisionInspectsUnboundGit verifies decisions never establish Git bindings.
+func TestPromptCaptureDecisionInspectsUnboundGit(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "")
+	root := t.TempDir()
+	if output, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	stats := func() string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/stats?all_projects=true", nil))
+		if rec.Code != 200 {
+			t.Fatalf("stats: %d %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+	snapshot := func() map[string]string {
+		t.Helper()
+		files := map[string]string{}
+		err := filepath.WalkDir(filepath.Join(root, ".git"), func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !entry.IsDir() {
+				content, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				files[path] = string(content)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	beforeStats, beforeGit := stats(), snapshot()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/prompts/capture-decision", strings.NewReader(`{"source":"claude-code","cwd":`+quoteCapture(root)+`,"content":"human"}`)))
+	if !reflect.DeepEqual(beforeGit, snapshot()) {
+		t.Error("decision created or modified Git metadata")
+	}
+	if beforeStats != stats() {
+		t.Error("decision changed public database stats")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || body["decision"] != "capture" || body["project_source"] != "unbound_git" {
+		t.Fatalf("inspection response = %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := st.CreateSession("historical", "different-project", root); err != nil {
+		t.Fatal(err)
+	}
+	beforeStats = stats()
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/prompts/capture-decision", strings.NewReader(`{"source":"claude-code","cwd":`+quoteCapture(root)+`,"content":"human"}`)))
+	if rec.Code != 409 || strings.Contains(rec.Body.String(), `"decision":"capture"`) {
+		t.Fatalf("conflicting history = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !reflect.DeepEqual(beforeGit, snapshot()) {
+		t.Error("conflicting decision changed Git metadata")
+	}
+	if beforeStats != stats() {
+		t.Error("conflicting decision changed public database stats")
 	}
 }
 

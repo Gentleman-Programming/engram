@@ -36,7 +36,7 @@ func (s *Server) handlePromptCaptureDecision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	cwd := strings.TrimSpace(*body.Cwd)
-	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{Mode: projectpkg.ResolutionCurrent, Directory: cwd, Detect: s.store.DetectProject})
+	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{Mode: projectpkg.ResolutionCurrent, Directory: cwd, Detect: s.store.InspectProject})
 	if err != nil {
 		s.writeProjectResolutionError(w, res, err)
 		return
