@@ -20,7 +20,12 @@ func TestDoctorDirectoryBackfillCaseVariant(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
+			db.SetMaxOpenConns(1)
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Errorf("close doctor backfill database: %v", err)
+				}
+			})
 			// Legacy spellings cannot be created through current session creation.
 			for _, id := range []string{"case-a", "case-b"} {
 				if _, err := db.Exec(`INSERT INTO sessions(id,project,ownership_mode,directory) VALUES (?, 'Mixed_Case_Project', 'shared', '/work/case')`, id); err != nil {
@@ -46,8 +51,15 @@ func TestDoctorDirectoryBackfillCaseVariant(t *testing.T) {
 				return result
 			}
 			before := counts()
+			// Compare snapshots across opposite scan orders to detect unordered aggregation.
+			if _, err := db.Exec(`PRAGMA reverse_unordered_selects = ON`); err != nil {
+				t.Fatal(err)
+			}
 			var original string
-			if err := db.QueryRow(`SELECT group_concat(payload, '|') FROM sync_mutations`).Scan(&original); err != nil {
+			if err := db.QueryRow(`SELECT group_concat(payload, '|') FROM (SELECT payload FROM sync_mutations ORDER BY seq)`).Scan(&original); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA reverse_unordered_selects = OFF`); err != nil {
 				t.Fatal(err)
 			}
 			for step, mode := range []string{"--dry-run", "--apply", "--apply"} {
@@ -87,7 +99,7 @@ func TestDoctorDirectoryBackfillCaseVariant(t *testing.T) {
 				}
 				if mode == "--dry-run" {
 					var after string
-					if err := db.QueryRow(`SELECT group_concat(payload, '|') FROM sync_mutations`).Scan(&after); err != nil {
+					if err := db.QueryRow(`SELECT group_concat(payload, '|') FROM (SELECT payload FROM sync_mutations ORDER BY seq)`).Scan(&after); err != nil {
 						t.Fatal(err)
 					}
 					if after != original || repaired != 0 || report["applied"] != false {
