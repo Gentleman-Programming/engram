@@ -14,6 +14,8 @@ import (
 	"testing"
 )
 
+// TestClaudeCodeWindowsPromptResolverRejectsMalformedCanonicalProject ensures
+// invalid Go decision metadata cannot authorize PowerShell prompt persistence.
 func TestClaudeCodeWindowsPromptResolverRejectsMalformedCanonicalProject(t *testing.T) {
 	powershellPath := claudeCodePowerShell(t)
 	adapterPath := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.ps1")
@@ -80,6 +82,8 @@ func TestClaudeCodeWindowsPromptResolverRejectsMalformedCanonicalProject(t *test
 	}
 }
 
+// TestClaudeCodeWindowsPromptResolverPersistsCanonicalProject verifies exactly
+// one unchanged human prompt is persisted under the server's canonical project.
 func TestClaudeCodeWindowsPromptResolverPersistsCanonicalProject(t *testing.T) {
 	powershellPath := claudeCodePowerShell(t)
 	adapterPath := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.ps1")

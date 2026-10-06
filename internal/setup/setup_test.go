@@ -3633,6 +3633,8 @@ func TestClaudeCodeUserPromptHookUsesCollisionResistantWindowsSafeSessionKey(t *
 	}
 }
 
+// TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge verifies
+// server-owned capture decisions without changing bootstrap or reminder state.
 func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs the Claude Code shell hook as a child process")
@@ -3650,18 +3652,29 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		err     error
 	}
 	projectCWDs := make(chan string, 16)
+	decisions := make(chan string, 8)
 	observationProjects := make(chan string, 16)
 	prompts := make(chan capturedPrompt, 8)
 	const cwd = "/workspace with space/mañana"
-	const project = "hook test/mañana"
+	const project = "hook test?mañana"
 	const expectedPrompt = "quote \" slash \\ newline\nbmp Ω pair 😃 esc \x1b"
 	input := `{"cwd":"/workspace with space/mañana","session_id":"session-677","prompt":"quote \" slash \\ newline\nbmp \u03a9 pair \uD83D\uDE03 esc \u001b"}`
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/prompts/capture-decision":
+			var request struct{ Source, Cwd, Content string }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode capture decision: %v", err)
+			}
+			if r.Method != http.MethodPost || request.Source != "claude-code" || request.Content != expectedPrompt {
+				t.Errorf("invalid capture decision request: %s %+v", r.Method, request)
+			}
+			decisions <- request.Cwd
+			_ = json.NewEncoder(w).Encode(map[string]string{"decision": "capture", "project": project, "project_source": "config"})
 		case "/project/current":
 			projectCWDs <- r.URL.Query().Get("cwd")
-			_, _ = w.Write([]byte(`{"project":"hook test/mañana","project_source":"config"}`))
+			_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
 		case "/sessions/session-677":
 			_, _ = w.Write([]byte(`{"started_at":"2000-01-01T00:00:00Z"}`))
 		case "/observations":
@@ -3766,7 +3779,17 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			t.Fatal("timed out waiting for prompt POST")
 		}
 	}
-	for range 5 {
+	for range 3 {
+		select {
+		case got := <-decisions:
+			if got != cwd {
+				t.Fatalf("capture-decision cwd = %q, want %q", got, cwd)
+			}
+		case <-time.After(hookRequestWaitTimeout):
+			t.Fatal("timed out waiting for capture decision request")
+		}
+	}
+	for range 2 {
 		select {
 		case got := <-projectCWDs:
 			if got != cwd {
