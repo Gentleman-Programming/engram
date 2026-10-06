@@ -241,7 +241,7 @@ This is an intentional compatibility break for clients omitting `expected_projec
 
 > **Prerequisite**: Install the `engram` binary first (via [Homebrew](INSTALLATION.md#homebrew-macos--linux), [Windows binary](INSTALLATION.md#windows), [binary download](INSTALLATION.md#download-binary-all-platforms), or [source](INSTALLATION.md#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking.
 
-**Recommended: Full setup with one command** — installs the plugin AND registers the MCP server in `opencode.json` automatically:
+**Recommended: Full setup with one command** — installs the plugin AND registers the MCP server in your global `opencode.json` or `opencode.jsonc` automatically:
 
 ```bash
 engram setup opencode
@@ -250,8 +250,12 @@ engram setup opencode
 This does three things:
 
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
-2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (19 agent-facing tools)
+2. Adds the `engram` MCP server entry to your global OpenCode configuration with `--tools=agent` (19 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
+
+MCP registration edits only the missing `mcp.engram` member, preserving all existing configuration bytes, including comments, trailing commas, formatting, and key order. An existing `mcp.engram` entry is left untouched. Setup uses `opencode.jsonc` when it exists, otherwise `opencode.json`; OpenCode loads both global files and merges `.jsonc` last. The directory is `$XDG_CONFIG_HOME/opencode` when set, otherwise `~/.config/opencode` on all platforms. Project and environment overrides may take precedence over this global entry.
+
+Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
 
 ### Verify each layer after setup
 
@@ -268,7 +272,7 @@ The plugin auto-starts the HTTP server if needed for session tracking. If your e
 engram serve &
 ```
 
-> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
+> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and the global `opencode.json(c)` selected as described above. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
 
 **Alternative: Manual MCP-only setup** (no plugin, all 23 tools by default):
 

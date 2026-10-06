@@ -1445,7 +1445,11 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 		{"TUI", "tui.jsonc", "plugin", `{"plugin":["existing","opencode-subagent-statusline"]}`, injectOpenCodeTUIPlugin},
 	} {
 		t.Run(agent.name, func(t *testing.T) {
-			for _, scenario := range []string{"noop", "precision", "read", "parse", "section", "entry", "block", "marshal", "write", "root null", "section null"} {
+			scenarios := []string{"noop", "precision", "read", "parse", "section", "entry", "write", "root null", "section null"}
+			if agent.name == "TUI" {
+				scenarios = append(scenarios, "block", "marshal")
+			}
+			for _, scenario := range scenarios {
 				t.Run(scenario, func(t *testing.T) {
 					if agent.name == "TUI" && scenario == "entry" {
 						t.Skip("TUI has no entry serialization")
@@ -1524,11 +1528,19 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 						defer func() { panicked = recover() != nil }()
 						err = agent.inject()
 					}()
-					wantPanic := scenario == "root null" || scenario == "section null" && agent.name == "MCP"
+					wantPanic := scenario == "root null" && agent.name == "TUI"
 					if panicked != wantPanic {
 						t.Fatalf("panic = %v, want %v", panicked, wantPanic)
 					}
 					switch scenario {
+					case "root null":
+						if agent.name == "MCP" {
+							prefix = "parse config: "
+						}
+					case "section null":
+						if agent.name == "MCP" {
+							prefix = "parse mcp block: "
+						}
 					case "read", "parse", "marshal", "write":
 						prefix = scenario + " config: "
 					case "section":
@@ -1550,9 +1562,11 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 							}
 						case "section":
 							var typed *json.UnmarshalTypeError
-							if !errors.As(err, &typed) {
+							if agent.name == "TUI" && !errors.As(err, &typed) {
 								t.Fatalf("type cause lost: %v", err)
 							}
+						case "root null", "section null":
+							// MCP rejects non-object documents before serialization.
 						default:
 							var typed *os.PathError
 							if !errors.Is(err, cause) || !errors.Is(err, os.ErrPermission) || !errors.As(err, &typed) || typed != cause {
@@ -1578,7 +1592,7 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 					}
 					if scenario == "precision" {
 						var config map[string]json.RawMessage
-						if err := json.Unmarshal(data, &config); err != nil {
+						if err := json.Unmarshal(stripJSONC(data), &config); err != nil {
 							t.Fatal(err)
 						}
 						if string(config["opaque"]) != "9007199254740993" || writes != 1 {
@@ -1819,42 +1833,29 @@ func TestInjectOpenCodeMCPConfigErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("marshal mcp block error", func(t *testing.T) {
+	t.Run("only entry is serialized", func(t *testing.T) {
 		resetSetupSeams(t)
-		home := useTestHome(t)
-		runtimeGOOS = "linux"
-		xdg := filepath.Join(home, "xdg")
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-
+		useIsolatedProfile(t)
+		configPath := openCodeConfigPath()
+		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+			t.Fatal(err)
+		}
 		calls := 0
 		jsonMarshalFn = func(v any) ([]byte, error) {
 			calls++
-			if calls == 2 {
-				return nil, errors.New("marshal mcp boom")
+			if calls > 1 {
+				return nil, errors.New("must not serialize existing settings")
 			}
 			return json.Marshal(v)
 		}
-
-		err := injectOpenCodeMCP()
-		if err == nil || !strings.Contains(err.Error(), "marshal mcp block") {
-			t.Fatalf("expected marshal mcp block error, got %v", err)
-		}
-	})
-
-	t.Run("marshal config error", func(t *testing.T) {
-		resetSetupSeams(t)
-		home := useTestHome(t)
-		runtimeGOOS = "linux"
-		xdg := filepath.Join(home, "xdg")
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-
 		jsonMarshalIndentFn = func(any, string, string) ([]byte, error) {
-			return nil, errors.New("marshal config boom")
+			return nil, errors.New("must not reformat config")
 		}
-
-		err := injectOpenCodeMCP()
-		if err == nil || !strings.Contains(err.Error(), "marshal config") {
-			t.Fatalf("expected marshal config error, got %v", err)
+		if err := injectOpenCodeMCP(); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 {
+			t.Fatalf("entry marshals = %d, want 1", calls)
 		}
 	})
 }
@@ -4893,8 +4894,8 @@ func TestInjectOpenCodeMCPHandlesJSONC(t *testing.T) {
 		t.Fatalf("read result: %v", err)
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("result should be valid JSON: %v", err)
+	if err := json.Unmarshal(stripJSONC(raw), &cfg); err != nil {
+		t.Fatalf("result should be valid JSONC: %v", err)
 	}
 	mcp, ok := cfg["mcp"].(map[string]any)
 	if !ok {
