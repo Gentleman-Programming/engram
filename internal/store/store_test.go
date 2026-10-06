@@ -684,6 +684,90 @@ func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *test
 	}
 }
 
+func TestRescuedManualSessionRejectsForeignRegistrationWithoutMutation(t *testing.T) {
+	for _, sessionID := range []string{"manual-save-athlos", "manual-save-Athlos"} {
+		t.Run(sessionID, func(t *testing.T) {
+			s := newTestStore(t)
+			enrollTestProject(t, s, "athlos")
+			enrollTestProject(t, s, "other")
+			if err := s.CreateSession(sessionID, "Athlos", "/original"); err != nil {
+				t.Fatal(err)
+			}
+			// NULL reproduces the pre-ownership state; all behavior below uses
+			// the public store interface rather than inspecting SQL storage.
+			if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = NULL WHERE id = ?`, sessionID); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "athlos", SessionIDs: []string{sessionID}})
+			if err != nil || result.RescuedSessions != 1 || !result.Complete || !result.Journaled {
+				t.Fatalf("rescue = %#v, err=%v", result, err)
+			}
+			before, err := s.GetSession(sessionID)
+			if err != nil || before.Project != "athlos" || before.OwnershipMode != SessionOwnershipProjectOwned {
+				t.Fatalf("rescued session = %#v, err=%v", before, err)
+			}
+			mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+			if err != nil || len(mutationsBefore) != 1 {
+				t.Fatalf("rescued mutations = %#v, err=%v", mutationsBefore, err)
+			}
+			for _, mode := range []string{SessionOwnershipShared, SessionOwnershipProjectOwned} {
+				err := s.CreateSessionWithOwnershipMode(sessionID, "other", "/foreign", mode)
+				if !errors.Is(err, ErrSessionOwnershipMismatch) {
+					t.Fatalf("foreign %s registration = %v, want ownership mismatch", mode, err)
+				}
+				if mode == SessionOwnershipProjectOwned {
+					var conflict *SessionProjectConflictError
+					if !errors.As(err, &conflict) || conflict.SessionID != sessionID || conflict.OwnerProject != "athlos" || conflict.RequestedProject != "other" {
+						t.Fatalf("foreign strict registration = %v, want structured athlos ownership conflict", err)
+					}
+				} else {
+					want := fmt.Sprintf("%s: session %q belongs to %q, not %q", ErrSessionOwnershipMismatch, sessionID, "athlos", "other")
+					if err.Error() != want {
+						t.Fatalf("foreign shared registration error = %q, want %q", err, want)
+					}
+				}
+				after, err := s.GetSession(sessionID)
+				if err != nil || !reflect.DeepEqual(after, before) {
+					t.Fatalf("foreign %s registration changed session: before=%#v after=%#v err=%v", mode, before, after, err)
+				}
+				mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+				if err != nil || !reflect.DeepEqual(mutationsAfter, mutationsBefore) {
+					t.Fatalf("foreign %s registration changed journal: before=%#v after=%#v err=%v", mode, mutationsBefore, mutationsAfter, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRescuePreservesAlreadySharedManualSession(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "athlos")
+	const sessionID = "manual-save-Athlos"
+	if err := s.CreateSession(sessionID, "athlos", "/original"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetSession(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "athlos", SessionIDs: []string{sessionID}})
+	if err != nil || result.RescuedSessions != 0 || result.SkippedRecords != 1 {
+		t.Fatalf("already-shared rescue = %#v, err=%v, want one skipped session", result, err)
+	}
+	after, err := s.GetSession(sessionID)
+	if err != nil || after.OwnershipMode != SessionOwnershipShared || !reflect.DeepEqual(after, before) {
+		t.Fatalf("already-shared rescue changed session: before=%#v after=%#v err=%v", before, after, err)
+	}
+	mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+	if err != nil || !reflect.DeepEqual(mutationsAfter, mutationsBefore) {
+		t.Fatalf("already-shared rescue changed journal: before=%#v after=%#v err=%v", mutationsBefore, mutationsAfter, err)
+	}
+}
+
 type rescueRowsAffectedResult struct {
 	affected int64
 	err      error

@@ -123,6 +123,30 @@ The CLI `--json` and MCP tool return:
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
 
+### Manual-save ownership normalization and previously rescued sessions
+
+For ownership classification, the `manual-save-` prefix is literal, but the
+suffix and target project are normalized before comparison. For example,
+`manual-save-Athlos` and project `athlos` match during legacy backfill, ownership
+rescue, and project reclassification. An unrelated suffix does not establish
+ownership. HTTP and runtime registrations still default to `shared`.
+
+Legacy backfill only classifies sessions with a NULL ownership mode. Ownership
+rescue only stamps a missing mode; it does not promote an existing `shared`
+session. Consequently, a session incorrectly stamped `shared` by an older
+rescue remains `shared` after upgrading or repeating the rescue, even if its
+manual-save suffix matches its project. A clean doctor report does not prove
+that such a session is project-owned.
+
+If you already ran the older rescue, retain its backup and review the affected
+session IDs, persisted projects, and ownership modes with a maintainer. There is
+no general supported command to promote these already-shared sessions in place;
+a targeted recovery requires a separately reviewed procedure. Do not clear
+ownership modes or promote all manual-looking sessions with bulk SQL: valid
+shared sessions can use those names too. Do not restore an older backup over a
+live store or discard records written since that backup without reviewing the
+rollback consequences.
+
 ### Network filesystem startup rejection
 
 Persistent SQLite WAL is unsafe on known NFS and SMB/CIFS data directories. When startup rejects one, stop **all** Engram processes; copy the complete `engram.db`, `engram.db-wal`, and `engram.db-shm` triplet to local storage; set `ENGRAM_DATA_DIR` to the absolute path of that local directory (relative paths are rejected); start Engram; then run `engram doctor`. Run the integrity check for your shell:
