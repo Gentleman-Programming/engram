@@ -72,6 +72,15 @@ persistence or decide which session an omitted ID should select.
 | Codex | Genuine startup/resume/clear registers with `resume: true`. Go validates HTTP 201, `status: "created"`, and an exact root ID or numeric continuation with matching `resumed_from`. | PreToolUse, prompt capture and post-compaction resolve the existing effective identity through `/runtime-sessions/resolve`, without registration. Failed confirmation blocks attributed writes and withholds the active protocol. Host closing uses `/runtime-sessions/end`; model `mem_session_end` is rewritten to the resolved effective ID for unchanged exact-ID MCP ending. No private identity map or raw-ID fallback is used. |
 | OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. The core selects a live continuation when the root has ended. | Before session-attributed tool writes it registers the root with `resume: true`, rechecks host ownership, and injects the acknowledged effective `id` as `session_id`. Injection requires an HTTP-success response with `status: "created"` and an `id` equal to the root or prefixed by `<root>:resume:`; missing or foreign acknowledgements block injection. |
 
+Claude and Codex PreToolUse confirmation share a four-second total HTTP budget
+for project resolution and session registration. A timeout denies the call with
+`Claude host session confirmation timed out (server slow or unavailable)` or
+`Codex host session confirmation timed out (server slow or unavailable)`.
+Other confirmation failures retain the existing registration-denial message.
+The hook still requires registration on every gated call, including strict
+response validation and the adapter's existing ownership mode; it does not cache
+registration or retry. Codex prompt capture uses its separate, unchanged budget.
+
 Parent/root translation is specific to OpenCode's session hierarchy, not a
 universal adapter rule. Hook-level binding cannot protect calls when a hook is
 skipped, bypassed, or timed out; independent direct/manual MCP saves remain

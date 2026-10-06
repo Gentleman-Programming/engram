@@ -30,6 +30,8 @@ Check three things:
 | `doctor` | `ready` or actionable repair | Local metadata is safe to upload |
 | `last_acked_seq` | Advances after sync | Cloud accepted the pending journal |
 
+`engram cloud upgrade doctor --project <project>` checks policy failures recorded locally for that project only. A denial recorded for another project in the shared `cloud` sync target does not block the selected project. Doctor does not probe server authorization; it persists its diagnosis as `doctor_ready` or `doctor_blocked`. Use `engram sync --cloud --project <project>` to check the current server response.
+
 If the dashboard shows `0` observations but local saves exist, the cloud server has not accepted the client's pending sync yet. Do not delete local data.
 
 ---
@@ -137,6 +139,8 @@ write chunk: cloud: push chunk ...: status 400: invalid push payload: observatio
 ```
 
 It means a historical `session` mutation in `sync_mutations` is missing `directory`, a local `sessions` row included in the project export still has an empty/null `directory`, a local `observations` row included in the project export is missing a cloud-push required field, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows, local session rows, or exported local observation rows may still need repair before first cloud upload.
+
+Isolated cross-project sessions are an exception: `ownership_mode: "project_owned"` with an omitted or blank string directory is valid and replicates without a repair. If an older client or cloud server rejects that payload, update both sides to a version supporting isolated cloud sessions. Do not use the directory rescue helper on these sessions: assigning a directory breaks their isolation contract. JSON null and non-string directory values are still invalid.
 
 ### Safe path: helper script
 

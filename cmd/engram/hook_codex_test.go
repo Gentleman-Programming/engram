@@ -214,6 +214,18 @@ func TestCodexResumeLifecycleUsesConfirmedBinding(t *testing.T) {
 	}
 }
 
+func TestCodexGuardTimeoutDenial(t *testing.T) {
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+	output := guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`))
+	if !strings.Contains(string(output), "Codex host session confirmation timed out (server slow or unavailable)") || !strings.Contains(string(output), `"permissionDecision":"deny"`) {
+		t.Fatalf("timeout denial = %s", output)
+	}
+}
+
 func TestCodexResumeAcknowledgmentRejectsUnrelatedIdentity(t *testing.T) {
 	for _, raw := range []string{
 		`{"id":"other","status":"created","resumed_from":"host"}`,

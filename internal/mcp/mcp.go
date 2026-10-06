@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -42,6 +43,10 @@ const (
 
 // MCPConfig holds configuration for the MCP server.
 type MCPConfig struct {
+	// Version is the binary version reported during the MCP handshake.
+	// An empty value defaults to "dev" for callers without build metadata.
+	Version string
+
 	// DefaultProject is a trusted process-level project override supplied by
 	// long-lived MCP hosts (for example, `engram mcp --project NAME` or
 	// ENGRAM_PROJECT). When set, it is used before cwd detection for MCP
@@ -408,9 +413,13 @@ func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]boo
 }
 
 func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
+	version := cfg.Version
+	if version == "" {
+		version = "dev"
+	}
 	srv := server.NewMCPServer(
 		"engram",
-		"0.1.0",
+		version,
 		server.WithToolCapabilities(true),
 		server.WithInstructions(buildServerInstructions(allowlist)),
 	)
@@ -812,6 +821,12 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
+				),
+				mcp.WithBoolean("include_history",
+					mcp.Description("When true, render the observation's bounded version history: the 50 most recent prior title/content snapshots, oldest first, with version_count set to the total stored count in the envelope. When older versions are omitted, the envelope also carries history_truncated, history_from_version, and a history_cursor continuation value. Omit for the historical default output."),
+				),
+				mcp.WithNumber("history_cursor",
+					mcp.Description("Optional non-negative integer cursor returned as history_cursor by a previous truncated include_history response; submit it in a follow-up call to fetch the older page. Omit for the most recent page."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional project for response context, validated against known projects. Omit to use the process override or cwd detection. ID-based lookup is not filtered by project ownership."),
@@ -2310,10 +2325,72 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
 
+		extra := map[string]any{}
+		if boolArg(req, "include_history", false) {
+			// Bounded paginated history (#1286): a single page of the most recent
+			// versions (or the page continuing before an emitted history_cursor),
+			// a truthful total, and a continuation cursor only when an older page
+			// still exists.
+			cursor, err := historyCursorArg(req)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			page, err := s.GetObservationVersionPage(id, store.DefaultObservationVersionPageSize, cursor)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to read observation history: %v", err)), nil
+			}
+			versions := page.Versions
+			extra["version_count"] = page.Total
+			history := make([]map[string]any, 0, len(versions))
+			if len(versions) > 0 {
+				var b strings.Builder
+				if page.HasMore {
+					b.WriteString("\n\nHistory (")
+					b.WriteString(strconv.Itoa(len(versions)))
+					b.WriteString(" of ")
+					b.WriteString(strconv.Itoa(page.Total))
+					b.WriteString(" previous versions — older versions omitted):")
+				} else {
+					b.WriteString("\n\nHistory (")
+					b.WriteString(strconv.Itoa(len(versions)))
+					b.WriteString(" previous version")
+					if len(versions) != 1 {
+						b.WriteString("s")
+					}
+					b.WriteString("):")
+				}
+				for _, v := range versions {
+					fmt.Fprintf(&b, "\n\n--- Version %d (%s) ---\n%s\n%s",
+						v.Version,
+						timeutil.FormatLocal(v.CreatedAt),
+						v.Title,
+						v.Content,
+					)
+					history = append(history, map[string]any{
+						"version":    v.Version,
+						"title":      v.Title,
+						"content":    v.Content,
+						"created_at": v.CreatedAt,
+					})
+				}
+				result += b.String()
+			}
+			extra["history"] = history
+			if page.HasMore {
+				// versions is ascending (oldest first): the oldest shown version
+				// is the first entry, and the next page continues strictly before
+				// it via the same value the store exposes as NextCursor.
+				oldest := versions[0].Version
+				extra["history_truncated"] = true
+				extra["history_from_version"] = oldest
+				extra["history_cursor"] = page.NextCursor
+			}
+		}
+
 		if detErr != nil {
 			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
-		return respondWithProject(detRes, result, nil), nil
+		return respondWithProject(detRes, result, extra), nil
 	}
 }
 
@@ -3624,6 +3701,22 @@ func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return int(v)
+}
+
+// historyCursorArg reads the optional history_cursor argument as a
+// non-negative integer, defaulting to 0 (the most recent page) when omitted.
+// Invalid values return an error that the handler surfaces as a tool error, so
+// a malformed cursor can never be silently misread.
+func historyCursorArg(req mcp.CallToolRequest) (int64, error) {
+	raw, ok := req.GetArguments()["history_cursor"]
+	if !ok {
+		return 0, nil
+	}
+	f, ok := raw.(float64)
+	if !ok || f < 0 || math.Trunc(f) != f || f >= 0x1p63 {
+		return 0, fmt.Errorf("history_cursor must be a non-negative integer")
+	}
+	return int64(f), nil
 }
 
 func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {

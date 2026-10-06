@@ -1445,7 +1445,11 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 		{"TUI", "tui.jsonc", "plugin", `{"plugin":["existing","opencode-subagent-statusline"]}`, injectOpenCodeTUIPlugin},
 	} {
 		t.Run(agent.name, func(t *testing.T) {
-			for _, scenario := range []string{"noop", "precision", "read", "parse", "section", "entry", "block", "marshal", "write", "root null", "section null"} {
+			scenarios := []string{"noop", "precision", "read", "parse", "section", "entry", "write", "root null", "section null"}
+			if agent.name == "TUI" {
+				scenarios = append(scenarios, "block", "marshal")
+			}
+			for _, scenario := range scenarios {
 				t.Run(scenario, func(t *testing.T) {
 					if agent.name == "TUI" && scenario == "entry" {
 						t.Skip("TUI has no entry serialization")
@@ -1524,11 +1528,19 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 						defer func() { panicked = recover() != nil }()
 						err = agent.inject()
 					}()
-					wantPanic := scenario == "root null" || scenario == "section null" && agent.name == "MCP"
+					wantPanic := scenario == "root null" && agent.name == "TUI"
 					if panicked != wantPanic {
 						t.Fatalf("panic = %v, want %v", panicked, wantPanic)
 					}
 					switch scenario {
+					case "root null":
+						if agent.name == "MCP" {
+							prefix = "parse config: "
+						}
+					case "section null":
+						if agent.name == "MCP" {
+							prefix = "parse mcp block: "
+						}
 					case "read", "parse", "marshal", "write":
 						prefix = scenario + " config: "
 					case "section":
@@ -1550,9 +1562,11 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 							}
 						case "section":
 							var typed *json.UnmarshalTypeError
-							if !errors.As(err, &typed) {
+							if agent.name == "TUI" && !errors.As(err, &typed) {
 								t.Fatalf("type cause lost: %v", err)
 							}
+						case "root null", "section null":
+							// MCP rejects non-object documents before serialization.
 						default:
 							var typed *os.PathError
 							if !errors.Is(err, cause) || !errors.Is(err, os.ErrPermission) || !errors.As(err, &typed) || typed != cause {
@@ -1578,7 +1592,7 @@ func TestOpenCodeJSONCCharacterization(t *testing.T) {
 					}
 					if scenario == "precision" {
 						var config map[string]json.RawMessage
-						if err := json.Unmarshal(data, &config); err != nil {
+						if err := json.Unmarshal(stripJSONC(data), &config); err != nil {
 							t.Fatal(err)
 						}
 						if string(config["opaque"]) != "9007199254740993" || writes != 1 {
@@ -1819,42 +1833,29 @@ func TestInjectOpenCodeMCPConfigErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("marshal mcp block error", func(t *testing.T) {
+	t.Run("only entry is serialized", func(t *testing.T) {
 		resetSetupSeams(t)
-		home := useTestHome(t)
-		runtimeGOOS = "linux"
-		xdg := filepath.Join(home, "xdg")
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-
+		useIsolatedProfile(t)
+		configPath := openCodeConfigPath()
+		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+			t.Fatal(err)
+		}
 		calls := 0
 		jsonMarshalFn = func(v any) ([]byte, error) {
 			calls++
-			if calls == 2 {
-				return nil, errors.New("marshal mcp boom")
+			if calls > 1 {
+				return nil, errors.New("must not serialize existing settings")
 			}
 			return json.Marshal(v)
 		}
-
-		err := injectOpenCodeMCP()
-		if err == nil || !strings.Contains(err.Error(), "marshal mcp block") {
-			t.Fatalf("expected marshal mcp block error, got %v", err)
-		}
-	})
-
-	t.Run("marshal config error", func(t *testing.T) {
-		resetSetupSeams(t)
-		home := useTestHome(t)
-		runtimeGOOS = "linux"
-		xdg := filepath.Join(home, "xdg")
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-
 		jsonMarshalIndentFn = func(any, string, string) ([]byte, error) {
-			return nil, errors.New("marshal config boom")
+			return nil, errors.New("must not reformat config")
 		}
-
-		err := injectOpenCodeMCP()
-		if err == nil || !strings.Contains(err.Error(), "marshal config") {
-			t.Fatalf("expected marshal config error, got %v", err)
+		if err := injectOpenCodeMCP(); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 {
+			t.Fatalf("entry marshals = %d, want 1", calls)
 		}
 	})
 }
@@ -2003,24 +2004,63 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("install already is success", func(t *testing.T) {
-		resetSetupSeams(t)
-		useTestHome(t)
-		lookPathFn = func(string) (string, error) { return "claude", nil }
-		writeClaudeCodeUserMCPFn = func() error { return nil }
-		calls := 0
-		runCommand = func(string, ...string) ([]byte, error) {
-			calls++
-			if calls == 1 {
+	for _, installErr := range []error{nil, errors.New("exit 1")} {
+		t.Run(fmt.Sprintf("already installed updates exit=%v", installErr), func(t *testing.T) {
+			resetSetupSeams(t)
+			useTestHome(t)
+			lookPathFn = func(string) (string, error) { return "claude", nil }
+			mcpCalls := 0
+			writeClaudeCodeUserMCPFn = func() error { mcpCalls++; return nil }
+			var commands []string
+			runCommand = func(_ string, args ...string) ([]byte, error) {
+				commands = append(commands, strings.Join(args, " "))
+				if len(commands) == 2 {
+					return []byte("Plugin already installed"), installErr
+				}
 				return []byte("ok"), nil
 			}
-			return []byte("already installed"), errors.New("exit 1")
-		}
+			result, err := installClaudeCode()
+			if err != nil || result == nil || !result.MCPConfigured {
+				t.Fatalf("expected configured success, got %#v, %v", result, err)
+			}
+			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram --scope user"}
+			if !reflect.DeepEqual(commands, want) || mcpCalls != 1 {
+				t.Fatalf("commands=%v MCP calls=%d, want %v and 1", commands, mcpCalls, want)
+			}
+		})
+	}
 
-		if _, err := installClaudeCode(); err != nil {
-			t.Fatalf("expected already-installed branch to succeed, got %v", err)
-		}
-	})
+	for _, failAt := range []int{3, 4} {
+		t.Run(fmt.Sprintf("update failure command %d", failAt), func(t *testing.T) {
+			resetSetupSeams(t)
+			useTestHome(t)
+			lookPathFn = func(string) (string, error) { return "claude", nil }
+			writeClaudeCodeUserMCPFn = func() error { t.Fatal("MCP registration must not run after update failure"); return nil }
+			var commands []string
+			runCommand = func(_ string, args ...string) ([]byte, error) {
+				commands = append(commands, strings.Join(args, " "))
+				if len(commands) == 2 {
+					return []byte("already installed"), nil
+				}
+				if len(commands) == failAt {
+					return []byte("already cached: network failure"), errors.New("exit 1")
+				}
+				return []byte("ok"), nil
+			}
+			result, err := installClaudeCode()
+			wantError := "plugin update failed: already cached: network failure"
+			if failAt == 3 {
+				wantError = "marketplace update failed: already cached: network failure"
+			}
+			if result != nil || err == nil || err.Error() != wantError {
+				t.Fatalf("result=%#v error=%v, want nil and %q", result, err, wantError)
+			}
+			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram --scope user"}
+			if !reflect.DeepEqual(commands, want[:failAt]) {
+				t.Fatalf("commands=%v, want %v", commands, want[:failAt])
+			}
+		})
+	}
 
 	t.Run("user mcp write failure is non-fatal", func(t *testing.T) {
 		resetSetupSeams(t)
@@ -3594,6 +3634,8 @@ func TestClaudeCodeUserPromptHookUsesCollisionResistantWindowsSafeSessionKey(t *
 	}
 }
 
+// TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge verifies
+// server-owned capture decisions without changing bootstrap or reminder state.
 func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs the Claude Code shell hook as a child process")
@@ -3611,18 +3653,29 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		err     error
 	}
 	projectCWDs := make(chan string, 16)
+	decisions := make(chan string, 8)
 	observationProjects := make(chan string, 16)
 	prompts := make(chan capturedPrompt, 8)
 	const cwd = "/workspace with space/mañana"
-	const project = "hook test/mañana"
+	const project = "hook test?mañana"
 	const expectedPrompt = "quote \" slash \\ newline\nbmp Ω pair 😃 esc \x1b"
 	input := `{"cwd":"/workspace with space/mañana","session_id":"session-677","prompt":"quote \" slash \\ newline\nbmp \u03a9 pair \uD83D\uDE03 esc \u001b"}`
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/prompts/capture-decision":
+			var request struct{ Source, Cwd, Content string }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode capture decision: %v", err)
+			}
+			if r.Method != http.MethodPost || request.Source != "claude-code" || request.Content != expectedPrompt {
+				t.Errorf("invalid capture decision request: %s %+v", r.Method, request)
+			}
+			decisions <- request.Cwd
+			_ = json.NewEncoder(w).Encode(map[string]string{"decision": "capture", "project": project, "project_source": "config"})
 		case "/project/current":
 			projectCWDs <- r.URL.Query().Get("cwd")
-			_, _ = w.Write([]byte(`{"project":"hook test/mañana","project_source":"config"}`))
+			_ = json.NewEncoder(w).Encode(map[string]string{"project": project, "project_source": "config"})
 		case "/sessions/session-677":
 			_, _ = w.Write([]byte(`{"started_at":"2000-01-01T00:00:00Z"}`))
 		case "/observations":
@@ -3727,7 +3780,17 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			t.Fatal("timed out waiting for prompt POST")
 		}
 	}
-	for range 5 {
+	for range 3 {
+		select {
+		case got := <-decisions:
+			if got != cwd {
+				t.Fatalf("capture-decision cwd = %q, want %q", got, cwd)
+			}
+		case <-time.After(hookRequestWaitTimeout):
+			t.Fatal("timed out waiting for capture decision request")
+		}
+	}
+	for range 2 {
 		select {
 		case got := <-projectCWDs:
 			if got != cwd {
@@ -4854,8 +4917,8 @@ func TestInjectOpenCodeMCPHandlesJSONC(t *testing.T) {
 		t.Fatalf("read result: %v", err)
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("result should be valid JSON: %v", err)
+	if err := json.Unmarshal(stripJSONC(raw), &cfg); err != nil {
+		t.Fatalf("result should be valid JSONC: %v", err)
 	}
 	mcp, ok := cfg["mcp"].(map[string]any)
 	if !ok {

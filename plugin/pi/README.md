@@ -19,6 +19,55 @@ Pi is great at doing the work in front of it. The problem is everything around t
 
 Engram is persistent memory for AI coding agents. `gentle-engram` connects Pi to that memory so your agent can save the useful parts of a session and retrieve them later — without stuffing raw tool output back into the prompt.
 
+## Local bridge ownership protocol
+
+Native Engram exposes a session-scoped responder on the local `pi.events` bus after
+`session_start`. This is routing context, **not authentication**, and does not itself
+suppress any Claude hooks. Consumers must route to the bus for the exact Pi runtime
+session; ownership of a parent never establishes ownership of a nested session.
+
+- Request channel: `engram:bridge:claim:v1`
+- Request fields: `{ runtimeSessionId: string, nonce: string, operation: "session-register" | "prompt-capture", promptDigest?: string }`
+- Reply channel: `engram:bridge:decision:v1`
+- Reply fields: the exact three required request fields, the supplied `promptDigest`
+  when it is a string, and `status: "owned" | "unknown"`.
+
+Runtime IDs are opaque and compared without trimming. Nonces must be nonblank
+strings of at most 256 JavaScript string units; consumers generate a fresh nonce
+per query and correlate all three fields. Invalid requests and foreign IDs receive
+no reply. Since `emit` does not await listeners, subscribe before emitting and use
+a bounded consumer timeout (allow for the responder's 1000 ms decision budget).
+No reply is not proof that native Engram is absent.
+
+An eligible `session-register` claim can confirm registration using the existing
+native registration path before the provider spawns, joining a pending registration.
+Only its validated server acknowledgement permits `owned`; UI readiness never does.
+
+A `prompt-capture` claim **never registers or captures a prompt**. It requires
+`promptDigest`: exactly 64 lowercase hexadecimal characters encoding SHA-256 of
+UTF-8 bytes of the original prompt after JavaScript `.trim()`. Only a matching
+current native turn with a confirmed `/prompts` reply `{ id: <positive safe integer>,
+status: "saved" }` permits `owned`. Missing, invalid, or mismatched digests return
+`unknown`. The proof stores only the digest and routing identities, not plaintext,
+private content, or durable metadata. Every `before_agent_start` clears prior proof
+before initialization or early returns; lifecycle changes also invalidate it.
+Short prompts (trimmed length <=10) retain the existing native skip policy and
+therefore cannot establish prompt ownership. Failed or ambiguous delivery cannot
+reuse a previous turn's proof, even for repeated identical prompts.
+
+Digest matching identifies the original input, **not full-fidelity storage**:
+native persistence still redacts private tags before truncating to 2000 JavaScript
+string units plus an ellipsis when needed. Consumers must account for this policy
+when deciding which capture is duplicate; ownership does not assert that private
+or truncated content was stored. Failed, unresolved, stale, closing, or timed-out
+claims cannot return `owned`. Timeout does not cancel an existing registration or
+trigger a retry, and never emits a late positive decision. Unknown retains hooks.
+
+Listeners and pending reply delivery are removed on shutdown **and reload**;
+reload still skips persistence shutdown. Each new native session must establish
+its own registration. Cross-runtime bridge routing and hook suppression are
+consumer responsibilities, not a process-global readiness signal.
+
 ## At a glance
 
 | You want                    | Engram gives Pi                                  |
@@ -74,6 +123,87 @@ Engram does not try to make the model read everything. It gives the model a disc
 </p>
 
 Engram includes a terminal UI for browsing sessions, observations, prompts, projects, timelines, and search results. Engram Cloud adds browser visibility for shared project memory.
+
+## Core resume compatibility
+
+`gentle-engram` 0.2.0 negotiates root session resume through `GET /health`:
+`capabilities.root_session_resume: true` enables it; explicit false or malformed
+capability data disables it. When the capability is absent, a stable core version
+of **3.0.0 or newer** (optionally prefixed with `v`) is accepted. The tagged
+v3.0.0 server implements core-selected continuation identities; earlier releases
+are not inferred compatible. Unknown, malformed, and prerelease versions require
+explicit support advertisement.
+
+Each root registration flight retains its first resume-support decision and
+rechecks health before every dispatch. If support changes (including unreadable
+health after supported health), the retry stops before another POST. Retry once
+core health is stable: the earlier registration may have succeeded despite a
+lost acknowledgement, but no unacknowledged identity is adopted. Stable support
+permits an idempotent retry with the same resume flag.
+
+Without resume support, fresh root sessions and still-active persisted mappings
+can register normally without resume. If an ended identity needs continuation,
+attributed writes stop with a diagnostic naming the plugin and core versions,
+the support requirement, and upgrade guidance. Upgrade the Engram binary and
+restart the running server, then retry; updating only the Pi package is not
+sufficient. The plugin never invents a continuation ID or adopts a failed
+registration. Read-only memory tools do not require resume support. Cross-project
+satellite saves still require `isolated_session_registration: true` separately.
+
+## Opt-in Pi session registration trace
+
+For an affected quit/resume cycle, set `ENGRAM_PI_SESSION_TRACE=1` before launching
+Pi with this source version of the extension. The published `0.2.0` package does
+not include this instrumentation; use the local extension instead of loading both
+copies.
+
+If your Pi `settings.json` lists `npm:gentle-engram@0.2.0` under `packages`,
+temporarily remove only that entry before launching the local extension, then
+restore it after collecting the trace. Keep other packages enabled: `-e` adds
+an extension; it does not replace the installed package.
+
+From the repository root in a POSIX shell, set `SESSION_ID` to the ID
+of the conversation you intend to resume, then run:
+
+```bash
+ENGRAM_PI_SESSION_TRACE=1 pi -e ./plugin/pi/index.ts --session "${SESSION_ID:?Set SESSION_ID to the conversation you intend to resume}"
+```
+
+Use the entrypoint that actually fails; the printed launcher hint is not known to
+reproduce every report. The flag is inherited by child processes. Loading or
+reloading this instrumented extension is required; setting it in an unrelated
+shell does not change a running Pi process.
+
+Lifecycle and registration emit JSON lines prefixed with `[engram:session-trace]`
+to stderr:
+
+- `lifecycle`: `session_start` or `session_shutdown`; identity classified as `first`,
+  `same`, `different`, or `missing`, compared with the previous valid traced
+  lifecycle identity in this extension instance. Shutdown reason is allowlisted
+  as `reload`, `other`, or `missing`, never the raw host string. Reload shutdown
+  is observed before returning without persistence cleanup.
+- `context`: availability of `append_entry` and `get_branch`, and whether the
+  persisted mapping refers to the root or a continuation.
+- `dispatch`: root/continuation request classification and the actual `resume`
+  boolean after capability negotiation, for each transport dispatch attempt.
+- `acknowledgement`: root/continuation/invalid acknowledgement classification.
+- `adoption`: the validated effective identity was adopted.
+- `rejection`: HTTP status (or null) and the allowlisted reason
+  `session_already_ended` or `other`; raw errors are never included.
+
+Only these trace lines are intended for sharing. They contain no session IDs,
+project names, paths, URLs, request bodies, memory content, or raw server errors.
+Other stderr output may contain sensitive information; do not share the full log.
+Concurrent registration traces may interleave and are not individually correlated.
+Lifecycle comparisons reset on a new extension instance/process (including reload)
+and after an event observed with tracing disabled. A missing identity does not
+replace the last valid comparison identity. `other` does not identify the exact
+shutdown reason or prove a picker switch; describe the entrypoint separately.
+An absent trace does not prove no event/request occurred unless this extension and flag
+were confirmed active; independent `mem_session_start` and satellite registrations
+are outside this trace. Tracing does not change retry, adoption, or write rules.
+Unset the flag (or set any value other than `1`) for subsequent launches to disable
+it. No trace file is created automatically.
 
 ## Quick start
 
@@ -153,6 +283,25 @@ Pi sends eligible non-Engram tool results to Engram for passive scanning after r
 - Prompt context tied to meaningful saved observations
 - Cross-machine/team memory once a project is enrolled in Engram Cloud
 
+### Automatic user-prompt capture
+
+Prompts with more than 10 trimmed characters are captured once at
+`before_agent_start`, after Pi's input expansion. The extension uses the `input`
+event's source to exclude extension-injected turns, including automatic subagent
+wake notifications. Sessions marked with `GENTLE_PI_AGENTS_CHILD` also skip
+automatic user-prompt capture; their memory tools and other lifecycle behavior
+remain available.
+
+Human-facing RPC prompts are still eligible: RPC alone does not identify a
+subagent. When input provenance is unavailable, the existing capture policy is
+preserved. Pending provenance is isolated by runtime session identity and cleared
+on session start (including switching), shutdown, and reload. Queued steering and
+follow-up inputs do not replace idle-input provenance: Pi delivers those through
+its queues without a new `before_agent_start` capture.
+
+This changes automatic capture only, not explicit `mem_save_prompt` calls, and
+does not remove previously stored synthetic prompts.
+
 ## Private blocks
 
 `gentle-engram` redacts explicit private blocks before sending captured prompts, passive observations, or compaction summaries to Engram:
@@ -213,6 +362,8 @@ Run it again when new chunks are published and you want to import them. Opening 
 - No MCP extension: Pi-native `mem_*` tools come from `gentle-engram`. Pi 0.99.0 and later provide built-in MCP for other servers.
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
+
+Background session registration reports exhausted timeout or unknown transport outcomes with safe-retry guidance, separately from invalid acknowledgement identities. Both failures block passive observations until registration is confirmed.
 
 When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi gives ordinary reads a bounded 10-second retry policy and `mem_doctor` a bounded 15-second retry policy. Session registration uses a separate bounded 5-second replay policy because Engram core implements that route as idempotent. Other writes are sent once with a short deadline: if their transport outcome is ambiguous, Pi reports it as **unknown** and tells you to verify before retrying rather than risking a duplicate mutation. Caller cancellation is propagated, not reported as a transport failure.
 
@@ -303,7 +454,7 @@ Each Pi runtime session is registered `project_owned` and keeps exactly one owni
 - `mem_save`, `mem_save_prompt`, and `mem_session_summary` accept `project: "name"` or `cwd: "/path/inside/other/repo"`.
 - `cwd` is resolved through the same server detection as `/project/current`. An ambiguous or unresolved `cwd` fails with the detection hint and available projects instead of guessing. When both `project` and `cwd` are set they must agree (case-insensitive), otherwise the call fails before anything is written.
 - When the target differs from the runtime session's owning project, Pi registers a derived satellite session `<runtimeID>@<project>` as `project_owned` under the target project with no directory and writes with it. `cwd` only resolves the target project; newly created satellites have an empty stored directory and are never implicit directory-matched runtime candidates for other MCP agents. The runtime session is never re-registered under the target, so no `session_project_conflict` occurs. The satellite renews its lease on every write, concurrent writes share one registration, and an ended satellite resumes through the normal `<id>:resume:N` continuation. Pi ends its satellites when the runtime session quits; after an extension reload they stay unended and only their local lease lapses.
-- Before every satellite registration dispatch (including transport retries and the single bounded recovery replay), Pi requires `GET /health` to advertise `capabilities.isolated_session_registration: true` (literal boolean). Missing, false, or malformed capabilities fail closed with upgrade guidance before any satellite POST; no version floor is guessed. Pi sends `isolated: true`, which makes the server validate the root and selected continuation's directories atomically before lease renewal or ownership repair. A previously persisted nonblank directory returns `409 session_isolation_conflict` without mutation; it is never silently cleared. Same-project runtime registration does not require this capability.
+- Before every satellite registration dispatch (including transport retries and the single bounded recovery replay), Pi requires `GET /health` to advertise `capabilities.isolated_session_registration: true` (literal boolean). Missing, false, or malformed capabilities fail closed with upgrade guidance before any satellite POST; no version floor is guessed. Pi sends `isolated: true`, which makes the server validate the root and selected continuation atomically before lease renewal or ownership repair. A previously persisted nonblank directory or `shared` ownership mode (including a blank-directory `shared` row) returns `409 session_isolation_conflict` without mutation; the row is never silently cleared or converted. Same-project runtime registration does not require this capability.
 - Same-project writes, and writes without an explicit target, keep using the runtime session exactly as before.
 
 There is no automatic inference: editing files in another repository never changes where memories go. Prompt and passive capture always target the detected project.

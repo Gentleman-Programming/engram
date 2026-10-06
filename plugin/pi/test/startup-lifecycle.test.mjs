@@ -3,7 +3,7 @@
 // re-implementing it with stubs.
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { createServer as createHTTPServer } from "node:http";
+import { createServer as createHTTPServer, get } from "node:http";
 import { createServer } from "node:net";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -140,7 +140,7 @@ async function withFixture(options, run) {
         response.end(JSON.stringify({ id: JSON.parse(body).id, status: "created" }));
         return;
       }
-      response.writeHead(200, { "content-type": "application/json" });
+      response.writeHead(request.url === "/health" ? (options.healthStatus ?? 200) : 200, { "content-type": "application/json" });
       response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : (options.healthBody ?? { instance_id: "00000000000000000000000000000000" })));
     });
     if (readyServer) await new Promise((resolve, reject) => {
@@ -307,6 +307,35 @@ test("an initially unavailable Engram provider publishes offline status", async 
     await hooks.get("session_start")({}, ctx);
 
     assert.deepEqual(statusCalls, [["engram", `🧠 ${dir.split(/[\\/]/).at(-1).toLowerCase()} · offline`]]);
+  });
+});
+
+test("an unhealthy external listener stays offline with bounded startup attempts and retains its port", { timeout: 60_000, concurrency: false }, async () => {
+  await withFixture({ readyServer: true, healthStatus: 500 }, async ({ hooks, tools, ctx, statusCalls, dir, spawnLog, port }) => {
+    // Use HTTP directly so fetch stubs cannot fabricate evidence that the listener survived.
+    const listenerStatus = () => new Promise((resolve, reject) => {
+      const request = get(`http://127.0.0.1:${port}/health`, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode));
+        response.once("error", reject);
+      });
+      request.once("error", reject);
+      request.setTimeout(2_000, () => request.destroy(new Error("fixture health request timed out")));
+    });
+    assert.equal(await listenerStatus(), 500, "the external listener occupies the port before startup");
+
+    await hooks.get("session_start")({}, ctx);
+    assert.deepEqual(statusCalls, [["engram", `🧠 ${dir.split(/[\\/]/).at(-1).toLowerCase()} · offline`]]);
+    assert.equal(await countSpawns(spawnLog), 1, "HTTP 500 currently triggers a real startup attempt");
+
+    for (let call = 0; call < 50; call += 1) {
+      const result = await tools.get("mem_search").execute(`unhealthy-${call}`, { query: "startup" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /could not initialize the Engram memory provider/);
+    }
+    const spawns = await countSpawns(spawnLog);
+    assert.ok(spawns >= 1 && spawns <= 2, `50 failing tool calls produced ${spawns} startup attempts, not a bounded retry`);
+    assert.equal(await listenerStatus(), 500, "startup and repeated operations leave the external listener alive on the same port");
   });
 });
 

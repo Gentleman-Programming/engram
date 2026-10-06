@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -204,6 +206,79 @@ function recordingFetch(routes) {
     });
   };
   return { calls, fetchStub };
+}
+
+// Issue #1673: drive the registered input/start hooks and inspect HTTP requests.
+// The input hook is optional here because the buggy plugin does not subscribe to it.
+for (const scenario of [
+  { name: "interactive", source: "interactive", capture: true },
+  { name: "human RPC host", source: "rpc", capture: true },
+  { name: "unknown provenance", capture: true },
+  { name: "expanded interactive input", source: "interactive", inputText: "/explain", capture: true },
+  { name: "extension", source: "extension", capture: false },
+  { name: "extension wake", source: "extension", wake: true, capture: false },
+  { name: "delegated-child", source: "rpc", child: true, capture: false },
+  { name: "queued steer before interactive", source: "interactive", queuedBefore: "extension", capture: true },
+  { name: "queued follow-up after extension", source: "extension", queuedAfter: "interactive", capture: false },
+  { name: "handled extension before interactive", source: "interactive", staleInput: true, capture: true },
+  { name: "session start clears provenance", staleInput: true, restart: true, capture: true },
+  { name: "runtime switch isolates provenance", staleInput: true, switchSession: true, capture: true },
+  { name: "reload clears provenance", staleInput: true, reload: true, capture: true },
+]) {
+  test(`prompt provenance regression: ${scenario.name}`, async () => {
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const originalFetch = globalThis.fetch;
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    if (scenario.child) process.env.GENTLE_PI_AGENTS_CHILD = "1";
+    else delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-provenance-", async ({ sandbox }) => {
+        const { eventHandlers } = await loadPluginHarness(sandbox);
+        let sessionId = `provenance-${scenario.name}`;
+        const ctx = runtimeContext(() => sessionId);
+        await eventHandlers.get("session_start")({}, ctx);
+        const input = async (source, text, streamingBehavior) => {
+          await eventHandlers.get("input")?.({ text, source, streamingBehavior, images: [] }, ctx);
+        };
+        if (scenario.staleInput) await input("extension", "An extension input that never starts an agent run.");
+        if (scenario.restart) await eventHandlers.get("session_start")({}, ctx);
+        if (scenario.reload) {
+          await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+          await eventHandlers.get("session_start")({}, ctx);
+        }
+        if (scenario.switchSession) sessionId += "-switched";
+        const prompt = scenario.wake
+          ? "[System-generated Gentle Agents notification, not written by the user] Subagent output was delivered to this session above. Review it and continue. [gentle-agents wake: regression]"
+          : scenario.child
+            ? "Independent read-only verification of the uncommitted changes."
+            : scenario.source === "extension"
+              ? "Continue automatically after receiving an extension update."
+              : "Please explain the root cause of this reported bug.";
+        if (scenario.queuedBefore) await input(scenario.queuedBefore, "Queued automatic steering update.", "steer");
+        if (scenario.source) await input(scenario.source, scenario.inputText ?? prompt);
+        if (scenario.queuedAfter) await input(scenario.queuedAfter, "Queued human follow-up request.", "followUp");
+        await eventHandlers.get("before_agent_start")({ prompt, systemPrompt: "base" }, ctx);
+        const writes = calls.filter(({ method, path }) => method === "POST" && path === "/prompts");
+        assert.deepEqual(writes.map(({ body }) => body), scenario.capture ? [{
+          session_id: sessionId, content: prompt, project: "engram",
+        }] : [], "only human-authored prompts may be persisted, exactly once");
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) {
+        if (originalEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = originalEnv[key];
+      }
+    }
+  });
 }
 
 test("Pi native saves persist under separate host sessions and stop on failed registration", async () => {
@@ -553,6 +628,7 @@ test("fresh Pi state honors a structured session-project conflict without captur
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
+    if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: phase }));
     if (path === "/sessions") {
       if (phase === "generic-error") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 500 });
@@ -1422,6 +1498,7 @@ test("separate plugin graphs converge on a server-selected continuation", async 
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "shared" }));
     if (path === "/sessions" && body.id === "dual") {
       if (++originals === 2) entered.resolve();
@@ -1658,6 +1735,141 @@ test("an ownerless pending replacement is not registered on first use", async ()
   }
 });
 
+test("root resume compatibility negotiates support and fails closed", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const cases = [
+    { health: { version: "2.2.1" }, supported: false },
+    { health: { version: "3.0.0" }, supported: true },
+    { health: { version: "v3.0.1" }, supported: true },
+    { health: { capabilities: { root_session_resume: true } }, supported: true },
+    { health: { version: "3.0.0", capabilities: { root_session_resume: false } }, supported: false },
+    { health: { version: "3.0.0", capabilities: { root_session_resume: "true" } }, supported: false },
+    { health: { version: "3.0.0", capabilities: [] }, supported: false },
+    { health: { version: "3.0.0-rc.1" }, supported: false },
+    { health: { version: "3.invalid" }, supported: false },
+    { health: {}, supported: false },
+    { health: null, supported: false },
+    { health: {}, healthStatus: 404, supported: false },
+    { health: "not an object", supported: false },
+    { health: { version: "3.0.0", capabilities: null }, supported: false },
+  ];
+  try {
+    for (const { health, healthStatus = 200, supported } of cases) {
+      for (const mode of ["root-ended", "mapped-ended", "fresh", "mapped-live"]) {
+        const mapped = mode.startsWith("mapped-");
+        const fresh = mode === "fresh";
+        const activeMapping = mode === "mapped-live";
+        const runtimeID = "compat-root";
+        const persistedID = `${runtimeID}:resume:2`;
+        const entries = mapped ? [{ type: "custom", customType: "engram-effective-session", data: {
+          runtimeID, effectiveID: persistedID, pending: true, project: "compat-project",
+        } }] : [];
+        const calls = [];
+        globalThis.fetch = async (url, init = {}) => {
+          const path = new URL(url).pathname;
+          const body = init.body ? JSON.parse(init.body) : undefined;
+          calls.push({ path, body });
+          if (path === "/health") return new Response(JSON.stringify(health), { status: healthStatus });
+          if (path === "/project/current") return new Response(JSON.stringify({ project: "compat-project" }));
+          if (path === "/sessions") {
+            // Model an old core that ignores resume and rejects ended identities.
+            if (!fresh && !activeMapping && (body.id !== runtimeID || !supported || !body.resume)) {
+              return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+            }
+            return new Response(JSON.stringify({ id: activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`, status: "created" }));
+          }
+          return new Response(JSON.stringify({ status: "ok" }));
+        };
+        const ctx = runtimeContext(runtimeID);
+        ctx.sessionManager.getBranch = () => entries;
+        await withPluginSandbox("engram-pi-root-compat-", async ({ sandbox }) => {
+          const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+          const result = await registeredTools.get("mem_save").execute("compat", { title: "compat", content: "compat" }, undefined, undefined, ctx);
+          assert.equal(!!result.isError, !supported && !fresh && !activeMapping, JSON.stringify({ health, mode, result }));
+          if (!supported && !fresh && !activeMapping) {
+            assert.match(JSON.stringify(result), /gentle-engram 0\.2\.0/);
+            assert.match(JSON.stringify(result), /core .*root_session_resume.*3\.0\.0.*[Uu]pgrade/);
+            assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+            assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => !body.resume));
+            assert.equal(entries.length, mapped ? 1 : 0);
+          } else {
+            assert.equal(calls.findLast(({ path }) => path === "/observations").body.session_id, activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`);
+            if (!supported) assert.equal(calls.findLast(({ path }) => path === "/sessions").body.resume, false);
+          }
+        });
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("root resume compatibility pins retry support after lost acknowledgement", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const [initial, next, mandatory] of [
+      [true, false, false], [false, true, false], [true, null, false],
+      [true, true, false], [false, false, false], [false, null, false],
+      [true, false, true], [true, true, true],
+    ]) {
+      const runtimeID = "retry-compat";
+      const mappedID = `${runtimeID}:resume:2`;
+      const entries = mandatory ? [{ type: "custom", customType: "engram-effective-session", data: {
+        runtimeID, effectiveID: mappedID, pending: true, project: "retry-project",
+      } }] : [];
+      const initialEntries = entries.length;
+      const posts = [];
+      const writes = [];
+      let healthChecks = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        const body = init.body ? JSON.parse(init.body) : undefined;
+        if (path === "/health") {
+          const support = healthChecks++ === 0 ? initial : next;
+          return new Response(support === null ? "unreadable" : JSON.stringify({ capabilities: { root_session_resume: support } }));
+        }
+        if (path === "/project/current") return new Response(JSON.stringify({ project: "retry-project" }));
+        if (path === "/sessions") {
+          if (body.id === mappedID) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+          posts.push(body);
+          // The core applied the first registration, but its successful body was lost.
+          if (posts.length === 1) return new Response("truncated acknowledgement");
+          return new Response(JSON.stringify({ id: initial ? `${runtimeID}:resume:3` : runtimeID, status: "created" }));
+        }
+        if (path === "/observations") writes.push(body);
+        return new Response(JSON.stringify({ status: "ok" }));
+      };
+      const ctx = runtimeContext(runtimeID);
+      ctx.sessionManager.getBranch = () => entries;
+      await withPluginSandbox("engram-pi-retry-compat-", async ({ sandbox }) => {
+        const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+        const result = await registeredTools.get("mem_save").execute("retry-compat", { title: "retry", content: "retry" }, undefined, undefined, ctx);
+        const changed = initial !== (next === true);
+        assert.equal(!!result.isError, changed, JSON.stringify({ initial, next, mandatory, result }));
+        assert.ok(healthChecks >= 2, "each dispatch attempt must recheck health (other probes may also run)");
+        assert.deepEqual(posts.map(({ resume }) => resume), changed ? [initial] : [initial, initial]);
+        if (changed) {
+          assert.match(JSON.stringify(result), /resume support changed.*retry/i);
+          assert.equal(writes.length, 0);
+          assert.equal(entries.length, initialEntries, "lost acknowledgement must not adopt an identity");
+        } else {
+          assert.equal(writes.at(-1).session_id, initial ? `${runtimeID}:resume:3` : runtimeID);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("resumed quit adopts core numeric identities and reload retains the persisted ID", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -1668,6 +1880,7 @@ test("resumed quit adopts core numeric identities and reload retains the persist
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }), { status: 200 });
     if (path === "/sessions") {
       if (ended.has(body.id) && !body.resume) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -2571,6 +2784,7 @@ test("fallback from ended mapping to live root supersedes identity for writes an
         const path = new URL(url).pathname;
         const body = init.body ? JSON.parse(init.body) : undefined;
         calls.push({ path, body });
+        if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return body.id === legacyID
           ? new Response(JSON.stringify({ code: "session_already_ended", session_id: legacyID }), { status: 409 })
@@ -2687,6 +2901,210 @@ test("hosts without mapping persistence never request core resume", async () => 
   }
 });
 
+test("session registration trace is opt-in, metadata-only, and preserves resume behavior", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalTrace = process.env.ENGRAM_PI_SESSION_TRACE;
+  const originalWrite = process.stderr.write;
+  const originalDescriptorWrite = fs.writeSync;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const scenario of ["disabled", "appendEntry", "getBranch", "resume", "retry"]) {
+      const enabled = scenario !== "disabled";
+      if (enabled) process.env.ENGRAM_PI_SESSION_TRACE = "1";
+      else delete process.env.ENGRAM_PI_SESSION_TRACE;
+      const stderr = [];
+      const registrations = [];
+      const writes = [];
+      const entries = [];
+      const runtimeID = `private-runtime-${scenario}`;
+      const effectiveID = `${runtimeID}:resume:2`;
+      const canPersist = !["appendEntry", "getBranch"].includes(scenario);
+      process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
+      fs.writeSync = (fd, ...args) => {
+        if (fd !== 2) return originalDescriptorWrite(fd, ...args);
+        stderr.push(String(args[0])); return Buffer.byteLength(String(args[0]));
+      };
+      syncBuiltinESMExports();
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        const body = init.body ? JSON.parse(init.body) : undefined;
+        if (path === "/project/current") return new Response('{"project":"private-project"}');
+        if (path === "/health") return new Response('{"version":"3.0.0","capabilities":{"root_session_resume":true}}');
+        if (path === "/sessions") {
+          registrations.push(body);
+          if (scenario === "retry" && registrations.length === 1) throw new Error("private transport detail");
+          if (!body.resume) return new Response(JSON.stringify({ code: "session_already_ended", error: "session has already ended", session_id: runtimeID }), { status: 409 });
+          return new Response(JSON.stringify({ id: effectiveID, status: "created" }));
+        }
+        if (path === "/observations") writes.push(body);
+        return new Response('{"id":1}');
+      };
+      await withPluginSandbox("engram-pi-session-trace-", async ({ sandbox }) => {
+        const append = scenario === "appendEntry" ? undefined : (customType, data) => entries.push({ type: "custom", customType, data });
+        const { registeredTools } = await loadPluginHarness(sandbox, append);
+        const ctx = runtimeContext(runtimeID);
+        if (scenario !== "getBranch") ctx.sessionManager.getBranch = () => entries;
+        const result = await registeredTools.get("mem_save").execute("trace", { title: "private title", content: "private content" }, undefined, undefined, ctx);
+        assert.equal(result.isError, canPersist ? undefined : true);
+        if (!canPersist) assert.equal(result.details.data?.code, "session_already_ended");
+        assert.equal(registrations.length, scenario === "retry" ? 2 : 1);
+        assert.ok(registrations.every((body) => body.resume === canPersist));
+        assert.equal(writes.length, canPersist ? 1 : 0);
+        if (canPersist) assert.equal(writes[0].session_id, effectiveID);
+        assert.equal(entries.length, canPersist ? 1 : 0);
+        const lines = stderr.filter((line) => line.startsWith("[engram:session-trace] "));
+        if (!enabled) assert.deepEqual(lines, []);
+        else {
+          const events = lines.map((line) => JSON.parse(line.slice("[engram:session-trace] ".length)));
+          assert.deepEqual(events, [
+            { stage: "context", append_entry: scenario !== "appendEntry", get_branch: scenario !== "getBranch", persisted: "root" },
+            ...registrations.map(() => ({ stage: "dispatch", requested: "root", resume: canPersist })),
+            canPersist ? { stage: "acknowledgement", effective: "continuation" }
+              : { stage: "rejection", http_status: 409, reason: "session_already_ended" },
+            ...(canPersist ? [{ stage: "adoption", effective: "continuation" }] : []),
+          ]);
+          assert.doesNotMatch(lines.join(""), /private|\/|session_id|title|content/);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stderr.write = originalWrite;
+    fs.writeSync = originalDescriptorWrite;
+    syncBuiltinESMExports();
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (originalTrace === undefined) delete process.env.ENGRAM_PI_SESSION_TRACE; else process.env.ENGRAM_PI_SESSION_TRACE = originalTrace;
+  }
+});
+
+test("session lifecycle trace is private, opt-in, and preserves shutdown behavior", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalTrace = process.env.ENGRAM_PI_SESSION_TRACE;
+  const originalWrite = process.stderr.write;
+  const originalDescriptorWrite = fs.writeSync;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const mode of ["enabled", "disabled", "broken-stderr"]) {
+      process.env.ENGRAM_PI_SESSION_TRACE = mode === "disabled" ? "0" : "1";
+      const stderr = [];
+      const calls = [];
+      process.stderr.write = (chunk) => {
+        if (mode === "broken-stderr") throw new Error("private stderr failure");
+        stderr.push(String(chunk)); return true;
+      };
+      fs.writeSync = (fd, ...args) => {
+        if (fd !== 2) return originalDescriptorWrite(fd, ...args);
+        if (mode === "broken-stderr") throw new Error("private stderr failure");
+        stderr.push(String(args[0])); return Buffer.byteLength(String(args[0]));
+      };
+      syncBuiltinESMExports();
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        calls.push(path);
+        if (path === "/project/current") return new Response('{"project":"pi"}');
+        if (path === "/health") return new Response('{"version":"3.0.0"}');
+        if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
+        return new Response('{"id":1,"status":"ended"}');
+      };
+      await withPluginSandbox("engram-pi-lifecycle-trace-", async ({ sandbox }) => {
+        const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+        const start = eventHandlers.get("session_start");
+        const shutdown = eventHandlers.get("session_shutdown");
+        const alpha = runtimeContext("private-alpha");
+        const beta = runtimeContext("private-beta");
+        const save = async (ctx) => {
+          const result = await registeredTools.get("mem_save").execute("trace", { title: "private title", content: "private content" }, undefined, undefined, ctx);
+          assert.equal(result.isError, undefined);
+        };
+        await start({}, alpha); await save(alpha);
+        await shutdown({ reason: "reload" }, alpha);
+        assert.equal(calls.filter((path) => path.endsWith("/end")).length, 0);
+        await start({}, alpha); await save(alpha);
+        await shutdown({ reason: "private arbitrary reason" }, alpha);
+        assert.equal(calls.filter((path) => path.endsWith("/end")).length, 1);
+        await start({}, beta); await save(beta);
+        await shutdown({}, beta);
+        await shutdown({}, runtimeContext(""));
+        await shutdown({ reason: "reload" }, runtimeContext(() => { throw new Error("private identity failure"); }));
+        assert.equal(calls.filter((path) => path === "/observations").length, 3);
+        assert.equal(calls.filter((path) => path.endsWith("/end")).length, 2);
+        const events = stderr.filter((line) => line.startsWith("[engram:session-trace] "))
+          .map((line) => JSON.parse(line.slice("[engram:session-trace] ".length)));
+        assert.deepEqual(events.filter(({ stage }) => stage === "lifecycle"), mode === "enabled" ? [
+          { stage: "lifecycle", event: "session_start", identity: "first" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "reload", identity: "same" },
+          { stage: "lifecycle", event: "session_start", identity: "same" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "other", identity: "same" },
+          { stage: "lifecycle", event: "session_start", identity: "different" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "missing", identity: "same" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "missing", identity: "missing" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "reload", identity: "missing" },
+        ] : []);
+        assert.doesNotMatch(stderr.join(""), /private|arbitrary|\/|title|content/);
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch; process.stderr.write = originalWrite;
+    fs.writeSync = originalDescriptorWrite;
+    syncBuiltinESMExports();
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (originalTrace === undefined) delete process.env.ENGRAM_PI_SESSION_TRACE; else process.env.ENGRAM_PI_SESSION_TRACE = originalTrace;
+  }
+});
+
+test("session trace survives a closed stderr pipe without changing host error handling", async () => {
+  for (const hostHandler of [false, true]) {
+    await withPluginSandbox("engram-pi-closed-trace-pipe-", async ({ sandbox }) => {
+      const script = `
+        import { importPluginFromSandbox } from ${JSON.stringify(new URL("./plugin-sandbox.mjs", import.meta.url).href)};
+        const handlers = new Map();
+        const register = await importPluginFromSandbox(${JSON.stringify(sandbox)});
+        register({ registerTool() {}, on(event, handler) { handlers.set(event, handler); } });
+        let hostErrors = 0;
+        if (${hostHandler}) process.stderr.on('error', () => { hostErrors++; });
+        const listeners = process.stderr.listenerCount('error');
+        let requests = 0;
+        globalThis.fetch = async () => { requests++; throw new Error('unexpected request'); };
+        process.stdout.write('ready\\n');
+        await new Promise(resolve => process.stdin.once('data', resolve));
+        await handlers.get('session_shutdown')({ reason: 'reload' }, {
+          sessionManager: { getSessionId: () => 'synthetic-session' },
+        });
+        process.stdin.pause();
+        await new Promise(resolve => setImmediate(resolve));
+        process.stdout.write(JSON.stringify({ listeners, remaining: process.stderr.listenerCount('error'), hostErrors, requests }) + '\\n');
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+        env: { ...process.env, ENGRAM_PI_SESSION_TRACE: "1" },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const ready = deferred();
+      const closed = deferred();
+      const exited = deferred();
+      const output = [];
+      const lines = createInterface({ input: child.stdout });
+      lines.on("line", (line) => { output.push(line); if (line === "ready") ready.resolve(); });
+      child.stderr.once("close", () => closed.resolve());
+      child.once("exit", (code, signal) => exited.resolve({ code, signal }));
+      child.once("error", (error) => exited.resolve({ error }));
+      try {
+        await waitFor(ready.promise, "child did not prepare the trace");
+        child.stderr.destroy();
+        await waitFor(closed.promise, "stderr reader did not close");
+        child.stdin.end("trace\n");
+        const result = await waitFor(exited.promise, "child did not exit after the trace");
+        assert.deepEqual(result, { code: 0, signal: null });
+        assert.deepEqual(output, ["ready", JSON.stringify({ listeners: hostHandler ? 1 : 0, remaining: hostHandler ? 1 : 0, hostErrors: 0, requests: 0 })]);
+      } finally {
+        child.kill();
+        lines.close();
+      }
+    });
+  }
+});
+
 test("persisted legacy continuation renews without appendEntry", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -2774,6 +3192,7 @@ test("malformed persisted mapping never authorizes foreign writes or cleanup", a
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: foreignAck ? "foreign" : body.id, status: "created" }));
     return new Response(JSON.stringify({ id: 1, status: "ok" }));
@@ -2816,6 +3235,7 @@ test("legacy UUID mapping is registered as-is until ended, then resumes the runt
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/sessions") {
       registrations.push(body);
       if (ended && body.id === legacyID) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -2852,6 +3272,7 @@ test("resume registration refuses invalid acknowledgements before persisting or 
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
     calls.push(path);
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify(acknowledgement));
     throw new Error(`unexpected write: ${path}`);
@@ -2869,7 +3290,7 @@ test("resume registration refuses invalid acknowledgements before persisting or 
         assert.match(result.content[0].text, /invalid acknowledgement/);
       }
       assert.equal(entries.length, 0);
-      assert.equal(calls.filter((path) => path !== "/sessions" && path !== "/project/current").length, 0);
+      assert.equal(calls.filter((path) => path !== "/sessions" && path !== "/project/current" && path !== "/health").length, 0);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -2885,6 +3306,7 @@ test("lost core acknowledgement retries the root without guessing a continuation
   let writes = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") {
       registrations.push(JSON.parse(init.body));
@@ -2915,7 +3337,7 @@ test("lost core acknowledgement retries the root without guessing a continuation
   }
 });
 
-test("old server ended-session refusal retains its specific cause without client guessing", async () => {
+test("old server ended-session refusal explains compatibility without client guessing", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -2935,8 +3357,7 @@ test("old server ended-session refusal retains its specific cause without client
       ctx.sessionManager.getBranch = () => entries;
       const result = await registeredTools.get("mem_save").execute("no-entry", { title: "blocked", content: "blocked" }, undefined, undefined, ctx);
       assert.equal(result.isError, true);
-      assert.equal(result.details.http_status, 409);
-      assert.equal(result.details.data.code, "session_already_ended");
+      assert.match(result.details.error, /core unknown.*root_session_resume.*Upgrade/);
       assert.equal(entries.length, 0);
       assert.equal(calls.filter((path) => path === "/sessions").length, 1);
       assert.equal(calls.includes("/observations"), false);

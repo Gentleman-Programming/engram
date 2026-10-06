@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -68,7 +69,7 @@ func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func()
 
 	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
 	defer cancel()
-	client := &http.Client{}
+	_, client := hookEndpointClient(baseURL)
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, baseURL+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
 		return fallback
@@ -207,13 +208,18 @@ func cmdCodexLifecycle(action string) {
 
 // Runtime identity belongs to the core, not a second platform-specific cache.
 func runCodexLifecycle(action string, data []byte, base string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
+	defer cancel()
+	return runCodexLifecycleContext(ctx, action, data, base)
+}
+
+// The guard owns its context so a failed resolution can retain timeout evidence.
+func runCodexLifecycleContext(ctx context.Context, action string, data []byte, base string) string {
 	var in codexPromptInput
 	if json.Unmarshal(data, &in) != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.CWD) == "" || base == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
-	defer cancel()
-	client := &http.Client{}
+	_, client := hookEndpointClient(base)
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
 		return ""
@@ -233,12 +239,30 @@ func runCodexLifecycle(action string, data []byte, base string) string {
 	return ""
 }
 
+// hookEndpointClient shares endpoint selection across native hooks. Explicit TCP
+// callers retain their endpoint even when the environment selects a socket.
+func hookEndpointClient(base string) (string, *http.Client) {
+	client := &http.Client{}
+	configured := codexHookURL()
+	if base == "" {
+		base = configured
+	}
+	if strings.TrimSpace(os.Getenv("ENGRAM_URL")) == "" && base == "http://localhost" && base == configured {
+		if socket := strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")); socket != "" {
+			client.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+			}}
+		}
+	}
+	return base, client
+}
+
 func codexHookURL() string {
 	if base := strings.TrimSpace(os.Getenv("ENGRAM_URL")); base != "" {
 		return strings.TrimRight(base, "/")
 	}
 	if strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")) != "" {
-		return ""
+		return "http://localhost"
 	}
 	port := strings.TrimSpace(os.Getenv("ENGRAM_PORT"))
 	if port == "" {

@@ -92,6 +92,14 @@ type ManagedTokenLookup interface {
 	FindManagedTokenByHash(ctx context.Context, hash string) (ManagedTokenRecord, Principal, error)
 }
 
+// ManagedTokenUsageRecorder is required for successful managed authentication.
+// Lookup-only backends fail closed rather than omitting durable usage.
+type ManagedTokenUsageRecorder interface {
+	MarkManagedTokenUsed(ctx context.Context, tokenID string) error
+}
+
+var ErrTokenUsageRecorderRequired = errors.New("managed token usage recorder is required")
+
 type ManagedTokenHasher struct {
 	pepper []byte
 }
@@ -278,6 +286,13 @@ func (r *PrincipalResolver) ResolveBearerToken(ctx context.Context, token string
 			}
 			if !principal.Enabled {
 				return Principal{}, ErrPrincipalDisabled
+			}
+			recorder, ok := r.managedTokens.(ManagedTokenUsageRecorder)
+			if !ok {
+				return Principal{}, ErrTokenUsageRecorderRequired
+			}
+			if err := recorder.MarkManagedTokenUsed(ctx, record.ID); err != nil {
+				return Principal{}, fmt.Errorf("record managed token usage: %w", err)
 			}
 			principal.TokenID = record.ID
 			return principal, nil

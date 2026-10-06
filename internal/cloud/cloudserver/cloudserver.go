@@ -906,7 +906,7 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 		if strings.TrimSpace(session.ID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
-		if strings.TrimSpace(session.Directory) == "" {
+		if strings.TrimSpace(session.Directory) == "" && session.OwnershipMode != store.SessionOwnershipProjectOwned {
 			return fmt.Errorf("sessions[%d].directory is required", i)
 		}
 	}

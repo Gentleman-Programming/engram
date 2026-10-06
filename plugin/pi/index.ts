@@ -7,9 +7,10 @@
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ArchiveOutcome, buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
@@ -24,6 +25,22 @@ const ENGRAM_PORT = Number.parseInt(optionalEnvironmentValue(process.env.ENGRAM_
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
+
+// Only allowlisted metadata is logged; never pass request bodies, identities, or errors.
+type SessionTraceEvent =
+  | { stage: "lifecycle"; event: "session_start"; identity: "first" | "same" | "different" | "missing" }
+  | { stage: "lifecycle"; event: "session_shutdown"; reason: "reload" | "other" | "missing"; identity: "first" | "same" | "different" | "missing" }
+  | { stage: "context"; append_entry: boolean; get_branch: boolean; persisted: "root" | "continuation" }
+  | { stage: "dispatch"; requested: "root" | "continuation"; resume: boolean }
+  | { stage: "acknowledgement" | "adoption"; effective: "root" | "continuation" | "invalid" }
+  | { stage: "rejection"; http_status: number | null; reason: "session_already_ended" | "other" };
+
+function traceSessionRegistration(event: SessionTraceEvent): void {
+  if (process.env.ENGRAM_PI_SESSION_TRACE !== "1") return;
+  // Descriptor writes surface pipe failures synchronously, without host-wide stream handlers.
+  try { writeSync(2, `[engram:session-trace] ${JSON.stringify(event)}\n`); }
+  catch { /* Diagnostic output must not change registration or write behavior. */ }
+}
 
 // Writes are single-attempt: once dispatched, their server-side outcome may be unknown.
 const ENGRAM_WRITE_TIMEOUT_MS = 3000;
@@ -128,8 +145,10 @@ interface FetchOptions {
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
-  // Satellite-only pre-dispatch validation, including transport retries/reconnects.
+  // Capability validation before dispatch, including transport retries/reconnects.
   beforeDispatch?: () => Promise<void>;
+  // Observational hook, separate from capability validation and recovery guards.
+  onDispatch?: () => void;
 }
 
 type EngramOperation = "read" | "doctor" | "session-registration" | "write";
@@ -320,6 +339,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   for (let attempt = 0; attempt < policy.maxAttempts; attempt += 1) {
     // Validation errors must escape, not be classified/retried as transport failures.
     if (opts.beforeDispatch) await opts.beforeDispatch();
+    opts.onDispatch?.();
     let res: Response;
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
@@ -392,7 +412,12 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
 }
 
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
-  return (await engramFetchResult<TResponse>(path, opts)).data;
+  const result = await engramFetchResult<TResponse>(path, opts);
+  // Background registration has no native-tool side channel for transport diagnostics.
+  if (result.transportFailure?.operation === "session-registration") {
+    throw new Error(unreachableMessage(result.transportFailure));
+  }
+  return result.data;
 }
 
 function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; transportFailure: () => EngramTransportFailure | undefined } {
@@ -1009,7 +1034,8 @@ const shutdownFlightsKey = Symbol.for("engram.pi.shutdown-flights");
 const realm = globalThis as typeof globalThis & { [shutdownFlightsKey]?: WeakMap<object, Map<string, Promise<void>>> };
 const shutdownFlights = realm[shutdownFlightsKey] ??= new WeakMap<object, Map<string, Promise<void>>>();
 const lifecycleKey = Symbol.for("engram.pi.session-lifecycle");
-type Lifecycle = { epoch: number; closing: boolean; confirmedShutdownID?: string };
+type Lifecycle = { epoch: number; closing: boolean; confirmedShutdownID?: string; removeBridgeResponder?: () => void;
+  promptTurn?: number; promptProof?: { digest: string; project: string; effectiveID: string } };
 const lifecycleRealm = globalThis as typeof globalThis & { [lifecycleKey]?: WeakMap<object, Map<string, Lifecycle>> };
 const lifecycles = lifecycleRealm[lifecycleKey] ??= new WeakMap<object, Map<string, Lifecycle>>();
 function lifecycle(ctx: SessionContext, id: string): Lifecycle {
@@ -1097,6 +1123,28 @@ function effectiveSessionID(ctx: SessionContext, runtimeID: string): string {
   return runtimeID;
 }
 
+// The v3.0.0 tagged server supports core-selected resume identities. Earlier
+// releases need explicit advertisement rather than an unverified version guess.
+function supportsRootSessionResume(health: unknown): boolean {
+  if (!health || typeof health !== "object" || Array.isArray(health)) return false;
+  const { capabilities, version } = health as { capabilities?: unknown; version?: unknown };
+  if (capabilities !== undefined) {
+    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return false;
+    if (Object.prototype.hasOwnProperty.call(capabilities, "root_session_resume")) {
+      return (capabilities as Record<string, unknown>).root_session_resume === true;
+    }
+  }
+  if (typeof version !== "string") return false;
+  const release = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version);
+  return !!release && Number(release[1]) >= 3;
+}
+
+function rootResumeCompatibilityError(health: unknown): Error {
+  const version = health && typeof health === "object" && typeof (health as { version?: unknown }).version === "string"
+    ? (health as { version: string }).version : "unknown";
+  return new Error(`gentle-engram 0.2.0 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
+}
+
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
   const runtimeID = requireRuntimeSessionID(ctx);
   const state = lifecycle(ctx, runtimeID);
@@ -1114,26 +1162,51 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
   const registration = (async () => {
     const persistedID = effectiveSessionID(ctx, runtimeID);
     const canPersist = !!appendEntry && !!ctx.sessionManager.getBranch;
+    traceSessionRegistration({ stage: "context", append_entry: !!appendEntry, get_branch: !!ctx.sessionManager.getBranch, persisted: persistedID === runtimeID ? "root" : "continuation" });
     if (pendingEffectiveSession(ctx, runtimeID, persistedID)) {
       const owner = pendingEffectiveSessionProject(ctx, runtimeID, persistedID);
       if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${persistedID}`);
       if (owner !== sessionProject) throw new SessionProjectConflictError(persistedID, owner, sessionProject);
     }
-    const register = async (id: string, resume: boolean): Promise<string> => {
+    const register = async (id: string, resume: boolean, requireResume = false): Promise<string> => {
       const conflict = sessionProjectConflict(id, sessionProject);
       if (conflict) throw conflict;
       const key = `${sessionProject}:${id}`;
       sessionRegistrationProjects.set(id, sessionProject);
       const delivery = (async () => {
         let acknowledgement: { id?: unknown; status?: unknown } | null;
+        let health: unknown;
+        let resumeSupport: boolean | undefined;
+        const body = { id, project: sessionProject, directory, ownership_mode: "project_owned", resume };
+        const validateCapability = resume ? async () => {
+          // Missing/unreadable health is not support evidence, but fresh registration
+          // without resume remains safe. Registration itself retains transport errors.
+          try { health = await fetch("/health"); }
+          catch { health = undefined; }
+          assertOpen(state, epoch);
+          const supported = supportsRootSessionResume(health);
+          if (resumeSupport !== undefined && supported !== resumeSupport) {
+            throw new Error("Engram core root resume support changed during session registration. Retry once core health is stable; the previous registration may have succeeded, but its acknowledgement was not confirmed.");
+          }
+          if (requireResume && !supported) throw rootResumeCompatibilityError(health);
+          resumeSupport = supported;
+          body.resume = supported;
+        } : undefined;
         try {
-          acknowledgement = await fetch("/sessions", { method: "POST", body: {
-            id, project: sessionProject, directory, ownership_mode: "project_owned", resume,
-          } });
+          acknowledgement = await fetch("/sessions", {
+            method: "POST", beforeDispatch: validateCapability, body,
+            onDispatch: () => traceSessionRegistration({ stage: "dispatch", requested: id === runtimeID ? "root" : "continuation", resume: body.resume }),
+          });
         } catch (error) {
-          throw sessionProjectConflictFromResponse(error, id, sessionProject, resume ? runtimeID : undefined) || error;
+          traceSessionRegistration({ stage: "rejection", http_status: error instanceof EngramHttpError ? error.status : null, reason: error instanceof EngramHttpError && (error.data as { code?: string } | null)?.code === "session_already_ended" ? "session_already_ended" : "other" });
+          if (resume && !body.resume && error instanceof EngramHttpError && error.status === 409
+            && (error.data as { code?: string } | null)?.code === "session_already_ended") {
+            throw rootResumeCompatibilityError(health);
+          }
+          throw sessionProjectConflictFromResponse(error, id, sessionProject, body.resume ? runtimeID : undefined) || error;
         }
         const effectiveID = acknowledgement?.id;
+        traceSessionRegistration({ stage: "acknowledgement", effective: acknowledgement?.status === "created" && effectiveID === runtimeID ? "root" : acknowledgement?.status === "created" && typeof effectiveID === "string" && effectiveID.startsWith(`${runtimeID}:resume:`) ? "continuation" : "invalid" });
         if (acknowledgement?.status !== "created" || typeof effectiveID !== "string"
           || !(effectiveID === runtimeID || effectiveID.startsWith(`${runtimeID}:resume:`))) {
           throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${runtimeID}: invalid acknowledgement`);
@@ -1153,6 +1226,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
           runtimeID, effectiveID, pending: true, project: sessionProject,
         });
         assertOpen(state, epoch);
+        traceSessionRegistration({ stage: "adoption", effective: effectiveID === runtimeID ? "root" : "continuation" });
         return effectiveID;
       })();
       sessionRegistrationsInFlight.set(key, delivery);
@@ -1175,7 +1249,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
       if (persistedID === runtimeID || !(error instanceof EngramHttpError) || error.status !== 409
         || (error.data as { code?: string } | null)?.code !== "session_already_ended") throw error;
       assertOpen(state, epoch);
-      return register(runtimeID, canPersist);
+      return register(runtimeID, canPersist, true);
     }
   })();
   effectiveSessionRegistrations.set(registrationKey, registration);
@@ -2045,16 +2119,123 @@ function registerMemoryTools(pi: ExtensionAPI): void {
   }
 }
 
+const BRIDGE_CLAIM = "engram:bridge:claim:v1";
+const BRIDGE_DECISION = "engram:bridge:decision:v1";
+const BRIDGE_CLAIM_TIMEOUT_MS = 1000;
+
+function removeBridgeResponders(ctx: SessionContext): void {
+  for (const state of lifecycles.get(ctx.sessionManager)?.values() || []) {
+    state.removeBridgeResponder?.();
+    state.removeBridgeResponder = undefined;
+    state.promptProof = undefined;
+    state.promptTurn = (state.promptTurn || 0) + 1;
+  }
+}
+
+// A claim supplies routing context, never credentials or an arbitrary registration ID.
+// Install only with an observed native lifecycle context, not from the extension factory.
+function installBridgeResponder(pi: ExtensionAPI, ctx: SessionContext, runtimeID: string, state: Lifecycle): void {
+  if (!pi.events?.on || !pi.events?.emit) return;
+  const epoch = state.epoch;
+  let active = true;
+  const current = () => active && !state.closing && state.epoch === epoch
+    && getSessionId(ctx) === runtimeID;
+  const unsubscribe = pi.events.on(BRIDGE_CLAIM, async (data: unknown) => {
+    if (!data || typeof data !== "object") return;
+    const request = data as { runtimeSessionId?: unknown; nonce?: unknown; operation?: unknown; promptDigest?: unknown };
+    if (request.runtimeSessionId !== runtimeID || typeof request.nonce !== "string"
+      || request.nonce.trim().length === 0 || request.nonce.length > 256
+      || (request.operation !== "session-register" && request.operation !== "prompt-capture")) return;
+    // Copy fields before awaiting: another local extension may mutate its request object.
+    const correlation = { runtimeSessionId: runtimeID, nonce: request.nonce, operation: request.operation,
+      ...(typeof request.promptDigest === "string" ? { promptDigest: request.promptDigest } : {}) };
+    if (request.operation === "prompt-capture") {
+      const proof = state.promptProof;
+      let owned = false;
+      try {
+        owned = typeof request.promptDigest === "string" && /^[a-f0-9]{64}$/.test(request.promptDigest)
+          && current() && !!proof && proof.digest === request.promptDigest
+          && !projectDetectionPending && !projectResolutionError && project === proof.project
+          && effectiveSessionID(ctx, runtimeID) === proof.effectiveID
+          && registeredSessionProjects.get(proof.effectiveID) === proof.project
+          && !knownSessions.has(`\u0000closing:${runtimeID}`)
+          && !knownSessions.has(`\u0000closing:${proof.effectiveID}`);
+      } catch { /* A stale or unreadable native context cannot prove delivery. */ }
+      if (active) pi.events.emit(BRIDGE_DECISION, { ...correlation, status: owned ? "owned" : "unknown" });
+      return;
+    }
+    let status: "owned" | "unknown" = "unknown";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
+    try {
+      const confirm = async () => {
+        if (!current() || !(await initOnceForHook(ctx.cwd)) || expired || !current()) return false;
+        await refreshProjectDetection(ctx.cwd);
+        if (expired || !current() || project === "unknown" || projectDetectionPending || projectResolutionError) return false;
+        const owner = project;
+        let effectiveID = effectiveSessionID(ctx, runtimeID);
+        if (registeredSessionProjects.get(effectiveID) !== owner) {
+          // registerEffectiveSession joins any pending registration and validates its acknowledgement.
+          effectiveID = await registerEffectiveSession(ctx, owner, pi.appendEntry?.bind(pi));
+        }
+        return current() && project === owner && registeredSessionProjects.get(effectiveID) === owner
+          && !knownSessions.has(`\u0000closing:${runtimeID}`)
+          && !knownSessions.has(`\u0000closing:${effectiveID}`);
+      };
+      const confirmed = await Promise.race([
+        confirm(),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => { expired = true; resolve(false); }, BRIDGE_CLAIM_TIMEOUT_MS); }),
+      ]);
+      if (confirmed && current()) status = "owned";
+    } catch { /* Uncertain registration retains the consumer's existing hooks. */ }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+    // Reload/shutdown cancel delivery as well as removing the listener.
+    if (active) pi.events.emit(BRIDGE_DECISION, { ...correlation, status });
+  });
+  state.removeBridgeResponder = () => { active = false; unsubscribe(); };
+}
+
 export default function registerEngram(pi: ExtensionAPI) {
+  // Trace-only comparison is local to this factory, never persistence or ownership state.
+  let previousTraceIdentity: string | undefined;
+  const traceLifecycle = (event: "session_start" | "session_shutdown", id: string | undefined | (() => string), reason?: unknown) => {
+    if (process.env.ENGRAM_PI_SESSION_TRACE !== "1") {
+      previousTraceIdentity = undefined;
+      return;
+    }
+    let current: string | undefined;
+    try {
+      const value = typeof id === "function" ? id() : id;
+      if (typeof value === "string" && value.trim()) current = value.trim();
+    } catch { /* Reading identity for diagnostics must never affect reload cleanup. */ }
+    const identity = !current ? "missing" : !previousTraceIdentity ? "first" : current === previousTraceIdentity ? "same" : "different";
+    if (current) previousTraceIdentity = current;
+    if (event === "session_start") traceSessionRegistration({ stage: "lifecycle", event, identity });
+    else traceSessionRegistration({ stage: "lifecycle", event, identity, reason: reason === "reload" ? "reload" : reason == null || reason === "" ? "missing" : "other" });
+  };
+  // Pi's queued steer/follow-up inputs bypass before_agent_start. Only retain
+  // the latest idle input; a FIFO would assign queued provenance to later runs.
+  const pendingInput = new WeakMap<object, { sessionId: string; source: InputEvent["source"] }>();
   registerMemoryTools(pi);
-  pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
+  pi.on("input", (event: InputEvent, ctx: SessionContext) => {
+    if (event.streamingBehavior) return { action: "continue" as const };
     const sessionId = observeRuntimeSessionID(ctx);
+    if (sessionId) pendingInput.set(ctx.sessionManager, { sessionId, source: event.source });
+    else pendingInput.delete(ctx.sessionManager);
+    return { action: "continue" as const };
+  });
+  pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
+    pendingInput.delete(ctx.sessionManager);
+    removeBridgeResponders(ctx);
+    const sessionId = observeRuntimeSessionID(ctx);
+    traceLifecycle("session_start", sessionId);
     if (sessionId) {
       const state = lifecycle(ctx, sessionId);
       state.epoch++;
       state.closing = false;
       knownSessions.delete(`\u0000closing:${sessionId}`);
       knownSessions.delete(`\u0000closing:${effectiveSessionID(ctx, sessionId)}`);
+      installBridgeResponder(pi, ctx, sessionId, state);
     }
     const ready = await initOnceForHook(ctx.cwd);
     try {
@@ -2063,9 +2244,15 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event: { reason?: string }, ctx: SessionContext) => {
+    pendingInput.delete(ctx.sessionManager);
+    removeBridgeResponders(ctx);
     // Pi reload replaces the extension runner but keeps its runtime session ID alive.
-    if (event.reason === "reload") return;
+    if (event.reason === "reload") {
+      traceLifecycle("session_shutdown", () => ctx.sessionManager.getSessionId(), event.reason);
+      return;
+    }
     const runtimeID = observeRuntimeSessionID(ctx);
+    traceLifecycle("session_shutdown", runtimeID, event.reason);
     if (!runtimeID) return;
     const state = lifecycle(ctx, runtimeID);
     state.epoch++;
@@ -2157,10 +2344,21 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
-    let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
+    // Consume before awaiting: another input must not change this turn's source.
     const sessionId = observeRuntimeSessionID(ctx);
+    const input = pendingInput.get(ctx.sessionManager);
+    pendingInput.delete(ctx.sessionManager);
+    const syntheticInput = (input?.sessionId === sessionId && input?.source === "extension")
+      || Boolean(process.env.GENTLE_PI_AGENTS_CHILD);
+    // Invalidate before any initialization or early return, including short/empty turns.
+    for (const prior of lifecycles.get(ctx.sessionManager)?.values() || []) {
+      prior.promptProof = undefined;
+      prior.promptTurn = (prior.promptTurn || 0) + 1;
+    }
+    let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     const epoch = state?.epoch;
+    const promptTurn = state?.promptTurn;
     // A returned systemPrompt becomes a forced prompt that turns skipping this hook never see
     // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
     const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
@@ -2176,6 +2374,8 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (!(await initOnceForHook(ctx.cwd))) return result;
     await refreshProjectDetection(ctx.cwd);
 
+    // Unknown provenance and human-facing RPC retain the existing capture policy.
+    if (syntheticInput) return result;
     const finalContent = event.prompt?.trim();
     if ((projectDetectionPending || projectResolutionError) && sessionId && finalContent && finalContent.length > 10) {
       return result;
@@ -2193,7 +2393,21 @@ export default function registerEngram(pi: ExtensionAPI) {
         project,
       };
       if (state && (state.closing || state.epoch !== epoch)) return result;
-      await bestEffortEngramFetch("/prompts", { method: "POST", body }, ctx);
+      const acknowledgement = await bestEffortEngramFetch<{ id?: unknown; status?: unknown }>("/prompts", { method: "POST", body }, ctx);
+      // null includes errors and successful JSON null/204: only the core's saved-ID
+      // acknowledgement proves capture. The digest matches the original trimmed input,
+      // while persistence retains its existing redaction/truncation policy.
+      if (state && !state.closing && state.epoch === epoch && state.promptTurn === promptTurn
+        && getSessionId(ctx) === sessionId && project === body.project
+        && !projectDetectionPending && !projectResolutionError
+        && effectiveSessionID(ctx, sessionId) === effectiveID
+        && registeredSessionProjects.get(effectiveID) === body.project
+        && !knownSessions.has(`\u0000closing:${effectiveID}`)
+        && acknowledgement?.status === "saved" && typeof acknowledgement.id === "number"
+        && Number.isSafeInteger(acknowledgement.id) && acknowledgement.id > 0) {
+        state.promptProof = { digest: createHash("sha256").update(finalContent, "utf8").digest("hex"),
+          project: body.project, effectiveID };
+      }
     }
 
     return result;

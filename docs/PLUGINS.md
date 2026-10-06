@@ -151,6 +151,7 @@ plugin/claude-code/
 
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
+   Before rewriting input, the hook resolves the project and confirms project-owned session registration using one shared four-second HTTP budget. This leaves one second within the configured five-second hook timeout for process startup and verdict output. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; other registration failures retain `Claude host session registration could not be confirmed`. Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
 2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 
@@ -168,6 +169,10 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 3. This ensures no work is lost when context is compressed
 
 **On user prompt submit**:
+The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompts/capture-decision` endpoint whether to capture a prompt. This replaces capture's former `GET /project/current` read, rather than adding another human-prompt preflight. Go skips blank prompts and prompts whose trimmed content starts with `<task-notification>` or `<agent-message`; only a valid `capture` decision with canonical project metadata permits `POST /prompts`, using the original content unchanged. Filtering affects persistence only, not ToolSearch or save reminders, and does not delete existing rows. The Windows Git Bash safe path remains builtin-only and skips all prompt persistence and API calls.
+
+**Server compatibility:** Automatic Claude prompt capture requires an Engram server with `/prompts/capture-decision`. Older servers (404), unavailable/slow servers, and malformed or invalid decisions silently skip capture; normal hooks, first-message ToolSearch, and existing save-reminder reads continue to work. There is no local classifier fallback. Decision responses must be 2xx without redirects. Adapters reject project metadata containing path separators, ASCII controls, or surrounding whitespace; these are transport sanity checks, not project normalization. Go remains the canonical-name authority, including lowercasing and repeated separator normalization; adapters never repair server metadata.
+
 1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.

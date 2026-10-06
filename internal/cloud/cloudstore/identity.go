@@ -783,6 +783,64 @@ func (cs *CloudStore) FindPrincipalTokenByHash(ctx context.Context, tokenHash st
 	return token, principal, nil
 }
 
+var ErrPrincipalTokenRevoked = errors.New("principal token is revoked")
+
+// MarkPrincipalTokenUsed serializes enabled-state validation and usage against
+// principal transitions and recovery. Lock principal before token, matching
+// recovery's ordering; an UPDATE predicate alone cannot protect both rows.
+func (cs *CloudStore) MarkPrincipalTokenUsed(ctx context.Context, tokenID string) error {
+	if cs == nil || cs.db == nil {
+		return fmt.Errorf("cloudstore: not initialized")
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("cloudstore: begin token usage tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var principalID string
+	err = tx.QueryRowContext(ctx, `SELECT principal_id::text FROM cloud_principal_tokens WHERE id = $1`, tokenID).Scan(&principalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPrincipalTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: find token usage principal: %w", err)
+	}
+	var enabled bool
+	// NO KEY UPDATE blocks enabled-state changes and recovery's FOR UPDATE,
+	// but permits FK KEY SHARE checks by concurrent token revocation.
+	err = tx.QueryRowContext(ctx, `SELECT enabled FROM cloud_principals WHERE id = $1 FOR NO KEY UPDATE`, principalID).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPrincipalNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: lock token usage principal: %w", err)
+	}
+	if !enabled {
+		return ErrPrincipalDisabled
+	}
+	var revokedAt *time.Time
+	err = tx.QueryRowContext(ctx, `SELECT revoked_at FROM cloud_principal_tokens WHERE id = $1 AND principal_id = $2 FOR UPDATE`, tokenID, principalID).Scan(&revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPrincipalTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: lock token usage: %w", err)
+	}
+	if revokedAt != nil {
+		return ErrPrincipalTokenRevoked
+	}
+	// clock_timestamp is evaluated after waiting for locks, unlike NOW's
+	// transaction-start time. GREATEST also preserves future stored values.
+	if _, err := tx.ExecContext(ctx, `UPDATE cloud_principal_tokens SET last_used_at = GREATEST(last_used_at, clock_timestamp()) WHERE id = $1`, tokenID); err != nil {
+		return fmt.Errorf("cloudstore: mark token usage: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cloudstore: commit token usage: %w", err)
+	}
+	return nil
+}
+
 func (cs *CloudStore) RevokePrincipalToken(ctx context.Context, tokenID, revokedByPrincipalID, reason string) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")

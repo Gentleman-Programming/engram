@@ -64,10 +64,12 @@ func init() {
 }
 
 var (
-	storeNew           = store.New
-	storeDefaultConfig = store.DefaultConfig
-	newHTTPServer      = server.New
-	startHTTP          = (*server.Server).Start
+	storeNew                   = store.New
+	storeDefaultConfig         = store.DefaultConfig
+	newHTTPServer              = server.New
+	startHTTP                  = (*server.Server).Start
+	serveGenerationInvalidated = (*server.Server).GenerationInvalidated
+	serveGenerationError       = (*store.Store).GenerationError
 
 	newMCPServer           = mcp.NewServer
 	newMCPServerWithTools  = mcp.NewServerWithTools
@@ -778,7 +780,9 @@ func main() {
 
 	switch os.Args[1] {
 	case "serve":
-		cmdServe(cfg)
+		if err := cmdServe(cfg); err != nil {
+			fatal(err)
+		}
 	case "mcp":
 		cmdMCP(cfg)
 	case "tui":
@@ -800,7 +804,9 @@ func main() {
 	case "stats":
 		cmdStats(cfg)
 	case "export":
-		cmdExport(cfg)
+		if _, err := cmdExport(cfg); err != nil {
+			fatal(err)
+		}
 	case "import":
 		cmdImport(cfg)
 	case "sync":
@@ -878,16 +884,15 @@ func printUpdateCheckResult(result versioncheck.CheckResult) {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-func cmdServe(cfg store.Config) {
+func cmdServe(cfg store.Config) error {
 	options, err := resolveServeOptions(os.Args[2:])
 	if err != nil {
-		fatal(err)
-		return
+		return err
 	}
 
 	s, err := storeNew(cfg)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 	defer s.Close()
 
@@ -918,30 +923,58 @@ func cmdServe(cfg store.Config) {
 		srv.SetSyncStatus(fallback)
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
+	// The process owner handles notification, never the request goroutine.
+	// All exit paths stop background work before closing the store.
+	stopBackground := func() {
+		cancel()
+		if mgrStop != nil {
+			mgrStop()
+			mgrStop = nil
+		}
+	}
+	defer func() {
+		stopBackground()
+		_ = srv.Close()
+	}()
 	sigCh := make(chan os.Signal, 1)
 	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals(sigCh)
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-sigCh:
-			log.Println("[engram] shutting down...")
-			cancel()
-			if mgrStop != nil {
-				mgrStop()
-			}
-			if err := srv.Close(); err != nil {
-				log.Printf("[engram] close server: %v", err)
-			}
-		case <-done:
-		}
-	}()
-
-	if err := startHTTP(srv); err != nil {
-		fatal(err)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- startHTTP(srv) }()
+	var terminal, serveErr error
+	select {
+	case <-serveGenerationInvalidated(srv):
+		terminal = store.ErrDatabaseGenerationChanged
+	case <-sigCh:
+		log.Println("[engram] shutting down...")
+	case serveErr = <-serveResult:
+		// Preserve the serving result while sharing cleanup and the late generation check.
 	}
+	stopBackground()
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	_ = srv.Shutdown(drainCtx) // expiry forces active connections closed
+	// Forced connection closure does not join handlers: the store may already be
+	// sticky-invalidated before middleware can notify us. Read only that observed
+	// state, without probing the filesystem or waiting for a handler to return.
+	if errors.Is(serveGenerationError(s), store.ErrDatabaseGenerationChanged) {
+		terminal = store.ErrDatabaseGenerationChanged
+	}
+	// Also preserve notifications that arrived during background cleanup or draining.
+	if terminal == nil {
+		select {
+		case <-serveGenerationInvalidated(srv):
+			terminal = store.ErrDatabaseGenerationChanged
+		default:
+		}
+	}
+	if terminal != nil {
+		log.Println("[engram] database generation changed; stopping server; restart Engram")
+	}
+	if terminal != nil {
+		return terminal
+	}
+	return serveErr
 }
 
 type serveOptions struct {
@@ -1120,7 +1153,7 @@ func cmdMCP(cfg store.Config) {
 	}
 	defer stopAutosync()
 
-	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
+	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride, Version: version}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 
@@ -1950,7 +1983,7 @@ func cmdStats(cfg store.Config) {
 	fmt.Printf("  Database:     %s/engram.db\n", cfg.DataDir)
 }
 
-func cmdExport(cfg store.Config) {
+func cmdExport(cfg store.Config) (string, error) {
 	outFile := "engram-export.json"
 	projectName := ""
 	allProjects := false
@@ -1959,8 +1992,7 @@ func cmdExport(cfg store.Config) {
 		case "--project":
 			value, err := requiredProjectValue(os.Args, i)
 			if err != nil {
-				fatal(err)
-				return
+				return "", err
 			}
 			projectName = value
 			i++
@@ -1975,14 +2007,13 @@ func cmdExport(cfg store.Config) {
 
 	s, err := storeNew(cfg)
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 	defer s.Close()
 
 	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
 	if resolveErr != nil {
-		fatal(resolveErr)
-		return
+		return "", resolveErr
 	}
 	var data *store.ExportData
 	if resolved != "" {
@@ -1991,22 +2022,23 @@ func cmdExport(cfg store.Config) {
 		data, err = storeExport(s)
 	}
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 
 	out, err := jsonMarshalIndent(data, "", "  ")
 	if err != nil {
-		fatal(err)
+		return "", err
 	}
 
 	if err := os.WriteFile(outFile, out, 0644); err != nil {
-		fatal(err)
+		return "", fmt.Errorf("write %s: %w", outFile, err)
 	}
 
 	fmt.Printf("Exported to %s\n", outFile)
 	fmt.Printf("  Sessions:     %d\n", len(data.Sessions))
 	fmt.Printf("  Observations: %d\n", len(data.Observations))
 	fmt.Printf("  Prompts:      %d\n", len(data.Prompts))
+	return outFile, nil
 }
 
 func cmdImport(cfg store.Config) {
@@ -3498,6 +3530,7 @@ func printSetupUsage() {
 	fmt.Println("usage: engram setup [<agent>] [--protocol=slim|full]")
 	fmt.Println()
 	fmt.Println("Install an agent plugin (claude-code, opencode, codex, ...).")
+	fmt.Println("Claude Code: already-installed engram@engram is updated at user scope; update failures fail setup.")
 	fmt.Println("Without <agent>, shows an interactive menu.")
 	fmt.Println()
 	fmt.Println("Flags:")
@@ -3715,7 +3748,7 @@ Commands:
   serve [port]       Start HTTP API server (default: 7437)
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
-                        Profiles: agent (18 tools), admin (4 tools), all (default, 22)
+                        Profiles: agent (%d tools), admin (%d tools), all (default, %d)
                        Combine: --tools=agent,admin or pick individual tools
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).
@@ -3851,7 +3884,7 @@ MCP Configuration (add to your agent's config):
       }
     }
   }
-`, version)
+`, version, len(mcp.ProfileAgent), len(mcp.ProfileAdmin), len(mcp.ResolveTools("agent,admin")))
 }
 
 func fatal(err error) {

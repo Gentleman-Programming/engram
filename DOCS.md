@@ -303,13 +303,14 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+- When a local HTTP request observes permanent database generation invalidation, its existing error response is preserved. After the handler returns, `engram serve` logs one restart diagnostic, stops autosync, drains HTTP requests for up to five seconds (then force-closes remaining connections), releases its listener, and exits nonzero after cleanup. Ordinary transient health failures remain generic `500` responses and do not stop the server. Detection is request-triggered, not a background watchdog; the database is not reopened automatically.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
 
 - `POST /sessions` — Create or renew a runtime session. Body: `{id, project, directory?, ownership_mode?, resume?, isolated?}`
   - `directory` is optional. Ordinary registration normalizes directories to the runtime worktree root, including omitted or blank input resolving to server cwd. Renewal keeps the first nonblank stored directory.
-  - `isolated: true` requires `ownership_mode: "project_owned"` and an omitted or blank directory (otherwise `400`). It stores an empty directory and atomically rejects a nonblank directory on either the requested root or selected continuation with `409 code: "session_isolation_conflict"` before lease renewal, ownership repair, or sync mutations. Existing runtime-bound rows are never silently cleared. This contract is advertised by `GET /health` as `capabilities.isolated_session_registration: true`; clients must require that exact capability before sending isolated registrations, because older servers may ignore the flag.
+  - `isolated: true` requires `ownership_mode: "project_owned"` and an omitted or blank directory (otherwise `400`). It stores an empty directory and atomically rejects, on either the requested root or the selected continuation, a persisted nonblank directory or a persisted `shared` ownership mode (including a `shared` row with a blank directory, such as one imported from Cloud) with `409 code: "session_isolation_conflict"` before lease renewal, ownership repair, or sync mutations. Existing runtime-bound or shared rows are never silently cleared or converted. Ordinary non-isolated registration of `shared` sessions is unchanged. This contract is advertised by `GET /health` as `capabilities.isolated_session_registration: true`; clients must require that exact capability before sending isolated registrations, because older servers may ignore the flag.
   - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
   - A successful create or renewal writes a local 30-minute `runtime_lease_expires_at` without changing the persisted session identity. Leases are local liveness evidence only: they are neither synced nor exported.
   - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
@@ -377,6 +378,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Prompts
 
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
+- `POST /prompts/capture-decision` — Read-only Claude capture decision. Body: `{source:"claude-code", cwd:<nonblank string>, content:<string>}`. Returns `200 {decision:"skip"}` for trimmed blank content or content starting with `<task-notification>` or `<agent-message`; otherwise returns `200 {decision:"capture", ...}` with the current-project metadata schema, resolved by inspection only (unlike `GET /project/current`, this route never establishes Git bindings). An unbound Git repository returns `project_source:"unbound_git"`, which capture adapters must not treat as established canonical identity; normal SessionStart/project resolution may first need to establish that binding. Conflicting or ambiguous history fails closed through existing project error responses. Do not add a second, writing project GET to the capture decision path. Malformed, missing, wrong-type, unsupported-source, unknown-field, or trailing JSON requests return `400`; project resolution errors use existing project error responses. No prompts, counters, or database state are changed. Claude capture-enabled hooks use this instead of their capture project GET, then persist original human content once through `POST /prompts`. Updating the server is required for automatic Claude capture: unsupported endpoints or invalid/error responses skip persistence without a local prefix fallback. Reminder reads and other hooks are unchanged; the builtin-only Windows Git Bash path makes no API calls.
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
   - No-result responses from both prompt collection endpoints return `200` with `[]` (never `null`)
@@ -947,6 +949,8 @@ engram sync --cloud --project <project>
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
 
+For pending observation upserts missing only a title, preview with `engram doctor repair --project <project> --check sync_mutation_required_fields --plan`, then use `--apply` instead of `--plan`. Eligible local mutations copy the matching live observation's validated current title verbatim without updating that observation. This repairs the current projection, not historical title truth. The existing blank-local-title path still derives a title from observation content and updates the source. Both paths patch only the queued payload title, preserving sequence and delivery state; neither pushes mutations. Conflicting identity, ownership, or project references are not eligible for current-title copying.
+
 When cloud sync receives `policy_forbidden`, Engram preserves the server's denied project message and advises the server administrator to check `ENGRAM_CLOUD_ALLOWED_PROJECTS`. A managed principal's project grant may also need checking; the client does not expose allowlist contents.
 
 For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
@@ -1257,6 +1261,21 @@ Parameters:
 
 - **id** (required): int — observation ID to retrieve
 - **project** (optional): string — explicit project context; unknown names return a structured error with `available_projects`
+
+Optional argument `include_history` (boolean, default false): when true, the
+result also renders the captured version history of the observation (each
+snapshot is the title/content saved before a `topic_key` upsert or a
+content-changing `mem_update` overwrote it, numbered per observation starting at
+1). The response envelope gains `version_count` (the truthful total stored
+count, always) and `history` (an array of `{version, title, content, created_at}`
+objects). When more than 50 versions are stored, the response renders the most
+recent 50 (oldest first) and adds `history_truncated` (true),
+`history_from_version` (the oldest version still rendered), and `history_cursor`
+(a non-negative continuation value). To fetch the older page, pass that value as
+the optional `history_cursor` argument of a follow-up
+`mem_get_observation(id, include_history: true)` call; the older page is emitted
+without truncation fields once version 1 is reached. Omitting the argument keeps
+the input and output identical to prior releases.
 
 ### mem_session_summary
 
@@ -1628,7 +1647,7 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 ## Running as a Service
 
-Without a service supervisor, `engram serve` dies whenever the binary is replaced (e.g. on `brew upgrade engram`) or the host reboots, and autosync stops silently. The templates below restart it automatically. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
+Use a service supervisor to start `engram serve` after reboot and restart it after failures. Replacing the binary alone does not guarantee that an existing process exits. In this version, permanent database generation invalidation observed by an HTTP request triggers autosync cancellation, up to five seconds of HTTP draining, listener release, and a nonzero exit after cleanup. Restart belongs to the supervisor or operator, not Engram itself; already-running older binaries do not gain this behavior. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
 
 ### Using systemd (Linux)
 
@@ -1660,7 +1679,7 @@ WantedBy=default.target
 
 ### Using launchd (macOS)
 
-This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` automatically after `brew upgrade engram` replaces the binary, so autosync survives upgrades.
+This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` when it exits. A binary upgrade alone is not an exit trigger; request-observed permanent database generation invalidation is.
 
 1. Find your binary path: `which engram` (typically `/opt/homebrew/bin/engram` on Apple Silicon or `/usr/local/bin/engram` on Intel)
 2. Create the data dir if missing: `mkdir -p ~/.engram`

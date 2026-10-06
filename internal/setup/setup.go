@@ -628,50 +628,48 @@ func injectOpenCodeTUIPlugin() error {
 	return writeOpenCodeJSONCConfig(configPath, config)
 }
 
-// injectOpenCodeMCP adds the engram MCP server entry to opencode.json.
-// It reads the existing config, adds/updates the engram entry under "mcp",
-// and writes it back preserving all other settings.
+// injectOpenCodeMCP inserts only the missing mcp.engram member, preserving
+// every original byte of the user's JSON/JSONC configuration.
 func injectOpenCodeMCP() error {
 	configPath := openCodeConfigPath()
-
-	// Read existing config (or start with empty object)
-	config, err := readOpenCodeJSONCConfig(configPath)
+	data, err := readFileFn(configPath)
 	if err != nil {
-		return err
-	}
-
-	// Parse or create the "mcp" block
-	var mcpBlock map[string]json.RawMessage
-	if raw, exists := config["mcp"]; exists {
-		if err := json.Unmarshal(raw, &mcpBlock); err != nil {
-			return fmt.Errorf("parse mcp block: %w", err)
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read config: %w", err)
 		}
-	} else {
-		mcpBlock = make(map[string]json.RawMessage)
+		data = []byte("{}")
 	}
-
-	// Check if engram is already registered
-	if _, exists := mcpBlock["engram"]; exists {
-		return nil // already registered, nothing to do
+	config, err := parseOpenCodeJSONC(data)
+	if err != nil {
+		return fmt.Errorf("parse config: %w", err)
 	}
-
-	// Add engram MCP entry (agent profile — only tools agents need).
-	// Use resolveEngramCommand() so Windows users (and headless Linux setups
-	// where PATH is not inherited) get the absolute binary path.
+	if config.members == nil {
+		return fmt.Errorf("parse config: expected object")
+	}
+	mcpBlock, exists := config.members["mcp"]
+	if exists {
+		if mcpBlock.members == nil {
+			return fmt.Errorf("parse mcp block: expected object")
+		}
+		if _, registered := mcpBlock.members["engram"]; registered {
+			return nil
+		}
+	}
 	entryJSON, err := jsonMarshalFn(mcpEntry(opencodeObject))
 	if err != nil {
 		return fmt.Errorf("marshal engram entry: %w", err)
 	}
-	mcpBlock["engram"] = json.RawMessage(entryJSON)
-
-	// Write mcp block back to config
-	mcpJSON, err := jsonMarshalFn(mcpBlock)
-	if err != nil {
-		return fmt.Errorf("marshal mcp block: %w", err)
+	member := append([]byte(`"engram":`), entryJSON...)
+	object := mcpBlock
+	if !exists {
+		member = append(append([]byte(`"mcp":{`), member...), '}')
+		object = config
 	}
-	config["mcp"] = json.RawMessage(mcpJSON)
-
-	return writeOpenCodeJSONCConfig(configPath, config)
+	output := insertJSONCMember(data, object, member)
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
 }
 
 func readOpenCodeJSONCConfig(path string) (map[string]json.RawMessage, error) {
@@ -988,6 +986,19 @@ func installClaudeCode() (*Result, error) {
 		// If plugin is already installed, that's fine
 		if !strings.Contains(installOutputStr, "already") {
 			return nil, fmt.Errorf("plugin install failed: %s", installOutputStr)
+		}
+	}
+
+	// An existing installation is not necessarily current. Refresh the catalog
+	// before updating the cached plugin, regardless of install's exit status.
+	if strings.Contains(installOutputStr, "already") {
+		updateOut, updateErr := runCommand(claudeBin, "plugin", "marketplace", "update", "engram")
+		if updateErr != nil {
+			return nil, fmt.Errorf("marketplace update failed: %s", strings.TrimSpace(string(updateOut)))
+		}
+		updateOut, updateErr = runCommand(claudeBin, "plugin", "update", "engram@engram", "--scope", "user")
+		if updateErr != nil {
+			return nil, fmt.Errorf("plugin update failed: %s", strings.TrimSpace(string(updateOut)))
 		}
 	}
 
