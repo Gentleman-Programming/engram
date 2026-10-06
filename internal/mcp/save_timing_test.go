@@ -57,6 +57,25 @@ func TestHandleSaveTimingOptIn(t *testing.T) {
 				t.Fatal(err)
 			}
 			rejected := call("")
+			// Make only this isolated fixture connection read-only. Valid
+			// input reaches AddObservation, but its write must fail.
+			if _, err := s.DB().Exec("PRAGMA query_only = ON"); err != nil {
+				t.Fatal(err)
+			}
+			_, writeErr := s.AddObservation(store.AddObservationParams{
+				SessionID: "timing-session", Project: "timing-test", Scope: "project",
+				Title: "private-title-marker failed save", Content: "private-body-marker", Type: "manual",
+			})
+			if writeErr == nil {
+				t.Fatal("read-only fixture must reject AddObservation")
+			}
+			failedSave := call("private-title-marker failed save")
+			if _, err := s.DB().Exec("PRAGMA query_only = OFF"); err != nil {
+				t.Fatal(err)
+			}
+			if !failedSave.IsError || callResultText(t, failedSave) != "Failed to save: "+writeErr.Error() {
+				t.Fatalf("store failure changed: %s", callResultText(t, failedSave))
+			}
 			after, err := s.Stats()
 			if err != nil {
 				t.Fatal(err)
@@ -117,7 +136,7 @@ func TestHandleSaveTimingOptIn(t *testing.T) {
 				return
 			}
 			lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-			if len(lines) != 2 {
+			if len(lines) != 3 {
 				t.Fatalf("want one diagnostic per call, got %q", output)
 			}
 			for i, line := range lines {
@@ -136,8 +155,14 @@ func TestHandleSaveTimingOptIn(t *testing.T) {
 					}
 				}
 				wantStatus := "saved"
-				if i == 1 {
+				if i > 0 {
 					wantStatus = "not_saved"
+					if record["candidate_lookup_ms"] != float64(0) || record["relation_insert_ms"] != float64(0) {
+						t.Fatalf("failed save reached candidate detection: %v", record)
+					}
+				}
+				if i == 1 && record["save_ms"] != float64(0) {
+					t.Fatalf("title rejection reached AddObservation: %v", record)
 				}
 				if record["status"] != wantStatus {
 					t.Fatalf("status: %v", record)

@@ -734,7 +734,7 @@ engram mcp
 
 For an agent-managed server, add `"ENGRAM_MEM_SAVE_TIMING": "1"` to that server's MCP environment configuration and restart it; retrieve stderr from the host's MCP logs. No diagnostic text is written to MCP stdout or added to tool responses.
 
-Each completed invocation writes one line with this prefix and JSON fields (values below are illustrative milliseconds):
+With timing enabled, each completed inner `handleSave` invocation writes one line with this prefix and JSON fields (values below are illustrative milliseconds):
 
 ```text
 engram: mem_save_timing {"status":"saved","total_ms":563.2,"save_ms":12.1,"candidate_lookup_ms":511.3,"relation_insert_ms":3.4}
@@ -746,7 +746,7 @@ engram: mem_save_timing {"status":"saved","total_ms":563.2,"save_ms":12.1,"candi
 - `relation_insert_ms`: elapsed time for the pending-relation insertion loop. Zero if that stage was not reached.
 - `status`: `saved` when `AddObservation` succeeded (also for an update/deduplicated save), otherwise `not_saved`. It is not a candidate-detection success indicator. Unreached stages report zero.
 
-Stage times include database waits; they do **not** separately measure SQLite lock waits or connection-pool waits, and are not CPU times. Stages do not sum to `total_ms`: project/session resolution, prompt capture, and response construction also take time. A still-running or killed invocation has no completed timing record. Logging itself can block if the host does not drain stderr.
+Stage times include database waits; they do **not** separately measure SQLite lock waits or connection-pool waits, and are not CPU times. Stages do not sum to `total_ms`: project/session resolution, prompt capture, and response construction also take time. A still-running or killed invocation has no completed timing record. Requests rejected because the MCP write queue is full, or canceled before `handleSave` starts, also produce no timing record; queue wait is excluded from `total_ms`. Logging itself can block if the host does not drain stderr.
 
 The new diagnostic records contain only durations and status: no titles, content, project names, paths, IDs, or error details. Existing unrelated error logs are unchanged; inspect them before sharing a trace. Compare these records with client elapsed times from a sequential reproduction before choosing an optimization. Saving, ranking, and candidate insertion behavior are unchanged.
 
