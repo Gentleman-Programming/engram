@@ -465,6 +465,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
+	// Committed-result lookup for replay-safe observation saves.
+	s.mux.HandleFunc("GET /observations/save-result", s.handleGetObservationSaveResult)
 	// Pin state is local-only metadata and remains open with ENGRAM_HTTP_TOKEN like other non-destructive local HTTP writes.
 	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
@@ -660,6 +662,24 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, session)
 }
 
+func (s *Server) handleGetObservationSaveResult(w http.ResponseWriter, r *http.Request) {
+	operationID := r.URL.Query().Get("operation_id")
+	if operationID == "" {
+		jsonError(w, http.StatusBadRequest, "operation_id is required")
+		return
+	}
+	observationID, err := s.store.GetObservationSaveResult(operationID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if observationID == 0 {
+		jsonError(w, http.StatusNotFound, "no committed result found for operation_id")
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"id": observationID, "status": "committed"})
+}
+
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	var body store.AddObservationParams
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -677,7 +697,20 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "session_id and content are required")
 		return
 	}
-	if !s.validateSessionProject(w, body.SessionID, body.Project) {
+	// A committed operation ID reaches the transactional replay path before
+	// session-ownership pre-validation, so a later ownership change cannot
+	// lock out an acknowledged save. Unknown or missing operation IDs still
+	// run the normal pre-validation gate.
+	recorded := false
+	if body.OperationID != "" {
+		var err error
+		recorded, err = s.store.ObservationOperationRecorded(body.OperationID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if !recorded && !s.validateSessionProject(w, body.SessionID, body.Project) {
 		return
 	}
 
@@ -689,6 +722,10 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrObservationTitleRequired),
 			errors.Is(err, store.ErrObservationContentRequired):
 			jsonError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrObservationOperationConflict):
+			jsonError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrObservationOperationExpired):
+			jsonError(w, http.StatusGone, err.Error())
 		case writeOwnershipError(w, body.SessionID, err):
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())

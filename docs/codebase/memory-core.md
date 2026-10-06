@@ -51,6 +51,12 @@ For schema details, use [DOCS.md — Database Schema](../../DOCS.md#database-sch
 - Write tools resolve the project from cwd/config; do not invent a project when there is ambiguity.
 - Search is progressive: compact results first, `mem_get_observation` only when full content is needed.
 
+## Replay-safe store saves
+
+`AddObservationParams.OperationID` optionally binds a save to a durable local result in `observation_save_operations`. The ledger uses a `v1:` SHA-256 fingerprint of length-prefixed, normalized request fields (including redacted/truncated content), computed before session ownership resolution. An identical replay returns the committed ID before ownership, dedupe, topic revisions, or sync mutations can run again; a changed payload returns `ErrObservationOperationConflict`.
+
+The ledger uses a plain insert in the same transaction as the observation and its sync mutation. Hard deletion preserves the operation as a tombstone through nullable `observation_id` and `ON DELETE SET NULL`; identical tombstone replays and unsupported fingerprint versions return `ErrObservationOperationExpired`. Saves without an operation ID retain existing behavior and write no ledger row. This is an internal store contract, not an HTTP or plugin recovery API.
+
 ## Deferred relation diagnostics
 
 `referenced observation missing` means at least one endpoint identity is absent locally. `referenced observation effective project mismatch` means both identities exist, but the relation's project-scoped endpoint check fails. An observation's explicit project overrides its session project; blank observation projects inherit the session project. Check the endpoint and relation ownership rather than assuming another pull will supply a missing observation.
