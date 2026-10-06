@@ -1266,7 +1266,7 @@ func (s *Store) backfillLegacySessionOwnershipModes() error {
 	for rows.Next() {
 		var id, project string
 		if err := rows.Scan(&id, &project); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		if manualSaveOwnerProject(id, project) {
@@ -1274,7 +1274,7 @@ func (s *Store) backfillLegacySessionOwnershipModes() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return err
 	}
 	if err := rows.Close(); err != nil {
