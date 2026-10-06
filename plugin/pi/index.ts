@@ -7,7 +7,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
@@ -37,7 +37,8 @@ type SessionTraceEvent =
 
 function traceSessionRegistration(event: SessionTraceEvent): void {
   if (process.env.ENGRAM_PI_SESSION_TRACE !== "1") return;
-  try { process.stderr.write(`[engram:session-trace] ${JSON.stringify(event)}\n`); }
+  // Descriptor writes surface pipe failures synchronously, without host-wide stream handlers.
+  try { writeSync(2, `[engram:session-trace] ${JSON.stringify(event)}\n`); }
   catch { /* Diagnostic output must not change registration or write behavior. */ }
 }
 

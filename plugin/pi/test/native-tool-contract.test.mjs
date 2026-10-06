@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -2904,6 +2906,7 @@ test("session registration trace is opt-in, metadata-only, and preserves resume 
   const originalUrl = process.env.ENGRAM_URL;
   const originalTrace = process.env.ENGRAM_PI_SESSION_TRACE;
   const originalWrite = process.stderr.write;
+  const originalDescriptorWrite = fs.writeSync;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   try {
     for (const scenario of ["disabled", "appendEntry", "getBranch", "resume", "retry"]) {
@@ -2918,6 +2921,11 @@ test("session registration trace is opt-in, metadata-only, and preserves resume 
       const effectiveID = `${runtimeID}:resume:2`;
       const canPersist = !["appendEntry", "getBranch"].includes(scenario);
       process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
+      fs.writeSync = (fd, ...args) => {
+        if (fd !== 2) return originalDescriptorWrite(fd, ...args);
+        stderr.push(String(args[0])); return Buffer.byteLength(String(args[0]));
+      };
+      syncBuiltinESMExports();
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
         const body = init.body ? JSON.parse(init.body) : undefined;
@@ -2963,6 +2971,8 @@ test("session registration trace is opt-in, metadata-only, and preserves resume 
   } finally {
     globalThis.fetch = originalFetch;
     process.stderr.write = originalWrite;
+    fs.writeSync = originalDescriptorWrite;
+    syncBuiltinESMExports();
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
     if (originalTrace === undefined) delete process.env.ENGRAM_PI_SESSION_TRACE; else process.env.ENGRAM_PI_SESSION_TRACE = originalTrace;
   }
@@ -2973,6 +2983,7 @@ test("session lifecycle trace is private, opt-in, and preserves shutdown behavio
   const originalUrl = process.env.ENGRAM_URL;
   const originalTrace = process.env.ENGRAM_PI_SESSION_TRACE;
   const originalWrite = process.stderr.write;
+  const originalDescriptorWrite = fs.writeSync;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   try {
     for (const mode of ["enabled", "disabled", "broken-stderr"]) {
@@ -2983,6 +2994,12 @@ test("session lifecycle trace is private, opt-in, and preserves shutdown behavio
         if (mode === "broken-stderr") throw new Error("private stderr failure");
         stderr.push(String(chunk)); return true;
       };
+      fs.writeSync = (fd, ...args) => {
+        if (fd !== 2) return originalDescriptorWrite(fd, ...args);
+        if (mode === "broken-stderr") throw new Error("private stderr failure");
+        stderr.push(String(args[0])); return Buffer.byteLength(String(args[0]));
+      };
+      syncBuiltinESMExports();
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
         calls.push(path);
@@ -3030,8 +3047,61 @@ test("session lifecycle trace is private, opt-in, and preserves shutdown behavio
     }
   } finally {
     globalThis.fetch = originalFetch; process.stderr.write = originalWrite;
+    fs.writeSync = originalDescriptorWrite;
+    syncBuiltinESMExports();
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
     if (originalTrace === undefined) delete process.env.ENGRAM_PI_SESSION_TRACE; else process.env.ENGRAM_PI_SESSION_TRACE = originalTrace;
+  }
+});
+
+test("session trace survives a closed stderr pipe without changing host error handling", async () => {
+  for (const hostHandler of [false, true]) {
+    await withPluginSandbox("engram-pi-closed-trace-pipe-", async ({ sandbox }) => {
+      const script = `
+        import { importPluginFromSandbox } from ${JSON.stringify(new URL("./plugin-sandbox.mjs", import.meta.url).href)};
+        const handlers = new Map();
+        const register = await importPluginFromSandbox(${JSON.stringify(sandbox)});
+        register({ registerTool() {}, on(event, handler) { handlers.set(event, handler); } });
+        let hostErrors = 0;
+        if (${hostHandler}) process.stderr.on('error', () => { hostErrors++; });
+        const listeners = process.stderr.listenerCount('error');
+        let requests = 0;
+        globalThis.fetch = async () => { requests++; throw new Error('unexpected request'); };
+        process.stdout.write('ready\\n');
+        await new Promise(resolve => process.stdin.once('data', resolve));
+        await handlers.get('session_shutdown')({ reason: 'reload' }, {
+          sessionManager: { getSessionId: () => 'synthetic-session' },
+        });
+        process.stdin.pause();
+        await new Promise(resolve => setImmediate(resolve));
+        process.stdout.write(JSON.stringify({ listeners, remaining: process.stderr.listenerCount('error'), hostErrors, requests }) + '\\n');
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+        env: { ...process.env, ENGRAM_PI_SESSION_TRACE: "1" },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const ready = deferred();
+      const closed = deferred();
+      const exited = deferred();
+      const output = [];
+      const lines = createInterface({ input: child.stdout });
+      lines.on("line", (line) => { output.push(line); if (line === "ready") ready.resolve(); });
+      child.stderr.once("close", () => closed.resolve());
+      child.once("exit", (code, signal) => exited.resolve({ code, signal }));
+      child.once("error", (error) => exited.resolve({ error }));
+      try {
+        await waitFor(ready.promise, "child did not prepare the trace");
+        child.stderr.destroy();
+        await waitFor(closed.promise, "stderr reader did not close");
+        child.stdin.end("trace\n");
+        const result = await waitFor(exited.promise, "child did not exit after the trace");
+        assert.deepEqual(result, { code: 0, signal: null });
+        assert.deepEqual(output, ["ready", JSON.stringify({ listeners: hostHandler ? 1 : 0, remaining: hostHandler ? 1 : 0, hostErrors: 0, requests: 0 })]);
+      } finally {
+        child.kill();
+        lines.close();
+      }
+    });
   }
 });
 

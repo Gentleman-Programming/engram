@@ -155,7 +155,14 @@ satellite saves still require `isolated_session_registration: true` separately.
 For an affected quit/resume cycle, set `ENGRAM_PI_SESSION_TRACE=1` before launching
 Pi with this source version of the extension. The published `0.2.0` package does
 not include this instrumentation; use the local extension instead of loading both
-copies. From the repository root in a POSIX shell, set `SESSION_ID` to the ID
+copies.
+
+If your Pi `settings.json` lists `npm:gentle-engram@0.2.0` under `packages`,
+temporarily remove only that entry before launching the local extension, then
+restore it after collecting the trace. Keep other packages enabled: `-e` adds
+an extension; it does not replace the installed package.
+
+From the repository root in a POSIX shell, set `SESSION_ID` to the ID
 of the conversation you intend to resume, then run:
 
 ```bash
