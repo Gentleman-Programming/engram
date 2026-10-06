@@ -3530,7 +3530,7 @@ func printSetupUsage() {
 	fmt.Println("usage: engram setup [<agent>] [--protocol=slim|full]")
 	fmt.Println()
 	fmt.Println("Install an agent plugin (claude-code, opencode, codex, ...).")
-	fmt.Println("Claude Code: already-installed plugins are updated; update failures fail setup.")
+	fmt.Println("Claude Code: already-installed engram@engram is updated at user scope; update failures fail setup.")
 	fmt.Println("Without <agent>, shows an interactive menu.")
 	fmt.Println()
 	fmt.Println("Flags:")

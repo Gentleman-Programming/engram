@@ -163,7 +163,7 @@ Run the setup command for the agent you use, then restart that agent. `engram se
 | CommandCode | `engram setup commandcode` |
 | Another MCP-compatible agent | [Manual MCP setup](docs/AGENT-SETUP.md#any-other-mcp-agent) |
 
-For Claude Code, rerunning setup updates the marketplace and plugin when the plugin is already installed. An update failure fails setup; restart Claude Code after a successful update to load the new hooks.
+For Claude Code, rerunning setup updates the marketplace and the user-scope `engram@engram` plugin when it is already installed; existing project- or local-scope copies are not updated. An update failure fails setup; restart Claude Code after a successful update to load the new hooks.
 
 See [Agent Setup](docs/AGENT-SETUP.md) for per-agent configuration, plugin behavior, manual MCP setup, compaction resilience, and troubleshooting. Pi users can also find the package at [`gentle-engram`](plugin/pi/README.md).
 

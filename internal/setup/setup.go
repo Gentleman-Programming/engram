@@ -998,7 +998,7 @@ func installClaudeCode() (*Result, error) {
 		if updateErr != nil {
 			return nil, fmt.Errorf("marketplace update failed: %s", strings.TrimSpace(string(updateOut)))
 		}
-		updateOut, updateErr = runCommand(claudeBin, "plugin", "update", "engram@engram")
+		updateOut, updateErr = runCommand(claudeBin, "plugin", "update", "engram@engram", "--scope", "user")
 		if updateErr != nil {
 			return nil, fmt.Errorf("plugin update failed: %s", strings.TrimSpace(string(updateOut)))
 		}

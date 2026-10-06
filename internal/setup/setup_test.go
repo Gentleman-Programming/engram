@@ -2022,7 +2022,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 			if err != nil || result == nil || !result.MCPConfigured {
 				t.Fatalf("expected configured success, got %#v, %v", result, err)
 			}
-			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram"}
+			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram --scope user"}
 			if !reflect.DeepEqual(commands, want) || mcpCalls != 1 {
 				t.Fatalf("commands=%v MCP calls=%d, want %v and 1", commands, mcpCalls, want)
 			}
@@ -2054,7 +2054,7 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 			if result != nil || err == nil || err.Error() != wantError {
 				t.Fatalf("result=%#v error=%v, want nil and %q", result, err, wantError)
 			}
-			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram"}
+			want := []string{"plugin marketplace add " + claudeCodeMarketplace, "plugin install engram", "plugin marketplace update engram", "plugin update engram@engram --scope user"}
 			if !reflect.DeepEqual(commands, want[:failAt]) {
 				t.Fatalf("commands=%v, want %v", commands, want[:failAt])
 			}
