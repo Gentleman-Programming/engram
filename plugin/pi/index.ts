@@ -26,6 +26,21 @@ const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 
+// Only allowlisted metadata is logged; never pass request bodies, identities, or errors.
+type SessionTraceEvent =
+  | { stage: "lifecycle"; event: "session_start"; identity: "first" | "same" | "different" | "missing" }
+  | { stage: "lifecycle"; event: "session_shutdown"; reason: "reload" | "other" | "missing"; identity: "first" | "same" | "different" | "missing" }
+  | { stage: "context"; append_entry: boolean; get_branch: boolean; persisted: "root" | "continuation" }
+  | { stage: "dispatch"; requested: "root" | "continuation"; resume: boolean }
+  | { stage: "acknowledgement" | "adoption"; effective: "root" | "continuation" | "invalid" }
+  | { stage: "rejection"; http_status: number | null; reason: "session_already_ended" | "other" };
+
+function traceSessionRegistration(event: SessionTraceEvent): void {
+  if (process.env.ENGRAM_PI_SESSION_TRACE !== "1") return;
+  try { process.stderr.write(`[engram:session-trace] ${JSON.stringify(event)}\n`); }
+  catch { /* Diagnostic output must not change registration or write behavior. */ }
+}
+
 // Writes are single-attempt: once dispatched, their server-side outcome may be unknown.
 const ENGRAM_WRITE_TIMEOUT_MS = 3000;
 const ENGRAM_READ_TIMEOUT_MS = 10000;
@@ -131,6 +146,8 @@ interface FetchOptions {
   signal?: AbortSignal;
   // Capability validation before dispatch, including transport retries/reconnects.
   beforeDispatch?: () => Promise<void>;
+  // Observational hook, separate from capability validation and recovery guards.
+  onDispatch?: () => void;
 }
 
 type EngramOperation = "read" | "doctor" | "session-registration" | "write";
@@ -321,6 +338,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   for (let attempt = 0; attempt < policy.maxAttempts; attempt += 1) {
     // Validation errors must escape, not be classified/retried as transport failures.
     if (opts.beforeDispatch) await opts.beforeDispatch();
+    opts.onDispatch?.();
     let res: Response;
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
@@ -1143,6 +1161,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
   const registration = (async () => {
     const persistedID = effectiveSessionID(ctx, runtimeID);
     const canPersist = !!appendEntry && !!ctx.sessionManager.getBranch;
+    traceSessionRegistration({ stage: "context", append_entry: !!appendEntry, get_branch: !!ctx.sessionManager.getBranch, persisted: persistedID === runtimeID ? "root" : "continuation" });
     if (pendingEffectiveSession(ctx, runtimeID, persistedID)) {
       const owner = pendingEffectiveSessionProject(ctx, runtimeID, persistedID);
       if (!owner) throw new Error(`Cannot confirm project ownership for pending Pi session ${persistedID}`);
@@ -1173,8 +1192,12 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
           body.resume = supported;
         } : undefined;
         try {
-          acknowledgement = await fetch("/sessions", { method: "POST", beforeDispatch: validateCapability, body });
+          acknowledgement = await fetch("/sessions", {
+            method: "POST", beforeDispatch: validateCapability, body,
+            onDispatch: () => traceSessionRegistration({ stage: "dispatch", requested: id === runtimeID ? "root" : "continuation", resume: body.resume }),
+          });
         } catch (error) {
+          traceSessionRegistration({ stage: "rejection", http_status: error instanceof EngramHttpError ? error.status : null, reason: error instanceof EngramHttpError && (error.data as { code?: string } | null)?.code === "session_already_ended" ? "session_already_ended" : "other" });
           if (resume && !body.resume && error instanceof EngramHttpError && error.status === 409
             && (error.data as { code?: string } | null)?.code === "session_already_ended") {
             throw rootResumeCompatibilityError(health);
@@ -1182,6 +1205,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
           throw sessionProjectConflictFromResponse(error, id, sessionProject, body.resume ? runtimeID : undefined) || error;
         }
         const effectiveID = acknowledgement?.id;
+        traceSessionRegistration({ stage: "acknowledgement", effective: acknowledgement?.status === "created" && effectiveID === runtimeID ? "root" : acknowledgement?.status === "created" && typeof effectiveID === "string" && effectiveID.startsWith(`${runtimeID}:resume:`) ? "continuation" : "invalid" });
         if (acknowledgement?.status !== "created" || typeof effectiveID !== "string"
           || !(effectiveID === runtimeID || effectiveID.startsWith(`${runtimeID}:resume:`))) {
           throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${runtimeID}: invalid acknowledgement`);
@@ -1201,6 +1225,7 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
           runtimeID, effectiveID, pending: true, project: sessionProject,
         });
         assertOpen(state, epoch);
+        traceSessionRegistration({ stage: "adoption", effective: effectiveID === runtimeID ? "root" : "continuation" });
         return effectiveID;
       })();
       sessionRegistrationsInFlight.set(key, delivery);
@@ -2170,10 +2195,28 @@ function installBridgeResponder(pi: ExtensionAPI, ctx: SessionContext, runtimeID
 }
 
 export default function registerEngram(pi: ExtensionAPI) {
+  // Trace-only comparison is local to this factory, never persistence or ownership state.
+  let previousTraceIdentity: string | undefined;
+  const traceLifecycle = (event: "session_start" | "session_shutdown", id: string | undefined | (() => string), reason?: unknown) => {
+    if (process.env.ENGRAM_PI_SESSION_TRACE !== "1") {
+      previousTraceIdentity = undefined;
+      return;
+    }
+    let current: string | undefined;
+    try {
+      const value = typeof id === "function" ? id() : id;
+      if (typeof value === "string" && value.trim()) current = value.trim();
+    } catch { /* Reading identity for diagnostics must never affect reload cleanup. */ }
+    const identity = !current ? "missing" : !previousTraceIdentity ? "first" : current === previousTraceIdentity ? "same" : "different";
+    if (current) previousTraceIdentity = current;
+    if (event === "session_start") traceSessionRegistration({ stage: "lifecycle", event, identity });
+    else traceSessionRegistration({ stage: "lifecycle", event, identity, reason: reason === "reload" ? "reload" : reason == null || reason === "" ? "missing" : "other" });
+  };
   registerMemoryTools(pi);
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     removeBridgeResponders(ctx);
     const sessionId = observeRuntimeSessionID(ctx);
+    traceLifecycle("session_start", sessionId);
     if (sessionId) {
       const state = lifecycle(ctx, sessionId);
       state.epoch++;
@@ -2191,8 +2234,12 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (event: { reason?: string }, ctx: SessionContext) => {
     removeBridgeResponders(ctx);
     // Pi reload replaces the extension runner but keeps its runtime session ID alive.
-    if (event.reason === "reload") return;
+    if (event.reason === "reload") {
+      traceLifecycle("session_shutdown", () => ctx.sessionManager.getSessionId(), event.reason);
+      return;
+    }
     const runtimeID = observeRuntimeSessionID(ctx);
+    traceLifecycle("session_shutdown", runtimeID, event.reason);
     if (!runtimeID) return;
     const state = lifecycle(ctx, runtimeID);
     state.epoch++;

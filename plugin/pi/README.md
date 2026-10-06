@@ -150,6 +150,53 @@ sufficient. The plugin never invents a continuation ID or adopts a failed
 registration. Read-only memory tools do not require resume support. Cross-project
 satellite saves still require `isolated_session_registration: true` separately.
 
+## Opt-in Pi session registration trace
+
+For an affected quit/resume cycle, set `ENGRAM_PI_SESSION_TRACE=1` before launching
+Pi with this source version of the extension. The published `0.2.0` package does
+not include this instrumentation; use the local extension instead of loading both
+copies. For example, from the repository root in a POSIX shell:
+
+```bash
+ENGRAM_PI_SESSION_TRACE=1 pi -e ./plugin/pi/index.ts --session <session-id>
+```
+
+Use the entrypoint that actually fails; the printed launcher hint is not known to
+reproduce every report. The flag is inherited by child processes. Loading or
+reloading this instrumented extension is required; setting it in an unrelated
+shell does not change a running Pi process.
+
+Lifecycle and registration emit JSON lines prefixed with `[engram:session-trace]`
+to stderr:
+
+- `lifecycle`: `session_start` or `session_shutdown`; identity classified as `first`,
+  `same`, `different`, or `missing`, compared with the previous valid traced
+  lifecycle identity in this extension instance. Shutdown reason is allowlisted
+  as `reload`, `other`, or `missing`, never the raw host string. Reload shutdown
+  is observed before returning without persistence cleanup.
+- `context`: availability of `append_entry` and `get_branch`, and whether the
+  persisted mapping refers to the root or a continuation.
+- `dispatch`: root/continuation request classification and the actual `resume`
+  boolean after capability negotiation, for each transport dispatch attempt.
+- `acknowledgement`: root/continuation/invalid acknowledgement classification.
+- `adoption`: the validated effective identity was adopted.
+- `rejection`: HTTP status (or null) and the allowlisted reason
+  `session_already_ended` or `other`; raw errors are never included.
+
+Only these trace lines are intended for sharing. They contain no session IDs,
+project names, paths, URLs, request bodies, memory content, or raw server errors.
+Other stderr output may contain sensitive information; do not share the full log.
+Concurrent registration traces may interleave and are not individually correlated.
+Lifecycle comparisons reset on a new extension instance/process (including reload)
+and after an event observed with tracing disabled. A missing identity does not
+replace the last valid comparison identity. `other` does not identify the exact
+shutdown reason or prove a picker switch; describe the entrypoint separately.
+An absent trace does not prove no event/request occurred unless this extension and flag
+were confirmed active; independent `mem_session_start` and satellite registrations
+are outside this trace. Tracing does not change retry, adoption, or write rules.
+Unset the flag (or set any value other than `1`) for subsequent launches to disable
+it. No trace file is created automatically.
+
 ## Quick start
 
 ```bash
