@@ -155,10 +155,11 @@ satellite saves still require `isolated_session_registration: true` separately.
 For an affected quit/resume cycle, set `ENGRAM_PI_SESSION_TRACE=1` before launching
 Pi with this source version of the extension. The published `0.2.0` package does
 not include this instrumentation; use the local extension instead of loading both
-copies. For example, from the repository root in a POSIX shell:
+copies. From the repository root in a POSIX shell, set `SESSION_ID` to the ID
+of the conversation you intend to resume, then run:
 
 ```bash
-ENGRAM_PI_SESSION_TRACE=1 pi -e ./plugin/pi/index.ts --session <session-id>
+ENGRAM_PI_SESSION_TRACE=1 pi -e ./plugin/pi/index.ts --session "${SESSION_ID:?Set SESSION_ID to the conversation you intend to resume}"
 ```
 
 Use the entrypoint that actually fails; the printed launcher hint is not known to
