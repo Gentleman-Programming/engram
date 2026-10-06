@@ -365,6 +365,17 @@ resolve_project_without_jq() {
   printf '%s\n' "$project"
 }
 
+# Synthetic Claude turns share UserPromptSubmit with human requests. Filter only
+# persistence, not the ToolSearch bootstrap or save reminder. Keep this builtin-only.
+should_capture_prompt() {
+  local trimmed="$1"
+  trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+  case "$trimmed" in
+    '<task-notification>'*|'<agent-message'*) return 1 ;;
+  esac
+  return 0
+}
+
 user_prompt_submit_without_jq() {
   local cwd="" session_id="" prompt="" project="" session_key state_dir state_file
   local session_start="" session_start_epoch now_epoch session_age_secs encoded_project
@@ -374,7 +385,7 @@ user_prompt_submit_without_jq() {
   json_string_value_without_jq "session_id" "$INPUT" && session_id="$JSON_VALUE"
   json_string_value_without_jq "prompt" "$INPUT" && prompt="$JSON_VALUE"
 
-  if [ -n "$prompt" ] && [ -n "$session_id" ]; then
+  if [ -n "$prompt" ] && [ -n "$session_id" ] && should_capture_prompt "$prompt"; then
     (
       project=$(resolve_project_without_jq "$cwd") || exit 0
       json_escape_without_jq "$session_id"
@@ -548,13 +559,13 @@ PROJECT=""
 # ──────────────────────────────────────────────────────────────────────────────
 # PROMPT PERSIST
 #
-# Every user message is captured to POST /prompts so mem_save can attach the
+# Human messages (excluding known synthetic prefixes) are captured to POST /prompts so mem_save can attach the
 # originating prompt via SessionActivity. The canonical project is resolved by
 # the server before this script writes. Fire-and-forget: never blocks and never
 # fails the hook.
 # ──────────────────────────────────────────────────────────────────────────────
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
+if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ] && should_capture_prompt "$PROMPT"; then
   # Detached subshell so the POST never stalls the hook. The server derives the
   # prompt's project from the session and rejects any mismatch.
   (

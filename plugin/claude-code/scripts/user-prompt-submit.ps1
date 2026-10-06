@@ -75,6 +75,10 @@ function Invoke-EngramPromptPersist {
   # Fail-silent and bounded: a short timeout keeps a slow/unreachable server
   # from stalling prompt submission, and any error is swallowed.
   if ([string]::IsNullOrWhiteSpace($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId) -or [string]::IsNullOrWhiteSpace($Project)) { return }
+  # Only skip persistence: synthetic turns still receive the normal bootstrap.
+  $trimmedPrompt = $Prompt.TrimStart()
+  if ($trimmedPrompt.StartsWith('<task-notification>', [System.StringComparison]::Ordinal) -or
+      $trimmedPrompt.StartsWith('<agent-message', [System.StringComparison]::Ordinal)) { return }
   try {
     $body = [PSCustomObject]@{
       session_id = $SessionId

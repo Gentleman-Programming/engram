@@ -169,6 +169,8 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 3. This ensures no work is lost when context is compressed
 
 **On user prompt submit**:
+The Bash capture paths and PowerShell fallback skip `POST /prompts` when the prompt, after leading whitespace, starts with `<task-notification>` or `<agent-message`. These known synthetic Claude turns are not user requests. This prefix heuristic does not classify every possible automatic turn; it leaves human prompt content unchanged and does not delete previously captured rows. Filtering affects persistence only, not ToolSearch or save reminders. The Windows Git Bash safe path continues to skip all prompt persistence.
+
 1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
