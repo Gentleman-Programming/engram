@@ -7977,6 +7977,7 @@ func TestMemCurrentProject_WarningCase3(t *testing.T) {
 
 // TestMemCurrentProject_ExplicitWorkspace checks workspace selection and metadata.
 func TestMemCurrentProject_ExplicitWorkspace(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "")
 	newRepo := func(project string) string {
 		t.Helper()
 		dir := t.TempDir()
@@ -8059,6 +8060,60 @@ func TestMemCurrentProject_ExplicitWorkspace(t *testing.T) {
 				t.Errorf("process cwd changed to %q, want %q", afterCwd, processCwd)
 			}
 		})
+	}
+}
+
+// TestMemCurrentProject_NonexistentExplicitWorkspace preserves basename fallback.
+func TestMemCurrentProject_NonexistentExplicitWorkspace(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "")
+	missing := filepath.Join(t.TempDir(), "missing-workspace")
+	s := newMCPTestStore(t)
+
+	res, err := handleCurrentProject(s, MCPConfig{})(context.Background(),
+		mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"directory": missing,
+		}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+	var got struct {
+		Project       string `json:"project"`
+		ProjectSource string `json:"project_source"`
+		ProjectPath   string `json:"project_path"`
+		Cwd           string `json:"cwd"`
+	}
+	text := callResultText(t, res)
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Project != "missing-workspace" {
+		t.Errorf("project = %q, want missing-workspace", got.Project)
+	}
+	if got.ProjectSource != project.SourceDirBasename {
+		t.Errorf("project_source = %q, want %q", got.ProjectSource, project.SourceDirBasename)
+	}
+	wantPath, err := filepath.Abs(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(got.ProjectPath) != filepath.Clean(wantPath) {
+		t.Errorf("project_path = %q, want %q", got.ProjectPath, wantPath)
+	}
+	if got.Cwd != missing {
+		t.Errorf("cwd = %q, want %q", got.Cwd, missing)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["error_hint"]; ok {
+		t.Errorf("unexpected error_hint in response: %s", text)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("missing workspace was created or cannot be checked: %v", err)
 	}
 }
 
