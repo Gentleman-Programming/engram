@@ -486,6 +486,7 @@ func (s *Server) routes() {
 
 	// Prompts
 	s.mux.HandleFunc("POST /prompts", s.handleAddPrompt)
+	s.mux.HandleFunc("POST /prompts/capture-decision", s.handlePromptCaptureDecision)
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
 	s.mux.HandleFunc("GET /prompts/search", s.handleSearchPrompts)
 	s.mux.HandleFunc("DELETE /prompts/{id}", requireAuth(s.handleDeletePrompt))
@@ -1473,6 +1474,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 
 // ─── Project Detection ───────────────────────────────────────────────────────
 
+// handleCurrentProject returns canonical current-project detection metadata.
 func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	cwd := strings.TrimSpace(r.URL.Query().Get("cwd"))
 	if cwd == "" {
@@ -1492,6 +1494,11 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 		s.writeProjectResolutionError(w, res, err)
 		return
 	}
+	jsonResponse(w, http.StatusOK, currentProjectPayload(cwd, res))
+}
+
+// currentProjectPayload builds the shared current-project response metadata.
+func currentProjectPayload(cwd string, res projectpkg.DetectionResult) map[string]any {
 	payload := map[string]any{
 		"project":            res.Project,
 		"project_source":     res.Source,
@@ -1506,7 +1513,7 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 		payload["error_hint"] = res.Error.Error()
 	}
 
-	jsonResponse(w, http.StatusOK, payload)
+	return payload
 }
 
 // resolveRequestProject applies the shared resolution modes to HTTP operations.
