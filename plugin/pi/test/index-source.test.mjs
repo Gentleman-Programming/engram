@@ -624,6 +624,41 @@ test("memory protocol declares gentle-engram as the Pi-native provider", () => {
   assert.match(source, /Do not infer alternative Engram tool names from other integrations/);
 });
 
+test("memory protocol enforces the canonical topic workflow", () => {
+  const workflowStart = source.indexOf("### CANONICAL TOPIC WORKFLOW");
+  assert.notEqual(workflowStart, -1, "canonical topic workflow section missing");
+  const nextHeading = source.indexOf("\n### ", workflowStart + 1);
+  const workflow = source.slice(workflowStart, nextHeading);
+
+  assert.match(workflow, /SEARCH first[\s\S]*mem_search/);
+  assert.match(workflow, /READ in full[\s\S]*mem_get_observation/);
+  assert.match(workflow, /search snippets are not enough/);
+  assert.match(workflow, /SAME bounded topic[\s\S]*mem_update[\s\S]*by ID/);
+  assert.match(workflow, /preserve every still-valid fact/);
+  assert.match(workflow, /Record superseded facts as history/);
+  assert.match(workflow, /Genuinely new topic[\s\S]*mem_save/);
+  assert.match(workflow, /If the learning is already covered, write nothing/);
+  assert.match(workflow, /Ambiguous identity or failed lookup[\s\S]*Do not blindly overwrite/);
+  assert.match(workflow, /A failed read is not evidence of absence/);
+  assert.match(workflow, /Never merge across projects or scopes/);
+  assert.match(workflow, /hint, not proof of identity/);
+
+  assert.doesNotMatch(workflow, /Call `mem_save` IMMEDIATELY/);
+  assert.match(source, /Bug fix completed[\s\S]*Architecture or design decision made[\s\S]*User preference or constraint learned/);
+  assert.match(source, /Format for \\`mem_update\\`:/);
+  assert.match(source, /expected_project[\s\S]*project that owns the observation/);
+  assert.match(source, /full rewritten content including every still-valid fact/);
+});
+
+test("memory tool descriptions carry the canonical workflow guidance", () => {
+  assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*Search existing memories before saving; snippets are not enough to decide identity/);
+  assert.match(source, /mem_get_observation: Type\.Object\(\{[\s\S]*Read in full before deciding identity or updating/);
+  assert.match(source, /mem_save: Type\.Object\(\{[\s\S]*New topics only: search and read first; use mem_update for an existing topic/);
+  assert.match(source, /mem_update: Type\.Object\(\{[\s\S]*Update an existing observation by ID; preserve still-valid facts and keep its topic_key/);
+  assert.match(source, /mem_save: Type\.Object\(\{[\s\S]*Stable, deliberate topic key; reuse via mem_update rather than duplicating/);
+  assert.match(source, /mem_update: Type\.Object\(\{[\s\S]*Keep the existing topic_key unless the topic itself changed/);
+});
+
 test("an inconclusive health probe still attempts the spawn", async () => {
   let probes = 0;
   let spawns = 0;
