@@ -30,6 +30,8 @@ Check three things:
 | `doctor` | `ready` or actionable repair | Local metadata is safe to upload |
 | `last_acked_seq` | Advances after sync | Cloud accepted the pending journal |
 
+`engram cloud upgrade doctor --project <project>` checks policy failures recorded locally for that project only. A denial recorded for another project in the shared `cloud` sync target does not block the selected project. Doctor does not probe server authorization; it persists its diagnosis as `doctor_ready` or `doctor_blocked`. Use `engram sync --cloud --project <project>` to check the current server response.
+
 If the dashboard shows `0` observations but local saves exist, the cloud server has not accepted the client's pending sync yet. Do not delete local data.
 
 ---
