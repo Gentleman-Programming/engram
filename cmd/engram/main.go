@@ -3753,6 +3753,7 @@ Commands:
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).
                                        Also accepted as ENGRAM_PROJECT=NAME env var.
+                       ENGRAM_MEM_SAVE_TIMING=1  Log mem_save stage timings to stderr (off by default).
   tui                Launch interactive terminal UI
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests

@@ -1463,6 +1463,10 @@ func handlePin(s *store.Store, pinned bool) server.ToolHandlerFunc {
 
 func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		timing := beginSaveTiming()
+		if timing != nil {
+			defer timing.finish()
+		}
 		title, _ := req.GetArguments()["title"].(string)
 		content, _ := req.GetArguments()["content"].(string)
 		if strings.TrimSpace(content) == "" {
@@ -1549,6 +1553,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		truncation := s.ContentTruncation(content)
 
+		var saveStarted time.Time
+		if timing != nil {
+			saveStarted = time.Now()
+		}
 		savedID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      typ,
@@ -1558,6 +1566,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			Scope:     scope,
 			TopicKey:  topicKey,
 		})
+		if timing != nil {
+			timing.save = time.Since(saveStarted)
+			timing.saved = err == nil
+		}
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
@@ -1606,6 +1618,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		if cfg.Limit != nil {
 			candOpts.Limit = *cfg.Limit
+		}
+		if timing != nil {
+			candOpts.Timings = &timing.candidates
 		}
 		candidates, candErr := s.FindCandidates(savedID, candOpts)
 		if candErr != nil {

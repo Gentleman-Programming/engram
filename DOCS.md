@@ -700,6 +700,7 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `ENGRAM_MEM_SAVE_TIMING`        | Set to exactly `1` in the MCP server environment to log one privacy-safe stage timing record per `mem_save` invocation to stderr. See [mem_save timing diagnostics](#mem_save-timing-diagnostics). | (unset — disabled) |
 | `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
@@ -719,6 +720,35 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 | `ENGRAM_JWT_SECRET`             | Required in authenticated cloud serve mode. Must be explicitly set to a non-default value.                                                                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_ADMIN`            | Optional legacy dashboard-admin token in authenticated cloud serve mode. It can access dashboard admin read surfaces, project sync controls, and audit logs, but not managed-user, token, or grant mutations. Ignored/rejected in insecure mode. | (unset) |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed cloud tokens. Required both to issue tokens via `engram cloud bootstrap admin --issue-token` (and the admin API/dashboard) and to enable managed-token authentication on `engram cloud serve`. Distinct from `ENGRAM_JWT_SECRET` on purpose — see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap). | (unset)              |
+
+### mem_save timing diagnostics
+
+Set `ENGRAM_MEM_SAVE_TIMING=1` in the environment of the **Engram MCP server process**, then restart that process. Other values (including `true`) leave diagnostics disabled. Remove the variable and restart to disable them again.
+
+For a manually launched server in PowerShell:
+
+```powershell
+$env:ENGRAM_MEM_SAVE_TIMING = '1'
+engram mcp
+```
+
+For an agent-managed server, add `"ENGRAM_MEM_SAVE_TIMING": "1"` to that server's MCP environment configuration and restart it; retrieve stderr from the host's MCP logs. No diagnostic text is written to MCP stdout or added to tool responses.
+
+Each completed invocation writes one line with this prefix and JSON fields (values below are illustrative milliseconds):
+
+```text
+engram: mem_save_timing {"status":"saved","total_ms":563.2,"save_ms":12.1,"candidate_lookup_ms":511.3,"relation_insert_ms":3.4}
+```
+
+- `total_ms`: handler elapsed time through response construction, before emitting the diagnostic. Excludes transport delivery, client scheduling, and the diagnostic write itself.
+- `save_ms`: `AddObservation` elapsed time, including its internal database work. Excludes project/session resolution and prompt capture.
+- `candidate_lookup_ms`: `FindCandidates` elapsed time excluding pending-relation insertion; includes source lookup, FTS execution, row consumption, and row closure.
+- `relation_insert_ms`: elapsed time for the pending-relation insertion loop. Zero if that stage was not reached.
+- `status`: `saved` when `AddObservation` succeeded (also for an update/deduplicated save), otherwise `not_saved`. It is not a candidate-detection success indicator. Unreached stages report zero.
+
+Stage times include database waits; they do **not** separately measure SQLite lock waits or connection-pool waits, and are not CPU times. Stages do not sum to `total_ms`: project/session resolution, prompt capture, and response construction also take time. A still-running or killed invocation has no completed timing record. Logging itself can block if the host does not drain stderr.
+
+The new diagnostic records contain only durations and status: no titles, content, project names, paths, IDs, or error details. Existing unrelated error logs are unchanged; inspect them before sharing a trace. Compare these records with client elapsed times from a sequential reproduction before choosing an optimization. Saving, ranking, and candidate insertion behavior are unchanged.
 
 ### Conflict Audit CLI (admin)
 

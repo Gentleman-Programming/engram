@@ -98,6 +98,17 @@ type CandidateOptions struct {
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
 	SkipInsert bool
+	// Timings optionally receives per-call diagnostic durations. Use a distinct
+	// pointer for each concurrent call. Nil performs no timing instrumentation.
+	Timings *CandidateTimings
+}
+
+// CandidateTimings separates candidate lookup (including row consumption and
+// closure) from pending-relation insertion. Durations include database waits;
+// they are not CPU times or separate SQLite lock-wait measurements.
+type CandidateTimings struct {
+	Lookup  time.Duration
+	Inserts time.Duration
 }
 
 // ─── Phase 3 types ────────────────────────────────────────────────────────────
@@ -356,6 +367,11 @@ type JudgeRelationParams struct {
 // Errors from this method are expected to be logged and swallowed by callers —
 // detection failure must never fail the originating save.
 func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
+	if opts.Timings != nil {
+		*opts.Timings = CandidateTimings{}
+		started := time.Now()
+		defer func() { opts.Timings.Lookup = time.Since(started) - opts.Timings.Inserts }()
+	}
 	// Apply defaults.
 	limit := opts.Limit
 	if limit <= 0 {
@@ -452,6 +468,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Insert a pending relation row for each candidate.
+	if opts.Timings != nil {
+		started := time.Now()
+		defer func() { opts.Timings.Inserts = time.Since(started) }()
+	}
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
 		judgmentID := newSyncID("rel")
