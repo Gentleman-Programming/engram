@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -42,7 +43,14 @@ func TestHandleSaveTimingOptIn(t *testing.T) {
 				t.Fatal(err)
 			}
 			os.Stderr = pipeW
-			t.Cleanup(func() { os.Stderr = old; pipeW.Close(); pipeR.Close() })
+			t.Cleanup(func() {
+				os.Stderr = old
+				for _, pipe := range []*os.File{pipeW, pipeR} {
+					if err := pipe.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+						t.Errorf("close diagnostic pipe: %v", err)
+					}
+				}
+			})
 			result := call("private-title-marker authentication sessions")
 			before, err := s.Stats()
 			if err != nil {
@@ -61,7 +69,9 @@ func TestHandleSaveTimingOptIn(t *testing.T) {
 				t.Fatalf("pending relations = %d, err = %v", relations, err)
 			}
 			os.Stderr = old
-			pipeW.Close()
+			if err := pipeW.Close(); err != nil {
+				t.Fatalf("close diagnostic writer: %v", err)
+			}
 			output, err := io.ReadAll(pipeR)
 			if err != nil {
 				t.Fatal(err)
