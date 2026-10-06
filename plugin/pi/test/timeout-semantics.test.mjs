@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
+import { randomUUID } from "node:crypto";
+import { redactValue, redactUrlPath } from "../private-redaction.js";
 import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
 
@@ -84,6 +88,81 @@ async function runTimeoutScenario({ observationBehavior, promptBehavior }) {
     });
   }
 }
+
+// Evaluate the real transport in memory, following the extracted-source fixtures in
+// index-source.test.mjs. No sandbox writes or real sleeps are needed for deadline tests.
+async function recoveryClockHarness(failure = "timeout", confirmation) {
+  const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+  const transport = stripTypeScriptTypes(source.slice(source.indexOf("function optionalEnvironmentValue"), source.indexOf("function detectLocalConfigProject")));
+  const clock = { now: 0, calls: [], waits: [], recoveries: 0 };
+  const AbortSignal = { timeout: (ms) => ({ timeoutMs: ms }) };
+  const wait = async (ms) => { clock.waits.push(ms); clock.now += ms; };
+  const fetch = async (url, init) => {
+    const request = new URL(url);
+    clock.calls.push({ path: request.pathname, operationId: request.searchParams.get("operation_id"), body: init.body, timeoutMs: init.signal.timeoutMs });
+    if ((confirmation === "lookup" && request.pathname === "/observations/save-result")
+      || (confirmation === "replay" && request.pathname === "/observations" && clock.calls.length > 1)) {
+      return new Response(JSON.stringify({ id: 42, status: confirmation === "lookup" ? "committed" : "saved" }));
+    }
+    if (failure === "timeout" || request.pathname === "/observations") {
+      clock.now += init.signal.timeoutMs;
+      throw Object.assign(new Error("deadline elapsed"), { name: "TimeoutError" });
+    }
+    throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+  };
+  const factory = new Function("fetch", "AbortSignal", "wait", "randomUUID", "redactValue", "redactUrlPath", "recoverImplicitEngramServer", "isConnectionRefusedError", "unreachableMessage", `${transport}\nreturn { postObservationWithReplayRecovery, engramFetchResult };`);
+  const api = factory(fetch, AbortSignal, wait, randomUUID, redactValue, redactUrlPath,
+    async () => { clock.recoveries += 1; return false; }, (error) => error.code === "ECONNREFUSED", () => "unreachable");
+  return { ...api, clock };
+}
+
+test("recovery lookups have a one-second single-attempt deadline and bounded unknown outcome", async () => {
+  const { postObservationWithReplayRecovery, clock } = await recoveryClockHarness();
+  const result = await postObservationWithReplayRecovery({ session_id: "clock-session", title: "title", content: "content" });
+  assert.deepEqual(result.transportFailure, { operation: "write", outcome: "unknown", timeoutMs: 3000 });
+  assert.equal(result.data, null);
+  const lookups = clock.calls.filter(({ path }) => path === "/observations/save-result");
+  const writes = clock.calls.filter(({ path }) => path === "/observations");
+  assert.equal(lookups.length, 4, "one lookup per replay plus the final lookup; no nested GET retries");
+  assert.deepEqual(lookups.map(({ timeoutMs }) => timeoutMs), [1000, 1000, 1000, 1000]);
+  assert.equal(clock.now, 16750, "four 3s POSTs, four 1s lookups and 250/500ms backoff");
+  assert.equal(writes.length, 4);
+  assert.equal(new Set(writes.map(({ body }) => body)).size, 1, "exact payload, including operation_id, stays identical");
+  const operationId = JSON.parse(writes[0].body).operation_id;
+  assert.ok(operationId);
+  assert.ok(lookups.every((lookup) => lookup.operationId === operationId));
+  assert.deepEqual(clock.waits, [250, 500]);
+});
+
+test("recovery lookup refusal cannot trigger server startup or additional effects", async () => {
+  const { postObservationWithReplayRecovery, clock } = await recoveryClockHarness("refused");
+  const result = await postObservationWithReplayRecovery({ title: "title", content: "content" });
+  assert.equal(result.transportFailure.outcome, "unknown");
+  assert.equal(clock.calls.filter(({ path }) => path === "/observations/save-result").length, 4);
+  assert.equal(clock.recoveries, 0, "lookup budget must not expand into implicit server recovery");
+});
+
+for (const confirmation of ["lookup", "replay"]) {
+  test(`bounded recovery still accepts ${confirmation} confirmation`, async () => {
+    const { postObservationWithReplayRecovery, clock } = await recoveryClockHarness("timeout", confirmation);
+    const result = await postObservationWithReplayRecovery({ title: "title", content: "content" });
+    assert.equal(result.data.id, 42);
+    assert.equal(result.transportFailure, undefined);
+    const writes = clock.calls.filter(({ path }) => path === "/observations");
+    assert.equal(writes.length, confirmation === "lookup" ? 1 : 2);
+    assert.equal(new Set(writes.map(({ body }) => body)).size, 1);
+    assert.equal(clock.now, confirmation === "lookup" ? 3000 : 4000);
+  });
+}
+
+test("normal GET retains its ten-second timeout and three attempts", async () => {
+  const { engramFetchResult, clock } = await recoveryClockHarness();
+  const result = await engramFetchResult("/observations/recent?project=pi");
+  assert.deepEqual(result.transportFailure, { operation: "read", outcome: "timed_out", timeoutMs: 10000 });
+  assert.deepEqual(clock.calls.map(({ timeoutMs }) => timeoutMs), [10000, 10000, 10000]);
+  assert.deepEqual(clock.waits, [250, 500]);
+  assert.equal(clock.now, 30750);
+});
 
 test("observation write timeout with no server confirmation stays unknown through bounded replay", async () => {
   const { observationResult, observationPosts } = await runTimeoutScenario({

@@ -30,6 +30,7 @@ const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 // other writes are single-attempt and report unknown when their server-side outcome is unresolved.
 const ENGRAM_WRITE_TIMEOUT_MS = 3000;
 const ENGRAM_READ_TIMEOUT_MS = 10000;
+const ENGRAM_RECOVERY_LOOKUP_TIMEOUT_MS = 1000;
 const ENGRAM_DOCTOR_TIMEOUT_MS = 15000;
 const ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS = 5000;
 const ENGRAM_READ_MAX_ATTEMPTS = 3;
@@ -135,7 +136,7 @@ interface FetchOptions {
   beforeDispatch?: () => Promise<void>;
 }
 
-type EngramOperation = "read" | "doctor" | "session-registration" | "write";
+type EngramOperation = "read" | "recovery-lookup" | "doctor" | "session-registration" | "write";
 type EngramTransportOutcome = "timed_out" | "unknown";
 
 interface EngramTransportFailure {
@@ -170,6 +171,10 @@ function isSafeToReplay(path: string, method: string): boolean {
 function engramFetchPolicy(path: string, method: string): EngramFetchPolicy {
   if (isIdempotentSessionRegistration(path, method)) {
     return { operation: "session-registration", timeoutMs: ENGRAM_SESSION_REGISTRATION_TIMEOUT_MS, maxAttempts: ENGRAM_SESSION_REGISTRATION_MAX_ATTEMPTS, replaySafe: true };
+  }
+  // The observation recovery loop already bounds retries; do not nest the normal read budget.
+  if (method === "GET" && path.startsWith("/observations/save-result?")) {
+    return { operation: "recovery-lookup", timeoutMs: ENGRAM_RECOVERY_LOOKUP_TIMEOUT_MS, maxAttempts: 1, replaySafe: true };
   }
   if (method === "GET" && path.startsWith("/doctor")) {
     return { operation: "doctor", timeoutMs: ENGRAM_DOCTOR_TIMEOUT_MS, maxAttempts: ENGRAM_READ_MAX_ATTEMPTS, replaySafe: true };
@@ -365,7 +370,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
           // may mean a cleanly ended but truncated write response, so fail safe.
           // Keep malformed read bodies as parsing errors. Idempotent session
           // registration may be retried even when its JSON was truncated.
-          if (error instanceof SyntaxError && (policy.operation === "read" || policy.operation === "doctor")) throw error;
+          if (error instanceof SyntaxError && (policy.operation === "read" || policy.operation === "recovery-lookup" || policy.operation === "doctor")) throw error;
           if (opts.signal?.aborted) throw error;
           ambiguousTransport = true;
           if (!policy.replaySafe || attempt === policy.maxAttempts - 1) break;
@@ -388,7 +393,8 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
     return { data: null, transportFailure: { operation: policy.operation, outcome: "unknown", timeoutMs: policy.timeoutMs } };
   }
   if (timedOut) return { data: null, transportFailure: { operation: policy.operation, outcome: "timed_out", timeoutMs: policy.timeoutMs } };
-  if (refused && (!opts.beforeDispatch || allowGuardedRecovery) && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+  // A recovery lookup must not expand its deadline into server startup/reconnect work.
+  if (refused && policy.operation !== "recovery-lookup" && (!opts.beforeDispatch || allowGuardedRecovery) && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
     return engramFetchResult<TResponse>(path, opts, false);
   }
   throw new Error(unreachableMessage(undefined));
