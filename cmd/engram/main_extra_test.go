@@ -1507,7 +1507,11 @@ func TestCmdCloudUpgradeDoctorScopesPolicyToProject(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			})
 			for _, project := range []string{"project-a", "project-b"} {
 				if err := s.EnrollProject(project); err != nil {
 					t.Fatal(err)
