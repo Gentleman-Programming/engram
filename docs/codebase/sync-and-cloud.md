@@ -107,18 +107,19 @@ values remain invalid. This also applies to `Store.ApplyPulledMutation`, the
 single-mutation path used by cloud autosync. No fabricated directory or manual
 database repair is needed for an isolated session.
 
-**Cloud pulled mutations admit a present blank string for shared and legacy
-sessions.** `Store.ApplyPulledMutation` requires the `directory` key of a
-shared or legacy session to be present as a JSON string; a blank or whitespace
-string is accepted because historical Cloud session events carry that shape.
-The session is applied as carried, as an inert partial session: no directory,
-`ended_at`, runtime lease, or owner is invented, a new row takes the default
-`shared` mode when the payload names none, and the cursor advances in the same
-transaction. A missing key, JSON `null`, or any non-string value is still
-rejected: nothing is persisted, nothing is dead-lettered, and the cursor does
-not advance. The completion upsert below still preserves an existing concrete
-directory and a `project_owned` owner. Because a new row is `shared`, isolated
-session registration refuses it with `session_isolation_conflict`.
+**Cloud pulled mutations admit a blank or omitted directory.**
+`Store.ApplyPulledMutation`, the single-mutation path used by cloud autosync,
+accepts a session whose `directory` is a JSON string (blank or whitespace
+included) or absent, for every ownership mode, because historical Cloud
+session events carry both shapes. The session is applied as carried, as an
+inert partial session: no directory, `ended_at`, runtime lease, or owner is
+invented, a new row takes the default `shared` mode when the payload names
+none, and the cursor advances in the same transaction. JSON `null` and any
+non-string value are still rejected: nothing is persisted, nothing is
+dead-lettered, and the cursor does not advance. The completion upsert below
+still preserves an existing concrete directory and a `project_owned` owner.
+Because a new row is `shared`, isolated session registration refuses it with
+`session_isolation_conflict`.
 
 The domain is carried explicitly, never inferred from the target-key string:
 the syncer's import mode selects it, and it flows through

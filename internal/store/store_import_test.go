@@ -633,21 +633,25 @@ func TestImportJSONSnapshotDirectoryAdmission(t *testing.T) {
 	})
 }
 
-// Cloud mutation compatibility: historical Cloud session events carry a present
-// blank-string directory. ApplyPulledMutation imports them as an inert partial
-// session — no invented directory, ended_at, lease or ownership — and advances
-// the cursor atomically with the row. Null, non-string and missing directories
-// keep failing closed without moving the cursor.
-func TestCloudPulledMutationAcceptsOnlyPresentBlankStringDirectory(t *testing.T) {
-	for _, directory := range []string{`""`, `" \t "`} {
-		t.Run("accepted "+directory, func(t *testing.T) {
+// Cloud mutation compatibility: historical Cloud session events carry a blank
+// string or no directory key at all. ApplyPulledMutation imports them as an
+// inert partial session — no invented directory, ended_at, lease or ownership —
+// and advances the cursor atomically with the row. Null and non-string
+// directories keep failing closed without moving the cursor.
+func TestCloudPulledMutationAcceptsBlankOrMissingDirectory(t *testing.T) {
+	for _, tc := range []struct{ name, field, want string }{
+		{name: `""`, field: `,"directory":""`, want: ""},
+		{name: `" \t "`, field: `,"directory":" \t "`, want: " \t "},
+		{name: "missing key", field: ``, want: ""},
+	} {
+		t.Run("accepted "+tc.name, func(t *testing.T) {
 			s := newTestStore(t)
 			// Enrollment makes any outbound journal row for the project observable.
 			if err := s.EnrollProject("engram"); err != nil {
 				t.Fatal(err)
 			}
 			before := capturePublicRegistrationState(t, s, "legacy-blank")
-			payload := fmt.Sprintf(`{"id":"legacy-blank","project":"engram","directory":%s,"started_at":"2025-01-01 00:00:00"}`, directory)
+			payload := `{"id":"legacy-blank","project":"engram"` + tc.field + `,"started_at":"2025-01-01 00:00:00"}`
 			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "legacy-blank", Op: SyncOpUpsert, Payload: payload}); err != nil {
 				t.Fatalf("ApplyPulledMutation: %v", err)
 			}
@@ -655,11 +659,7 @@ func TestCloudPulledMutationAcceptsOnlyPresentBlankStringDirectory(t *testing.T)
 			if err != nil {
 				t.Fatalf("GetSession: %v", err)
 			}
-			var want string
-			if err := json.Unmarshal([]byte(directory), &want); err != nil {
-				t.Fatal(err)
-			}
-			if sess.Directory != want || sess.EndedAt != nil || sess.RuntimeLeaseExpiresAt != nil || sess.Project != "engram" || sess.StartedAt != "2025-01-01 00:00:00" {
+			if sess.Directory != tc.want || sess.EndedAt != nil || sess.RuntimeLeaseExpiresAt != nil || sess.Project != "engram" || sess.StartedAt != "2025-01-01 00:00:00" {
 				t.Fatalf("inert partial session = %#v", sess)
 			}
 			state, err := s.GetSyncState(DefaultSyncTargetKey)
@@ -690,7 +690,6 @@ func TestCloudPulledMutationAcceptsOnlyPresentBlankStringDirectory(t *testing.T)
 		{name: "null", directory: `,"directory":null`, typed: true},
 		{name: "number", directory: `,"directory":42`},
 		{name: "object", directory: `,"directory":{"path":"/a"}`},
-		{name: "missing", directory: ``, typed: true},
 	} {
 		t.Run("rejected "+tc.name, func(t *testing.T) {
 			s := newTestStore(t)
@@ -721,52 +720,54 @@ func TestCloudPulledMutationAcceptsOnlyPresentBlankStringDirectory(t *testing.T)
 func TestCloudPulledBlankDirectoryPreservesExistingSession(t *testing.T) {
 	for _, mode := range []string{SessionOwnershipShared, SessionOwnershipProjectOwned} {
 		for _, incoming := range []string{"engram", "other"} {
-			t.Run(mode+"/incoming="+incoming, func(t *testing.T) {
-				s := newTestStore(t)
-				for _, project := range []string{"engram", "other"} {
-					if err := s.EnrollProject(project); err != nil {
+			for _, field := range []string{`,"directory":""`, ``} {
+				t.Run(fmt.Sprintf("%s/incoming=%s/field=%q", mode, incoming, field), func(t *testing.T) {
+					s := newTestStore(t)
+					for _, project := range []string{"engram", "other"} {
+						if err := s.EnrollProject(project); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := s.StartSessionWithOwnershipMode("existing", "engram", "/repos/engram", mode); err != nil {
 						t.Fatal(err)
 					}
-				}
-				if err := s.StartSessionWithOwnershipMode("existing", "engram", "/repos/engram", mode); err != nil {
-					t.Fatal(err)
-				}
-				before := capturePublicRegistrationState(t, s, "existing")
-				owner, eligible, err := s.LocalSessionProvenance("existing")
-				if err != nil || before.Sessions["existing"] == nil || before.Sessions["existing"].RuntimeLeaseExpiresAt == nil {
-					t.Fatalf("fixture = %#v, %v", before.Sessions["existing"], err)
-				}
-				otherBefore, err := s.StatsProject("other")
-				if err != nil {
-					t.Fatal(err)
-				}
-				// started_at is carried as stored so only directory and project vary.
-				payload := fmt.Sprintf(`{"id":"existing","project":%q,"directory":"","started_at":%q}`, incoming, before.Sessions["existing"].StartedAt)
-				if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "existing", Op: SyncOpUpsert, Payload: payload}); err != nil {
-					t.Fatalf("ApplyPulledMutation: %v", err)
-				}
-				after := capturePublicRegistrationState(t, s, "existing")
-				if !reflect.DeepEqual(before.Journal, after.Journal) || !reflect.DeepEqual(before.Stats, after.Stats) {
-					t.Fatalf("pull changed journal or counters: %#v -> %#v", before, after)
-				}
-				want := *before.Sessions["existing"]
-				if mode == SessionOwnershipShared {
-					want.Project = incoming
-				}
-				if got := after.Sessions["existing"]; got == nil || !reflect.DeepEqual(want, *got) {
-					t.Fatalf("existing session = %#v, want %#v", got, want)
-				}
-				otherAfter, err := s.StatsProject("other")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if mode == SessionOwnershipProjectOwned {
-					ownerAfter, eligibleAfter, err := s.LocalSessionProvenance("existing")
-					if err != nil || ownerAfter != owner || eligibleAfter != eligible || !reflect.DeepEqual(otherBefore, otherAfter) {
-						t.Fatalf("project_owned provenance %q/%t -> %q/%t, other stats %#v -> %#v, %v", owner, eligible, ownerAfter, eligibleAfter, otherBefore, otherAfter, err)
+					before := capturePublicRegistrationState(t, s, "existing")
+					owner, eligible, err := s.LocalSessionProvenance("existing")
+					if err != nil || before.Sessions["existing"] == nil || before.Sessions["existing"].RuntimeLeaseExpiresAt == nil {
+						t.Fatalf("fixture = %#v, %v", before.Sessions["existing"], err)
 					}
-				}
-			})
+					otherBefore, err := s.StatsProject("other")
+					if err != nil {
+						t.Fatal(err)
+					}
+					// started_at is carried as stored so only directory and project vary.
+					payload := fmt.Sprintf(`{"id":"existing","project":%q%s,"started_at":%q}`, incoming, field, before.Sessions["existing"].StartedAt)
+					if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "existing", Op: SyncOpUpsert, Payload: payload}); err != nil {
+						t.Fatalf("ApplyPulledMutation: %v", err)
+					}
+					after := capturePublicRegistrationState(t, s, "existing")
+					if !reflect.DeepEqual(before.Journal, after.Journal) || !reflect.DeepEqual(before.Stats, after.Stats) {
+						t.Fatalf("pull changed journal or counters: %#v -> %#v", before, after)
+					}
+					want := *before.Sessions["existing"]
+					if mode == SessionOwnershipShared {
+						want.Project = incoming
+					}
+					if got := after.Sessions["existing"]; got == nil || !reflect.DeepEqual(want, *got) {
+						t.Fatalf("existing session = %#v, want %#v", got, want)
+					}
+					otherAfter, err := s.StatsProject("other")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if mode == SessionOwnershipProjectOwned {
+						ownerAfter, eligibleAfter, err := s.LocalSessionProvenance("existing")
+						if err != nil || ownerAfter != owner || eligibleAfter != eligible || !reflect.DeepEqual(otherBefore, otherAfter) {
+							t.Fatalf("project_owned provenance %q/%t -> %q/%t, other stats %#v -> %#v, %v", owner, eligible, ownerAfter, eligibleAfter, otherBefore, otherAfter, err)
+						}
+					}
+				})
+			}
 		}
 	}
 }

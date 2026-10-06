@@ -8011,7 +8011,8 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 // directory admission (validatePulledSessionDirectory), so a shared session upsert
 // with a blank or missing directory fails the whole chunk atomically — no
 // session persisted, chunk not recorded. Only per-mutation Cloud pull admits a
-// present blank string (validatePulledSessionDirectoryCloudMutation). cloud=false keeps the local partial-session domain:
+// blank or omitted directory (validatePulledSessionDirectoryCloudMutation).
+// cloud=false keeps the local partial-session domain:
 // blank directories are accepted and the skip-plus-evidence quarantine ladder
 // behaves exactly as before.
 func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations []SyncMutation, cloud bool) error {
@@ -11169,10 +11170,9 @@ const (
 	// shared and legacy sessions: Cloud chunk import. Project-owned sessions
 	// follow ValidateCloudSessionDirectory.
 	pulledSessionDirectoryCloudStrict
-	// pulledSessionDirectoryCloudMutation requires a present string, blank
-	// included, for shared and legacy sessions: per-mutation Cloud pull
-	// (ApplyPulledMutation / autosync). Project-owned sessions follow
-	// ValidateCloudSessionDirectory.
+	// pulledSessionDirectoryCloudMutation accepts a missing key or any JSON
+	// string for every ownership mode: per-mutation Cloud pull
+	// (ApplyPulledMutation / autosync).
 	pulledSessionDirectoryCloudMutation
 )
 
@@ -11228,32 +11228,13 @@ func ValidateCloudSessionDirectory(raw []byte) error {
 }
 
 // validatePulledSessionDirectoryCloudMutation admits historical Cloud session
-// events whose directory is a present JSON string, blank included. The row is
-// applied as carried: an inert partial session with no lease, invented
-// ended_at or directory, and the existing upsert never erases a concrete
-// directory or a project-owned owner. For shared and legacy sessions a missing
-// key, JSON null and non-string values keep the strict wording and stay
-// fail-closed without moving the cursor; project-owned sessions keep the
-// ValidateCloudSessionDirectory rule.
+// events whose directory is a JSON string (blank included) or absent, for every
+// ownership mode. The row is applied as carried: an inert partial session with
+// no lease, invented ended_at or directory, and the existing upsert never
+// erases a concrete directory or a project-owned owner. JSON null and
+// non-string values stay fail-closed without moving the cursor.
 func validatePulledSessionDirectoryCloudMutation(raw []byte) error {
-	var fields map[string]json.RawMessage
-	if err := decodeSyncPayload(raw, &fields); err != nil {
-		return err
-	}
-	var mode string
-	if err := json.Unmarshal(fields["ownership_mode"], &mode); err == nil && mode == SessionOwnershipProjectOwned {
-		// Project-owned sessions keep the ValidateCloudSessionDirectory rule.
-		return validatePulledSessionDirectoryLocal(raw)
-	}
-	directory, ok := fields["directory"]
-	if !ok {
-		return fmt.Errorf("%w: directory is required", ErrPulledSessionDirectoryInvalid)
-	}
-	var value *string
-	if err := json.Unmarshal(directory, &value); err != nil || value == nil {
-		return fmt.Errorf("%w: directory must be non-blank", ErrPulledSessionDirectoryInvalid)
-	}
-	return nil
+	return validatePulledSessionDirectoryLocal(raw)
 }
 
 // validatePulledSessionDirectoryLocal is the local pull-path admission check.
