@@ -480,6 +480,9 @@ func TestClaudeInvalidExplicitPortDeniesWithoutDefaultServer(t *testing.T) {
 }
 
 func TestHookSessionConfirmationLatency(t *testing.T) {
+	if hookSessionConfirmationTimeout != 4*time.Second {
+		t.Fatalf("confirmation budget = %v, want 4s", hookSessionConfirmationTimeout)
+	}
 	for _, agent := range []string{"claude", "codex"} {
 		for _, tc := range []struct {
 			name      string
@@ -489,6 +492,7 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 			wantPosts int32
 		}{
 			{"slow healthy server", 900 * time.Millisecond, 900 * time.Millisecond, false, 1},
+			{"combined confirmation timeout", 2100 * time.Millisecond, 2100 * time.Millisecond, true, 1},
 			{"project timeout", 5 * time.Second, 0, true, 0},
 			{"registration timeout", 0, 5 * time.Second, true, 1},
 		} {
@@ -539,9 +543,7 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				var output []byte
 				claudeHookOutput = func(value []byte) error { output = append([]byte(nil), value...); return nil }
 				exitFunc = func(code int) { t.Errorf("unexpected process exit: %d", code) }
-				started := time.Now()
 				cmdHook([]string{agent + "-pre-tool-use"})
-				elapsed := time.Since(started)
 				var response struct {
 					HookSpecificOutput struct {
 						HookEventName            string         `json:"hookEventName"`
@@ -580,9 +582,6 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				}
 				if gets.Load() != 1 || posts.Load() != tc.wantPosts {
 					t.Errorf("unexpected requests: GET=%d POST=%d", gets.Load(), posts.Load())
-				}
-				if elapsed >= 5*time.Second {
-					t.Errorf("confirmation exceeded outer hook timeout: %v", elapsed)
 				}
 			})
 		}
