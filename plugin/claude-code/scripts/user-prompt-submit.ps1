@@ -39,62 +39,55 @@ function Write-ToolSearchMessage {
   } | ConvertTo-Json -Compress
 }
 
-function Resolve-EngramProject {
-  param(
-    [string]$EngramUrl,
-    [string]$Cwd
-  )
-  if ([string]::IsNullOrWhiteSpace($Cwd)) { return $null }
-  try {
-    $encodedCwd = [System.Uri]::EscapeDataString($Cwd)
-    $resolution = Invoke-RestMethod -Method Get -Uri "$EngramUrl/project/current?cwd=$encodedCwd" -TimeoutSec 1
-    $projectProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'project' })
-    $sourceProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'project_source' })
-    if ($projectProperty.Count -ne 1 -or $sourceProperty.Count -ne 1 -or $projectProperty[0].Value -isnot [string] -or $sourceProperty[0].Value -isnot [string]) {
-      return $null
-    }
-    $project = $projectProperty[0].Value
-    $source = $sourceProperty[0].Value
-    $validSources = @('config', 'git_remote', 'git_root', 'git_child', 'dir_basename', 'process_override')
-    if ([string]::IsNullOrWhiteSpace($project) -or $validSources -cnotcontains $source -or $null -ne $resolution.PSObject.Properties['error_hint']) {
-      return $null
-    }
-    return $project
-  } catch {
-    return $null
-  }
-}
-
 <#
 .SYNOPSIS
 Persists a human Claude prompt through the canonical Engram project.
 .DESCRIPTION
-Skips empty inputs and known synthetic turn prefixes after leading whitespace,
-without changing the original persisted text or the hook bootstrap. HTTP errors
-are swallowed and the request timeout bounds submission latency.
+Asks the Go decision endpoint to classify and resolve the canonical project in
+place of the former current-project read. Invalid or unavailable decisions skip
+persistence, without changing original text or the hook bootstrap.
 #>
 function Invoke-EngramPromptPersist {
   param(
     [string]$EngramUrl,
     [string]$SessionId,
-    [string]$Project,
+    [string]$Cwd,
     [string]$Prompt
   )
   # Fail-silent and bounded: a short timeout keeps a slow/unreachable server
   # from stalling prompt submission, and any error is swallowed.
-  if ([string]::IsNullOrWhiteSpace($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId) -or [string]::IsNullOrWhiteSpace($Project)) { return }
-  # Only skip persistence: synthetic turns still receive the normal bootstrap.
-  $trimmedPrompt = $Prompt.TrimStart()
-  if ($trimmedPrompt.StartsWith('<task-notification>', [System.StringComparison]::Ordinal) -or
-      $trimmedPrompt.StartsWith('<agent-message', [System.StringComparison]::Ordinal)) { return }
+  if ([string]::IsNullOrEmpty($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId) -or [string]::IsNullOrWhiteSpace($Cwd)) { return }
   try {
+    $request = [PSCustomObject]@{ source = 'claude-code'; cwd = $Cwd; content = $Prompt } | ConvertTo-Json -Compress
+    # UseBasicParsing and MaximumRedirection work on Windows PowerShell 5.1.
+    # A redirect must not fetch another endpoint or authorize persistence.
+    $response = Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop `
+      -Method Post -Uri "$EngramUrl/prompts/capture-decision" `
+      -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($request)) -TimeoutSec 1
+    if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return }
+    # ConvertFrom-Json can unwrap a single-item array on PowerShell 5.1.
+    if ($response.Content -isnot [string] -or -not $response.Content.TrimStart().StartsWith('{', [System.StringComparison]::Ordinal)) { return }
+    $resolution = $response.Content | ConvertFrom-Json -ErrorAction Stop
+    if ($resolution -isnot [PSCustomObject]) { return }
+    $decisionProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'decision' })
+    $projectProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'project' })
+    $sourceProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'project_source' })
+    if ($decisionProperty.Count -ne 1 -or $projectProperty.Count -ne 1 -or $sourceProperty.Count -ne 1 -or
+        $decisionProperty[0].Value -isnot [string] -or $decisionProperty[0].Value -cne 'capture' -or
+        $projectProperty[0].Value -isnot [string] -or $sourceProperty[0].Value -isnot [string]) { return }
+    $project = $projectProperty[0].Value
+    # Transport sanity only; Go remains the authority for canonicalization.
+    if ($project -match '[/\\\x00-\x1f\x7f]' -or $project -cne $project.Trim()) { return }
+    $validSources = @('config', 'git_remote', 'git_root', 'git_child', 'dir_basename', 'process_override')
+    if ([string]::IsNullOrWhiteSpace($project) -or $validSources -cnotcontains $sourceProperty[0].Value -or
+        $null -ne $resolution.PSObject.Properties['error_hint']) { return }
     $body = [PSCustomObject]@{
       session_id = $SessionId
       project    = $Project
       content    = $Prompt
     } | ConvertTo-Json -Compress
     $null = Invoke-RestMethod -Method Post -Uri "$EngramUrl/prompts" `
-      -ContentType 'application/json' -Body $body -TimeoutSec 1
+      -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 1
   } catch { }
 }
 
@@ -114,8 +107,7 @@ try {
 
   # Persist only after canonical server resolution; do not infer a project in
   # the hook when the server is unavailable, invalid, or ambiguous.
-  $project = Resolve-EngramProject -EngramUrl $engramUrl -Cwd $cwd
-  Invoke-EngramPromptPersist -EngramUrl $engramUrl -SessionId $sessionID -Project $project -Prompt $prompt
+  Invoke-EngramPromptPersist -EngramUrl $engramUrl -SessionId $sessionID -Cwd $cwd -Prompt $prompt
 
   $safeSessionID = $sessionID -replace '[^a-zA-Z0-9_-]', '_'
   $stateFile = Join-Path ([IO.Path]::GetTempPath()) "engram-claude-$safeSessionID-tools-loaded"

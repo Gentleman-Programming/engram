@@ -45,11 +45,15 @@ func TestClaudeCodeWindowsPromptResolverRejectsMalformedCanonicalProject(t *test
 				defer mu.Unlock()
 
 				switch r.URL.Path {
-				case "/project/current":
+				case "/prompts/capture-decision":
 					resolutionRequests++
-					requestedCWD = r.URL.Query().Get("cwd")
+					var request struct{ Cwd string }
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Errorf("decode decision: %v", err)
+					}
+					requestedCWD = request.Cwd
 					w.WriteHeader(test.status)
-					_, _ = w.Write([]byte(test.resolution))
+					_, _ = w.Write([]byte(strings.Replace(test.resolution, "{", `{"decision":"capture",`, 1)))
 				case "/prompts":
 					promptWrites++
 					w.WriteHeader(http.StatusNoContent)
@@ -95,10 +99,14 @@ func TestClaudeCodeWindowsPromptResolverPersistsCanonicalProject(t *testing.T) {
 		defer mu.Unlock()
 
 		switch r.URL.Path {
-		case "/project/current":
+		case "/prompts/capture-decision":
 			resolutionRequests++
-			requestedCWD = r.URL.Query().Get("cwd")
-			_, _ = w.Write([]byte(`{"project":"canonical-project","project_source":"config"}`))
+			var request struct{ Cwd string }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode decision: %v", err)
+			}
+			requestedCWD = request.Cwd
+			_, _ = w.Write([]byte(`{"decision":"capture","project":"canonical-project","project_source":"config"}`))
 		case "/prompts":
 			promptWrites++
 			if r.Method != http.MethodPost {

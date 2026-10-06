@@ -365,19 +365,89 @@ resolve_project_without_jq() {
   printf '%s\n' "$project"
 }
 
-# should_capture_prompt returns success unless the leading-whitespace-trimmed
-# prompt starts with a known synthetic Claude turn prefix. It classifies only
-# persistence; the original text, ToolSearch bootstrap and save reminder are
-# unchanged. Bash builtins keep classification independent of subprocesses.
-should_capture_prompt() {
-  local trimmed="$1"
-  trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-  case "$trimmed" in
-    '<task-notification>'*|'<agent-message'*) return 1 ;;
+# capture_project_from_response accepts exact, top-level string decision metadata.
+# Reuse the builtin
+# JSON parser on both capture routes; nested or malformed metadata cannot
+# authorize a write. Classification belongs exclusively to the Go server.
+capture_project_from_response() {
+  local response="$1" key start value decision="" project="" source="" seen="|"
+  local LC_ALL=C
+  JSON_PARSE_INPUT="$response"
+  JSON_PARSE_INDEX=0
+  JSON_PARSE_LENGTH=${#response}
+  json_skip_whitespace_without_jq
+  [ "${response:JSON_PARSE_INDEX:1}" = '{' ] || return 1
+  json_parse_value_without_jq || return 1
+  json_skip_whitespace_without_jq
+  [ "$JSON_PARSE_INDEX" -eq "$JSON_PARSE_LENGTH" ] || return 1
+  JSON_PARSE_INDEX=0
+  json_skip_whitespace_without_jq
+  JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+  json_skip_whitespace_without_jq
+  while [ "${response:JSON_PARSE_INDEX:1}" != '}' ]; do
+    start=$JSON_PARSE_INDEX
+    json_parse_string_without_jq || return 1
+    json_string_value_without_jq k "{\"k\":${response:start:JSON_PARSE_INDEX-start}}" || return 1
+    key="$JSON_VALUE"
+    case "$key" in
+      decision|project|project_source|error_hint)
+        [[ "$seen" != *"|${key}|"* ]] || return 1
+        seen+="${key}|"
+        ;;
+    esac
+    json_skip_whitespace_without_jq
+    JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+    json_skip_whitespace_without_jq
+    start=$JSON_PARSE_INDEX
+    json_parse_value_without_jq || return 1
+    case "$key" in
+      error_hint) return 1 ;;
+      decision|project|project_source)
+        [ "${response:start:1}" = '"' ] || return 1
+        json_string_value_without_jq k "{\"k\":${response:start:JSON_PARSE_INDEX-start}}" || return 1
+        value="$JSON_VALUE"
+        case "$key" in
+          decision) decision="$value" ;;
+          project) project="$value" ;;
+          project_source) source="$value" ;;
+        esac
+        ;;
+    esac
+    json_skip_whitespace_without_jq
+    [ "${response:JSON_PARSE_INDEX:1}" = '}' ] && break
+    JSON_PARSE_INDEX=$(( JSON_PARSE_INDEX + 1 ))
+    json_skip_whitespace_without_jq
+  done
+  [ "$decision" = capture ] && [[ "$project" = *[![:space:]]* ]] || return 1
+  # Transport sanity only: never repair metadata or duplicate Go normalization.
+  [[ "$project" != *[/\\]* && "$project" != *[[:cntrl:]]* &&
+     "$project" != [[:space:]]* && "$project" != *[[:space:]] ]] || return 1
+  case "$source" in
+    config|git_remote|git_root|git_child|dir_basename|process_override) ;;
+    *) return 1 ;;
   esac
-  return 0
+  JSON_VALUE="$project"
 }
 
+# resolve_capture_project replaces capture's GET with one read-only decision POST.
+# Reminder reads still use the existing resolver independently.
+resolve_capture_project() {
+  local cwd="$1" prompt="$2" escaped_cwd escaped_prompt response status
+  [[ "$cwd" = *[![:space:]]* ]] || return 1
+  json_escape_without_jq "$cwd"
+  escaped_cwd="$JSON_VALUE"
+  json_escape_without_jq "$prompt"
+  escaped_prompt="$JSON_VALUE"
+  response=$(engram_curl -sf -X POST "${ENGRAM_URL}/prompts/capture-decision" --max-time 2 -w $'\n%{http_code}' \
+    -H 'Content-Type: application/json' \
+    -d "{\"source\":\"claude-code\",\"cwd\":\"${escaped_cwd}\",\"content\":\"${escaped_prompt}\"}" 2>/dev/null) || return 1
+  status="${response##*$'\n'}"
+  [[ "$status" = 2[0-9][0-9] ]] || return 1
+  capture_project_from_response "${response%$'\n'*}"
+}
+
+# user_prompt_submit_without_jq preserves bootstrap/reminders without jq and
+# persists original prompts only after a valid Go capture decision.
 user_prompt_submit_without_jq() {
   local cwd="" session_id="" prompt="" project="" session_key state_dir state_file
   local session_start="" session_start_epoch now_epoch session_age_secs encoded_project
@@ -387,9 +457,10 @@ user_prompt_submit_without_jq() {
   json_string_value_without_jq "session_id" "$INPUT" && session_id="$JSON_VALUE"
   json_string_value_without_jq "prompt" "$INPUT" && prompt="$JSON_VALUE"
 
-  if [ -n "$prompt" ] && [ -n "$session_id" ] && should_capture_prompt "$prompt"; then
+  if [ -n "$prompt" ] && [ -n "$session_id" ]; then
     (
-      project=$(resolve_project_without_jq "$cwd") || exit 0
+      resolve_capture_project "$cwd" "$prompt" || exit 0
+      project="$JSON_VALUE"
       json_escape_without_jq "$session_id"
       local escaped_session="$JSON_VALUE"
       json_escape_without_jq "$project"
@@ -561,21 +632,27 @@ PROJECT=""
 # ──────────────────────────────────────────────────────────────────────────────
 # PROMPT PERSIST
 #
-# Human messages (excluding known synthetic prefixes) are captured to POST /prompts so mem_save can attach the
-# originating prompt via SessionActivity. The canonical project is resolved by
-# the server before this script writes. Fire-and-forget: never blocks and never
-# fails the hook.
+# The Go decision endpoint authorizes capture and returns the canonical project
+# before POST /prompts. Original content is preserved. Fire-and-forget: never
+# blocks and never fails the hook.
 # ──────────────────────────────────────────────────────────────────────────────
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ] && should_capture_prompt "$PROMPT"; then
+# Decode without a subprocess: preserve Unicode and CRLF even with Windows jq.
+PROMPT=""
+json_string_value_without_jq "prompt" "$INPUT" && PROMPT="$JSON_VALUE"
+if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   # Detached subshell so the POST never stalls the hook. The server derives the
   # prompt's project from the session and rejects any mismatch.
   (
-    PROJECT=$(resolve_project "$CWD") || exit 0
+    resolve_capture_project "$CWD" "$PROMPT" || exit 0
+    PROJECT="$JSON_VALUE"
+    json_escape_without_jq "$SESSION_ID"
+    ESCAPED_SESSION="$JSON_VALUE"
+    json_escape_without_jq "$PROJECT"
+    ESCAPED_PROJECT="$JSON_VALUE"
+    json_escape_without_jq "$PROMPT"
     engram_curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
-            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
+      -d "{\"session_id\":\"${ESCAPED_SESSION}\",\"project\":\"${ESCAPED_PROJECT}\",\"content\":\"${JSON_VALUE}\"}" >/dev/null 2>&1 || true
   ) &
 fi
 
