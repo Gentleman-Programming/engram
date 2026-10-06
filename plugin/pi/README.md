@@ -228,6 +228,25 @@ Pi sends eligible non-Engram tool results to Engram for passive scanning after r
 - Prompt context tied to meaningful saved observations
 - Cross-machine/team memory once a project is enrolled in Engram Cloud
 
+### Automatic user-prompt capture
+
+Prompts with more than 10 trimmed characters are captured once at
+`before_agent_start`, after Pi's input expansion. The extension uses the `input`
+event's source to exclude extension-injected turns, including automatic subagent
+wake notifications. Sessions marked with `GENTLE_PI_AGENTS_CHILD` also skip
+automatic user-prompt capture; their memory tools and other lifecycle behavior
+remain available.
+
+Human-facing RPC prompts are still eligible: RPC alone does not identify a
+subagent. When input provenance is unavailable, the existing capture policy is
+preserved. Pending provenance is isolated by runtime session identity and cleared
+on session start (including switching), shutdown, and reload. Queued steering and
+follow-up inputs do not replace idle-input provenance: Pi delivers those through
+its queues without a new `before_agent_start` capture.
+
+This changes automatic capture only, not explicit `mem_save_prompt` calls, and
+does not remove previously stored synthetic prompts.
+
 ## Private blocks
 
 `gentle-engram` redacts explicit private blocks before sending captured prompts, passive observations, or compaction summaries to Engram:
