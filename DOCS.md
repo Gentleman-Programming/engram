@@ -1479,7 +1479,7 @@ Engram automatically prevents project name drift — the same project saved unde
 
 ### Automatic normalization
 
-All project names are normalized on write and read: **lowercase**, **trimmed**, **collapsed hyphens/underscores**. Hyphens and underscores are not interchangeable, so `"engram-memory"` and `"engram_memory"` are not equivalent. If a name is changed during normalization, a warning is included in the response.
+All project names are normalized on write and read: **Unicode NFC**, **lowercase**, **trimmed**, **collapsed hyphens/underscores**. Visually identical NFC/NFD spellings (for example, `café` with a composed `é` or an `e` plus a combining acute accent) resolve to the same project. NFC is applied before lowercasing and to its output. Existing private Git bindings with NFD labels remain readable as NFC identities without rewriting the binding file. Hyphens and underscores are not interchangeable, so `"engram-memory"` and `"engram_memory"` are not equivalent. If a name is changed during normalization, a warning is included in the response.
 
 ### Auto-detection
 
@@ -1512,9 +1512,9 @@ When saving to a project that doesn't exist yet, Engram checks for similar exist
 
 ### Retroactive cleanup
 
-Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated or normalized-identical names are rejected. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves. The reserved `inbox` project cannot be a merge destination, including for an explicitly named separator variant such as `in-box`; preview and apply both reject it.
+Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated names and case/spacing-only normalized-identical inputs are rejected. A distinct legacy NFD spelling is accepted when it normalizes to the NFC target; use the exact stored source spelling. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves. The reserved `inbox` project cannot be a merge destination, including for an explicitly named separator variant such as `in-box`; preview and apply both reject it.
 
-Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation.
+Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation. `engram projects consolidate --all --dry-run` groups existing NFC/NFD pairs and suggests the NFC canonical name; rerun without `--dry-run` to select the groups to merge. Existing rows are not automatically migrated. Explicit merge and consolidation move observations, sessions, prompts, pending sync mutations and enrollment through the existing transactional repair path; acknowledged sync history remains unchanged.
 
 Use `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` to assign ownership to legacy rows that carry none. It prints how many sessions, observations, and prompts moved, and — when anything was left behind — exactly which items and why. It works against the local store, so it needs no running server and no `ENGRAM_HTTP_TOKEN`.
 

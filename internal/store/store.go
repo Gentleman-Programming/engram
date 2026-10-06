@@ -32,6 +32,7 @@ import (
 
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
+	"golang.org/x/text/unicode/norm"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -8921,7 +8922,7 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 	return s.mergeProjects(sources, canonical, false)
 }
 
-// MergeExplicitProjectVariants admits explicitly named separator variants for admin use.
+// MergeExplicitProjectVariants admits explicitly named separator and normalization variants for admin use.
 func (s *Store) MergeExplicitProjectVariants(sources []string, canonical string) (*MergeResult, error) {
 	return s.mergeProjects(sources, canonical, true)
 }
@@ -8964,8 +8965,11 @@ func (s *Store) PreviewExplicitProjectMerge(source, canonical string) (*Explicit
 	if canonical == ReservedInboxProjectName {
 		return nil, fmt.Errorf("reserved inbox project cannot be a merge destination")
 	}
-	if canonical == "" || normalizedSource == "" || normalizedSource == canonical || !mergeProjectEligible(normalizedSource, canonical, true) {
-		return nil, fmt.Errorf("source project %q must be a distinct separator variant of canonical project %q", source, canonical)
+	// Preserve the raw legacy spelling for SQL selection. Unicode-equivalent
+	// names may normalize to the target but still identify distinct stored rows.
+	unicodeVariant := !norm.NFC.IsNormalString(strings.TrimSpace(source))
+	if canonical == "" || normalizedSource == "" || (normalizedSource == canonical && !unicodeVariant) || !mergeProjectEligible(normalizedSource, canonical, true) {
+		return nil, fmt.Errorf("source project %q must be a distinct separator variant or Unicode normalization variant of canonical project %q", source, canonical)
 	}
 	name := strings.TrimSpace(source)
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
@@ -12525,7 +12529,7 @@ func normalizeScope(scope string) string {
 }
 
 // NormalizeProject applies canonical project name normalization:
-// lowercase + trim whitespace + collapse consecutive hyphens/underscores.
+// Unicode NFC + lowercase + trim whitespace + collapse consecutive hyphens/underscores.
 // Returns the normalized name and a warning message if the name was changed
 // (empty string if no change was needed).
 // Exported so MCP and CLI handlers can surface the warning to users.

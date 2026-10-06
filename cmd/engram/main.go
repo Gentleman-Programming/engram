@@ -3788,7 +3788,7 @@ Commands:
                        --force, -f   Overwrite existing .engram/config.json
   projects list      List all projects with observation, session, and prompt counts
   projects merge --from <source> --to <canonical> (--dry-run|--apply)
-                     Preview or apply an explicit separator-variant merge
+                     Preview or apply a separator or Unicode normalization variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups

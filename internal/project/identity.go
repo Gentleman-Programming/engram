@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -109,12 +110,15 @@ func readRepositoryBinding(commonDir string) (repositoryBinding, error) {
 	if err := json.Unmarshal(data, &binding); err != nil || !validRepositoryBinding(binding) {
 		return repositoryBinding{}, fmt.Errorf("%w: binding is invalid; configure project_name explicitly before retrying", ErrRepositoryBinding)
 	}
+	// Older bindings may retain an NFD label. Canonicalize only the returned
+	// identity, without rewriting private Git metadata or historical memories.
+	binding.Project = norm.NFC.String(binding.Project)
 	return binding, nil
 }
 
 func validRepositoryBinding(binding repositoryBinding) bool {
 	project, err := normalizeProjectName(binding.Project)
-	if err != nil || project != binding.Project || binding.Version != repositoryBindingVersion {
+	if err != nil || project != norm.NFC.String(binding.Project) || binding.Version != repositoryBindingVersion {
 		return false
 	}
 	if len(binding.ID) != 32 {
