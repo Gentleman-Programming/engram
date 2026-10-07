@@ -1035,7 +1035,7 @@ const realm = globalThis as typeof globalThis & { [shutdownFlightsKey]?: WeakMap
 const shutdownFlights = realm[shutdownFlightsKey] ??= new WeakMap<object, Map<string, Promise<void>>>();
 const lifecycleKey = Symbol.for("engram.pi.session-lifecycle");
 type Lifecycle = { epoch: number; closing: boolean; confirmedShutdownID?: string; removeBridgeResponder?: () => void;
-  promptTurn?: number; promptProof?: { digest: string; project: string; effectiveID: string };
+  awaitingInitialUserMessage?: boolean; promptTurn?: number; promptProof?: { digest: string; project: string; effectiveID: string };
   currentPrompt?: { content: string; project: string; effectiveID: string } };
 const lifecycleRealm = globalThis as typeof globalThis & { [lifecycleKey]?: WeakMap<object, Map<string, Lifecycle>> };
 const lifecycles = lifecycleRealm[lifecycleKey] ??= new WeakMap<object, Map<string, Lifecycle>>();
@@ -2136,6 +2136,7 @@ function removeBridgeResponders(ctx: SessionContext): void {
     state.removeBridgeResponder = undefined;
     state.promptProof = undefined;
     state.currentPrompt = undefined;
+    state.awaitingInitialUserMessage = false;
     state.promptTurn = (state.promptTurn || 0) + 1;
   }
 }
@@ -2231,6 +2232,24 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (sessionId) pendingInput.set(ctx.sessionManager, { sessionId, source: event.source });
     else pendingInput.delete(ctx.sessionManager);
     return { action: "continue" as const };
+  });
+  pi.on("message_start", (event: { message?: { role?: string } }, ctx: SessionContext) => {
+    if (event.message?.role !== "user") return;
+    const sessionId = observeRuntimeSessionID(ctx);
+    for (const [runtimeID, state] of lifecycles.get(ctx.sessionManager) || []) {
+      if (sessionId && sessionId !== runtimeID) continue;
+      if (sessionId === runtimeID && !state.closing && state.awaitingInitialUserMessage) {
+        // agent.prompt emits the first user message after before_agent_start.
+        state.awaitingInitialUserMessage = false;
+        continue;
+      }
+      // Later user messages are consumed queued turns, not enqueue notifications.
+      // Never inspect their content or inherit the preceding native turn's proof.
+      state.awaitingInitialUserMessage = false;
+      state.currentPrompt = undefined;
+      state.promptProof = undefined;
+      state.promptTurn = (state.promptTurn || 0) + 1;
+    }
   });
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     pendingInput.delete(ctx.sessionManager);
@@ -2362,10 +2381,12 @@ export default function registerEngram(pi: ExtensionAPI) {
     for (const prior of lifecycles.get(ctx.sessionManager)?.values() || []) {
       prior.promptProof = undefined;
       prior.currentPrompt = undefined;
+      prior.awaitingInitialUserMessage = false;
       prior.promptTurn = (prior.promptTurn || 0) + 1;
     }
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
+    if (state) state.awaitingInitialUserMessage = true;
     const epoch = state?.epoch;
     const promptTurn = state?.promptTurn;
     // A returned systemPrompt becomes a forced prompt that turns skipping this hook never see

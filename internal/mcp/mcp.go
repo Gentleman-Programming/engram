@@ -546,7 +546,7 @@ Examples:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 				mcp.WithBoolean("capture_prompt",
-					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for automated saves."),
+					mcp.Description("Automatically capture the current user prompt when available. Omission defaults to true; false skips capture for automated saves. If present, must be a boolean; other values return capture_prompt must be a boolean before project resolution or writes."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
@@ -1502,7 +1502,11 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
 		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 		var capturePrompt *bool
-		if option, ok := req.GetArguments()["capture_prompt"].(bool); ok {
+		if value, present := req.GetArguments()["capture_prompt"]; present {
+			option, ok := value.(bool)
+			if !ok {
+				return mcp.NewToolResultError("capture_prompt must be a boolean"), nil
+			}
 			capturePrompt = &option
 		}
 		recoverySessionID := sessionID

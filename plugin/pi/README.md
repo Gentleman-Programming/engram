@@ -72,7 +72,7 @@ consumer responsibilities, not a process-global readiness signal.
 
 Native `mem_save` honors `capture_prompt` (optional boolean, default `true`). It sends the available current turn's already-redacted, truncated prompt for the same session/project to Go core, which best-effort stores it using exact session/project/stored-content dedupe. Missing context or a capture failure does not fail the observation save. Prompt rows are independent; no observation-ID link is created.
 
-`capture_prompt=false` skips only that save's capture attempt. It does **not** disable `before_agent_start` lifecycle capture or remove previously captured prompts. Synthetic/short turns, another runtime/project, and shutdown/reload cannot reuse the preceding turn's prompt.
+`capture_prompt=false` skips only that save's capture attempt. It does **not** disable `before_agent_start` lifecycle capture or remove previously captured prompts. Synthetic/short turns, another runtime/project, and shutdown/reload cannot reuse the preceding turn's prompt. Enqueuing steer/follow-up input preserves the active run's capture. The initial user `message_start` after `before_agent_start` also preserves it; each subsequent user `message_start` marks consumption of queued input and clears both prompt context and ownership proof. Queued turns never inherit or capture prompt context, even when their text repeats the previous prompt. The next normal `before_agent_start` establishes its own context.
 
 ## At a glance
 

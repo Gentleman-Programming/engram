@@ -250,6 +250,66 @@ for (const capture of [undefined, true, false]) {
   });
 }
 
+for (const streamingBehavior of ["steer", "followUp"]) {
+  test(`mem_save prompt capture queued consumption: ${streamingBehavior}`, async () => {
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const originalFetch = globalThis.fetch;
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+      { method: "POST", path: "/observations", status: 201, body: { id: 2, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-queued-capture-", async ({ sandbox }) => {
+        const { eventHandlers, registeredTools } = await loadPluginHarness(sandbox);
+        const ctx = runtimeContext(`queued-${streamingBehavior}`);
+        const prompt = "Repeated user prompt with <private>queued-secret</private> safe content";
+        const redacted = "Repeated user prompt with [REDACTED] safe content";
+        const message = async (role) => eventHandlers.get("message_start")?.({ message: { role, content: [{ type: "text", text: prompt }] } }, ctx);
+        const save = async (expected) => {
+          const result = await registeredTools.get("mem_save").execute("queued", { title: "saved", content: "observation" }, undefined, undefined, ctx);
+          assert.equal(result.isError, undefined, JSON.stringify(result));
+          assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, expected);
+        };
+        await eventHandlers.get("session_start")({}, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt }, ctx);
+        await message("assistant");
+        await message("user"); // Initial agent.prompt message must preserve the native capture.
+        await save(redacted);
+        const foreign = { ...ctx, sessionManager: { getSessionId: () => "foreign-queued-runtime" } };
+        await eventHandlers.get("input")({ source: "interactive", text: prompt, images: [], streamingBehavior }, foreign);
+        await eventHandlers.get("message_start")?.({ message: { role: "user" } }, foreign);
+        await save(redacted);
+        for (let queued = 0; queued < 2; queued++) {
+          await eventHandlers.get("input")({ source: "interactive", text: prompt, images: [], streamingBehavior }, ctx);
+          await save(queued === 0 ? redacted : undefined); // Enqueue alone cannot invalidate an active run.
+          await message("user"); // Identical text is still a distinct consumed queued turn.
+          await save(undefined);
+        }
+        assert.equal(calls.filter(({ path }) => path === "/prompts").length, 1, "queued content is never captured");
+        await eventHandlers.get("input")({ source: "interactive", text: "Next normal user prompt", images: [] }, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "Next normal user prompt" }, ctx);
+        await message("user");
+        await save("Next normal user prompt");
+        await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+        await eventHandlers.get("session_start")({}, ctx);
+        await message("user");
+        await save(undefined);
+        assert.doesNotMatch(JSON.stringify(calls), /queued-secret/);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
+    }
+  });
+}
+
 // Records every request the extension issues so a test can assert the wire contract the Engram
 // HTTP server actually receives, instead of asserting over the extension source text.
 function recordingFetch(routes) {

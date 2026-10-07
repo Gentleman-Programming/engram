@@ -1207,7 +1207,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal` | `global` — see [Team Usage](docs/TEAM-USAGE.md) for conventions and sync caveats
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
-- **capture_prompt**: optional boolean in MCP and native Pi, default `true`; when the runtime supplies current prompt context for the same project/session, shared Go policy best-effort stores a deduplicated independent prompt row. Missing context or a capture error does not fail `mem_save`. `false` skips only this save's attempt; it does not disable Pi lifecycle capture or delete existing prompts.
+- **capture_prompt**: optional boolean in MCP and native Pi; omission defaults to `true`. In MCP, present non-boolean values (including `"false"`, numbers, and `null`) return the exact tool error `capture_prompt must be a boolean` before project resolution or any session, observation, or prompt write; when the runtime supplies current prompt context for the same project/session, shared Go policy best-effort stores a deduplicated independent prompt row. Missing context or a capture error does not fail `mem_save`. `false` skips only this save's attempt; it does not disable Pi lifecycle capture or delete existing prompts.
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`; required unless the legacy `observation` alias is provided
 - **observation**: backward-compatible alias for `content` for older/raw MCP clients; prefer `content` for new integrations
 
