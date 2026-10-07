@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,6 +206,59 @@ func TestClaudeCodeWindowsSafePromptRouteIsNoOpUnderPi(t *testing.T) {
 	t.Run("control/unset", func(t *testing.T) {
 		if out := run(t, ""); !strings.Contains(out, "ToolSearch") {
 			t.Fatalf("stdout = %q, want the ToolSearch bootstrap from the Windows-safe route", out)
+		}
+	})
+	t.Run("true", func(t *testing.T) {
+		if out := run(t, "true"); out != "" {
+			t.Errorf("stdout = %q, want empty under Pi", out)
+		}
+	})
+}
+
+// TestClaudeCodePowerShellPromptHookIsNoOpUnderPi covers the early exit in
+// user-prompt-submit.ps1, the PowerShell adapter that the shell tests above do
+// not run. The control run proves the adapter executed and printed its bootstrap.
+func TestClaudeCodePowerShellPromptHookIsNoOpUnderPi(t *testing.T) {
+	powershellPath := claudeCodePowerShell(t)
+	adapter := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.ps1")
+
+	run := func(t *testing.T, piValue string) string {
+		t.Helper()
+		srv, requests := piGuardServer(t)
+		serverURL, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("parse server URL: %v", err)
+		}
+		sessionID := newSessionID(t)
+		stateFile := filepath.Join(os.TempDir(), "engram-claude-"+sessionID+"-tools-loaded")
+		t.Cleanup(func() { _ = os.Remove(stateFile) })
+
+		cmd := exec.Command(powershellPath, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapter)
+		cmd.Env = append(withoutEngramPort(os.Environ()), "ENGRAM_PORT="+serverURL.Port())
+		if piValue != "" {
+			cmd.Env = append(cmd.Env, "PI_CODING_AGENT="+piValue)
+		}
+		cmd.Stdin = strings.NewReader(piGuardHookInput(t, map[string]any{
+			"session_id": sessionID,
+			"cwd":        t.TempDir(),
+			"prompt":     "hello from pi",
+		}))
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("user-prompt-submit.ps1 must exit 0: %v\nstderr: %s", err, stderr.String())
+		}
+		if piValue != "" {
+			if got := requests.list(); len(got) != 0 {
+				t.Errorf("requests = %v, want none under Pi", got)
+			}
+		}
+		return stdout.String()
+	}
+
+	t.Run("control/unset", func(t *testing.T) {
+		if out := run(t, ""); !strings.Contains(out, "ToolSearch") {
+			t.Fatalf("stdout = %q, want the ToolSearch bootstrap from the PowerShell adapter", out)
 		}
 	})
 	t.Run("true", func(t *testing.T) {
