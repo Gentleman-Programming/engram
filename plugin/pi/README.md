@@ -87,6 +87,12 @@ prevents. In that case the server resolves the write like any omitted-session wr
 active runtime session for that project and directory, `manual-save-<project>` when there is
 none, or a fail-closed error when several match. Use Pi's native `mem_*` tools instead.
 
+## Per-save prompt capture
+
+Native `mem_save` honors `capture_prompt` (optional boolean, default `true`). It sends the available current turn's already-redacted, truncated prompt for the same session/project to Go core, which best-effort stores it using exact session/project/stored-content dedupe. Missing context or a capture failure does not fail the observation save. Prompt rows are independent; no observation-ID link is created.
+
+`capture_prompt=false` skips only that save's capture attempt. It does **not** disable `before_agent_start` lifecycle capture or remove previously captured prompts. Synthetic/short turns, another runtime/project, and shutdown/reload cannot reuse the preceding turn's prompt. Enqueuing steer/follow-up input preserves the active run's capture. The initial user `message_start` after `before_agent_start` also preserves it; each subsequent user `message_start` marks consumption of queued input and clears both prompt context and ownership proof. Queued turns never inherit or capture prompt context, even when their text repeats the previous prompt. The next normal `before_agent_start` establishes its own context.
+
 ## At a glance
 
 | You want                    | Engram gives Pi                                  |
@@ -168,6 +174,30 @@ restart the running server, then retry; updating only the Pi package is not
 sufficient. The plugin never invents a continuation ID or adopts a failed
 registration. Read-only memory tools do not require resume support. Cross-project
 satellite saves still require `isolated_session_registration: true` separately.
+
+## Read-only caller-binding diagnostic
+
+Pi-native `mem_doctor` preserves the existing project/check request to `GET /doctor`
+and adds a separate `caller_binding` assessment from `POST /doctor/caller-binding`.
+Pi supplies observed runtime identity, a read-only effective mapping, and host API
+availability; Go evaluates persisted session state. Model parameters cannot supply
+these caller facts. A foreign project target does not inherit an unvalidated
+mapping or create a satellite.
+
+Project checks and caller binding are displayed separately. Healthy project checks
+can coexist with a blocked or unknown caller. An ended root is not itself a blocker:
+a live continuation may remain valid, or the normal registration path may support
+safe resume. Missing or throwing host APIs provide missing evidence, not readiness.
+An unsupported, failed, or malformed caller endpoint yields `unknown` with safe
+support-verification guidance while retaining the project report.
+
+Diagnosis never registers, renews leases, creates continuations, ends sessions,
+appends mapping entries, or repairs bindings. Even `ok` does not guarantee a later
+write. Only the six allowlisted fields in `caller_binding` are intended as shareable
+evidence: no identities, projects, paths, raw responses, or errors are included.
+The original project report is **not** asserted privacy-safe. CLI, HTTP project-only,
+and MCP doctor behavior are unchanged. This diagnostic relates to #1622 and #1635;
+it does not resolve either incident or weaken session guards.
 
 ## Opt-in Pi session registration trace
 

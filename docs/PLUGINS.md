@@ -311,9 +311,11 @@ Old clients that read only the `result` string continue to work — these fields
 
 ### mem_save prompt capture
 
-`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated saves.
+`mem_save` accepts `capture_prompt` as an optional boolean in MCP and native Pi. Omission defaults to `true`. In MCP, a present value must be a typed boolean: strings (including `"false"`), numbers, and `null` return the exact tool error `capture_prompt must be a boolean` before project resolution or any session, observation, or prompt write. The shared Go policy defaults to `true`: when the runtime supplies a current user prompt for the same project and session, Engram best-effort stores an independent `user_prompts` row using exact project + session + stored-content dedupe. This is not an observation-ID-to-prompt-ID link. Passing `capture_prompt=false` skips only that save's prompt capture attempt and is intended for automated saves.
 
 If no current prompt is available to the MCP process, or if best-effort prompt capture fails, `mem_save` still succeeds and no prompt is invented from the observation content. Plugins/protocol hooks that can observe user prompts must feed that prompt context before relying on automatic capture. Calling `mem_save_prompt` in the same MCP process records the prompt and makes it available to later `mem_save` calls for the same project/session; a different MCP process lifecycle does not inherit that in-memory prompt context.
+
+Native Pi supplies the current eligible turn's already-redacted, truncated prompt with `/observations` as `current_prompt`, alongside `capture_prompt`. It does not infer current context from stored history or reuse a prompt from another session/project. Pi's independent `before_agent_start` lifecycle capture remains enabled even when a later save opts out; opting out does not remove an existing prompt row. The Go dedupe policy prevents a per-save attempt from duplicating a lifecycle-captured row.
 
 ---
 

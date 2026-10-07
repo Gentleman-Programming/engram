@@ -1035,7 +1035,8 @@ const realm = globalThis as typeof globalThis & { [shutdownFlightsKey]?: WeakMap
 const shutdownFlights = realm[shutdownFlightsKey] ??= new WeakMap<object, Map<string, Promise<void>>>();
 const lifecycleKey = Symbol.for("engram.pi.session-lifecycle");
 type Lifecycle = { epoch: number; closing: boolean; confirmedShutdownID?: string; removeBridgeResponder?: () => void;
-  promptTurn?: number; promptProof?: { digest: string; project: string; effectiveID: string } };
+  awaitingInitialUserMessage?: boolean; promptTurn?: number; promptProof?: { digest: string; project: string; effectiveID: string };
+  currentPrompt?: { content: string; project: string; effectiveID: string } };
 const lifecycleRealm = globalThis as typeof globalThis & { [lifecycleKey]?: WeakMap<object, Map<string, Lifecycle>> };
 const lifecycles = lifecycleRealm[lifecycleKey] ??= new WeakMap<object, Map<string, Lifecycle>>();
 function lifecycle(ctx: SessionContext, id: string): Lifecycle {
@@ -1635,7 +1636,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     topic_key: optionalString("Stable topic key for upserts"),
     project: optionalString("Optional explicit project"),
     cwd: optionalString("Optional directory whose Engram project receives this write; must agree with project when both are set"),
-    capture_prompt: optionalBoolean("Capture current prompt when available"),
+    capture_prompt: optionalBoolean("Capture the available session/project prompt for this save (default true); does not disable lifecycle capture"),
   }),
   mem_update: Type.Object({
     id: Type.Number({ description: "Observation ID to update" }),
@@ -1799,11 +1800,68 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
   return slug || "memory";
 }
 
+// Per-invocation evidence stays separate from model parameters and host state.
+const callerAppendAvailability = new WeakMap<Record<string, unknown>, boolean | null>();
+
+const CALLER_NEXT_STEPS = [
+  "No action required; a later write is not guaranteed.",
+  "Collect caller context without registering a session.",
+  "Verify support and availability of the caller diagnostic.",
+  "Use the normal runtime registration path; diagnosis does not register sessions.",
+  "Inspect the runtime binding; diagnosis does not repair it.",
+  "Resume through a host that can persist effective identity; do not reopen the ended session.",
+];
+const CALLER_REASONS = ["caller_context_missing", "caller_binding_unavailable", "session_not_registered", "effective_session_missing", "session_project_conflict", "effective_mapping_invalid", "host_context_missing", "resume_required", "ended_session_without_persistence", "binding_observed"];
+
+function callerBindingProjection(value: unknown) {
+  const fallback = { status: "unknown", root_state: "unknown", effective_state: "unknown", reason_code: "caller_binding_unavailable", safe_next_step: CALLER_NEXT_STEPS[2], write_success_guaranteed: false };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const data = value as Record<string, unknown>;
+  const states = ["active", "ended", "missing", "unknown"];
+  if (["status", "root_state", "effective_state", "reason_code", "safe_next_step"].some(key => typeof data[key] !== "string")
+    || !["ok", "warning", "blocked", "unknown"].includes(String(data.status))
+    || !states.includes(String(data.root_state)) || !states.includes(String(data.effective_state))
+    || !CALLER_REASONS.includes(String(data.reason_code)) || !CALLER_NEXT_STEPS.includes(String(data.safe_next_step))
+    || data.write_success_guaranteed !== false) return fallback;
+  return { status: data.status, root_state: data.root_state, effective_state: data.effective_state,
+    reason_code: data.reason_code, safe_next_step: data.safe_next_step, write_success_guaranteed: false };
+}
+
+function callerBindingStatus(data: unknown): string | undefined {
+  return (data as { caller_binding?: { status?: string } } | null)?.caller_binding?.status;
+}
+
+function callerBindingContext(ctx: SessionContext, target: string, appendAvailable: boolean | null) {
+  let runtimeID: string | undefined;
+  let effectiveID: string | undefined;
+  let branchAvailable: boolean | null = null;
+  try {
+    const id = ctx.sessionManager?.getSessionId?.();
+    if (typeof id === "string" && id.trim()) runtimeID = id;
+  } catch { /* Missing host evidence is not a healthy binding. */ }
+  try {
+    const manager = ctx.sessionManager;
+    if (manager) {
+      branchAvailable = typeof manager.getBranch === "function";
+      if (runtimeID) {
+        // Match the write path, but never mutate registration or mapping entries.
+        effectiveID = effectiveSessionID(ctx, runtimeID);
+        const owner = pendingEffectiveSessionProject(ctx, runtimeID, effectiveID);
+        if ((owner && owner.toLowerCase() !== target.toLowerCase())
+          || (!owner && project.toLowerCase() !== target.toLowerCase())) effectiveID = undefined;
+      }
+    }
+  } catch { branchAvailable = null; effectiveID = undefined; }
+  return { project: target, runtime_session_id: runtimeID, effective_session_id: effectiveID,
+    host_context: { append_entry_available: appendAvailable, branch_available: branchAvailable } };
+}
+
 async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
-  const sessionId = getSessionId(ctx);
+  const sessionId = toolName === "mem_doctor" ? undefined : getSessionId(ctx);
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
   const writeState = sessionId ? lifecycle(ctx, sessionId) : undefined;
   const writeEpoch = writeState?.epoch;
+  const currentPrompt = writeState?.currentPrompt;
   const writeTarget = WRITE_TARGET_TOOLS.has(toolName) ? await resolveExplicitWriteTarget(params, fetch) : undefined;
   const requestedProject = writeTarget?.project || (typeof params.project === "string" && params.project ? params.project : undefined);
   const activeProject = requestedProject || project;
@@ -1857,6 +1915,11 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           project: activeProject,
           scope: params.scope || "project",
           topic_key: params.topic_key,
+          capture_prompt: params.capture_prompt,
+          current_prompt: params.capture_prompt !== false && currentPrompt
+            && writeState?.currentPrompt === currentPrompt
+            && currentPrompt.project === activeProject && currentPrompt.effectiveID === activeSessionId
+            ? currentPrompt.content : undefined,
         },
       });
     }
@@ -1981,9 +2044,19 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         throw error;
       }
     }
-    case "mem_doctor":
+    case "mem_doctor": {
       if (!requestedProject) requireResolvedProject();
-      return fetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
+      const report = await fetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
+      let caller: unknown;
+      try {
+        // A separate transport isolates optional diagnostic failures from project checks.
+        const response = await engramFetchResult("/doctor/caller-binding", {
+          method: "POST", body: callerBindingContext(ctx, activeProject, callerAppendAvailability.has(params) ? callerAppendAvailability.get(params)! : !!appendEntry),
+        });
+        if (!response.transportFailure) caller = response.data;
+      } catch { /* Old servers and errors receive only the literal safe fallback. */ }
+      return { ...(report as Record<string, unknown>), caller_binding: callerBindingProjection(caller) };
+    }
     case "mem_capture_passive": {
       requireResolvedProject();
       if (writeState) assertOpen(writeState, writeEpoch!);
@@ -2077,7 +2150,10 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
       ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, errorResult)}`);
       return errorResult;
     }
-    ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, result)}`);
+    const callerStatus = toolName === "mem_doctor" && data && typeof data === "object" && "caller_binding" in data
+      ? `project checks: ${compactResultStatus(toolName, result)} · caller: ${callerBindingStatus(data)}`
+      : compactResultStatus(toolName, result);
+    ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${callerStatus}`);
     return result;
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -2107,13 +2183,22 @@ function registerMemoryTools(pi: ExtensionAPI): void {
       parameters: MEMORY_TOOL_SCHEMAS[toolName],
       renderShell: "self",
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        if (toolName === "mem_doctor") {
+          let available: boolean | null = null;
+          try { available = typeof pi.appendEntry === "function"; } catch { /* Host getter unavailable. */ }
+          const callerParams = { ...params } as Record<string, unknown>;
+          callerAppendAvailability.set(callerParams, available);
+          return executeMemoryTool(toolName, callerParams, ctx as MemoryToolContext, signal);
+        }
         return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal, pi.appendEntry?.bind(pi));
       },
       renderCall(args) {
         return new Text(renderCallText(toolName, args), 0, 0);
       },
       renderResult(result, options, _theme, context) {
-        return new Text(renderResultText(toolName, result, { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError }), 0, 0);
+        const rendered = renderResultText(toolName, result, { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError });
+        const caller = toolName === "mem_doctor" ? (result.details as { data?: { caller_binding?: { status: string } } } | undefined)?.data?.caller_binding : undefined;
+        return new Text(caller && !options.expanded ? `Project checks: ${rendered}\nCaller binding: ${caller.status} (later writes not guaranteed)` : rendered, 0, 0);
       },
     });
   }
@@ -2128,6 +2213,8 @@ function removeBridgeResponders(ctx: SessionContext): void {
     state.removeBridgeResponder?.();
     state.removeBridgeResponder = undefined;
     state.promptProof = undefined;
+    state.currentPrompt = undefined;
+    state.awaitingInitialUserMessage = false;
     state.promptTurn = (state.promptTurn || 0) + 1;
   }
 }
@@ -2223,6 +2310,24 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (sessionId) pendingInput.set(ctx.sessionManager, { sessionId, source: event.source });
     else pendingInput.delete(ctx.sessionManager);
     return { action: "continue" as const };
+  });
+  pi.on("message_start", (event: { message?: { role?: string } }, ctx: SessionContext) => {
+    if (event.message?.role !== "user") return;
+    const sessionId = observeRuntimeSessionID(ctx);
+    for (const [runtimeID, state] of lifecycles.get(ctx.sessionManager) || []) {
+      if (sessionId && sessionId !== runtimeID) continue;
+      if (sessionId === runtimeID && !state.closing && state.awaitingInitialUserMessage) {
+        // agent.prompt emits the first user message after before_agent_start.
+        state.awaitingInitialUserMessage = false;
+        continue;
+      }
+      // Later user messages are consumed queued turns, not enqueue notifications.
+      // Never inspect their content or inherit the preceding native turn's proof.
+      state.awaitingInitialUserMessage = false;
+      state.currentPrompt = undefined;
+      state.promptProof = undefined;
+      state.promptTurn = (state.promptTurn || 0) + 1;
+    }
   });
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     pendingInput.delete(ctx.sessionManager);
@@ -2353,10 +2458,13 @@ export default function registerEngram(pi: ExtensionAPI) {
     // Invalidate before any initialization or early return, including short/empty turns.
     for (const prior of lifecycles.get(ctx.sessionManager)?.values() || []) {
       prior.promptProof = undefined;
+      prior.currentPrompt = undefined;
+      prior.awaitingInitialUserMessage = false;
       prior.promptTurn = (prior.promptTurn || 0) + 1;
     }
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
+    if (state) state.awaitingInitialUserMessage = true;
     const epoch = state?.epoch;
     const promptTurn = state?.promptTurn;
     // A returned systemPrompt becomes a forced prompt that turns skipping this hook never see
@@ -2392,7 +2500,13 @@ export default function registerEngram(pi: ExtensionAPI) {
         content: truncate(stripPrivateTags(finalContent), 2000),
         project,
       };
-      if (state && (state.closing || state.epoch !== epoch)) return result;
+      if (state && (state.closing || state.epoch !== epoch || state.promptTurn !== promptTurn)) return result;
+      // Retain only the already-redacted payload, scoped to the current owner.
+      // Go owns per-save opt-out and dedupe, including recovery after a failed lifecycle write.
+      if (state && getSessionId(ctx) === sessionId && project === body.project
+        && !projectDetectionPending && !projectResolutionError) {
+        state.currentPrompt = { content: body.content, project: body.project, effectiveID };
+      }
       const acknowledgement = await bestEffortEngramFetch<{ id?: unknown; status?: unknown }>("/prompts", { method: "POST", body }, ctx);
       // null includes errors and successful JSON null/204: only the core's saved-ID
       // acknowledgement proves capture. The digest matches the original trimmed input,
