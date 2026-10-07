@@ -29,26 +29,36 @@ func (r callerReader) GetSession(id string) (*store.Session, error) {
 func TestCallerBindingAssessment(t *testing.T) {
 	yes, no := true, false
 	ended := "synthetic timestamp"
+	const collect = "Collect caller context without registering a session."
+	const register = "Use the normal runtime registration path; diagnosis does not register sessions."
+	const inspect = "Inspect the runtime binding; diagnosis does not repair it."
+	const observe = "No action required; a later write is not guaranteed."
+	const resume = "Resume through a host that can persist effective identity; do not reopen the ended session."
+	const verify = "Verify support and availability of the caller diagnostic."
 	for _, tc := range []struct {
 		name, root, effective, project, reason, status string
-		rootState, effectiveState                      string
+		rootState, effectiveState, next                string
 		endRoot, endEffective                          bool
 		host                                           *diagnostic.CallerHostContext
 		lookupErr                                      error
 	}{
-		{name: "missing caller", reason: "caller_context_missing", status: "unknown", rootState: "unknown", effectiveState: "unknown"},
-		{name: "fresh root", root: "missing", effective: "missing", project: "fixture", reason: "session_not_registered", status: "unknown", rootState: "missing", effectiveState: "unknown"},
-		{name: "missing effective", root: "root", effective: "missing", project: "fixture", reason: "effective_session_missing", status: "unknown", rootState: "active", effectiveState: "missing"},
-		{name: "conflicting project", root: "root", effective: "root", project: "other", reason: "session_project_conflict", status: "blocked", rootState: "active", effectiveState: "active"},
-		{name: "noncanonical ordinal", root: "root", effective: "root:resume:02", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active"},
-		{name: "ordinal one", root: "root", effective: "root:resume:1", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active"},
-		{name: "foreign identity", root: "root", effective: "foreign", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active"},
-		{name: "host absent", root: "root", effective: "root", project: "fixture", reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active"},
-		{name: "live root", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{&no, &no}, reason: "binding_observed", status: "ok", rootState: "active", effectiveState: "active"},
-		{name: "ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, endEffective: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "resume_required", status: "warning", rootState: "ended", effectiveState: "ended"},
-		{name: "ended root with live continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "binding_observed", status: "ok", rootState: "ended", effectiveState: "active"},
-		{name: "branch unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&yes, &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended"},
-		{name: "lookup unavailable", root: "root", effective: "root", project: "fixture", lookupErr: errors.New("private database path"), reason: "caller_binding_unavailable", status: "unknown", rootState: "unknown", effectiveState: "unknown"},
+		{name: "missing caller", reason: "caller_context_missing", status: "unknown", rootState: "unknown", effectiveState: "unknown", next: collect},
+		{name: "fresh root", root: "missing", effective: "missing", project: "fixture", reason: "session_not_registered", status: "unknown", rootState: "missing", effectiveState: "unknown", next: register},
+		{name: "missing effective", root: "root", effective: "missing", project: "fixture", reason: "effective_session_missing", status: "unknown", rootState: "active", effectiveState: "missing", next: inspect},
+		{name: "conflicting project", root: "root", effective: "root", project: "other", reason: "session_project_conflict", status: "blocked", rootState: "active", effectiveState: "active", next: inspect},
+		{name: "noncanonical ordinal", root: "root", effective: "root:resume:02", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active", next: inspect},
+		{name: "ordinal one", root: "root", effective: "root:resume:1", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active", next: inspect},
+		{name: "foreign identity", root: "root", effective: "foreign", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active", next: inspect},
+		{name: "host absent", root: "root", effective: "root", project: "fixture", reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active", next: collect},
+		{name: "live root", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{&no, &no}, reason: "binding_observed", status: "ok", rootState: "active", effectiveState: "active", next: observe},
+		{name: "ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, endEffective: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "resume_required", status: "warning", rootState: "ended", effectiveState: "ended", next: resume},
+		{name: "ended root with live continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "binding_observed", status: "ok", rootState: "ended", effectiveState: "active", next: observe},
+		{name: "branch unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&yes, &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended", next: resume},
+		{name: "lookup unavailable", root: "root", effective: "root", project: "fixture", lookupErr: errors.New("private database path"), reason: "caller_binding_unavailable", status: "unknown", rootState: "unknown", effectiveState: "unknown", next: verify},
+		{name: "both persistence APIs unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&no, &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended", next: resume},
+		{name: "append evidence missing", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{BranchAvailable: &yes}, reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active", next: collect},
+		{name: "branch evidence missing", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes}, reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active", next: collect},
+		{name: "active root with ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endEffective: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "resume_required", status: "warning", rootState: "active", effectiveState: "ended", next: resume},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := map[string]*store.Session{"root": {Project: "fixture"}}
@@ -62,8 +72,29 @@ func TestCallerBindingAssessment(t *testing.T) {
 				}
 			}
 			got := diagnostic.AssessCallerBinding(callerReader{rows, tc.lookupErr}, diagnostic.CallerBindingInput{Project: tc.project, RuntimeSessionID: tc.root, EffectiveSessionID: tc.effective, HostContext: tc.host})
-			if got.Status != tc.status || got.ReasonCode != tc.reason || got.RootState != tc.rootState || got.EffectiveState != tc.effectiveState || got.WriteSuccessGuaranteed || strings.Contains(got.SafeNextStep, "private") {
-				t.Fatalf("assessment = %#v", got)
+			want := diagnostic.CallerBindingAssessment{Status: tc.status, ReasonCode: tc.reason, RootState: tc.rootState, EffectiveState: tc.effectiveState, SafeNextStep: tc.next}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("assessment = %#v, want %#v", got, want)
+			}
+			raw, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "private") || strings.Contains(string(raw), "fixture") {
+				t.Fatalf("assessment leaked evidence: %s", raw)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			keys := []string{"status", "root_state", "effective_state", "reason_code", "safe_next_step", "write_success_guaranteed"}
+			if len(fields) != len(keys) {
+				t.Fatalf("unexpected assessment fields: %s", raw)
+			}
+			for _, key := range keys {
+				if _, ok := fields[key]; !ok {
+					t.Fatalf("missing assessment field %s: %s", key, raw)
+				}
 			}
 		})
 	}
