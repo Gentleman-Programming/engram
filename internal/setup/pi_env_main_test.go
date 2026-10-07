@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -9,6 +10,9 @@ import (
 // hooks are no-ops when it is set. Clear it so the hook tests behave the same
 // from a Pi shell as from CI.
 func TestMain(m *testing.M) {
-	os.Unsetenv("PI_CODING_AGENT")
+	if err := os.Unsetenv("PI_CODING_AGENT"); err != nil {
+		fmt.Fprintf(os.Stderr, "clear PI_CODING_AGENT: %v\n", err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }
