@@ -75,6 +75,18 @@ exit 0 with no output and no requests. Pi's native Engram owns the session and i
 prompts, so the Claude child that the bridge starts records nothing. A Pi without
 native Engram therefore gets no capture from those hooks either.
 
+The guard reads an inherited environment variable, so it applies to every Claude Code
+process that inherits it, not only to bridge children. For example, a tmux, zellij or IDE
+server first started from Pi's shell passes `PI_CODING_AGENT` to every session it opens
+later, and a `claude` started there records nothing in Engram, without any warning. Clear
+it there (`env -u PI_CODING_AGENT claude`) when that session should use the plugin.
+
+With the guard active, `claude-pre-tool-use` no longer binds a session id. This only matters
+if the Claude child exposes Engram MCP tools, which the bridge's default `strictMcpConfig`
+prevents. In that case the server resolves the write like any omitted-session write: the single
+active runtime session for that project and directory, `manual-save-<project>` when there is
+none, or a fail-closed error when several match. Use Pi's native `mem_*` tools instead.
+
 ## At a glance
 
 | You want                    | Engram gives Pi                                  |
