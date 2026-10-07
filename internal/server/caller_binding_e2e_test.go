@@ -116,6 +116,8 @@ func TestCallerBindingPublicReadOnly(t *testing.T) {
 	}
 	for _, tc := range []struct{ body, reason, next string }{
 		{`{}`, "caller_context_missing", collect},
+		{`{"project":"/","runtime_session_id":"caller-root","effective_session_id":"caller-root:resume:2"}`, "caller_context_missing", collect},
+		{`{"project":"private\u0000name","runtime_session_id":"caller-root","effective_session_id":"caller-root:resume:2"}`, "caller_context_missing", collect},
 		{`{"project":"fixture","runtime_session_id":"absent","effective_session_id":"absent"}`, "session_not_registered", "Use the normal runtime registration path; diagnosis does not register sessions."},
 	} {
 		var out map[string]any
@@ -123,7 +125,7 @@ func TestCallerBindingPublicReadOnly(t *testing.T) {
 		if err := json.Unmarshal([]byte(body), &out); err != nil {
 			t.Fatal(err)
 		}
-		if out["status"] != "unknown" || out["reason_code"] != tc.reason || out["safe_next_step"] != tc.next || out["write_success_guaranteed"] != false {
+		if len(out) != 6 || strings.Contains(body, "private") || strings.Contains(body, "caller-root") || out["status"] != "unknown" || out["reason_code"] != tc.reason || out["safe_next_step"] != tc.next || out["write_success_guaranteed"] != false {
 			t.Fatalf("assessment: %s", body)
 		}
 	}

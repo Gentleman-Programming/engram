@@ -110,7 +110,11 @@ The successful response is a direct assessment, not the project-report envelope:
 States are `active`, `ended`, `missing` or `unknown`; status is `ok`, `warning`,
 `blocked` or `unknown`. Missing identities/project, unregistered root, missing
 effective row and missing host capabilities have distinct unknown reasons.
-Project conflicts and invalid mappings block. A live valid effective continuation
+Project names use the shared explicit-name validator before canonical comparison:
+path separators and embedded control characters are invalid. An invalid caller
+project reports `unknown` / `caller_context_missing`; an invalid persisted project
+reports `blocked` / `session_project_conflict`. Valid normalized spellings remain
+accepted. Project conflicts and invalid mappings block. A live valid effective continuation
 is not blocked merely because its root ended or host persistence is unavailable.
 An ended effective session blocks when either host API is known unavailable;
 when both are available it warns `resume_required`, without selecting or creating

@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
@@ -50,6 +51,10 @@ func AssessCallerBinding(reader CallerSessionReader, in CallerBindingInput) Call
 	if strings.TrimSpace(in.RuntimeSessionID) == "" || strings.TrimSpace(in.EffectiveSessionID) == "" || strings.TrimSpace(in.Project) == "" {
 		return result("unknown", "caller_context_missing", collect)
 	}
+	project, err := projectpkg.Resolve(projectpkg.ResolutionOptions{Mode: projectpkg.ResolutionExplicit, Explicit: in.Project})
+	if err != nil {
+		return result("unknown", "caller_context_missing", collect)
+	}
 	unavailable := func() CallerBindingAssessment {
 		return result("unknown", "caller_binding_unavailable", "Verify support and availability of the caller diagnostic.")
 	}
@@ -83,10 +88,9 @@ func AssessCallerBinding(reader CallerSessionReader, in CallerBindingInput) Call
 		}
 	}
 	out.EffectiveState = state(effective)
-	project, _ := store.NormalizeProject(in.Project)
 	for _, row := range []*store.Session{root, effective} {
-		persisted, _ := store.NormalizeProject(row.Project)
-		if persisted != project {
+		persisted, err := projectpkg.Resolve(projectpkg.ResolutionOptions{Mode: projectpkg.ResolutionExplicit, Explicit: row.Project})
+		if err != nil || persisted.Project != project.Project {
 			return result("blocked", "session_project_conflict", inspect)
 		}
 	}

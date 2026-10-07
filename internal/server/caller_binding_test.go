@@ -2,7 +2,9 @@ package server
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -60,6 +62,58 @@ func TestCallerBindingAssessment(t *testing.T) {
 			got := diagnostic.AssessCallerBinding(callerReader{rows, tc.lookupErr}, diagnostic.CallerBindingInput{Project: tc.project, RuntimeSessionID: tc.root, EffectiveSessionID: tc.effective, HostContext: tc.host})
 			if got.Status != tc.status || got.ReasonCode != tc.reason || got.WriteSuccessGuaranteed || strings.Contains(got.SafeNextStep, "private") {
 				t.Fatalf("assessment = %#v", got)
+			}
+		})
+	}
+}
+
+func TestCallerBindingProjectValidation(t *testing.T) {
+	yes := true
+	for _, tc := range []struct {
+		name, caller, rootProject, effectiveProject, status, reason string
+	}{
+		{"matching invalid path", "/", "/", "", "unknown", "caller_context_missing"},
+		{"caller path", "private/name", "fixture", "", "unknown", "caller_context_missing"},
+		{"caller backslash", `private\name`, "fixture", "", "unknown", "caller_context_missing"},
+		{"caller control", "private\x00name", "fixture", "", "unknown", "caller_context_missing"},
+		{"invalid root", "fixture", "/", "", "blocked", "session_project_conflict"},
+		{"invalid effective", "fixture", "fixture", `private\name`, "blocked", "session_project_conflict"},
+		{"normalized valid names", " FIX--TURE__NAME ", "fix-ture_name", " Fix--Ture__Name ", "ok", "binding_observed"},
+		{"valid conflict", "other", "fixture", "", "blocked", "session_project_conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := map[string]*store.Session{"root": {Project: tc.rootProject}}
+			effective := "root"
+			if tc.effectiveProject != "" {
+				effective = "root:resume:2"
+				rows[effective] = &store.Session{Project: tc.effectiveProject}
+			}
+			before := make(map[string]store.Session)
+			for id, row := range rows {
+				before[id] = *row
+			}
+			got := diagnostic.AssessCallerBinding(callerReader{rows: rows}, diagnostic.CallerBindingInput{
+				Project: tc.caller, RuntimeSessionID: "root", EffectiveSessionID: effective,
+				HostContext: &diagnostic.CallerHostContext{&yes, &yes},
+			})
+			state, next := "active", "Inspect the runtime binding; diagnosis does not repair it."
+			if tc.status == "unknown" {
+				state, next = "unknown", "Collect caller context without registering a session."
+			} else if tc.status == "ok" {
+				next = "No action required; a later write is not guaranteed."
+			}
+			want := diagnostic.CallerBindingAssessment{Status: tc.status, RootState: state, EffectiveState: state, ReasonCode: tc.reason, SafeNextStep: next}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("assessment = %#v, want %#v", got, want)
+			}
+			body, err := json.Marshal(got)
+			if err != nil || strings.Contains(string(body), "private") || strings.Contains(string(body), "fixture") || strings.Contains(string(body), "root:") {
+				t.Fatalf("unsafe assessment: %s (%v)", body, err)
+			}
+			for id, row := range rows {
+				if !reflect.DeepEqual(*row, before[id]) {
+					t.Fatal("diagnosis changed a supplied session")
+				}
 			}
 		})
 	}
