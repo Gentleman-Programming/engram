@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -178,6 +179,109 @@ func TestOpenCodeMCPRefreshesExistingLocalCommand(t *testing.T) {
 			second, err := os.ReadFile(path)
 			if err != nil || !bytes.Equal(after, second) || writes != 1 {
 				t.Fatalf("setup is not convergent: writes=%d second=%q err=%v", writes, second, err)
+			}
+		})
+	}
+}
+
+func TestReconcileOpenCodeMCPCommandGuardsAndFailures(t *testing.T) {
+	canonical := filepath.Join(t.TempDir(), "current", "engram")
+	for _, tc := range []struct {
+		name           string
+		layout         string
+		entry          string
+		marshalErr     error
+		writeErr       error
+		wantErr        string
+		wantWriteCount int
+	}{
+		{
+			name:       "returns marshal command error",
+			layout:     "V1",
+			entry:      `{"type":"local","command":["/removed/engram"]}`,
+			marshalErr: errors.New("marshal failed"),
+			wantErr:    "marshal engram command: marshal failed",
+		},
+		{
+			name:           "returns write config error",
+			layout:         "V2",
+			entry:          `{"type":"local","command":["/removed/engram"]}`,
+			writeErr:       errors.New("disk full"),
+			wantErr:        "write config: disk full",
+			wantWriteCount: 1,
+		},
+		{
+			name:   "leaves missing command unchanged",
+			layout: "V1",
+			entry:  `{"type":"local"}`,
+		},
+		{
+			name:   "leaves non array command unchanged",
+			layout: "V2",
+			entry:  `{"type":"local","command":"/removed/engram"}`,
+		},
+		{
+			name:   "leaves non string command zero unchanged",
+			layout: "V1",
+			entry:  `{"type":"local","command":[42,"mcp"]}`,
+		},
+		{
+			name:   "leaves canonical command unchanged",
+			layout: "V2",
+			entry:  `{"type":"local","command":[` + strconv.Quote(canonical) + `,"mcp"]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			osExecutable = func() (string, error) { return canonical, nil }
+
+			original := []byte(`{"mcp":{"engram":` + tc.entry + `}}`)
+			if tc.layout == "V2" {
+				original = []byte(`{"mcp":{"servers":{"engram":` + tc.entry + `}}}`)
+			}
+			config, err := parseOpenCodeJSONC(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engram := config.members["mcp"].members["engram"]
+			if tc.layout == "V2" {
+				engram = config.members["mcp"].members["servers"].members["engram"]
+			}
+
+			path := filepath.Join(t.TempDir(), "opencode.jsonc")
+			if err := os.WriteFile(path, original, 0644); err != nil {
+				t.Fatal(err)
+			}
+			writes := 0
+			writeFileFn = func(name string, data []byte, mode os.FileMode) error {
+				writes++
+				if tc.writeErr != nil {
+					return tc.writeErr
+				}
+				return os.WriteFile(name, data, mode)
+			}
+			if tc.marshalErr != nil {
+				jsonMarshalFn = func(any) ([]byte, error) { return nil, tc.marshalErr }
+			}
+
+			err = reconcileOpenCodeMCPCommand(path, original, engram)
+			if got := ""; err != nil {
+				got = err.Error()
+				if got != tc.wantErr {
+					t.Fatalf("error = %q, want %q", got, tc.wantErr)
+				}
+			} else if tc.wantErr != "" {
+				t.Fatalf("error = nil, want %q", tc.wantErr)
+			}
+			if writes != tc.wantWriteCount {
+				t.Fatalf("writes = %d, want %d", writes, tc.wantWriteCount)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, original) {
+				t.Fatalf("config changed:\nwant: %s\ngot: %s", original, after)
 			}
 		})
 	}
