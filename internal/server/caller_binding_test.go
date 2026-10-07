@@ -97,9 +97,10 @@ func TestCallerBindingProjectValidation(t *testing.T) {
 				HostContext: &diagnostic.CallerHostContext{&yes, &yes},
 			})
 			state, next := "active", "Inspect the runtime binding; diagnosis does not repair it."
-			if tc.status == "unknown" {
+			switch tc.status {
+			case "unknown":
 				state, next = "unknown", "Collect caller context without registering a session."
-			} else if tc.status == "ok" {
+			case "ok":
 				next = "No action required; a later write is not guaranteed."
 			}
 			want := diagnostic.CallerBindingAssessment{Status: tc.status, RootState: state, EffectiveState: state, ReasonCode: tc.reason, SafeNextStep: next}
