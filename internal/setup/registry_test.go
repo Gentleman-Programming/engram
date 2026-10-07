@@ -33,6 +33,7 @@ func declarativeAgents() []declarativeAgent {
 		{"kilocode", kilocodeConfigPath, "mcp", opencodeObject, kilocodeAgentsPath, markerBlock},
 		{"commandcode", commandcodeMCPPath, "mcpServers", commandCodeObject, commandcodeAgentsPath, markerBlock},
 		{"kimi", kimiMCPPath, "mcpServers", mcpServersObject, kimiAgentsPath, markerBlock},
+		{"cline", clineMCPPath, "mcpServers", mcpServersObject, clineRulesPath, wholeFile},
 	}
 }
 
@@ -257,7 +258,7 @@ func TestSupportedAgentsIncludesAllRegistryAgents(t *testing.T) {
 	want := []string{
 		"opencode", "pi", "claude-code", "gemini-cli", "codex",
 		"antigravity-cli", "windsurf", "qwen", "kiro", "cursor",
-		"vscode-copilot", "kilocode", "commandcode", "kimi",
+		"vscode-copilot", "kilocode", "commandcode", "kimi", "cline",
 	}
 	for _, slug := range want {
 		if !got[slug] {
@@ -729,6 +730,32 @@ func TestConfigDirsIgnoreRelativeConfigHome(t *testing.T) {
 			t.Errorf("kimiCodeHome with relative KIMI_CODE_HOME = %q, want %q", got, want)
 		}
 	})
+}
+
+// TestClinePathsMatchTheSharedRoot pins the two paths Cline's own storage
+// resolver returns: MCP settings under the data root, global rules directly
+// under ~/.cline. The two roots differ, so a single-root helper would put one
+// of the files somewhere Cline never reads.
+func TestClinePathsMatchTheSharedRoot(t *testing.T) {
+	home := stubRegistryEnv(t)
+
+	if got, want := clineMCPPath(), filepath.Join(home, ".cline", "data", "settings", "cline_mcp_settings.json"); got != want {
+		t.Errorf("clineMCPPath = %q, want %q", got, want)
+	}
+	if got, want := clineRulesPath(), filepath.Join(home, ".cline", "rules", "engram.md"); got != want {
+		t.Errorf("clineRulesPath = %q, want %q", got, want)
+	}
+
+	if _, err := Install("cline"); err != nil {
+		t.Fatalf("Install(cline): %v", err)
+	}
+	entry := readEngramEntry(t, clineMCPPath(), "mcpServers")
+	if entry["command"] != testEngramBin {
+		t.Errorf("expected command %q under mcpServers, got %#v", testEngramBin, entry["command"])
+	}
+	if _, err := os.Stat(clineRulesPath()); err != nil {
+		t.Errorf("expected the rules file at %s: %v", clineRulesPath(), err)
+	}
 }
 
 // TestKimiCodeHomeHonorsAbsoluteEnv verifies an absolute KIMI_CODE_HOME

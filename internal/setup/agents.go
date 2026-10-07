@@ -176,6 +176,20 @@ func agentAdapters() []agentAdapter {
 			},
 		},
 		{
+			slug:        "cline",
+			description: "Cline — MCP registration in ~/.cline/data/settings/cline_mcp_settings.json plus a global rules Memory Protocol",
+			mcpPath:     clineMCPPath,
+			mcpFormat:   mcpServersObject,
+			instructions: []instrSurface{
+				{path: clineRulesPath, style: wholeFile, body: memoryProtocolMarkdown},
+			},
+			postInstall: []string{
+				"Restart Cline so MCP config and rules are reloaded",
+				"Verify ~/.cline/data/settings/cline_mcp_settings.json includes mcpServers.engram",
+				"Verify ~/.cline/rules/engram.md has the Memory Protocol",
+			},
+		},
+		{
 			slug:        "kimi",
 			description: "Kimi Code CLI — MCP registration in ~/.kimi-code/mcp.json plus AGENTS.md Memory Protocol",
 			mcpPath:     kimiMCPPath,
@@ -341,6 +355,23 @@ func commandcodeMCPPath() string {
 
 func commandcodeAgentsPath() string {
 	return filepath.Join(commandcodeDir(), "AGENTS.md")
+}
+
+// ─── Cline paths ─────────────────────────────────────────────────────────────
+//
+// Cline shares one root across its VS Code extension, CLI and SDK. MCP servers
+// live under the data root (~/.cline/data/settings/cline_mcp_settings.json, the
+// path resolveMcpSettingsPath() in Cline's sdk/packages/shared returns), while
+// global rules resolve directly under ~/.cline/rules/.
+
+func clineMCPPath() string {
+	home, _ := userHome()
+	return filepath.Join(home, ".cline", "data", "settings", "cline_mcp_settings.json")
+}
+
+func clineRulesPath() string {
+	home, _ := userHome()
+	return filepath.Join(home, ".cline", "rules", "engram.md")
 }
 
 // ─── Kimi Code paths ─────────────────────────────────────────────────────────

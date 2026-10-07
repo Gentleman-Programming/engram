@@ -161,6 +161,7 @@ Run the setup command for the agent you use, then restart that agent. `engram se
 | Kilo Code | `engram setup kilocode` |
 | Kimi Code | `engram setup kimi` |
 | CommandCode | `engram setup commandcode` |
+| Cline | `engram setup cline` |
 | Another MCP-compatible agent | [Manual MCP setup](docs/AGENT-SETUP.md#any-other-mcp-agent) |
 
 For Claude Code, rerunning setup updates the marketplace and the user-scope `engram@engram` plugin when it is already installed; existing project- or local-scope copies are not updated. An update failure fails setup; restart Claude Code after a successful update to load the new hooks.

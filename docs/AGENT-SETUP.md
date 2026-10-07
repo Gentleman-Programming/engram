@@ -32,6 +32,7 @@ If a generic MCP client retains an absolute Engram executable path after you mov
 | Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
 | Kimi Code       | `engram setup kimi`                                                                          | [Details](#kimi-code)                              |
 | CommandCode     | `engram setup commandcode`                                                                   | [Details](#commandcode)                            |
+| Cline           | `engram setup cline`                                                                         | [Details](#cline)                                  |
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` configures the
@@ -767,6 +768,22 @@ engram setup commandcode
 ```
 
 Registers `mcpServers.engram` in the user-scope `~/.commandcode/mcp.json` (private, available across all projects) and writes the Memory Protocol as a marker block in the user-tier `~/.commandcode/AGENTS.md`. Memory is re-read every request, so `AGENTS.md` edits apply on the next turn with no restart; restart the session so the MCP server is picked up. On Windows the CLI binary is `cmdc` instead of `cmd`, but the config paths are the same.
+
+---
+
+## Cline
+
+**Automated:**
+
+```bash
+engram setup cline
+```
+
+Registers `mcpServers.engram` in `~/.cline/data/settings/cline_mcp_settings.json` and writes the Memory Protocol as a dedicated file in `~/.cline/rules/engram.md`.
+
+The MCP path is the one Cline's own `resolveMcpSettingsPath()` returns, and it is shared by the VS Code extension, the CLI and the SDK. Note that Cline's MCP overview docs still mention a `~/.cline/mcp.json` that the CLI never reads; the path above is the real one. Global rules resolve directly under `~/.cline/`, not under `~/.cline/data/`, and Cline combines every `.md` file it finds there into one ruleset, so `engram.md` is a dedicated Engram-owned file. Older installs that predate the move out of VS Code `globalStorage` keep their servers at `saoudrizwan.claude-dev/settings/cline_mcp_settings.json`; re-run `engram setup cline` after upgrading so the server is registered at the path Cline reads today.
+
+If `CLINE_DATA_DIR` or `CLINE_MCP_SETTINGS_PATH` is set, Cline reads elsewhere than the paths above. This setup writes the default locations only.
 
 ---
 

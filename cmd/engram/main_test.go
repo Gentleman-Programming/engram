@@ -445,7 +445,7 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "[--match all|any]") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
-	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode", "kimi", "commandcode"} {
+	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode", "kimi", "commandcode", "cline"} {
 		if !strings.Contains(stdout, agent) {
 			t.Fatalf("usage missing setup agent %q: %q", agent, stdout)
 		}
@@ -569,6 +569,11 @@ func TestPrintPostInstall(t *testing.T) {
 			name:    "commandcode",
 			result:  &setup.Result{Agent: "commandcode"},
 			expects: []string{"Restart the CommandCode session", "~/.commandcode/mcp.json", "~/.commandcode/AGENTS.md"},
+		},
+		{
+			name:    "cline",
+			result:  &setup.Result{Agent: "cline"},
+			expects: []string{"Restart Cline", "cline_mcp_settings.json", "~/.cline/rules/engram.md"},
 		},
 		{
 			name:   "unknown",
