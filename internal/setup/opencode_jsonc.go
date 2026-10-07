@@ -10,8 +10,11 @@ import (
 // jsoncObject retains source offsets, not a reserialized representation.
 // Non-object values have a nil members map.
 type jsoncObject struct {
-	open    int
-	members map[string]*jsoncObject
+	open        int
+	members     map[string]*jsoncObject
+	values      []*jsoncObject
+	stringStart int
+	stringEnd   int
 }
 
 // parseOpenCodeJSONC validates the entire document before any edit. Comments
@@ -102,12 +105,12 @@ func parseOpenCodeJSONC(data []byte) (*jsoncObject, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(normalized))
 	decoder.UseNumber()
-	return readJSONCValue(decoder, 0)
+	return readJSONCValue(decoder, normalized, 0)
 }
 
 func jsoncSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\r' || b == '\n' }
 
-func readJSONCValue(decoder *json.Decoder, depth int) (*jsoncObject, error) {
+func readJSONCValue(decoder *json.Decoder, normalized []byte, depth int) (*jsoncObject, error) {
 	if depth > 1000 {
 		return nil, fmt.Errorf("JSONC nesting too deep")
 	}
@@ -115,9 +118,13 @@ func readJSONCValue(decoder *json.Decoder, depth int) (*jsoncObject, error) {
 	if err != nil {
 		return nil, err
 	}
-	node := &jsoncObject{}
+	node := &jsoncObject{stringStart: -1}
 	delimiter, ok := token.(json.Delim)
 	if !ok {
+		if _, ok := token.(string); ok {
+			node.stringEnd = int(decoder.InputOffset())
+			node.stringStart = jsoncStringStart(normalized, node.stringEnd)
+		}
 		return node, nil
 	}
 	if delimiter == '{' {
@@ -136,18 +143,57 @@ func readJSONCValue(decoder *json.Decoder, depth int) (*jsoncObject, error) {
 				return nil, fmt.Errorf("duplicate key %q", key)
 			}
 		}
-		child, err := readJSONCValue(decoder, depth+1)
+		child, err := readJSONCValue(decoder, normalized, depth+1)
 		if err != nil {
 			return nil, err
 		}
 		if delimiter == '{' {
 			node.members[key] = child
+		} else {
+			node.values = append(node.values, child)
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
 		return nil, err
 	}
 	return node, nil
+}
+
+func jsoncStringStart(data []byte, end int) int {
+	for i := end - 2; i >= 0; i-- {
+		if data[i] != '"' {
+			continue
+		}
+		escaped := false
+		for backslash := i - 1; backslash >= 0 && data[backslash] == '\\'; backslash-- {
+			escaped = !escaped
+		}
+		if !escaped {
+			return i
+		}
+	}
+	return -1
+}
+
+func jsoncString(data []byte, node *jsoncObject) (string, bool) {
+	if node == nil || node.stringStart < 0 || node.stringEnd <= node.stringStart {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(data[node.stringStart:node.stringEnd], &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func replaceJSONCString(data []byte, node *jsoncObject, value []byte) ([]byte, error) {
+	if node == nil || node.stringStart < 0 || node.stringEnd <= node.stringStart || node.stringEnd > len(data) {
+		return nil, fmt.Errorf("expected string")
+	}
+	output := make([]byte, 0, len(data)+len(value)-(node.stringEnd-node.stringStart))
+	output = append(output, data[:node.stringStart]...)
+	output = append(output, value...)
+	return append(output, data[node.stringEnd:]...), nil
 }
 
 // insertJSONCMember inserts before the first original member. This avoids

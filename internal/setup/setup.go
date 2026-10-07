@@ -629,8 +629,11 @@ func injectOpenCodeTUIPlugin() error {
 	return writeOpenCodeJSONCConfig(configPath, config)
 }
 
-// injectOpenCodeMCP inserts only the missing mcp.engram member, preserving
-// every original byte of the user's JSON/JSONC configuration.
+// injectOpenCodeMCP reconciles the setup-owned executable in a local Engram
+// server and inserts a missing entry, preserving every other byte of the
+// user's JSON/JSONC configuration. V1 stores servers in mcp, while V2 stores
+// them in mcp.servers. Setup owns only command[0]; user flags and options stay
+// untouched.
 func injectOpenCodeMCP() error {
 	configPath := openCodeConfigPath()
 	data, err := readFileFn(configPath)
@@ -647,26 +650,73 @@ func injectOpenCodeMCP() error {
 	if config.members == nil {
 		return fmt.Errorf("parse config: expected object")
 	}
-	mcpBlock, exists := config.members["mcp"]
-	if exists {
+	mcpBlock, mcpExists := config.members["mcp"]
+	if mcpExists {
 		if mcpBlock.members == nil {
 			return fmt.Errorf("parse mcp block: expected object")
 		}
-		if _, registered := mcpBlock.members["engram"]; registered {
-			return nil
+		if servers, v2 := mcpBlock.members["servers"]; v2 {
+			if servers.members == nil {
+				return fmt.Errorf("parse mcp servers block: expected object")
+			}
+			if engram, registered := servers.members["engram"]; registered {
+				return reconcileOpenCodeMCPCommand(configPath, data, engram)
+			}
+			return insertOpenCodeMCPEntry(configPath, data, config, servers, false)
+		}
+		if engram, registered := mcpBlock.members["engram"]; registered {
+			return reconcileOpenCodeMCPCommand(configPath, data, engram)
 		}
 	}
+	return insertOpenCodeMCPEntry(configPath, data, config, mcpBlock, !mcpExists)
+}
+
+func insertOpenCodeMCPEntry(configPath string, data []byte, config, mcpBlock *jsoncObject, missingMCP bool) error {
 	entryJSON, err := jsonMarshalFn(mcpEntry(opencodeObject))
 	if err != nil {
 		return fmt.Errorf("marshal engram entry: %w", err)
 	}
 	member := append([]byte(`"engram":`), entryJSON...)
 	object := mcpBlock
-	if !exists {
+	if missingMCP {
 		member = append(append([]byte(`"mcp":{`), member...), '}')
 		object = config
 	}
 	output := insertJSONCMember(data, object, member)
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
+
+func reconcileOpenCodeMCPCommand(configPath string, data []byte, engram *jsoncObject) error {
+	if engram.members == nil {
+		return nil
+	}
+	entryType, local := jsoncString(data, engram.members["type"])
+	if !local || entryType != "local" {
+		return nil
+	}
+	command, exists := engram.members["command"]
+	if !exists || len(command.values) == 0 {
+		return nil
+	}
+	current, ok := jsoncString(data, command.values[0])
+	if !ok {
+		return nil
+	}
+	canonical := resolveEngramCommand()
+	if current == canonical {
+		return nil
+	}
+	replacement, err := jsonMarshalFn(canonical)
+	if err != nil {
+		return fmt.Errorf("marshal engram command: %w", err)
+	}
+	output, err := replaceJSONCString(data, command.values[0], replacement)
+	if err != nil {
+		return fmt.Errorf("replace engram command: %w", err)
+	}
 	if err := writeFileFn(configPath, output, 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}

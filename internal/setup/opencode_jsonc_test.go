@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -86,12 +87,165 @@ func TestOpenCodeMCPSetupPreservesJSONC(t *testing.T) {
 	}
 }
 
+func TestOpenCodeMCPRefreshesExistingLocalCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		original string
+		v2       bool
+	}{
+		{
+			name: "V1",
+			original: `{
+  // preserve V1 comments and formatting
+  "mcp": {
+    "engram": {"type":"local","command":["/removed/engram","mcp","--tools=agent","--custom"],"enabled":false,"environment":{"DEBUG":"1"}},
+    "other": {"type":"local","command":["other"]}
+  }
+}`,
+		},
+		{
+			name: "V2",
+			original: `{
+  "mcp": {
+    "timeout": {"request": 5000},
+    "servers": {
+      // preserve V2 comments and formatting
+      "engram": {"type":"local","command":["/removed/engram","mcp","--tools=agent","--custom"],"disabled":true,"environment":{"DEBUG":"1"}},
+      "other": {"type":"local","command":["other"]}
+    }
+  }
+}`,
+			v2: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			useIsolatedProfile(t)
+			canonical := filepath.Join(t.TempDir(), "current", "engram")
+			osExecutable = func() (string, error) { return canonical, nil }
+			path := filepath.Join(openCodeConfigDir(), "opencode.jsonc")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.original), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			writes := 0
+			writeFileFn = func(name string, data []byte, mode os.FileMode) error {
+				writes++
+				return os.WriteFile(name, data, mode)
+			}
+			if err := injectOpenCodeMCP(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonicalJSON, err := json.Marshal(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := bytes.Replace([]byte(tc.original), []byte(`"/removed/engram"`), canonicalJSON, 1)
+			if !bytes.Equal(after, want) {
+				t.Fatalf("refresh changed bytes other than command[0]:\nwant:\n%s\ngot:\n%s", want, after)
+			}
+
+			var config map[string]any
+			if err := json.Unmarshal(stripJSONC(after), &config); err != nil {
+				t.Fatal(err)
+			}
+			mcp := config["mcp"].(map[string]any)
+			entry := mcp["engram"]
+			if tc.v2 {
+				if _, legacy := mcp["engram"]; legacy {
+					t.Fatalf("V2 configuration gained a legacy mcp.engram entry: %#v", mcp)
+				}
+				entry = mcp["servers"].(map[string]any)["engram"]
+			}
+			engram := entry.(map[string]any)
+			if command := engram["command"].([]any); !reflect.DeepEqual(command, []any{canonical, "mcp", "--tools=agent", "--custom"}) {
+				t.Fatalf("command = %#v, want canonical executable with preserved arguments", command)
+			}
+			if engram["environment"].(map[string]any)["DEBUG"] != "1" {
+				t.Fatalf("custom options were not preserved: %#v", engram)
+			}
+
+			if err := injectOpenCodeMCP(); err != nil {
+				t.Fatal(err)
+			}
+			second, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, second) || writes != 1 {
+				t.Fatalf("setup is not convergent: writes=%d second=%q err=%v", writes, second, err)
+			}
+		})
+	}
+}
+
+func TestOpenCodeMCPV2PreservesRemoteEntryAndAddsNoLegacyDuplicate(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	path := filepath.Join(openCodeConfigDir(), "opencode.jsonc")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"mcp":{"servers":{"engram":{"type":"remote","url":"https://example.com/mcp"},"other":{"type":"local","command":["other"]}}}}`
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	writeFileFn = func(string, []byte, os.FileMode) error { writes++; return nil }
+	if err := injectOpenCodeMCP(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != original || writes != 0 {
+		t.Fatalf("remote V2 entry changed or legacy entry added: %q writes=%d err=%v", after, writes, err)
+	}
+}
+
+func TestOpenCodeMCPV2AddsMissingServerWithoutLegacyDuplicate(t *testing.T) {
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
+	path := filepath.Join(openCodeConfigDir(), "opencode.jsonc")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"mcp":{"timeout":{"request":5000},"servers":{"other":{"type":"local","command":["other"]}}}}`
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := injectOpenCodeMCP(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(stripJSONC(after), &config); err != nil {
+		t.Fatal(err)
+	}
+	mcp := config["mcp"].(map[string]any)
+	if _, legacy := mcp["engram"]; legacy {
+		t.Fatalf("V2 configuration gained a legacy mcp.engram entry: %#v", mcp)
+	}
+	servers := mcp["servers"].(map[string]any)
+	if _, registered := servers["engram"]; !registered {
+		t.Fatalf("missing V2 mcp.servers.engram: %#v", servers)
+	}
+	if _, preserved := servers["other"]; !preserved {
+		t.Fatalf("other V2 server was not preserved: %#v", servers)
+	}
+}
+
 func TestOpenCodeMCPRejectsUnsafeJSONC(t *testing.T) {
 	for _, original := range []string{
 		`null`, `[]`, `{"mcp":null}`, `{"mcp":42}`,
 		`{"mcp":{},"mcp":{}}`, `{"mcp":{"other":{},"other":{}}}`,
 		`{"mcp":{},"\u006dcp":{}}`, `{"other":{"a":1,"a":2}}`,
-		`{"mcp":{/* unfinished}`, `{"mcp":{},} garbage`, `{,}`, `{"mcp":{},,}`,
+		`{"mcp":{/* unfinished}`, `{"mcp":{},} garbage`, `{,}`, `{"mcp":{},,}`, `{"mcp":{"servers":null}}`,
 	} {
 		t.Run(original, func(t *testing.T) {
 			resetSetupSeams(t)

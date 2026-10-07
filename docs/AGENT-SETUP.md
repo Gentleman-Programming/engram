@@ -253,9 +253,9 @@ This does three things:
 2. Adds the `engram` MCP server entry to your global OpenCode configuration with `--tools=agent` (19 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
 
-MCP registration edits only the missing `mcp.engram` member, preserving all existing configuration bytes, including comments, trailing commas, formatting, and key order. An existing `mcp.engram` entry is left untouched. Setup uses `opencode.jsonc` when it exists, otherwise `opencode.json`; OpenCode loads both global files and merges `.jsonc` last. The directory is `$XDG_CONFIG_HOME/opencode` when set, otherwise `~/.config/opencode` on all platforms. Project and environment overrides may take precedence over this global entry.
+MCP registration adds a missing local Engram entry and refreshes only `command[0]` for an existing local entry, preserving all other configuration bytes, including comments, trailing commas, formatting, key order, flags, options, and other servers. It supports both V1 `mcp.engram` and V2 `mcp.servers.engram`; remote entries are left untouched. Setup uses `opencode.jsonc` when it exists, otherwise `opencode.json`; OpenCode loads both global files and merges `.jsonc` last. The directory is `$XDG_CONFIG_HOME/opencode` when set, otherwise `~/.config/opencode` on all platforms. Project and environment overrides may take precedence over this global entry.
 
-Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
+Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` or `mcp.servers` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
 
 ### Verify each layer after setup
 
