@@ -22,10 +22,10 @@ const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8"
 
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-test("next Pi package release is 0.2.0", () => {
-	assert.equal(pkg.version, "0.2.0");
+test("next Pi package release is 0.3.0", () => {
+	assert.equal(pkg.version, "0.3.0");
 });
-const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16"];
+const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16", "npm:gentle-engram@0.2.0"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RELEASE_CONTRACT_PATH = fileURLToPath(new URL("./release-contract.mjs", import.meta.url));
@@ -241,6 +241,39 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 		const repeatOutput = runCli(agentDir, "init");
 		assert.equal(readFileSync(join(agentDir, "settings.json"), "utf8"), settingsAfterMigration);
 		assert.match(repeatOutput, new RegExp(`Kept ${PACKAGE_NAME} in settings\\.json`));
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("pi-engram init upgrades 0.2.0 without changing unrelated config and remains idempotent", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-upgrade-"));
+	try {
+		const settingsPath = join(agentDir, "settings.json");
+		const mcpPath = join(agentDir, "mcp.json");
+		writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:existing", "npm:gentle-engram@0.2.0"], custom: true }));
+		const originalMcp = JSON.stringify({ mcpServers: { other: { command: "other" } } });
+		writeFileSync(mcpPath, originalMcp);
+		for (const action of ["Added", "Kept"]) {
+			const before = readFileSync(settingsPath, "utf8");
+			const result = spawnSync(process.execPath, [CLI_PATH, "init"], {
+				encoding: "utf8", env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+			});
+			assert.equal(result.status, 0, result.stderr);
+			assert.equal(result.stderr, "");
+			assert.equal(result.stdout, [
+				`Pi agent dir: ${agentDir}`,
+				`${action} npm:gentle-engram@0.3.0 in settings.json`,
+				"Pi-native mem_* tools own agent writes; no Engram MCP registration is created.",
+				"Set ENGRAM_URL for an existing engram serve instance, or ENGRAM_BIN for a custom engram binary path.",
+				"",
+			].join("\n"));
+			assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), {
+				packages: ["npm:existing", "npm:gentle-engram@0.3.0"], custom: true,
+			});
+			assert.equal(readFileSync(mcpPath, "utf8"), originalMcp);
+			if (action === "Kept") assert.equal(readFileSync(settingsPath, "utf8"), before);
+		}
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });
 	}
