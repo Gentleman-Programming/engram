@@ -70,7 +70,7 @@ consumer responsibilities, not a process-global readiness signal.
 
 Until a consumer of this protocol ships, the Claude Code plugin suppresses its own
 hooks with the guard that pi-claude-bridge documents for Claude Code hooks: when
-`PI_CODING_AGENT` is set, every plugin hook script and `engram hook claude-pre-tool-use`
+`PI_CODING_AGENT` is non-empty, every plugin hook script and `engram hook claude-pre-tool-use`
 exit 0 with no output and no requests. Pi's native Engram owns the session and its
 prompts, so the Claude child that the bridge starts records nothing. A Pi without
 native Engram therefore gets no capture from those hooks either.

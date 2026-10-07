@@ -15,7 +15,7 @@
 #
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
-# Under Pi (PI_CODING_AGENT set) every hook is a silent no-op; this script checks it before the
+# Under Pi (PI_CODING_AGENT non-empty) every hook is a silent no-op; this script checks it before the
 # Windows fast path below, which runs before _helpers.sh is sourced.
 if [ -n "${PI_CODING_AGENT:-}" ]; then
   [ -t 0 ] || while IFS= read -r _engram_pi_line; do :; done 2>/dev/null
