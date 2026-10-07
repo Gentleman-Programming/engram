@@ -145,3 +145,48 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 		})
 	}
 }
+
+// TestClaudeCodeWindowsSafePromptRouteIsNoOpUnderPi covers the guard that
+// user-prompt-submit.sh runs before its Windows-safe fast path. That path exits
+// before _helpers.sh is sourced, so the helpers guard cannot mask a missing
+// script-level guard here. The control run proves the fast path was reached.
+func TestClaudeCodeWindowsSafePromptRouteIsNoOpUnderPi(t *testing.T) {
+	script := bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	input := `{"session_id":"pi-guard-session","cwd":"` + filepath.ToSlash(t.TempDir()) + `","prompt":"hello from pi"}`
+
+	run := func(t *testing.T, piValue string) string {
+		t.Helper()
+		srv, requests := piGuardServer(t)
+		cmd := exec.Command("bash", script)
+		cmd.Env = append(os.Environ(),
+			"MSYSTEM=MINGW64",
+			"ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=auto",
+			"ENGRAM_URL="+srv.URL,
+			"TMPDIR="+filepath.ToSlash(t.TempDir()),
+		)
+		if piValue != "" {
+			cmd.Env = append(cmd.Env, "PI_CODING_AGENT="+piValue)
+		}
+		cmd.Stdin = strings.NewReader(input)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("user-prompt-submit.sh must exit 0: %v\nstderr: %s", err, stderr.String())
+		}
+		if got := requests.list(); len(got) != 0 {
+			t.Errorf("Windows-safe route made API requests: %v", got)
+		}
+		return stdout.String()
+	}
+
+	t.Run("control/unset", func(t *testing.T) {
+		if out := run(t, ""); !strings.Contains(out, "ToolSearch") {
+			t.Fatalf("stdout = %q, want the ToolSearch bootstrap from the Windows-safe route", out)
+		}
+	})
+	t.Run("true", func(t *testing.T) {
+		if out := run(t, "true"); out != "" {
+			t.Errorf("stdout = %q, want empty under Pi", out)
+		}
+	})
+}
