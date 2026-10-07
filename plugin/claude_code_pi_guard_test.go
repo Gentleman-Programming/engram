@@ -2,6 +2,7 @@ package plugin_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -53,6 +54,17 @@ func piGuardServer(t *testing.T) (*httptest.Server, *piGuardRequests) {
 	return srv, requests
 }
 
+// piGuardHookInput encodes a hook payload as JSON, so paths such as Windows
+// temp directories are escaped and every case receives valid input.
+func piGuardHookInput(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode hook input: %v", err)
+	}
+	return string(encoded)
+}
+
 func buildEngramBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "engram")
@@ -68,7 +80,14 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 	requireHookBinaries(t)
 	engramBin := buildEngramBinary(t)
 
-	hookInput := `{"session_id":"pi-guard-session","cwd":"` + t.TempDir() + `","prompt":"hello from pi","source":"startup","tool_name":"mcp__engram__mem_save","tool_input":{"title":"x"}}`
+	hookInput := piGuardHookInput(t, map[string]any{
+		"session_id": "pi-guard-session",
+		"cwd":        t.TempDir(),
+		"prompt":     "hello from pi",
+		"source":     "startup",
+		"tool_name":  "mcp__engram__mem_save",
+		"tool_input": map[string]string{"title": "x"},
+	})
 
 	shellHooks := []string{"session-start.sh", "post-compaction.sh", "user-prompt-submit.sh", "subagent-stop.sh", "session-end.sh"}
 
@@ -152,7 +171,11 @@ func TestClaudeCodeHooksAreNoOpUnderPi(t *testing.T) {
 // script-level guard here. The control run proves the fast path was reached.
 func TestClaudeCodeWindowsSafePromptRouteIsNoOpUnderPi(t *testing.T) {
 	script := bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
-	input := `{"session_id":"pi-guard-session","cwd":"` + filepath.ToSlash(t.TempDir()) + `","prompt":"hello from pi"}`
+	input := piGuardHookInput(t, map[string]any{
+		"session_id": "pi-guard-session",
+		"cwd":        t.TempDir(),
+		"prompt":     "hello from pi",
+	})
 
 	run := func(t *testing.T, piValue string) string {
 		t.Helper()
