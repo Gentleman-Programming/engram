@@ -68,6 +68,12 @@ reload still skips persistence shutdown. Each new native session must establish
 its own registration. Cross-runtime bridge routing and hook suppression are
 consumer responsibilities, not a process-global readiness signal.
 
+## Per-save prompt capture
+
+Native `mem_save` honors `capture_prompt` (optional boolean, default `true`). It sends the available current turn's already-redacted, truncated prompt for the same session/project to Go core, which best-effort stores it using exact session/project/stored-content dedupe. Missing context or a capture failure does not fail the observation save. Prompt rows are independent; no observation-ID link is created.
+
+`capture_prompt=false` skips only that save's capture attempt. It does **not** disable `before_agent_start` lifecycle capture or remove previously captured prompts. Synthetic/short turns, another runtime/project, and shutdown/reload cannot reuse the preceding turn's prompt.
+
 ## At a glance
 
 | You want                    | Engram gives Pi                                  |

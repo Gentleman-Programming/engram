@@ -187,6 +187,69 @@ function runtimeContext(sessionId) {
   };
 }
 
+for (const capture of [undefined, true, false]) {
+  test(`mem_save prompt capture forwarding: ${capture}`, async () => {
+    const originalFetch = globalThis.fetch;
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/health", body: { capabilities: { isolated_session_registration: true } } },
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+      { method: "POST", path: "/observations", status: 201, body: { id: 2, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-save-capture-", async ({ sandbox }) => {
+        const { eventHandlers, registeredTools } = await loadPluginHarness(sandbox);
+        const ctx = runtimeContext(`capture-${capture}`);
+        await eventHandlers.get("session_start")({}, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "A user prompt with <private>secret</private> safe content" }, ctx);
+        const save = async (params = {}, context = ctx) => {
+          const result = await registeredTools.get("mem_save").execute("capture", { title: "saved", content: "observation", ...params }, undefined, undefined, context);
+          assert.equal(result.isError, undefined, JSON.stringify(result));
+          return result;
+        };
+        const result = await save({ capture_prompt: capture });
+        assert.equal(result.isError, undefined, JSON.stringify(result));
+        const body = calls.filter(({ path }) => path === "/observations").at(-1).body;
+        assert.equal(body.capture_prompt, capture);
+        assert.equal(body.current_prompt, capture === false ? undefined : "A user prompt with [REDACTED] safe content");
+        assert.equal(calls.filter(({ path }) => path === "/prompts").length, 1, "per-save opt-out must not disable lifecycle capture");
+        assert.doesNotMatch(JSON.stringify(body), /secret/);
+        // An explicit satellite project never inherits the owner's prompt.
+        await save({ project: "other" });
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        // A different runtime never inherits this prompt.
+        await save({}, runtimeContext("another-capture-runtime"));
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        // Short and synthetic turns invalidate the previous prompt rather than reusing it.
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "short" }, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        await eventHandlers.get("input")({ source: "extension", text: "Synthetic extension prompt", images: [] }, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "Synthetic extension prompt" }, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "Another eligible human prompt" }, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, "Another eligible human prompt");
+        await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+        await eventHandlers.get("session_start")({}, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
+    }
+  });
+}
+
 // Records every request the extension issues so a test can assert the wire contract the Engram
 // HTTP server actually receives, instead of asserting over the extension source text.
 function recordingFetch(routes) {

@@ -663,8 +663,14 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, session)
 }
 
+var capturePromptForSave = (*store.Store).CapturePromptForSave
+
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
-	var body store.AddObservationParams
+	var body struct {
+		store.AddObservationParams
+		CapturePrompt *bool  `json:"capture_prompt,omitempty"`
+		CurrentPrompt string `json:"current_prompt,omitempty"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
@@ -684,7 +690,7 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := s.store.AddObservation(body)
+	id, err := s.store.AddObservation(body.AddObservationParams)
 	if err != nil {
 		// A titleless or contentless observation is a client mistake, not a
 		// server failure.
@@ -699,6 +705,13 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := capturePromptForSave(s.store, body.CapturePrompt, store.AddPromptParams{
+		SessionID: body.SessionID,
+		Project:   body.Project,
+		Content:   body.CurrentPrompt,
+	}); err != nil {
+		log.Printf("engram: auto prompt capture error (non-fatal): %v", err)
+	}
 	s.notifyWrite()
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }

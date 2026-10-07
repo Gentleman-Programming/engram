@@ -336,7 +336,8 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?, capture_prompt?, current_prompt?}`
+  - `capture_prompt` is an optional boolean (default `true`); after a successful observation save, `current_prompt` (optional string) is best-effort saved for the same session/project using exact stored-content dedupe. `false` skips this attempt. Missing prompt context or a capture error does not fail the observation save. No current prompt is inferred from persisted history and no observation-ID link is created.
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
@@ -1206,7 +1207,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal` | `global` — see [Team Usage](docs/TEAM-USAGE.md) for conventions and sync caveats
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
-- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated artifact saves should pass `false`.
+- **capture_prompt**: optional boolean in MCP and native Pi, default `true`; when the runtime supplies current prompt context for the same project/session, shared Go policy best-effort stores a deduplicated independent prompt row. Missing context or a capture error does not fail `mem_save`. `false` skips only this save's attempt; it does not disable Pi lifecycle capture or delete existing prompts.
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`; required unless the legacy `observation` alias is provided
 - **observation**: backward-compatible alias for `content` for older/raw MCP clients; prefer `content` for new integrations
 
@@ -1635,7 +1636,7 @@ Instead of a separate LLM service, the agent itself compresses observations. The
 
 Engram does not record a firehose of raw tool calls. Raw tool calls (`edit: {file: "foo.go"}`, `bash: {command: "go build"}`) are noisy and pollute FTS5 search. The agent's curated summaries are higher signal, more searchable, and don't bloat the database. Shell history and git provide the raw audit trail.
 
-Since v1.15.3, `mem_save` can also best-effort attach the current user prompt when prompt context was already provided to the same MCP process for the same project/session (typically by `mem_save_prompt`) and `capture_prompt` is not disabled. That is not raw event capture: it stores user intent tied to a curated save, and the save still succeeds if prompt context is missing.
+`mem_save` can also best-effort store the current user prompt when its runtime supplies context for the same project/session and `capture_prompt` is not disabled. MCP uses process-local context (typically fed by `mem_save_prompt`); native Pi supplies its eligible current turn's redacted/truncated content. Go dedupes independent prompt rows by session/project/content; there is no explicit observation-ID link. The save still succeeds if context is missing or capture fails, and opting out does not disable Pi's independent lifecycle capture.
 
 ---
 

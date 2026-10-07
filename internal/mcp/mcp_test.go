@@ -1461,11 +1461,11 @@ func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "prompt capture should fail non-fatally")
 	h := handleSave(s, MCPConfig{}, activity)
 
-	originalAddPromptIfMissing := addPromptIfMissing
-	addPromptIfMissing = func(*store.Store, store.AddPromptParams) (int64, bool, error) {
-		return 0, false, errors.New("forced prompt capture failure")
+	originalCapturePromptForSave := capturePromptForSave
+	capturePromptForSave = func(*store.Store, *bool, store.AddPromptParams) error {
+		return errors.New("forced prompt capture failure")
 	}
-	t.Cleanup(func() { addPromptIfMissing = originalAddPromptIfMissing })
+	t.Cleanup(func() { capturePromptForSave = originalCapturePromptForSave })
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Non fatal prompt capture",

@@ -72,9 +72,7 @@ type MCPConfig struct {
 
 var suggestTopicKey = store.SuggestTopicKey
 
-var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int64, bool, error) {
-	return s.AddPromptIfMissing(params)
-}
+var capturePromptForSave = (*store.Store).CapturePromptForSave
 
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
@@ -1503,7 +1501,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
 		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
-		capturePrompt := boolArg(req, "capture_prompt", true)
+		var capturePrompt *bool
+		if option, ok := req.GetArguments()["capture_prompt"].(bool); ok {
+			capturePrompt = &option
+		}
 		recoverySessionID := sessionID
 		if strings.TrimSpace(recoverySessionID) == "" {
 			recoverySessionID = defaultSessionID("")
@@ -1586,16 +1587,16 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		savedObservation, savedObservationErr := s.GetObservation(savedID)
 
-		if capturePrompt && activity != nil {
-			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
-				if _, _, promptErr := addPromptIfMissing(s, store.AddPromptParams{
-					SessionID: sessionID,
-					Content:   prompt,
-					Project:   project,
-				}); promptErr != nil {
-					fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
-				}
-			}
+		var currentPrompt string
+		if activity != nil {
+			currentPrompt, _ = activity.CurrentPrompt(sessionID, project)
+		}
+		if promptErr := capturePromptForSave(s, capturePrompt, store.AddPromptParams{
+			SessionID: sessionID,
+			Content:   currentPrompt,
+			Project:   project,
+		}); promptErr != nil {
+			fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
 		}
 
 		if activity != nil {
