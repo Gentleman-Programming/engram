@@ -552,9 +552,8 @@ func TestObservationSaveOperationConcurrentSameOperationReplay(t *testing.T) {
 		t.Fatalf("count pending mutations after: %v", err)
 	}
 	// Exactly one observation upsert was enqueued by the winning commit; the
-	// replayed commit returned the committed id without enqueueing a second
-	// mutation. The +1 accounts for the session backfill mutation created when
-	// the project was enrolled.
+	// replayed commit returned the committed ID without enqueueing a second
+	// mutation. The before count already includes enrollment's session backfill.
 	if after != before+1 {
 		t.Fatalf("pending sync mutations = %d, want %d (before=%d)", after, before+1, before)
 	}
@@ -947,12 +946,92 @@ func TestObservationSaveOperationConcurrentConflict(t *testing.T) {
 }
 
 // TestObservationSaveOperationRollbackLeavesNoState verifies that a failure
-// inside the AddObservation transaction rolls back both the observation and
-// the ledger row. It uses the existing production storeHooks.exec seam to
-// inject a deterministic sync-enqueue failure and a deterministic commit
-// failure; the hook is restored after each subtest so production behavior is
-// unchanged.
+// inside the AddObservation transaction rolls back the observation, ledger,
+// and sync mutation. It uses the existing production storeHooks seams to
+// inject deterministic ledger, sync-enqueue, and commit failures; hooks are
+// restored after each subtest so production behavior is unchanged.
 func TestObservationSaveOperationRollbackLeavesNoState(t *testing.T) {
+	t.Run("ledger_insert_failure", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("session-1", "test-project", "/tmp"); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if err := s.EnrollProject("test-project"); err != nil {
+			t.Fatalf("EnrollProject: %v", err)
+		}
+
+		originalExec := s.hooks.exec
+		t.Cleanup(func() { s.hooks.exec = originalExec })
+		forcedLedgerFailure := errors.New("forced ledger insert failure")
+		failLedgerInsert := true
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			if failLedgerInsert && strings.Contains(query, "INSERT INTO observation_save_operations") {
+				return nil, forcedLedgerFailure
+			}
+			return originalExec(db, query, args...)
+		}
+
+		params := AddObservationParams{
+			SessionID:   "session-1",
+			Type:        "manual",
+			Title:       "Ledger rollback title",
+			Content:     "Ledger rollback content.",
+			Project:     "test-project",
+			Scope:       "project",
+			OperationID: "op-rollback-ledger",
+		}
+		if _, err := s.AddObservation(params); !errors.Is(err, forcedLedgerFailure) {
+			t.Fatalf("AddObservation error = %v, want forced ledger failure", err)
+		}
+
+		var obsCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = ? AND title = ?`, "session-1", params.Title).Scan(&obsCount); err != nil {
+			t.Fatalf("count observations: %v", err)
+		}
+		if obsCount != 0 {
+			t.Fatalf("observation count = %d, want 0", obsCount)
+		}
+
+		ledgerCount, err := countObservationSaveOperationsFor(s, params.OperationID)
+		if err != nil {
+			t.Fatalf("count ledger rows: %v", err)
+		}
+		if ledgerCount != 0 {
+			t.Fatalf("ledger rows = %d, want 0", ledgerCount)
+		}
+
+		var obsMutations int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ?`, SyncEntityObservation).Scan(&obsMutations); err != nil {
+			t.Fatalf("count observation sync mutations: %v", err)
+		}
+		if obsMutations != 0 {
+			t.Fatalf("observation sync mutations = %d, want 0", obsMutations)
+		}
+
+		failLedgerInsert = false
+		result, err := s.AddObservationWithResult(params)
+		if err != nil {
+			t.Fatalf("retry AddObservationWithResult: %v", err)
+		}
+		if result.ID == 0 || result.Replayed {
+			t.Fatalf("retry result = %#v, want new non-zero save", result)
+		}
+
+		ledgerCount, err = countObservationSaveOperationsFor(s, params.OperationID)
+		if err != nil {
+			t.Fatalf("count retry ledger rows: %v", err)
+		}
+		if ledgerCount != 1 {
+			t.Fatalf("retry ledger rows = %d, want 1", ledgerCount)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ?`, SyncEntityObservation).Scan(&obsMutations); err != nil {
+			t.Fatalf("count retry observation sync mutations: %v", err)
+		}
+		if obsMutations != 1 {
+			t.Fatalf("retry observation sync mutations = %d, want 1", obsMutations)
+		}
+	})
+
 	t.Run("enqueue_failure", func(t *testing.T) {
 		s := newTestStore(t)
 		if err := s.CreateSession("session-1", "test-project", "/tmp"); err != nil {
@@ -966,10 +1045,8 @@ func TestObservationSaveOperationRollbackLeavesNoState(t *testing.T) {
 		t.Cleanup(func() { s.hooks.exec = originalExec })
 		var calls int
 		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-			// The ledger insert is executed through tx.Exec directly and cannot be
-			// intercepted here; failing the following sync-mutation insert still
-			// happens after the observation and ledger row are written in the same
-			// transaction, so the rollback removes all three.
+			// The ledger insert has already succeeded. Failing the following
+			// sync-mutation insert proves the same transaction removes all three.
 			if strings.Contains(query, "INSERT INTO sync_mutations") && calls == 0 {
 				calls++
 				return nil, errors.New("forced sync mutation insert failure")

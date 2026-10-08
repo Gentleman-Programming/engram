@@ -24,6 +24,31 @@ func runtimeScopeTestPath(root, path string) string {
 	return fmt.Sprintf("{stored=%q canonical=%q equal=%t}", relative(path), relative(canonical), path == canonical)
 }
 
+func runtimeSessionDiagnostic(root string, rootSession *Session, rootErr error, continuation *Session, continuationErr error, requested string) string {
+	rootPath := "<missing>"
+	if rootSession != nil {
+		rootPath = runtimeScopeTestPath(root, rootSession.Directory)
+	}
+	continuationPath := "<missing>"
+	if continuation != nil {
+		continuationPath = runtimeScopeTestPath(root, continuation.Directory)
+	}
+	return fmt.Sprintf("runtime scope diagnostic: root=%s root_read=%v continuation=%s continuation_read=%v requested=%s", rootPath, rootErr, continuationPath, continuationErr, runtimeScopeTestPath(root, requested))
+}
+
+func TestRuntimeSessionScopeAndConcurrencyDiagnosticHandlesNilSessions(t *testing.T) {
+	root := t.TempDir()
+	diagnostic := runtimeSessionDiagnostic(root, nil, sql.ErrNoRows, nil, sql.ErrNoRows, filepath.Join(root, "."))
+	for _, want := range []string{"root=<missing>", "root_read=sql: no rows in result set", "continuation=<missing>", "continuation_read=sql: no rows in result set", "requested={stored=\"", "canonical=\".\"", "equal=false}"} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("diagnostic %q missing %q", diagnostic, want)
+		}
+	}
+	if strings.Contains(diagnostic, root) {
+		t.Fatalf("diagnostic exposed temp root %q: %s", root, diagnostic)
+	}
+}
+
 func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(FallbackConfig(filepath.Join(root, "store")))
@@ -48,7 +73,7 @@ func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 		if err != nil || id != host+":resume:2" {
 			rootSession, rootErr := s.GetSession(host)
 			continuation, continuationErr := s.GetSession(host + ":resume:2")
-			t.Logf("runtime scope diagnostic: root=%s root_read=%v continuation=%s continuation_read=%v requested=%s", runtimeScopeTestPath(root, rootSession.Directory), rootErr, runtimeScopeTestPath(root, continuation.Directory), continuationErr, runtimeScopeTestPath(root, filepath.Join(root, ".")))
+			t.Log(runtimeSessionDiagnostic(root, rootSession, rootErr, continuation, continuationErr, filepath.Join(root, ".")))
 			t.Fatalf("resolve %s = %q, %v", host, id, err)
 		}
 	}

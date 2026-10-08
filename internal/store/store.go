@@ -4002,7 +4002,7 @@ func (s *Store) ObservationOperationRecorded(operationID string) (bool, error) {
 // that the ledger is written in the same transaction as the observation.
 func (s *Store) recordObservationSaveOperationTx(tx *sql.Tx, operationID, fingerprint string, observationID int64, obs *Observation) error {
 	if operationID != "" {
-		if _, err := tx.Exec(
+		if _, err := s.execHook(tx,
 			`INSERT INTO observation_save_operations (operation_id, fingerprint, observation_id)
 				 VALUES (?, ?, ?)`,
 			operationID, fingerprint, observationID,
