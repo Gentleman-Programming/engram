@@ -3,10 +3,26 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
+
+func runtimeScopeTestPath(root, path string) string {
+	relative := func(value string) string {
+		rel, err := filepath.Rel(projectpkg.RuntimeWorktreeDirectory(root), value)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "<outside-test-root>"
+		}
+		return filepath.ToSlash(rel)
+	}
+	canonical := projectpkg.RuntimeWorktreeDirectory(path)
+	return fmt.Sprintf("{stored=%q canonical=%q equal=%t}", relative(path), relative(canonical), path == canonical)
+}
 
 func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 	root := t.TempDir()
@@ -30,6 +46,9 @@ func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 	for _, host := range []string{"one", "two", "one"} {
 		id, err := s.ResolveRuntimeSessionWithOwnershipMode(host, project, filepath.Join(root, "."), SessionOwnershipShared)
 		if err != nil || id != host+":resume:2" {
+			rootSession, rootErr := s.GetSession(host)
+			continuation, continuationErr := s.GetSession(host + ":resume:2")
+			t.Logf("runtime scope diagnostic: root=%s root_read=%v continuation=%s continuation_read=%v requested=%s", runtimeScopeTestPath(root, rootSession.Directory), rootErr, runtimeScopeTestPath(root, continuation.Directory), continuationErr, runtimeScopeTestPath(root, filepath.Join(root, ".")))
 			t.Fatalf("resolve %s = %q, %v", host, id, err)
 		}
 	}
