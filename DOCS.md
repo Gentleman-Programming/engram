@@ -336,9 +336,21 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?, capture_prompt?, current_prompt?}`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?, operation_id?, capture_prompt?, current_prompt?}`
   - `capture_prompt` is an optional boolean (default `true`); after a successful observation save, `current_prompt` (optional string) is best-effort saved for the same session/project using exact stored-content dedupe. `false` skips this attempt. Missing prompt context or a capture error does not fail the observation save. No current prompt is inferred from persisted history and no observation-ID link is created.
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
+  - Omit `operation_id` to retain legacy save behavior. With one, an exact replay returns the original `201` result without another observation or sync mutation; a changed payload returns `409`, and a deleted result returns `410`.
+  - Use a stable client-generated `operation_id` for one logical save and preserve the original request while recovering an uncertain acknowledgement.
+  - Replay identity is the Store's normalized request fingerprint, including the requested project before session ownership resolution; a later ownership change does not change an exact replay result.
+  - The local operation ledger retains receipts indefinitely. Sync, logical export, and logical import do not carry those receipts to another database history.
+  - Unknown fingerprint versions fail closed with `410`; clients must not replace an expired or uncertain operation ID with a new save automatically.
+  - An absent lookup result is intentionally not evidence that an operation never committed or cannot commit later; the ledger has no pending state.
+  - A soft-deleted observation retains its ledger binding but has no lookup result. Its exact replay returns `410`; a changed payload returns `409`.
+  - A hard delete retains a ledger tombstone with the same exact-replay and changed-payload responses as a soft deletion.
+  - Exact keyed replays do not repeat prompt capture or write notification side effects. The first keyed save and every unkeyed save retain those behaviors.
+- `GET /observations/save-result?operation_id=ID` — Read the committed `{id, status:"committed"}` result for a replay-safe save.
+  - Missing `operation_id` returns `400`; an unknown, soft-deleted, or hard-deleted result returns `404` with `{error:"no committed result found for operation_id", code:"observation_save_result_not_found"}`.
+  - This typed `404` proves the lookup capability only. A generic legacy `400` or untyped `404` is not proof that a keyed save can be replayed safely.
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
