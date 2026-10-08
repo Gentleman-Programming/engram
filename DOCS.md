@@ -772,7 +772,7 @@ The new diagnostic records contain only durations and status: no titles, content
 
 ### HTTP write timing diagnostics
 
-Set `ENGRAM_HTTP_WRITE_TIMING=1` before starting `engram serve`. The local server writes one `engram: http_write_timing` JSON record to stderr after each `POST /sessions`, `POST /observations`, and `POST /observations/passive` handler returns. Records contain only the enumerated operation/outcome, retry attempt count, and request, connection-wait, transaction, commit, and response-write durations. `connection_wait_ms` is the store's `Begin` stage, including connection-pool or SQLite lock waiting; `transaction_ms` excludes that stage and commit.
+Set `ENGRAM_HTTP_WRITE_TIMING=1` before starting `engram serve`. The local server writes one `engram: http_write_timing` JSON record to stderr after each `POST /sessions`, `POST /observations`, and `POST /observations/passive` handler returns. Records contain only the enumerated operation/outcome, transaction attempt count, and request, connection-wait, transaction, commit, and response-write durations. For passive_capture, attempts and database-stage durations are totals across every learning saved by the request. `connection_wait_ms` is the store's `Begin` stage, including connection-pool or SQLite lock waiting; `transaction_ms` excludes that stage and commit.
 
 `response_write` describes the server's write attempt, not client acknowledgement. A completed server response write is never proof that a client received it. Records omit request URLs, identifiers, payloads, projects, paths, credentials, and errors; diagnostic-write failures are ignored and do not alter the request.
 
