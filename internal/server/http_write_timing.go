@@ -95,6 +95,10 @@ type timedResponseWriter struct {
 	writeDuration time.Duration
 }
 
+func (w *timedResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (w *timedResponseWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return

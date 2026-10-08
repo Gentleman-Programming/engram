@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHTTPWriteTimingOptInRedactsRequestData(t *testing.T) {
@@ -106,6 +107,18 @@ func TestHTTPWriteTimingFailuresDoNotChangeReplayOrResponseSemantics(t *testing.
 	}
 }
 
+func TestTimedResponseWriterUnwrapsForResponseController(t *testing.T) {
+	underlying := &deadlineResponseWriter{header: make(http.Header)}
+	deadline := time.Now().Add(time.Second)
+
+	if err := http.NewResponseController(&timedResponseWriter{ResponseWriter: underlying}).SetWriteDeadline(deadline); err != nil {
+		t.Fatalf("SetWriteDeadline() error = %v", err)
+	}
+	if !underlying.writeDeadline.Equal(deadline) {
+		t.Fatalf("write deadline = %v, want %v", underlying.writeDeadline, deadline)
+	}
+}
+
 func serveJSON(srv *Server, path string, body map[string]any) *httptest.ResponseRecorder {
 	encoded, _ := json.Marshal(body)
 	recorder := httptest.NewRecorder()
@@ -144,4 +157,19 @@ func (w *failingResponseWriter) Header() http.Header { return w.header }
 func (w *failingResponseWriter) WriteHeader(int)     {}
 func (w *failingResponseWriter) Write([]byte) (int, error) {
 	return 0, errors.New("response write failed")
+}
+
+type deadlineResponseWriter struct {
+	header        http.Header
+	writeDeadline time.Time
+}
+
+func (w *deadlineResponseWriter) Header() http.Header { return w.header }
+func (w *deadlineResponseWriter) WriteHeader(int)     {}
+func (w *deadlineResponseWriter) Write([]byte) (int, error) {
+	return 0, nil
+}
+func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.writeDeadline = deadline
+	return nil
 }

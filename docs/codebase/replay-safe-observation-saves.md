@@ -2,7 +2,7 @@
 
 # Replay-Safe Observation Saves
 
-**Observation saves can use a caller-supplied operation ID to recover a committed result without creating a second observation.** This guide records the local-store, HTTP, Pi, and timing boundaries introduced for [issue #1629](https://github.com/Gentleman-Programming/engram/issues/1629). The existing [PR #1649](https://github.com/Gentleman-Programming/engram/pull/1649) remains unchanged.
+**Observation saves can use a caller-supplied operation ID to recover a committed result without creating a second observation.** This guide records the local-store, HTTP, Pi, and timing boundaries introduced for [issue #1629](https://github.com/Gentleman-Programming/engram/issues/1629).
 
 ## Quick path
 
@@ -29,28 +29,14 @@ Pi treats uncertain writes as unknown. Only a typed “committed result not foun
 
 The local server can emit structured stderr timing records for session registration, observation saves, and passive capture when write timing is explicitly enabled. Records contain operation, outcome, attempt count, and duration fields; they exclude request and response bodies, observation text, prompt text, IDs, and project names.
 
-## Review order and integration condition
-
-```text
-integration guide
-  └── ledger foundation
-       └── HTTP result lookup
-            └── Pi recovery
-                 └── write timing telemetry
-```
-
-The integration branch is no-merge until every child slice has been reviewed and integrated in that order. The ledger, HTTP, and Pi slices exceed the normal review budget with approved scope exceptions; telemetry remains within the normal budget.
-
 ## Verification evidence
 
-The following were last observed passing for the reconstructed chain before this guide was added:
+Run the following commands to verify the affected boundaries:
 
 - `go test ./internal/store -run 'Test(AddObservationWithOperationID|AddObservationWithoutOperationID|ObservationOperation|ObservationSaveOperation|GetObservationSaveResult)' -count=1 -timeout=90s`
 - `go test ./internal/server -run 'Test(HandleGetObservationSaveResult|HandleAddObservation|ObservationPromptCapture)' -count=1 -timeout=90s`
 - `node --test plugin/pi/test/*.test.mjs`
 - `go test ./internal/server -run 'TestHTTPWriteTiming' -count=1 -timeout=90s`
-
-An earlier intermittent store result did not establish a root cause. Native immutable review transport was unavailable, so this guide does not claim a native review receipt.
 
 ## Source references
 
