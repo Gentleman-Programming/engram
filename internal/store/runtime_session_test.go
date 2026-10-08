@@ -38,7 +38,8 @@ func runtimeSessionDiagnostic(root string, rootSession *Session, rootErr error, 
 
 func TestRuntimeSessionScopeAndConcurrencyDiagnosticHandlesNilSessions(t *testing.T) {
 	root := t.TempDir()
-	diagnostic := runtimeSessionDiagnostic(root, nil, sql.ErrNoRows, nil, sql.ErrNoRows, filepath.Join(root, "."))
+	requested := root + string(filepath.Separator) + "."
+	diagnostic := runtimeSessionDiagnostic(root, nil, sql.ErrNoRows, nil, sql.ErrNoRows, requested)
 	for _, want := range []string{"root=<missing>", "root_read=sql: no rows in result set", "continuation=<missing>", "continuation_read=sql: no rows in result set", "requested={stored=\"", "canonical=\".\"", "equal=false}"} {
 		if !strings.Contains(diagnostic, want) {
 			t.Fatalf("diagnostic %q missing %q", diagnostic, want)
