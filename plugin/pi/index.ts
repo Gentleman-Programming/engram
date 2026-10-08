@@ -456,6 +456,13 @@ function isObservationSaveResultMiss(response: Response, data: unknown): boolean
     && (data as Record<string, unknown>).error === "no committed result found for operation_id";
 }
 
+function isAmbiguousObservationSaveReplayStatus(status: number): boolean {
+  // The ledger reports a changed replay as 409 and an expired/deleted replay as 410.
+  // Either can race an original write acknowledgement, so only these documented ledger
+  // outcomes warrant the one final authoritative lookup.
+  return status === 409 || status === 410;
+}
+
 // Only native mem_save opts in. Its request bytes and both destinations are frozen before
 // the first dispatch, so recovery cannot pick up a changed server configuration or payload.
 async function postObservationWithReplayRecovery<TResponse>(body: Record<string, unknown>, signal?: AbortSignal): Promise<EngramFetchResult<TResponse>> {
@@ -541,10 +548,14 @@ async function postObservationWithReplayRecovery<TResponse>(body: Record<string,
   }
   throwIfAborted(signal);
 
-  // The typed miss authorizes exactly one byte-identical replay. Every replay outcome that
-  // is not a valid saved receipt, including 409 and 410, gets one final read-only lookup.
+  // The typed miss authorizes exactly one byte-identical replay. Only the documented
+  // ledger outcomes 409 and 410 remain ambiguous enough to warrant one final lookup.
   const replay = await attempt("POST");
   if (replay.response?.ok && hasPositiveObservationID(replay.data, "saved")) return { data: replay.data as TResponse };
+  if (replay.response && !replay.response.ok && !isAmbiguousObservationSaveReplayStatus(replay.response.status)) {
+    const record = replay.data && typeof replay.data === "object" ? replay.data as Record<string, unknown> : {};
+    throw new EngramHttpError(typeof record.error === "string" ? record.error : `Engram request failed with HTTP ${replay.response.status}`, replay.response.status, replay.data);
+  }
   const final = await attempt("GET");
   if (final.response?.ok && hasPositiveObservationID(final.data, "committed")) return { data: final.data as TResponse };
   return unknown();

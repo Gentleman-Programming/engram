@@ -121,6 +121,24 @@ for (const status of [409, 410]) {
   });
 }
 
+for (const [name, response] of [
+  ["parsed", () => Response.json({ error: "replay validation failed" }, { status: 400 })],
+  ["malformed", () => new Response("not JSON", { status: 400 })],
+]) {
+  test(`definitive ${name} replay HTTP 400 remains typed without final recovery`, { concurrency: false }, async () => {
+    const { result, calls, healthChecks } = await saveWith((_request, _options, seen) => {
+      if (seen.length === 1) throw new TypeError("acknowledgement lost");
+      if (seen.length === 2) return typedMiss();
+      return response();
+    });
+
+    assert.equal(result.isError, true);
+    assert.equal(result.details.http_status, 400);
+    assert.deepEqual(calls.map(({ options }) => options.method), ["POST", "GET", "POST"]);
+    assert.equal(healthChecks, 0, "a received replay HTTP error must not start self-heal probing");
+  });
+}
+
 test("invalid committed receipt remains unknown instead of claiming a save", { concurrency: false }, async () => {
   const { result, calls } = await saveWith((_request, _options, seen) => seen.length === 1
     ? Promise.reject(new TypeError("acknowledgement lost"))
