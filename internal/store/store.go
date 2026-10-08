@@ -297,15 +297,25 @@ type SearchOptions struct {
 }
 
 type AddObservationParams struct {
-	SessionID   string `json:"session_id"`
-	Type        string `json:"type"`
-	Title       string `json:"title"`
-	Content     string `json:"content"`
-	ToolName    string `json:"tool_name,omitempty"`
-	Project     string `json:"project,omitempty"`
-	Scope       string `json:"scope,omitempty"`
-	TopicKey    string `json:"topic_key,omitempty"`
-	OperationID string `json:"operation_id,omitempty"`
+	SessionID   string        `json:"session_id"`
+	Type        string        `json:"type"`
+	Title       string        `json:"title"`
+	Content     string        `json:"content"`
+	ToolName    string        `json:"tool_name,omitempty"`
+	Project     string        `json:"project,omitempty"`
+	Scope       string        `json:"scope,omitempty"`
+	TopicKey    string        `json:"topic_key,omitempty"`
+	OperationID string        `json:"operation_id,omitempty"`
+	Timings     *WriteTimings `json:"-"`
+}
+
+// WriteTimings collects one write operation's local database stages. It holds
+// durations only; callers must not add request values or identifiers.
+type WriteTimings struct {
+	ConnectionWait time.Duration
+	Transaction    time.Duration
+	Commit         time.Duration
+	Attempts       int
 }
 
 // AddObservationResult reports whether an observation save created a new
@@ -3269,14 +3279,26 @@ func (s *Store) StartSession(id, project, directory string) error {
 // lease. It preserves the existing session identity and refuses to reopen an
 // ended session; EndSession remains terminal truth.
 func (s *Store) StartSessionWithOwnershipMode(id, project, directory, mode string) error {
-	return s.startSessionRegistration(id, project, directory, mode, false, nil, false)
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, nil)
+}
+
+// StartSessionWithOwnershipModeTimed records database-stage timings without
+// changing session-registration behavior.
+func (s *Store) StartSessionWithOwnershipModeTimed(id, project, directory, mode string, timings *WriteTimings) error {
+	return s.startSessionRegistration(id, project, directory, mode, false, nil, false, timings)
 }
 
 // ResumeSessionWithOwnershipMode atomically selects and registers a live runtime
 // identity. Ended rows remain terminal; ordinary and MCP registrations do not opt in.
 func (s *Store) ResumeSessionWithOwnershipMode(id, project, directory, mode string) (string, error) {
+	return s.ResumeSessionWithOwnershipModeTimed(id, project, directory, mode, nil)
+}
+
+// ResumeSessionWithOwnershipModeTimed records database-stage timings without
+// changing runtime-session continuation selection.
+func (s *Store) ResumeSessionWithOwnershipModeTimed(id, project, directory, mode string, timings *WriteTimings) (string, error) {
 	effective := id
-	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false)
+	err := s.startSessionRegistration(id, project, directory, mode, true, &effective, false, timings)
 	if err != nil {
 		return "", err
 	}
@@ -3293,8 +3315,14 @@ var ErrSessionIsolationConflict = errors.New("isolated session registration requ
 // Cloud pull or local import), because isolated registration never changes a
 // persisted ownership mode and a shared lease would accept cross-project writes.
 func (s *Store) RegisterIsolatedSession(id, project string, resume bool) (string, error) {
+	return s.RegisterIsolatedSessionTimed(id, project, resume, nil)
+}
+
+// RegisterIsolatedSessionTimed records database-stage timings without changing
+// isolated-session validation or persistence.
+func (s *Store) RegisterIsolatedSessionTimed(id, project string, resume bool, timings *WriteTimings) (string, error) {
 	effective := id
-	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true); err != nil {
+	if err := s.startSessionRegistration(id, project, "", SessionOwnershipProjectOwned, resume, &effective, true, timings); err != nil {
 		return "", err
 	}
 	return effective, nil
@@ -3359,7 +3387,7 @@ func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
 
-func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool) error {
+func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings) error {
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
@@ -3373,7 +3401,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 
 	claimed := false
 	root := id
-	err := s.withTx(func(tx *sql.Tx) error {
+	err := s.withWriteTimings(timings, func(tx *sql.Tx) error {
 		// withTx may retry its callback. Only the outcome of a committed
 		// attempt may become the terminal response.
 		claimed = false
@@ -4048,7 +4076,7 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 
 	var observationID int64
 	replayed := false
-	err := s.withTx(func(tx *sql.Tx) error {
+	err := s.withWriteTimings(p.Timings, func(tx *sql.Tx) error {
 		replayed = false
 		// If the caller supplied an operation ID, check for a committed result first
 		// so a replay can return the original outcome without repeating mutations.
@@ -9709,16 +9737,37 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
+	return s.withWriteTimings(nil, fn)
+}
+
+func (s *Store) withWriteTimings(timings *WriteTimings, fn func(tx *sql.Tx) error) error {
 	return withSQLiteWriteRetry(func() error {
+		if timings != nil {
+			timings.Attempts++
+		}
+		started := time.Now()
 		tx, err := s.beginTxHook()
+		if timings != nil {
+			timings.ConnectionWait += time.Since(started)
+		}
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
-		if err := fn(tx); err != nil {
+		started = time.Now()
+		err = fn(tx)
+		if timings != nil {
+			timings.Transaction += time.Since(started)
+		}
+		if err != nil {
 			return err
 		}
-		return s.commitHook(tx)
+		started = time.Now()
+		err = s.commitHook(tx)
+		if timings != nil {
+			timings.Commit += time.Since(started)
+		}
+		return err
 	})
 }
 
@@ -13134,10 +13183,11 @@ func sanitizeFTS(query string) string {
 
 // PassiveCaptureParams holds the input for passive memory capture.
 type PassiveCaptureParams struct {
-	SessionID string `json:"session_id"`
-	Content   string `json:"content"`
-	Project   string `json:"project,omitempty"`
-	Source    string `json:"source,omitempty"` // e.g. "subagent-stop", "session-end"
+	SessionID string        `json:"session_id"`
+	Content   string        `json:"content"`
+	Project   string        `json:"project,omitempty"`
+	Source    string        `json:"source,omitempty"` // e.g. "subagent-stop", "session-end"
+	Timings   *WriteTimings `json:"-"`
 }
 
 // PassiveCaptureResult holds the output of passive memory capture.
@@ -13265,6 +13315,7 @@ func (s *Store) PassiveCapture(p PassiveCaptureParams) (*PassiveCaptureResult, e
 			Project:   p.Project,
 			Scope:     "project",
 			ToolName:  p.Source,
+			Timings:   p.Timings,
 		})
 		if err != nil {
 			return result, fmt.Errorf("passive capture save: %w", err)

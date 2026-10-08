@@ -438,7 +438,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.mux.ServeHTTP(w, r)
+		if timing := beginHTTPWriteTiming(r); timing != nil {
+			writer := &timedResponseWriter{ResponseWriter: w}
+			r = r.WithContext(context.WithValue(r.Context(), httpWriteTimingKey{}, timing))
+			s.mux.ServeHTTP(writer, r)
+			timing.finish(writer)
+		} else {
+			s.mux.ServeHTTP(w, r)
+		}
 		if errors.Is(observedGenerationError(s.store), store.ErrDatabaseGenerationChanged) {
 			s.generationOnce.Do(func() {
 				select {
@@ -574,13 +581,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	effectiveID := body.ID
+	timings := requestWriteTimings(r)
 	var err error
 	if body.Isolated {
-		effectiveID, err = s.store.RegisterIsolatedSession(body.ID, body.Project, body.Resume)
+		effectiveID, err = s.store.RegisterIsolatedSessionTimed(body.ID, body.Project, body.Resume, timings)
 	} else if body.Resume {
-		effectiveID, err = s.store.ResumeSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
+		effectiveID, err = s.store.ResumeSessionWithOwnershipModeTimed(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode, timings)
 	} else {
-		err = s.store.StartSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode)
+		err = s.store.StartSessionWithOwnershipModeTimed(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode, timings)
 	}
 	if err != nil {
 		var conflict *store.SessionProjectConflictError
@@ -726,6 +734,7 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body.Timings = requestWriteTimings(r)
 	result, err := s.store.AddObservationWithResult(body.AddObservationParams)
 	if err != nil {
 		// A titleless or contentless observation is a client mistake, not a
@@ -772,6 +781,7 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body.Timings = requestWriteTimings(r)
 	result, err := s.store.PassiveCapture(body)
 	if err != nil {
 		if writeOwnershipError(w, body.SessionID, err) {
