@@ -182,8 +182,8 @@ func TestAddObservationWithOperationIDReturnsExpiredAfterSoftDeletion(t *testing
 	if _, err := s.AddObservation(params); !errors.Is(err, ErrObservationOperationExpired) {
 		t.Fatalf("exact replay after soft deletion error = %v, want ErrObservationOperationExpired", err)
 	}
-	if got, err := s.GetObservationSaveResult(params.OperationID); err != nil || got != 0 {
-		t.Fatalf("GetObservationSaveResult after soft deletion = %d, %v; want 0, nil", got, err)
+	if got, err := s.GetObservationSaveResult(params.OperationID); !errors.Is(err, ErrObservationOperationExpired) || got != 0 {
+		t.Fatalf("GetObservationSaveResult after soft deletion = %d, %v; want 0, ErrObservationOperationExpired", got, err)
 	}
 
 	changed := params
@@ -345,8 +345,8 @@ func TestGetObservationSaveResult(t *testing.T) {
 	if err := s.DeleteObservation(id, true); err != nil {
 		t.Fatalf("DeleteObservation: %v", err)
 	}
-	if got, err := s.GetObservationSaveResult("op-result"); err != nil || got != 0 {
-		t.Fatalf("tombstoned operation_id: got %d, %v; want 0, nil", got, err)
+	if got, err := s.GetObservationSaveResult("op-result"); !errors.Is(err, ErrObservationOperationExpired) || got != 0 {
+		t.Fatalf("tombstoned operation_id: got %d, %v; want 0, ErrObservationOperationExpired", got, err)
 	}
 }
 

@@ -682,6 +682,10 @@ func (s *Server) handleGetObservationSaveResult(w http.ResponseWriter, r *http.R
 	}
 	observationID, err := s.store.GetObservationSaveResult(operationID)
 	if err != nil {
+		if errors.Is(err, store.ErrObservationOperationExpired) {
+			jsonError(w, http.StatusGone, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

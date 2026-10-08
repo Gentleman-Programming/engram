@@ -3976,8 +3976,9 @@ func observationSaveFingerprint(p AddObservationParams, title, content, project,
 // GetObservationSaveResult returns the committed observation ID for a previous
 // observation save operation, if any. It is intended for clients that lost the
 // response and want to recover without replaying the write. A zero result with
-// a nil error means no committed outcome is known yet (or the original
-// observation was deleted and the operation has expired).
+// a nil error means no operation was recorded. ErrObservationOperationExpired
+// means the operation is retained but its observation was deleted, so it must
+// not be replayed.
 func (s *Store) GetObservationSaveResult(operationID string) (observationID int64, err error) {
 	if operationID == "" {
 		return 0, nil
@@ -3986,7 +3987,7 @@ func (s *Store) GetObservationSaveResult(operationID string) (observationID int6
 	err = s.db.QueryRow(
 		`SELECT o.id
 		 FROM observation_save_operations AS operation
-		 JOIN observations AS o ON o.id = operation.observation_id AND o.deleted_at IS NULL
+		 LEFT JOIN observations AS o ON o.id = operation.observation_id AND o.deleted_at IS NULL
 		 WHERE operation.operation_id = ?`,
 		operationID,
 	).Scan(&nullableID)
@@ -3997,7 +3998,7 @@ func (s *Store) GetObservationSaveResult(operationID string) (observationID int6
 		return 0, err
 	}
 	if !nullableID.Valid {
-		return 0, nil
+		return 0, ErrObservationOperationExpired
 	}
 	return nullableID.Int64, nil
 }

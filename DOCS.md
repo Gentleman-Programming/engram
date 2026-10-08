@@ -349,8 +349,8 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - A hard delete retains a ledger tombstone with the same exact-replay and changed-payload responses as a soft deletion.
   - Exact keyed replays do not repeat prompt capture or write notification side effects. The first keyed save and every unkeyed save retain those behaviors.
 - `GET /observations/save-result?operation_id=ID` — Read the committed `{id, status:"committed"}` result for a replay-safe save.
-  - Missing `operation_id` returns `400`; an unknown, soft-deleted, or hard-deleted result returns `404` with `{error:"no committed result found for operation_id", code:"observation_save_result_not_found"}`.
-  - This typed `404` proves the lookup capability only. A generic legacy `400` or untyped `404` is not proof that a keyed save can be replayed safely.
+  - Missing `operation_id` returns `400`; a never-recorded operation returns `404` with `{error:"no committed result found for operation_id", code:"observation_save_result_not_found"}`. A soft-deleted or hard-deleted operation returns `410`.
+  - Only this typed `404` for a never-recorded operation authorizes the documented exact replay. A `410`, generic legacy `400`, or untyped `404` is not proof that a keyed save can be replayed safely.
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)

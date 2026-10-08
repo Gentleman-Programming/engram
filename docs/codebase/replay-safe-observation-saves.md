@@ -8,7 +8,7 @@
 
 1. Send an observation save with a stable operation ID.
 2. If the write outcome is unknown, look up the committed result before considering a replay.
-3. Treat a missing, conflicting, or tombstoned result as unresolved unless the client has the explicit typed recovery evidence described below.
+3. Treat a conflicting or tombstoned result as non-replayable. Only a never-recorded result has the explicit typed recovery evidence described below.
 
 ## Contract and ownership
 
@@ -23,7 +23,7 @@ Operation IDs are frozen to their original payload. Reusing an ID for a differen
 
 ## Pi recovery boundary
 
-Pi treats uncertain writes as unknown. Only a typed “committed result not found” lookup authorizes one byte-identical replay. A successful write whose result cannot be read remains ambiguous; initial HTTP errors retain their typed status, and caller cancellation propagates. No other response or transport failure authorizes an additional write, and the recovery wait is cancellable.
+Pi treats uncertain writes as unknown. Only a typed `404` “committed result not found” lookup for a never-recorded operation authorizes one byte-identical replay. A retained soft-deleted or tombstoned operation returns `410` and is non-replayable. A successful write whose result cannot be read remains ambiguous; initial HTTP errors retain their typed status, and caller cancellation propagates. No other response or transport failure authorizes an additional write, and the recovery wait is cancellable.
 
 ## Opt-in timing diagnostics
 

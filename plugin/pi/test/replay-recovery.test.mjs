@@ -90,6 +90,19 @@ test("typed receipt miss authorizes one byte-identical replay to frozen canonica
   assert.equal(calls[2].url.origin, "http://recovery.invalid");
 });
 
+test("expired receipt lookup remains unknown without replay or another lookup", { concurrency: false }, async () => {
+  const { result, calls, healthChecks } = await saveWith((_request, _options, seen) => {
+    if (seen.length === 1) throw new TypeError("acknowledgement lost");
+    return Response.json({ error: "observation operation expired" }, { status: 410 });
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.outcome, "unknown");
+  assert.deepEqual(calls.map(({ options }) => options.method), ["POST", "GET"]);
+  assert.equal(calls.filter(({ options }) => options.method === "POST").length, 1);
+  assert.equal(healthChecks, 0, "a received lookup HTTP error must not start self-heal probing");
+});
+
 for (const [name, lookup] of [
   ["legacy 400", () => Response.json({ error: "legacy route" }, { status: 400 })],
   ["generic 404", () => Response.json({ error: "not found" }, { status: 404 })],

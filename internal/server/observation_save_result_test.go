@@ -70,7 +70,7 @@ func TestHandleGetObservationSaveResultReturnsNotFoundForUnknown(t *testing.T) {
 	assertObservationSaveResultNotFound(t, rec)
 }
 
-func TestHandleGetObservationSaveResultReturnsNotFoundForTombstonedOperation(t *testing.T) {
+func TestHandleGetObservationSaveResultReturnsGoneForTombstonedOperation(t *testing.T) {
 	st := newServerTestStore(t)
 	if err := st.CreateSession("sess-tombstone", "proj-tombstone", "/tmp"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
@@ -95,14 +95,14 @@ func TestHandleGetObservationSaveResultReturnsNotFoundForTombstonedOperation(t *
 	req := httptest.NewRequest(http.MethodGet, "/observations/save-result?operation_id=op-server-tombstone-1", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	assertObservationSaveResultNotFound(t, rec)
+	assertObservationSaveResultExpired(t, rec)
 
 	if err := st.DeleteObservation(committedID, true); err != nil {
 		t.Fatalf("hard DeleteObservation: %v", err)
 	}
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	assertObservationSaveResultNotFound(t, rec)
+	assertObservationSaveResultExpired(t, rec)
 }
 
 func assertObservationSaveResultNotFound(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -116,6 +116,20 @@ func assertObservationSaveResultNotFound(t *testing.T, rec *httptest.ResponseRec
 	}
 	if body["error"] != "no committed result found for operation_id" || body["code"] != "observation_save_result_not_found" {
 		t.Fatalf("body = %#v, want typed result-not-found error", body)
+	}
+}
+
+func assertObservationSaveResultExpired(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusGone {
+		t.Fatalf("expected 410, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != store.ErrObservationOperationExpired.Error() {
+		t.Fatalf("body = %#v, want expired operation error", body)
 	}
 }
 
