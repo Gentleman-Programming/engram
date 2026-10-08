@@ -317,6 +317,10 @@ If no current prompt is available to the MCP process, or if best-effort prompt c
 
 Native Pi supplies the current eligible turn's already-redacted, truncated prompt with `/observations` as `current_prompt`, alongside `capture_prompt`. It does not infer current context from stored history or reuse a prompt from another session/project. Pi's independent `before_agent_start` lifecycle capture remains enabled even when a later save opts out; opting out does not remove an existing prompt row. The Go dedupe policy prevents a per-save attempt from duplicating a lifecycle-captured row.
 
+### Pi observation-save recovery
+
+Pi-native `mem_save` sends one generated operation UUID with a frozen request payload and destination. If its initial acknowledgement is ambiguous, it looks up `GET /observations/save-result?operation_id=...`. Only a `404` whose body has both `code: "observation_save_result_not_found"` and `error: "no committed result found for operation_id"` authorizes one exact replay after a cancellable 250ms backoff. Legacy `400` replies, generic or malformed `404` replies, transport errors, and invalid receipts remain unknown and do not replay. A replay that is still ambiguous, including a `409` or `410`, gets exactly one final lookup; it never sends another POST. Positive IDs are required before Pi reports a save. Caller cancellation propagates through every recovery stage. Receipts are retained indefinitely by the local operation ledger; Pi does not replace an uncertain operation ID. Telemetry for this recovery remains deferred.
+
 ---
 
 ## Admin Observability (conflict layer)

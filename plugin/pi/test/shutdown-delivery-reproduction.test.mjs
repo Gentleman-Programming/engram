@@ -59,6 +59,8 @@ async function scenario(interrupted, fault) {
         return res.end(JSON.stringify({ id: identity, status: 'created' }));
       }
       if (path === '/observations') {
+        assert.match(body.operation_id, /^[0-9a-f-]{36}$/i);
+        delete body.operation_id;
         assert.deepEqual(body, { session_id: identity, title: 'disposable', content: 'synthetic fixture only', type: 'manual', project: 'synthetic-1632', scope: 'project' });
         return res.end('{"id":1}');
       }

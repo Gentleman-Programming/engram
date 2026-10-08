@@ -1632,6 +1632,7 @@ test("separate plugin graphs converge on a server-selected continuation", async 
       assert.equal(body.resume, true);
       return new Response(JSON.stringify({ id: "dual:resume:2", status: "created" }));
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   const entries = [];
@@ -1691,6 +1692,7 @@ test("simultaneous foreign projects honor core continuation ownership", async ()
         ? new Response(JSON.stringify({ id: "foreign-dual:resume:2", status: "created" }))
         : new Response(JSON.stringify({ code: "session_project_conflict", session_id: body.id, owner_project: "alpha", requested_project: "beta" }), { status: 409 });
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   const entries = [];
@@ -1907,6 +1909,7 @@ test("root resume compatibility negotiates support and fails closed", async () =
             }
             return new Response(JSON.stringify({ id: activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`, status: "created" }));
           }
+          if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
           return new Response(JSON.stringify({ status: "ok" }));
         };
         const ctx = runtimeContext(runtimeID);
@@ -1969,7 +1972,10 @@ test("root resume compatibility pins retry support after lost acknowledgement", 
           if (posts.length === 1) return new Response("truncated acknowledgement");
           return new Response(JSON.stringify({ id: initial ? `${runtimeID}:resume:3` : runtimeID, status: "created" }));
         }
-        if (path === "/observations") writes.push(body);
+        if (path === "/observations") {
+          writes.push(body);
+          return new Response(JSON.stringify({ id: 1, status: "saved" }));
+        }
         return new Response(JSON.stringify({ status: "ok" }));
       };
       const ctx = runtimeContext(runtimeID);
@@ -2014,6 +2020,7 @@ test("resumed quit adopts core numeric identities and reload retains the persist
       const id = ended.has(body.id) ? (ended.has("resumed:resume:2") ? "resumed:resume:3" : "resumed:resume:2") : body.id;
       return new Response(JSON.stringify({ id, status: "created" }), { status: 201 });
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }), { status: 201 });
     if (path.startsWith("/sessions/") && path.endsWith("/end")) ended.add(decodeURIComponent(path.slice(10, -4)));
     return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
   };
@@ -2091,6 +2098,7 @@ test("Pi-native explicit end targets the registered resumed identity, not the ho
     calls.push({ method: init.method ?? "GET", path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: "explicit-resume:resume:2", status: "created" }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ status: "ok" }));
   };
   try {
@@ -2256,6 +2264,7 @@ test("ambiguous legacy mapping registration reuses its persisted identity and en
       attempts.set(body.id, count);
       if (count <= 4) throw new Error("response lost after server created session");
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   try {
@@ -2314,6 +2323,7 @@ test("a legacy pending mapping cannot be claimed by another project after pre-di
       failure.code = "ENETUNREACH";
       throw failure;
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   try {
@@ -2356,6 +2366,7 @@ test("two module graphs coalesce concurrent pending replacement shutdown", async
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: body.id === "parallel" ? "parallel:resume:2" : body.id, status: "created" }));
     if (path.endsWith("/end")) { entered.resolve(); await release.promise; }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ status: "ok" }));
   };
   const entries = [];
@@ -2410,6 +2421,7 @@ test("a peer graph cannot revive a closed replacement without explicit session_s
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
     if (pausePeer && path === "/sessions") { entered.resolve(); await release.promise; }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id === "closed-peer" ? "closed-peer:resume:2" : body?.id, status: "created" }));
   };
   const entries = [];
@@ -2607,6 +2619,7 @@ test("confirmed replacement end clears pending state across repeated shutdown an
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id === "repeat-end" ? "repeat-end:resume:2" : body?.id, status: "created" }));
   };
   try {
@@ -2645,6 +2658,7 @@ test("an unconfirmed replacement end retains pending state for a later shutdown"
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path.endsWith("/end") && calls.filter(({ path: requested }) => requested.endsWith("/end")).length === 1) throw new Error("end response lost");
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id === "uncertain-end" ? "uncertain-end:resume:2" : body?.id, status: "created" }));
   };
   try {
@@ -2689,6 +2703,7 @@ test("a concurrent foreign-project caller cannot revoke the pending owner's shut
       started.resolve();
       await gate.promise;
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   try {
@@ -2861,6 +2876,7 @@ test("shutdown waits for resumed registration and rejects attributed writes", as
       await gate.promise;
       return new Response(JSON.stringify({ id: "overlap:resume:2", status: "created" }));
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ status: "ok" }));
   };
   const entries = [];
@@ -2916,6 +2932,7 @@ test("fallback from ended mapping to live root supersedes identity for writes an
         if (path === "/sessions") return body.id === legacyID
           ? new Response(JSON.stringify({ code: "session_already_ended", session_id: legacyID }), { status: 409 })
           : new Response(JSON.stringify({ id: runtimeID, status: "created" }));
+        if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
         return new Response(JSON.stringify({ id: 1, status: "ended" }));
       };
       await withPluginSandbox("engram-pi-fallback-root-", async ({ sandbox }) => {
@@ -2967,6 +2984,7 @@ test("read-only legacy shutdown suppresses confirmed delivery but retries uncert
           ends++;
           if (uncertain && ends === 1) throw new Error("end acknowledgement lost");
         }
+        if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
         return new Response(JSON.stringify({ status: "ended", id: 1 }));
       };
       await withPluginSandbox("engram-pi-readonly-shutdown-", async ({ sandbox }) => {
@@ -3004,7 +3022,7 @@ test("hosts without mapping persistence never request core resume", async () => 
       }
       return new Response(JSON.stringify({ id: body.id, status: "created" }));
     }
-    return new Response(JSON.stringify({ id: 1 }));
+    return new Response(JSON.stringify({ id: 1, status: "saved" }));
   };
   try {
     for (const missing of ["appendEntry", "getBranch"]) {
@@ -3133,6 +3151,7 @@ test("session lifecycle trace is private, opt-in, and preserves shutdown behavio
         if (path === "/project/current") return new Response('{"project":"pi"}');
         if (path === "/health") return new Response('{"version":"3.0.0"}');
         if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
+        if (path === "/observations") return new Response('{"id":1,"status":"saved"}');
         return new Response('{"id":1,"status":"ended"}');
       };
       await withPluginSandbox("engram-pi-lifecycle-trace-", async ({ sandbox }) => {
@@ -3245,7 +3264,7 @@ test("persisted legacy continuation renews without appendEntry", async () => {
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: body.id, status: "created" }));
-    return new Response(JSON.stringify({ id: 1 }));
+    return new Response(JSON.stringify({ id: 1, status: "saved" }));
   };
   try {
     await withPluginSandbox("engram-pi-read-only-mapping-", async ({ sandbox }) => {
@@ -3322,6 +3341,7 @@ test("malformed persisted mapping never authorizes foreign writes or cleanup", a
     if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: foreignAck ? "foreign" : body.id, status: "created" }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: 1, status: "ok" }));
   };
   try {
