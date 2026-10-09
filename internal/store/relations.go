@@ -94,6 +94,10 @@ type CandidateOptions struct {
 	// Query optionally overrides the saved observation title as the candidate
 	// query source. Empty uses the saved title.
 	Query string
+	// RequireSaveRelevance opts into title/topic relevance filtering before the
+	// candidate limit and pending relation inserts. MCP saves enable it; broad
+	// recall scans and other callers retain their existing behavior by default.
+	RequireSaveRelevance bool
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
@@ -358,7 +362,8 @@ type JudgeRelationParams struct {
 // ─── FindCandidates ───────────────────────────────────────────────────────────
 
 // FindCandidates runs a post-transaction FTS5 candidate query for the given
-// savedID and returns at most opts.Limit candidates above the BM25 floor.
+// savedID and returns at most opts.Limit candidates satisfying the rank predicate
+// and, when opted in, the save relevance gate.
 //
 // For each candidate, a pending memory_relations row is inserted and the row's
 // sync_id is exposed as Candidate.JudgmentID.
@@ -383,10 +388,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Get the saved observation to build the FTS query and for project/scope filtering.
-	var title, project, scope, sourceSyncID string
+	var title, project, scope, sourceSyncID, sourceTopic string
 	err = s.db.QueryRow(
-		`SELECT title, ifnull(project,''), scope, ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID,
-	).Scan(&title, &project, &scope, &sourceSyncID)
+		`SELECT title, ifnull(project,''), scope, ifnull(sync_id,''), ifnull(topic_key,'') FROM observations WHERE id = ?`, savedID,
+	).Scan(&title, &project, &scope, &sourceSyncID, &sourceTopic)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("FindCandidates: observation %d not found", savedID)
 	}
@@ -407,12 +412,20 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		queryText = title
 	}
 	ftsQuery := sanitizeFTSCandidates(queryText)
+	var relevanceTerms []string
+	queryLimit := limit
+	if opts.RequireSaveRelevance {
+		relevanceTerms = saveCandidateTerms(queryText)
+		// Keep BM25 ordering, but do not let rejected matches consume the limit.
+		// Rows are read only until enough eligible candidates have been found.
+		queryLimit = -1
+	}
 	if ftsQuery == "" {
 		return nil, nil
 	}
 
 	// Apply the rank predicate in SQL before ordering and limiting.
-	rows, err := s.db.Query(query, ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope, threshold, limit)
+	rows, err := s.db.Query(query, ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope, threshold, queryLimit)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
@@ -434,7 +447,13 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			}
 			return nil, fmt.Errorf("FindCandidates: scan: %w", err)
 		}
+		if opts.RequireSaveRelevance && !saveCandidateRelevant(relevanceTerms, sourceTopic, rc.title, rc.topicKey) {
+			continue
+		}
 		raw = append(raw, rc)
+		if opts.RequireSaveRelevance && len(raw) == limit {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		if closeErr := rows.Close(); closeErr != nil {

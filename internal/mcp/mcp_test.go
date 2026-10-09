@@ -9683,8 +9683,8 @@ func TestServerInstructions_ConflictSurfacingBlock(t *testing.T) {
 // Strategy: set BM25Floor to a very strict value (0.0) via MCPConfig. Even with
 // two similar observations in the store, no candidate should score >= 0 (BM25
 // scores are always negative), so candidates[] must be empty. Without the fix,
-// MCPConfig.BM25Floor would be ignored and the default -2.0 would be used,
-// returning at least one candidate — causing the assertion to fail.
+// MCPConfig.BM25Floor would be ignored and the default maximum rank 0.0 would
+// retain the relevant candidate — causing the assertion to fail.
 func TestHandleSave_MCPConfig_OverridesDefaults(t *testing.T) {
 	s := newMCPTestStore(t)
 

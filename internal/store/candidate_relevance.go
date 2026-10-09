@@ -1,0 +1,49 @@
+package store
+
+import (
+	"sort"
+	"strings"
+	"unicode"
+)
+
+// saveCandidateTerms normalizes title words for the opt-in save relevance gate.
+// Unlike candidateTerms, it is not used by broad-recall scans. Common English
+// connective words and generic change verbs are not evidence of a shared topic.
+func saveCandidateTerms(title string) []string {
+	terms := make(map[string]struct{})
+	for _, term := range strings.FieldsFunc(strings.ToLower(title), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		switch term {
+		case "a", "an", "the", "and", "or", "for", "to", "of", "in", "on", "with", "from", "by", "at", "as", "is", "are", "be", "was", "were", "we", "it", "this", "that", "use", "used", "using", "add", "added", "update", "updated", "fix", "fixed", "implement", "implemented":
+			continue
+		}
+		terms[term] = struct{}{}
+	}
+	result := make([]string, 0, len(terms))
+	for term := range terms {
+		result = append(result, term)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// saveCandidateRelevant uses explicit topic identity or distinct title terms,
+// not matches in observation content or corpus-dependent BM25 magnitude.
+func saveCandidateRelevant(sourceTerms []string, sourceTopic, title string, topic *string) bool {
+	if sourceTopic != "" && topic != nil && sourceTopic == *topic {
+		return true
+	}
+	targetTerms := saveCandidateTerms(title)
+	shared := 0
+	for _, source := range sourceTerms {
+		for _, target := range targetTerms {
+			if source == target {
+				shared++
+				break
+			}
+		}
+	}
+	// A one-term title remains eligible only against an equivalent one-term title.
+	return shared >= 2 || (shared == 1 && len(sourceTerms) == 1 && len(targetTerms) == 1)
+}
