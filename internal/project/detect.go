@@ -47,7 +47,7 @@ const (
 	SourceAllProjects                       = "all_projects"     // caller asked for cross-project search (no single project resolved)
 	SourceProcessOverride                   = "process_override" // resolved from the process-level project override
 	// SourceStoredProject means the observation record itself carries the
-	// project. ID-anchored tools (mem_get_observation, mem_update) fall back to
+	// project. The read-only mem_get_observation tool falls back to
 	// it when cwd resolution fails only because the current directory is
 	// ambiguous: the integer id fully identifies the record, so its stored
 	// project is a safe anchor.

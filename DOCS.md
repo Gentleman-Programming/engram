@@ -1142,7 +1142,7 @@ Exceptions:
 
 `mem_session_start` resolves from its explicit `directory` argument when supplied; otherwise it auto-detects from cwd. `mem_session_end` and `mem_capture_passive` auto-detect project from cwd; any `project` argument the LLM sends to them is ignored. `mem_session_summary` supports explicit project override (`project`, `project_choice_reason`, `recovery_token`) matching `mem_save`'s project resolution.
 
-`mem_update` requires `id` and caller-supplied `expected_project`. Native MCP also checks ownership against the known current/process project; the assertion does not bypass those checks, malformed/unknown process overrides, or ambiguous-project recovery protections. It no longer falls back to the stored owner for writes when cwd is ambiguous. `mem_get_observation` retains its read-only stored-owner fallback.
+`mem_update` requires `id` and caller-supplied `expected_project`. Like REST PATCH and `mem_delete`, it checks normalized stored ownership atomically with the mutation, independently of server cwd, process overrides, or cwd ambiguity. Its success envelope identifies the matched owner with `project_source: "explicit_override"` and `project_path: ""`; it does not claim a verified repository path. The assertion is not authentication or a permission grant. Save/session project resolution remains unchanged. `mem_get_observation` retains its read-only stored-owner fallback.
 
 `mem_save` resolves writes by precedence: validated explicit `project`, project already associated with `session_id`, repo/cwd detection (nearest `.engram/config.json` within the enclosing git root, git remote/root/child), then directory-basename fallback.
 

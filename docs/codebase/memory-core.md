@@ -47,8 +47,8 @@ For schema details, use [DOCS.md — Database Schema](../../DOCS.md#database-sch
 - `scope=project` is the default; `scope=personal` exists for non-shared memory; `scope=global` exists for machine-wide, cross-project observations.
 - Soft delete (`deleted_at`) hides data without physically deleting it unless explicit hard delete is used.
 - Public observation updates/deletes require caller-supplied `expected_project`. `UpdateObservationForProject` and `DeleteObservationForProject` validate the assertion and compare normalized stored ownership inside the same transaction as the mutation, before revision/sync/tombstone changes. Personal/global scope still has an owner. Shared transactional helpers preserve unguarded CLI/internal maintenance entry points; project metadata remains immutable.
-- Native MCP's stored-owner fallback is read-only (`mem_get_observation`); an owner assertion never replaces current-project checks or ambiguous-project recovery.
-- Write tools resolve the project from cwd/config; do not invent a project when there is ambiguity.
+- Native MCP's stored-owner fallback is read-only (`mem_get_observation`). ID-addressed `mem_update`/`mem_delete` use the caller's mandatory owner assertion rather than the server's current project; this is an ownership consistency check, not authentication or authorization.
+- New-record write tools resolve the project from cwd/config or a bound session; do not invent a project when there is ambiguity. Update/delete assertions do not change save/session recovery rules.
 - Search is progressive: compact results first, `mem_get_observation` only when full content is needed.
 
 ## Replay-safe store saves

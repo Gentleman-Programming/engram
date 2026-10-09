@@ -568,7 +568,7 @@ Examples:
 					mcp.Required(),
 					mcp.Description("Observation ID to update"),
 				),
-				mcp.WithString("expected_project", mcp.Required(), mcp.Description("Explicit expected owner; does not bypass current-project checks")),
+				mcp.WithString("expected_project", mcp.Required(), mcp.Description("Required expected owner, checked atomically against the observation; independent of the server's current project")),
 				mcp.WithString("title",
 					mcp.Description("New title"),
 				),
@@ -1706,7 +1706,7 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 	}
 }
 
-func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleUpdate(s *store.Store, _ MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		expected, _ := req.GetArguments()["expected_project"].(string)
 		if _, err := store.ValidateExpectedProject(expected); err != nil {
@@ -1744,40 +1744,13 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 
-		obs, err := s.GetObservation(id)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
-		}
-
-		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, true)
-		if err != nil {
-			return writeProjectErrorResult(nil, "", detRes, err), nil
-		}
-		resolvedProject, _ := store.NormalizeProject(detRes.Project)
-		storedProject := ""
-		if obs.Project != nil {
-			storedProject, _ = store.NormalizeProject(*obs.Project)
-		}
-		if storedProject == "" {
-			return errorWithMeta("project_required", "The stored observation has no project identity", knownWriteProjects(s, detRes)), nil
-		}
-		if storedProject != resolvedProject {
-			return errorWithMeta("project_mismatch", "The current project does not own this observation", knownWriteProjects(s, detRes)), nil
-		}
-		if detRes.Source == projectpkg.SourceDirBasename {
-			session, err := s.GetSession(obs.SessionID)
-			if err != nil || strings.TrimSpace(session.Directory) == "" || runtimeSessionDirectory(session.Directory) != runtimeSessionDirectory(detRes.Path) {
-				return errorWithMeta("project_mismatch", "The current project does not own this observation", knownWriteProjects(s, detRes)), nil
-			}
-		}
-
 		var truncation *store.TruncationMetadata
 		if update.Content != nil {
 			metadata := s.ContentTruncation(*update.Content)
 			truncation = &metadata
 		}
 
-		obs, err = s.UpdateObservationForProject(id, expected, update)
+		obs, err := s.UpdateObservationForProject(id, expected, update)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
 		}
@@ -1789,7 +1762,8 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			extra["truncation"] = *truncation
 		}
 
-		return respondWithProject(detRes, msg, extra), nil
+		owner, _ := store.NormalizeProject(*obs.Project)
+		return respondWithProject(projectpkg.DetectionResult{Project: owner, Source: projectpkg.SourceExplicitOverride}, msg, extra), nil
 	}
 }
 
