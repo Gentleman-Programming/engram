@@ -1078,24 +1078,30 @@ func (s *Store) GetRelationsForObservationsContext(ctx context.Context, syncIDs 
 	return result, nil
 }
 
+// Materialize eligible ranks once, then filter and sort the stored scores.
+// Keeping MATCH against the original FTS table preserves corpus-wide BM25
+// statistics; project/scope and relation filters do not change the scoring corpus.
 const findCandidatesFTSQuery = `
-	SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.title, o.type, o.topic_key,
-	       fts.rank
-	FROM observations_fts fts
-	CROSS JOIN observations o ON o.id = fts.rowid
-	WHERE observations_fts MATCH ?
-	  AND o.id != ?
-	  AND NOT EXISTS (
-		SELECT 1 FROM memory_relations r
-		WHERE ((r.source_id = ? AND r.target_id = ifnull(o.sync_id,''))
-		    OR (r.source_id = ifnull(o.sync_id,'') AND r.target_id = ?))
-		  AND r.judgment_status = 'judged'
-	  )
-	  AND o.deleted_at IS NULL
-	  AND ifnull(o.project,'') = ifnull(?,'')
-	  AND o.scope = ?
-	  AND fts.rank %s ?
-	ORDER BY fts.rank
+	WITH ranked AS MATERIALIZED (
+		SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.title, o.type, o.topic_key,
+		       fts.rank AS score
+		FROM observations_fts fts
+		CROSS JOIN observations o ON o.id = fts.rowid
+		WHERE observations_fts MATCH ?
+		  AND o.id != ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM memory_relations r
+			WHERE ((r.source_id = ? AND r.target_id = ifnull(o.sync_id,''))
+			    OR (r.source_id = ifnull(o.sync_id,'') AND r.target_id = ?))
+			  AND r.judgment_status = 'judged'
+		  )
+		  AND o.deleted_at IS NULL
+		  AND ifnull(o.project,'') = ifnull(?,'')
+		  AND o.scope = ?
+	)
+	SELECT id, sync_id, title, type, topic_key, score FROM ranked
+	WHERE score %s ?
+	ORDER BY score
 	LIMIT ?
 `
 

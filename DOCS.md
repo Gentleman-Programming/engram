@@ -770,6 +770,18 @@ Stage times include database waits; they do **not** separately measure SQLite lo
 
 The new diagnostic records contain only durations and status: no titles, content, project names, paths, IDs, or error details. Existing unrelated error logs are unchanged; inspect them before sharing a trace. Compare these records with client elapsed times from a sequential reproduction before choosing an optimization. Saving, ranking, and candidate insertion behavior are unchanged.
 
+#### Candidate-query performance benchmark (contributors)
+
+Run the synthetic candidate-query comparison from the repository root:
+
+```sh
+go test ./internal/store -run '^$' -bench '^BenchmarkCandidateRankComparison' -benchtime=1x -count=5 -benchmem
+```
+
+The benchmark creates isolated 15,000-observation databases with repeated title terms in indexed content. It compares the original query with filtered rank materialization, in both execution orders, with candidates spread across one or multiple projects. Setup is excluded from timing. It measures candidate SQL and result consumption, **not** full `mem_save`, pending-relation inserts, MCP queueing, or transport. Compare repeated samples on the same host; timings are not unit-test assertions or a production latency guarantee. `TestFindCandidatesOriginalQueryParity` checks candidate fields, raw scores, and ordering against the original query.
+
+Rank materialization uses temporary SQLite storage and adds allocations; `-benchmem` does not measure peak SQLite temporary-table memory. These benchmarks do not establish latency or memory bounds for other database sizes and distributions.
+
 ### HTTP write timing diagnostics
 
 Set `ENGRAM_HTTP_WRITE_TIMING=1` before starting `engram serve`. The local server writes one `engram: http_write_timing` JSON record to stderr after each `POST /sessions`, `POST /observations`, and `POST /observations/passive` handler returns. Records contain only the enumerated operation/outcome, transaction attempt count, and request, connection-wait, transaction, commit, and response-write durations. For passive_capture, attempts and database-stage durations are totals across every learning saved by the request. `connection_wait_ms` is the store's `Begin` stage, including connection-pool or SQLite lock waiting; `transaction_ms` excludes that stage and commit.
