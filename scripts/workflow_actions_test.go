@@ -86,6 +86,7 @@ func TestWorkflowExternalActionsArePinned(t *testing.T) {
 	}
 }
 
+// TestPRValidationAndTransientArtifactWorkflowContracts verifies the repository's PR and transient-artifact workflow contracts.
 func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	prCheckPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
 	prCheckContent, err := os.ReadFile(prCheckPath)
@@ -193,6 +194,199 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	}
 }
 
+// TestPRIssueReferenceContract verifies the workflow's supported issue-reference syntax and approval guardrails.
+func TestPRIssueReferenceContract(t *testing.T) {
+	prCheckPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
+	prCheckContent, err := os.ReadFile(prCheckPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", prCheckPath, err)
+	}
+	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
+
+	// Both validation jobs must define the same issue reference pattern, and it
+	// must accept the non-closing keyword `refs` while keeping the closing ones.
+	patterns := extractIssuePatternLiterals(t, prCheck)
+	if len(patterns) != 2 {
+		t.Fatalf("%s must define the issue reference pattern exactly twice (once per validation job), got %d", prCheckPath, len(patterns))
+	}
+	if patterns[0] != patterns[1] {
+		t.Errorf("both validation jobs must use the same issue reference pattern: %q != %q", patterns[0], patterns[1])
+	}
+	if !strings.Contains(patterns[0], "refs") {
+		t.Errorf("issue reference pattern %q must accept the non-closing keyword refs", patterns[0])
+	}
+	for _, keyword := range []string{"closes", "fixes", "resolves"} {
+		if !strings.Contains(patterns[0], keyword) {
+			t.Errorf("issue reference pattern %q must keep the closing keyword %s", patterns[0], keyword)
+		}
+	}
+
+	// Deterministic regex contract over the literal bytes checked into the
+	// workflow: accepted closing and non-closing references match, missing
+	// references and bare-number/prose forms do not.
+	pattern := regexp.MustCompile("(?i)" + patterns[0]) // JS flag `i`; `g` is irrelevant for Go
+	tests := []struct {
+		name string
+		body string
+		want []string // captured issue numbers, in order
+	}{
+		{name: "closing reference uppercase", body: "Closes #123", want: []string{"123"}},
+		{name: "closing reference lowercase", body: "fixes #456", want: []string{"456"}},
+		{name: "resolves reference", body: "Resolves #789", want: []string{"789"}},
+		{name: "non-closing reference", body: "Refs #1270", want: []string{"1270"}},
+		{name: "non-closing reference lowercase", body: "refs #42", want: []string{"42"}},
+		{name: "mixed closing and non-closing", body: "Refs #1270\nCloses #1493", want: []string{"1270", "1493"}},
+		{name: "missing reference", body: "This PR improves the plugin and its tests.", want: []string{}},
+		{name: "bare issue number", body: "See issue 123 for details.", want: []string{}},
+		{name: "bare hash", body: "Related: #123", want: []string{}},
+		{name: "prose with refs", body: "Refs the documentation for contributor conventions.", want: []string{}},
+		{name: "keyword without hash", body: "Closes 123 at the end.", want: []string{}},
+		{name: "missing whitespace", body: "Closes#123", want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var numbers []string
+			for _, match := range pattern.FindAllStringSubmatch(tt.body, -1) {
+				numbers = append(numbers, match[1])
+			}
+			if diff := compareStringSlices(numbers, tt.want); diff != "" {
+				t.Fatal(diff)
+			}
+		})
+	}
+
+	// Missing references must fail the reference check, in both jobs.
+	for _, fragment := range []string{"no issue reference found", "PR must reference an approved issue"} {
+		if !strings.Contains(prCheck, fragment) {
+			t.Errorf("%s must reject missing references with %q", prCheckPath, fragment)
+		}
+	}
+
+	// Every accepted reference must be subject to status:approved validation:
+	// the approved job iterates all matches and requires the label on each one.
+	for _, fragment := range []string{
+		"for (const match of matches)",
+		"issue_number: issueNumber",
+		"labels.includes('status:approved')",
+		"does not have the \\`status:approved\\` label", // backticks are escaped inside the JS template literal
+	} {
+		if !strings.Contains(prCheck, fragment) {
+			t.Errorf("%s must require status:approved for every accepted reference (%q missing)", prCheckPath, fragment)
+		}
+	}
+
+	// Security boundary: the pull_request trigger is preserved; pull_request_target is prohibited.
+	if !strings.Contains(prCheck, "pull_request:") || strings.Contains(prCheck, "pull_request_target:") {
+		t.Errorf("%s must keep the pull_request trigger and never use pull_request_target", prCheckPath)
+	}
+}
+
+// TestPRIssueReferenceApprovalOutcomes pins the approval outcomes of the PR
+// validation workflow over both events. Source-fragment counts bind every
+// pull_request and merge_group dispatch to the shared per-job validate
+// function, and the deterministic table then checks the decision that shared
+// path must make: an approved Refs reference is accepted, while a missing
+// reference and an unapproved reference are rejected.
+func TestPRIssueReferenceApprovalOutcomes(t *testing.T) {
+	prCheckPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
+	prCheckContent, err := os.ReadFile(prCheckPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", prCheckPath, err)
+	}
+	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
+
+	// Branch binding via source fragments: the workflow has exactly two
+	// validation jobs, each with one script declaring a single shared validate
+	// function, and both event branches invoke that same validate — merge_group
+	// through aggregatePullRequestResults(pulls, validate) and pull_request
+	// through validate(pull). Any count other than two means an event split off
+	// the shared validation path.
+	for _, fragment := range []string{
+		"script: |",
+		"const validate",
+		"context.eventName === 'merge_group'",
+		"aggregatePullRequestResults(pulls, validate)",
+		"validate(pull)",
+	} {
+		if got := strings.Count(prCheck, fragment); got != 2 {
+			t.Errorf("%s must contain %q exactly twice (once per validation job), got %d", prCheckPath, fragment, got)
+		}
+	}
+
+	// Deterministic outcomes over that shared path: matches come from the
+	// checked-in issuePattern literal, and the simulated issue labels stand in
+	// for the GitHub REST responses the workflow fetches at runtime.
+	patterns := extractIssuePatternLiterals(t, prCheck)
+	if len(patterns) != 2 {
+		t.Fatalf("%s must define the issue reference pattern once per validation job, got %d", prCheckPath, len(patterns))
+	}
+	issuePattern := regexp.MustCompile("(?i)" + patterns[0]) // JS flag `i`; `g` is irrelevant for Go
+	validate := func(body string, labels map[string][]string) []string {
+		matches := issuePattern.FindAllStringSubmatch(body, -1)
+		if len(matches) == 0 {
+			return []string{"no issue reference found"}
+		}
+		var failures []string
+		for _, match := range matches {
+			number := match[1]
+			approved := false
+			for _, label := range labels[number] {
+				if label == "status:approved" {
+					approved = true
+					break
+				}
+			}
+			if !approved {
+				failures = append(failures, fmt.Sprintf("issue #%s does not have the `status:approved` label.", number))
+			}
+		}
+		return failures
+	}
+
+	outcomes := []struct {
+		name   string
+		body   string
+		labels map[string][]string
+		want   []string // expected failures, in order; empty means accepted
+	}{
+		{name: "approved refs accepted", body: "Refs #1270", labels: map[string][]string{"1270": {"status:approved"}}, want: nil},
+		{name: "missing reference rejected", body: "This PR improves the plugin and its tests.", want: []string{"no issue reference found"}},
+		{name: "unapproved refs rejected", body: "Refs #1270", labels: map[string][]string{"1270": {"type:feature"}}, want: []string{"issue #1270 does not have the `status:approved` label."}},
+		{name: "mixed approved and unapproved references rejected", body: "Refs #1270\nCloses #1493", labels: map[string][]string{"1270": {"status:approved"}, "1493": {"type:bug"}}, want: []string{"issue #1493 does not have the `status:approved` label."}},
+	}
+	for _, tt := range outcomes {
+		t.Run(tt.name, func(t *testing.T) {
+			if diff := compareStringSlices(validate(tt.body, tt.labels), tt.want); diff != "" {
+				t.Fatal(diff)
+			}
+		})
+	}
+}
+
+// extractIssuePatternLiterals returns the JS regex source of every
+// `const issuePattern = /.../gi;` literal in the workflow file.
+func extractIssuePatternLiterals(t *testing.T, workflow string) []string {
+	t.Helper()
+	const marker = "const issuePattern = /"
+	const terminator = "/gi;"
+	var patterns []string
+	rest := workflow
+	for {
+		start := strings.Index(rest, marker)
+		if start < 0 {
+			return patterns
+		}
+		start += len(marker)
+		end := strings.Index(rest[start:], terminator)
+		if end < 0 {
+			t.Fatalf("issuePattern literal is not terminated: %q", rest[start:start+60])
+		}
+		patterns = append(patterns, rest[start:start+end])
+		rest = rest[start+end+len(terminator):]
+	}
+}
+
+// workflowDirectory returns the repository's GitHub workflow directory relative to this test file.
 func workflowDirectory(t *testing.T) string {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)

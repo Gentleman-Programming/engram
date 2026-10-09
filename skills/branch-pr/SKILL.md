@@ -71,16 +71,24 @@ Branch names are validated by a GitHub ruleset. Pushes that don't match **will b
 
 ## PR Body Format
 
-The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain:
+The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain one of the following:
 
 ### 1. Linked Issue (REQUIRED)
+
+Closing reference (auto-closes the issue on merge) — use only when this PR completes the issue:
 
 ```markdown
 Closes #<issue-number>
 ```
 
-Valid keywords: `Closes #N`, `Fixes #N`, `Resolves #N` (case insensitive).
-The linked issue MUST have the `status:approved` label.
+Non-closing reference (never closes the issue) — use only for a reviewable partial PR of an approved umbrella issue:
+
+```markdown
+Refs #<issue-number>
+```
+
+Valid keywords (case insensitive): `Closes #N`, `Fixes #N`, `Resolves #N` are closing references — use them only when this PR completes the issue (they auto-close it on merge). `Refs #N` is a non-closing reference for reviewable partial PRs of an approved umbrella issue; it passes the same checks but never closes the issue.
+Every referenced issue MUST have the `status:approved` label. Bare issue numbers or arbitrary prose are not accepted references.
 
 ### 2. PR Type (REQUIRED)
 
@@ -137,7 +145,7 @@ The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#
 
 | Check | Job name | What it verifies |
 |-------|----------|-----------------|
-| PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
+| PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` (closing) or `Refs #N` (non-closing) |
 | PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
 | PR Label Policy | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
 | Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
@@ -229,6 +237,8 @@ git checkout -b feat/my-feature main
 # Push and create PR
 git push -u origin feat/my-feature
 gh pr create --title "feat(scope): description" --body "Closes #N"
+# For a reviewable partial PR of an umbrella issue, reference without closing:
+gh pr create --title "feat(scope): first slice of umbrella" --body "Refs #N"
 
 # Add type label to PR
 gh pr edit <pr-number> --add-label "type:feature"
