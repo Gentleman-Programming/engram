@@ -857,7 +857,11 @@ export const Engram: Plugin = async (ctx) => {
 
       // V1 emits `task`; the V2 adapter normalizes `subagent` to `Task`.
       if ((input.tool === "task" || input.tool === "Task") && output) {
-        const text = typeof output === "string" ? output : JSON.stringify(output)
+        const text = typeof output === "string"
+          ? output
+          : typeof output?.output === "string"
+            ? output.output
+            : JSON.stringify(output)
         if (text.length > 50) {
           await engramFetch("/observations/passive", {
             method: "POST",
