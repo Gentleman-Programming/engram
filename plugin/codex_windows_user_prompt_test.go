@@ -248,6 +248,8 @@ func TestCodexWindowsNativeUserPromptTrustedPinForwardsInputAndMeetsTimingBudget
 	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/health":
+			_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
 		case "/sessions":

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"testing"
 
@@ -12,6 +13,9 @@ import (
 // SQLite's counters are library-wide: do not parallelize or run other SQLite
 // work between the highwater reset and the reads after consuming the query.
 func BenchmarkCandidateQuerySQLiteMemory(b *testing.B) {
+	if os.Getenv(candidateMemoryCountersEnv) != "1" {
+		b.Skip("SQLite allocator-memory benchmark requires " + candidateMemoryCountersEnv + "=1")
+	}
 	queries := candidateBenchmarkQueries()
 	for _, size := range []int{1000, 15000} {
 		for _, selective := range []bool{false, true} {
