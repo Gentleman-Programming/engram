@@ -74,13 +74,16 @@ func candidateBenchmarkQueries() map[string]string {
 	}
 }
 
-func candidateBenchmarkLookup(s *Store, savedID int64, query string) ([]Candidate, error) {
+func candidateBenchmarkLookup(s *Store, savedID int64, query string) (candidates []Candidate, err error) {
 	rows, err := s.db.Query(query, sanitizeFTSCandidates(candidateBenchTitle+" 0"), savedID, "candidate-bench-0", "candidate-bench-0", "candidate-bench", "project", 0.0, 5)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var candidates []Candidate
+	defer func() {
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	for rows.Next() {
 		var c Candidate
 		if err := rows.Scan(&c.ID, &c.SyncID, &c.Title, &c.Type, &c.TopicKey, &c.Score); err != nil {
