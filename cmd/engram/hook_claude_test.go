@@ -939,6 +939,46 @@ func TestClaudeConflictDenialNamesSessionProjects(t *testing.T) {
 	}
 }
 
+func TestClaudeDegradedSessionLookupFailsClosed(t *testing.T) {
+	// A session lookup that errors (5xx) must deny with a named cause instead
+	// of silently re-deriving the write's project from the cwd: a degraded
+	// answer is not "first registration" (#1717 review follow-up).
+	var derived bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+		case r.URL.Path == "/project/current":
+			derived = true
+			_, _ = io.WriteString(w, `{"project":"docs","project_source":"dir_basename"}`)
+		case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+			t.Errorf("cwd-derived registration reached the server after a failed lookup")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"id":"s9","status":"created"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ENGRAM_URL", server.URL)
+	input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+	var hook struct {
+		HookSpecificOutput struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+		t.Fatal(err)
+	}
+	reason := hook.HookSpecificOutput.PermissionDecisionReason
+	if hook.HookSpecificOutput.PermissionDecision != "deny" || !strings.Contains(reason, "session lookup failed") || derived {
+		t.Fatalf("degraded lookup must fail closed with a named cause, got %q derived=%v", reason, derived)
+	}
+}
+
 func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	if shouldCheckForUpdates([]string{"hook", "claude-pre-tool-use"}) {
 		t.Fatal("internal hook must not run the update check before emitting a Claude hook response")

@@ -132,8 +132,14 @@ func confirmHookSession(id, cwd string, projectOwned bool) (confirmationErr erro
 	// A registered session owns its project: confirm the write against that
 	// owner instead of re-deriving a project from the shell's current cwd
 	// (#1717). The cwd names the project only on first registration, and rows
-	// without a project (legacy upgraded stores) keep the derived path.
-	if owner, ok := hookSessionOwnerProject(ctx, client, base, id); ok {
+	// without a project (legacy upgraded stores) keep the derived path. A
+	// lookup that fails outright denies the write: a degraded answer is not a
+	// first registration.
+	owner, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
+	if lookupErr != nil {
+		return lookupErr
+	}
+	if known {
 		return hookRegisterSession(ctx, client, base, id, owner, cwd, projectOwned)
 	}
 	project, resolutionErr := hookResolveCwdProject(ctx, client, base, cwd)
@@ -144,23 +150,46 @@ func confirmHookSession(id, cwd string, projectOwned bool) (confirmationErr erro
 }
 
 // hookSessionOwnerProject reports the project a persisted session is bound
-// to. Ended sessions count too: their registration attempt is refused by the
-// server with session_already_ended, which the denial names. Sessions without
-// a project, and lookups that fail or miss, return ok=false so the caller
-// falls back to cwd-derived first registration.
-func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id string) (string, bool) {
-	var session struct {
-		Project string  `json:"project"`
-		EndedAt *string `json:"ended_at"`
+// to. Only a missing session (404) or a legacy blank-project row defers to
+// cwd-derived first registration; every other lookup failure returns an
+// error so the gate fails closed instead of silently re-deriving the write's
+// project from a degraded answer (#1717 review follow-up). Ended sessions
+// count too: their registration attempt is refused by the server with
+// session_already_ended, which the denial names.
+func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id string) (owner string, known bool, lookupErr error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return "", false, &hookDenialError{message: "host session lookup failed"}
 	}
-	if !codexJSON(ctx, client, http.MethodGet, base+"/sessions/"+url.PathEscape(id), nil, &session) {
-		return "", false
+	response, err := client.Do(request)
+	if err != nil || response == nil {
+		return "", false, &hookDenialError{message: "host session lookup failed"}
 	}
-	owner := strings.TrimSpace(session.Project)
-	if owner == "" {
-		return "", false
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit))
+	if err != nil {
+		return "", false, &hookDenialError{message: "host session lookup failed"}
 	}
-	return owner, true
+	switch {
+	case response.StatusCode == http.StatusNotFound:
+		// Unknown session: first registration derives the project from cwd.
+		return "", false, nil
+	case response.StatusCode >= 200 && response.StatusCode < 300:
+		var session struct {
+			Project string `json:"project"`
+		}
+		if json.Unmarshal(body, &session) != nil {
+			return "", false, &hookDenialError{message: "host session lookup failed (malformed session)"}
+		}
+		owner := strings.TrimSpace(session.Project)
+		if owner == "" {
+			// Legacy blank-project row: keep the cwd-derived repair path.
+			return "", false, nil
+		}
+		return owner, true, nil
+	default:
+		return "", false, &hookDenialError{message: fmt.Sprintf("host session lookup failed (HTTP %d)", response.StatusCode)}
+	}
 }
 
 // hookResolveCwdProject derives the project for a first registration from the
