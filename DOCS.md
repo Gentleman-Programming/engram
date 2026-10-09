@@ -163,6 +163,8 @@ sqlite3 (Join-Path $env:ENGRAM_DATA_DIR 'engram.db') 'PRAGMA integrity_check;'
 
 Engram does not auto-repair, quarantine, checkpoint, or fall back to rollback journaling for this condition.
 
+For constrained environments without local disks (such as diskless HPC clusters or shared research computing environments where accounts lack root and home directories are mounted over NFS), set `ENGRAM_ALLOW_UNSAFE_NFS=1` (or `true`) to bypass this startup check. Engram will emit a warning to stderr on startup and continue without failing. Running SQLite over network filesystems carries an inherent risk of database corruption and lock contention.
+
 ---
 
 ## CLI Reference

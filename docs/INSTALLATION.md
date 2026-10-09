@@ -228,6 +228,7 @@ Engram does not auto-repair, quarantine, checkpoint, or use rollback journaling 
 | Variable | Description | Default |
 |---|---|---|
 | `ENGRAM_DATA_DIR` | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided. | `~/.engram` (Windows: `%USERPROFILE%\.engram`) |
+| `ENGRAM_ALLOW_UNSAFE_NFS` | Opt-in bypass for startup network filesystem rejection (e.g. NFS/SMB mounts in diskless HPC environments). Set to `1` or `true` to bypass with a stderr warning; risks SQLite corruption. | (unset) |
 | `ENGRAM_PORT` | HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks. | `7437` |
 | `ENGRAM_SOCKET` | POSIX-only Unix-domain socket path. Run `engram serve --socket /path/to/engram.sock` (or set `ENGRAM_SOCKET`) to listen exclusively on the socket; do not combine it with an explicit TCP port. Claude Bash hooks use the same socket when the variable is exported and warn on stderr if socket transport cannot preserve memory capture. PowerShell remains TCP-only. | (unset) |
 

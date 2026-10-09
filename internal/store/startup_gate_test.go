@@ -11,10 +11,12 @@ package store
 //     stamped by a newer engram.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -207,6 +209,48 @@ func TestNewRejectsRemoteFilesystemBeforeCreatingDataDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
 		t.Errorf("rejected startup created data directory: %v", err)
+	}
+}
+
+func TestNewAllowsRemoteFilesystemWhenUnsafeNFSAllowed(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "nfs-data")
+	t.Setenv(EnvAllowUnsafeNFS, "1")
+
+	setFilesystemInspector(t, func(path string) (filesystemInfo, error) {
+		return filesystemInfo{Type: "NFS", Support: filesystemRemote}, nil
+	})
+
+	var buf bytes.Buffer
+	oldLog := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldLog)
+
+	s, err := New(FallbackConfig(dataDir))
+	if err != nil {
+		t.Fatalf("New with %s=1 failed: %v", EnvAllowUnsafeNFS, err)
+	}
+	defer s.Close()
+
+	output := buf.String()
+	if !strings.Contains(output, "WARNING") {
+		t.Errorf("expected warning in log output; got: %q", output)
+	}
+	if !strings.Contains(output, EnvAllowUnsafeNFS) {
+		t.Errorf("expected log output to mention %s; got: %q", EnvAllowUnsafeNFS, output)
+	}
+	if !strings.Contains(output, "NFS") {
+		t.Errorf("expected log output to mention NFS; got: %q", output)
+	}
+
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Errorf("data directory was not created: %v", err)
+	}
+	if err := s.db.Ping(); err != nil {
+		t.Errorf("s.db.Ping failed: %v", err)
+	}
+	if err := s.CreateSession("ses-nfs-test", "testproject", "/tmp/nfs"); err != nil {
+		t.Errorf("CreateSession failed: %v", err)
 	}
 }
 
