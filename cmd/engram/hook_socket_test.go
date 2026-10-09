@@ -67,7 +67,7 @@ func TestNativeHooksSocket(t *testing.T) {
 		}
 	})
 	t.Run("claude", func(t *testing.T) {
-		if err := confirmHookSession("host", "/work", true); err != nil {
+		if _, err := confirmHookSession("host", "/work", true); err != nil {
 			t.Fatal(err)
 		}
 	})

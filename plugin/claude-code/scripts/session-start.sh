@@ -44,13 +44,14 @@ fi
 
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
-# Create session
+# Create session. Claude keeps the session ID on --resume, so resume=true lets
+# the server register a live continuation when the original session already ended.
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
   engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir, ownership_mode: "project_owned"}')" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: "project_owned", resume: true}')" \
     > /dev/null
 fi
 

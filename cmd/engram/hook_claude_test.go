@@ -65,8 +65,13 @@ func TestClaudeEndedRegistrationCannotPersistBoundWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	var registrationStatus int
+	production := server.New(db, 0).Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sessions/"+host,
+			r.Method == http.MethodPost && r.URL.Path == "/runtime-sessions/resolve":
+			// The gate looks for a live continuation; none exists here.
+			production.ServeHTTP(w, r)
 		case r.URL.Path == "/project/current":
 			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 		case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
@@ -962,22 +967,33 @@ func TestClaudeShellLifecyclePersistsOnlyLiveHostWrites(t *testing.T) {
 			t.Fatalf("MCP result = %s, err = %v", encoded, err)
 		}
 	}
-	if err := db.CreateSession(endedHost, project, root); err != nil {
+	// Claude keeps the session ID on --resume (#1624): SessionStart registers a
+	// live continuation for the ended root, and writes bind to that continuation.
+	if err := db.StartSessionWithOwnershipMode(endedHost, project, root, store.SessionOwnershipProjectOwned); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.EndSession(endedHost, "finished"); err != nil {
 		t.Fatal(err)
 	}
 	start(endedHost)
-	if registered, conflicted := registrations.Load(), conflicts.Load(); registered != 7 || conflicted != 1 {
+	if registered, conflicted := registrations.Load(), conflicts.Load(); registered != 7 || conflicted != 0 {
 		t.Fatalf("registrations = %d, production 409s = %d", registered, conflicted)
 	}
-	decision, bound := preToolUse(endedHost, "must not persist")
-	if decision != "deny" || bound != nil || dispatches != 4 {
-		t.Fatalf("ended host decision %q, bound %v, dispatches %d", decision, bound, dispatches)
+	continuation := endedHost + ":resume:2"
+	decision, bound := preToolUse(endedHost, "after resume")
+	if decision == "deny" || bound["session_id"] != continuation {
+		t.Fatalf("resumed host decision %q, bound %v", decision, bound)
+	}
+	call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": bound}})
+	if encoded, _ := json.Marshal(mcpServer.HandleMessage(context.Background(), call)); strings.Contains(string(encoded), `"isError":true`) {
+		t.Fatalf("resumed host MCP result = %s", encoded)
+	}
+	resumedWrites, err := db.SessionObservations(continuation, 100)
+	if err != nil || len(resumedWrites) != 1 || resumedWrites[0].Title != "after resume" {
+		t.Fatalf("continuation writes = %v, err = %v", resumedWrites, err)
 	}
 	all, err := db.AllObservations(project, "", 100)
-	if err != nil || len(all) != 4 {
+	if err != nil || len(all) != 5 {
 		t.Fatalf("observations = %d, err = %v", len(all), err)
 	}
 	for host, expected := range want {
@@ -1337,4 +1353,146 @@ func TestTransformClaudePreToolUseFailsClosedForMalformedAuthoritativeInput(t *t
 			t.Fatalf("malformed authoritative input response = %#v, want PreToolUse deny", response.HookSpecificOutput)
 		}
 	}
+}
+
+// Issue #1624: Claude keeps its session ID on --resume. SessionStart registers
+// the resumed host as a continuation; gated writes must bind to that live
+// continuation while the ended root stays ended.
+func TestClaudeResumedSessionBindsWritesToLiveContinuation(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const host = "claude-resumed-host"
+	if err := db.StartSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(host, "quit"); err != nil {
+		t.Fatal(err)
+	}
+	continuation, err := db.ResumeSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned)
+	if err != nil || continuation != host+":resume:2" {
+		t.Fatalf("resume = %q, %v", continuation, err)
+	}
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, `{"project":"client","project_source":"config"}`)
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+
+	for _, tool := range []struct{ name, field string }{
+		{"mcp__engram__mem_save", "session_id"},
+		{"mcp__engram__mem_session_end", "id"},
+	} {
+		input, _ := json.Marshal(map[string]any{
+			"session_id": host, "cwd": root, "tool_name": tool.name,
+			"tool_input": map[string]any{"title": "after resume", "content": "c", tool.field: "untrusted-model-id"},
+		})
+		var response struct {
+			HookSpecificOutput claudeGateVerdict `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(guardClaudePreToolUse(input), &response); err != nil {
+			t.Fatal(err)
+		}
+		got := response.HookSpecificOutput
+		if got.PermissionDecision == "deny" || got.UpdatedInput[tool.field] != continuation {
+			t.Fatalf("%s after resume = %+v, want bound to %s", tool.name, got, continuation)
+		}
+		if tool.field == "session_id" {
+			call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "mem_save", "arguments": got.UpdatedInput}})
+			encoded, _ := json.Marshal(mcp.NewServerWithConfig(db, mcp.MCPConfig{DefaultProject: "client"}, nil).HandleMessage(context.Background(), call))
+			if strings.Contains(string(encoded), `"isError":true`) {
+				t.Fatalf("MCP save after resume: %s", encoded)
+			}
+		}
+	}
+	saved, err := db.SessionObservations(continuation, 10)
+	if err != nil || len(saved) != 1 {
+		t.Fatalf("continuation observations = %v, %v", saved, err)
+	}
+	ended, err := db.GetSession(host)
+	if err != nil || ended.EndedAt == nil {
+		t.Fatalf("ended root reopened: %+v, %v", ended, err)
+	}
+	if _, err := db.GetSession("untrusted-model-id"); err == nil {
+		t.Fatal("model-supplied session was created")
+	}
+}
+
+// Without a live continuation an ended host stays refused, now with its cause.
+func TestClaudeEndedSessionWithoutLiveContinuationDenies(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		endContinuation bool
+	}{
+		{"never resumed", false},
+		{"continuation ended too", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			const host = "claude-ended-host"
+			if err := db.StartSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.EndSession(host, "quit"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.endContinuation {
+				continuation, err := db.ResumeSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.EndSession(continuation, "quit again"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			production := server.New(db, 0).Handler()
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/project/current" {
+					_, _ = io.WriteString(w, `{"project":"client","project_source":"config"}`)
+					return
+				}
+				production.ServeHTTP(w, r)
+			}))
+			defer endpoint.Close()
+			t.Setenv("ENGRAM_URL", endpoint.URL)
+
+			input, _ := json.Marshal(map[string]any{
+				"session_id": host, "cwd": root, "tool_name": "mcp__engram__mem_save",
+				"tool_input": map[string]any{"title": "t", "content": "c"},
+			})
+			var response struct {
+				HookSpecificOutput claudeGateVerdict `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(guardClaudePreToolUse(input), &response); err != nil {
+				t.Fatal(err)
+			}
+			got := response.HookSpecificOutput
+			want := "Claude host session registration could not be confirmed (session_already_ended)"
+			if got.PermissionDecision != "deny" || got.PermissionDecisionReason != want || got.UpdatedInput != nil {
+				t.Fatalf("ended host = %+v, want deny %q", got, want)
+			}
+			if _, err := db.GetSession(host + ":resume:3"); err == nil {
+				t.Fatal("gate created a continuation")
+			}
+		})
+	}
+}
+
+type claudeGateVerdict struct {
+	PermissionDecision       string         `json:"permissionDecision"`
+	PermissionDecisionReason string         `json:"permissionDecisionReason"`
+	UpdatedInput             map[string]any `json:"updatedInput"`
 }

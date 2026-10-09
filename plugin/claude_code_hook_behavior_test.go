@@ -954,6 +954,7 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 		Project       string `json:"project"`
 		Directory     string `json:"directory"`
 		OwnershipMode string `json:"ownership_mode"`
+		Resume        bool   `json:"resume"`
 	}
 	var registrations int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -993,6 +994,11 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 	}
 	if registered.OwnershipMode != "project_owned" {
 		t.Fatalf("ownership_mode = %q, want project_owned", registered.OwnershipMode)
+	}
+	// Issue #1624: Claude reuses the session ID on --resume; resume lets the
+	// server register a live continuation instead of refusing the ended root.
+	if !registered.Resume {
+		t.Fatal("session registration must request resume")
 	}
 }
 

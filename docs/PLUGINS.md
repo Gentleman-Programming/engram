@@ -144,7 +144,7 @@ plugin/claude-code/
 │   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
 │   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
-│   └── session-end.sh             # Logs end-of-session event at session end
+│   └── session-end.sh             # Ends the session (or its live resume continuation)
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
 ```
 
@@ -152,15 +152,16 @@ plugin/claude-code/
 
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
-   Before rewriting input, the hook resolves the project and confirms project-owned session registration using one shared four-second HTTP budget. This leaves one second within the configured five-second hook timeout for process startup and verdict output. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; other registration failures retain `Claude host session registration could not be confirmed`. Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
+   Before rewriting input, the hook resolves the project and confirms project-owned session registration using one shared four-second HTTP budget. This leaves one second within the configured five-second hook timeout for process startup and verdict output. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; other registration failures deny with `Claude host session registration could not be confirmed`, followed by the server's error code when it returns one (for example `(session_already_ended)`). Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
+   Claude Code keeps the same `session_id` on `--resume`. When that original session has already ended, the hook binds the call to the live `<id>:resume:N` continuation that SessionStart registered, resolved from the original session's persisted project and directory. The ended session stays ended, and the hook never creates a continuation itself; with no live continuation the call is denied with `(session_already_ended)`.
 2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 
 Session binding is best-effort if the host times out the PreToolUse hook: normal permission flow can continue without the rewrite, so an explicit wrong same-project session ID might be persisted. This limitation was reproduced with an induced one-second hook timeout in a scratch test; it has not been observed with the production hook timeout.
 
-**On session start** (`startup`):
+**On session start** (`startup`, `resume`, `clear`, `fork`):
 1. Ensures the engram HTTP server is running
-2. Creates a new session via the API
+2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration
 3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
 4. Injects previous session context into Claude's initial context
 
@@ -168,6 +169,9 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 1. Injects the previous session context + compacted summary
 2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
 3. This ensures no work is lost when context is compressed
+
+**On session end**:
+The hook looks up the session first. If the original session has already ended (a resumed conversation), it ends the live continuation through `POST /runtime-sessions/end` with the session's persisted project, directory, and ownership mode; otherwise it calls `POST /sessions/{id}/end` as before. Both calls are bounded and fail open.
 
 **On user prompt submit**:
 The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompts/capture-decision` endpoint whether to capture a prompt. This replaces capture's former `GET /project/current` read, rather than adding another human-prompt preflight. Go skips blank prompts and prompts whose trimmed content starts with `<task-notification>` or `<agent-message`; only a valid `capture` decision with canonical project metadata permits `POST /prompts`, using the original content unchanged. Filtering affects persistence only, not ToolSearch or save reminders, and does not delete existing rows. The Windows Git Bash safe path remains builtin-only and skips all prompt persistence and API calls.

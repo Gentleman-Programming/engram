@@ -100,8 +100,13 @@ func guardClaudePreToolUse(input []byte) []byte {
 	if !idOK || !cwdOK {
 		return claudePreToolUseDeny("Claude " + errHookSessionUnconfirmed.Error())
 	}
-	if err := confirmHookSession(id, cwd, true); err != nil {
+	effective, err := confirmHookSession(id, cwd, true)
+	if err != nil {
 		return hookSessionConfirmationDeny("Claude", err)
+	}
+	if effective != id {
+		payload["session_id"], _ = json.Marshal(effective)
+		input, _ = json.Marshal(payload)
 	}
 	return transformClaudePreToolUse(input)
 }
@@ -110,13 +115,18 @@ func hookSessionConfirmationDeny(agent string, err error) []byte {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return claudePreToolUseDeny(agent + " host session confirmation timed out (server slow or unavailable)")
 	}
+	if errors.Is(err, errHookSessionUnconfirmed) {
+		return claudePreToolUseDeny(agent + " " + err.Error())
+	}
 	return claudePreToolUseDeny(agent + " " + errHookSessionUnconfirmed.Error())
 }
 
-func confirmHookSession(id, cwd string, projectOwned bool) (confirmationErr error) {
+// confirmHookSession returns the session ID writes must use: the host ID, or
+// the live continuation that SessionStart registered after a resume.
+func confirmHookSession(id, cwd string, projectOwned bool) (effective string, confirmationErr error) {
 	base, client := hookEndpointClient("")
 	if base == "" {
-		return errHookSessionUnconfirmed
+		return "", errHookSessionUnconfirmed
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationTimeout)
 	defer func() {
@@ -129,38 +139,112 @@ func confirmHookSession(id, cwd string, projectOwned bool) (confirmationErr erro
 	}()
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
-		return errHookSessionUnconfirmed
+		return "", errHookSessionUnconfirmed
 	}
 	project, ok := codexProjectAuthority(authority)
 	if !ok {
-		return errHookSessionUnconfirmed
+		return "", errHookSessionUnconfirmed
 	}
-	registration := map[string]string{"id": id, "project": project, "directory": cwd}
+	code, err := registerHookSession(ctx, client, base, id, project, cwd, projectOwned)
+	if code != "session_already_ended" {
+		return id, err
+	}
+	// Claude keeps the session ID on --resume, so the root stays ended and
+	// SessionStart registered a continuation. Bind to it only if it is live;
+	// the gate itself never creates one (#1624).
+	continuation, ok := liveHookContinuation(ctx, client, base, id)
+	if !ok {
+		return "", err
+	}
+	return continuation.ID, nil
+}
+
+// registerHookSession posts one registration and returns the server's error
+// code, if any, so callers can tell an ended session from other failures.
+func registerHookSession(ctx context.Context, client *http.Client, base, id, project, directory string, projectOwned bool) (string, error) {
+	registration := map[string]string{"id": id, "project": project, "directory": directory}
 	if projectOwned {
 		registration["ownership_mode"] = "project_owned"
 	}
 	body, _ := json.Marshal(registration)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/sessions", strings.NewReader(string(body)))
 	if err != nil {
-		return errHookSessionUnconfirmed
+		return "", errHookSessionUnconfirmed
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil || resp == nil {
-		return errHookSessionUnconfirmed
+		return "", errHookSessionUnconfirmed
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
-		return errHookSessionUnconfirmed
+		var failure struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&failure)
+		if !hookSessionErrorCode(failure.Code) {
+			return "", errHookSessionUnconfirmed
+		}
+		return failure.Code, fmt.Errorf("%w (%s)", errHookSessionUnconfirmed, failure.Code)
 	}
 	var result struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil || result.ID != id || result.Status != "created" {
-		return errHookSessionUnconfirmed
+		return "", errHookSessionUnconfirmed
 	}
-	return nil
+	return "", nil
+}
+
+type hookSession struct {
+	ID            string  `json:"id"`
+	Project       string  `json:"project"`
+	Directory     string  `json:"directory"`
+	OwnershipMode string  `json:"ownership_mode"`
+	EndedAt       *string `json:"ended_at"`
+}
+
+// liveHookContinuation resolves the live continuation of an ended root from
+// the root's persisted scope and renews its lease. It never registers a new
+// identity; any failure reports false so the gate fails closed.
+func liveHookContinuation(ctx context.Context, client *http.Client, base, root string) (hookSession, bool) {
+	var persisted hookSession
+	if !codexJSON(ctx, client, http.MethodGet, base+"/sessions/"+url.PathEscape(root), nil, &persisted) ||
+		persisted.ID != root || strings.TrimSpace(persisted.Project) == "" || strings.TrimSpace(persisted.Directory) == "" {
+		return hookSession{}, false
+	}
+	scope, _ := json.Marshal(map[string]string{
+		"id": root, "project": persisted.Project, "directory": persisted.Directory, "ownership_mode": persisted.OwnershipMode,
+	})
+	var resolved struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		ResumedFrom string `json:"resumed_from"`
+	}
+	if !codexJSON(ctx, client, http.MethodPost, base+"/runtime-sessions/resolve", scope, &resolved) ||
+		resolved.Status != "resolved" || resolved.ResumedFrom != root || !codexContinuation(resolved.ID, root) {
+		return hookSession{}, false
+	}
+	if _, err := registerHookSession(ctx, client, base, resolved.ID, persisted.Project, persisted.Directory, persisted.OwnershipMode == "project_owned"); err != nil {
+		return hookSession{}, false
+	}
+	persisted.ID = resolved.ID
+	return persisted, true
+}
+
+// hookSessionErrorCode accepts only short snake_case server codes, so a denial
+// reason never echoes arbitrary response text.
+func hookSessionErrorCode(code string) bool {
+	if code == "" || len(code) > 64 {
+		return false
+	}
+	for _, r := range code {
+		if (r < 'a' || r > 'z') && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // transformClaudePreToolUse consumes Claude Code's authoritative PreToolUse
