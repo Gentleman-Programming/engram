@@ -979,6 +979,79 @@ func TestClaudeDegradedSessionLookupFailsClosed(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionLookupOutcomes(t *testing.T) {
+	// Pin every session-lookup outcome (#1762 review follow-up): transport
+	// failures, malformed 2xx payloads, and mismatched session IDs deny
+	// without ever touching cwd resolution; a legacy blank-project row defers
+	// to the cwd path and allows the write.
+	for _, tc := range []struct {
+		name       string
+		sessionGet func(w http.ResponseWriter)
+		wantAllow  bool
+	}{
+		{"transport failure denies without cwd resolution", nil, false},
+		{"malformed 2xx session denies without cwd resolution", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{`)
+		}, false},
+		{"mismatched session id denies", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"other","project":"docs"}`)
+		}, false},
+		{"blank project defers to cwd resolution", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"s9","project":""}`)
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var derived, posted bool
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+					tc.sessionGet(w)
+				case r.URL.Path == "/project/current":
+					derived = true
+					_, _ = io.WriteString(w, `{"project":"docs","project_source":"dir_basename"}`)
+				case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+					posted = true
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, `{"id":"s9","status":"created"}`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Setenv("ENGRAM_URL", endpoint.URL)
+			if tc.sessionGet == nil {
+				endpoint.Close() // transport failure: connection refused
+			} else {
+				defer endpoint.Close()
+			}
+			input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+			var hook struct {
+				HookSpecificOutput struct {
+					PermissionDecision       string         `json:"permissionDecision"`
+					PermissionDecisionReason string         `json:"permissionDecisionReason"`
+					UpdatedInput             map[string]any `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+				t.Fatal(err)
+			}
+			bound := hook.HookSpecificOutput
+			if tc.wantAllow {
+				if bound.PermissionDecision == "deny" || bound.UpdatedInput["session_id"] != "s9" || !derived || !posted {
+					t.Fatalf("blank-project row must defer to cwd resolution and allow: decision=%q derived=%v posted=%v (%s)", bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
+				}
+				return
+			}
+			if bound.PermissionDecision != "deny" || bound.UpdatedInput != nil || derived || posted {
+				t.Fatalf("%s must deny without cwd resolution or registration: decision=%q derived=%v posted=%v (%s)", tc.name, bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
+			}
+			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") {
+				t.Fatalf("%s must name the lookup cause, got %q", tc.name, bound.PermissionDecisionReason)
+			}
+		})
+	}
+}
+
 func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	if shouldCheckForUpdates([]string{"hook", "claude-pre-tool-use"}) {
 		t.Fatal("internal hook must not run the update check before emitting a Claude hook response")

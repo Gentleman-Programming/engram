@@ -176,9 +176,10 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 		return "", false, nil
 	case response.StatusCode >= 200 && response.StatusCode < 300:
 		var session struct {
+			ID      string `json:"id"`
 			Project string `json:"project"`
 		}
-		if json.Unmarshal(body, &session) != nil {
+		if json.Unmarshal(body, &session) != nil || session.ID != id {
 			return "", false, &hookDenialError{message: "host session lookup failed (malformed session)"}
 		}
 		owner := strings.TrimSpace(session.Project)
