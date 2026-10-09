@@ -97,7 +97,7 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage             = "npm:gentle-engram@0.3.0"
+	piGentleEngramPackage             = "npm:gentle-engram@0.4.0"
 	piLegacyGentleEngramPackage       = "npm:gentle-engram@0.1.8"
 	piPreviousGentleEngramPackage     = "npm:gentle-engram@0.1.11"
 	piPriorGentleEngramPackage        = "npm:gentle-engram@0.1.12"
@@ -105,6 +105,7 @@ const (
 	piFormerGentleEngramPackage       = "npm:gentle-engram@0.1.15"
 	piEarlierGentleEngramPackage      = "npm:gentle-engram@0.1.16"
 	piPriorReleaseGentleEngramPackage = "npm:gentle-engram@0.2.0"
+	piLastReleaseGentleEngramPackage  = "npm:gentle-engram@0.3.0"
 )
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -361,7 +362,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage:
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage:
 				changed = true
 				continue
 			case piGentleEngramPackage:

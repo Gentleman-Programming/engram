@@ -62,7 +62,7 @@ Install Engram's Pi-native package:
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.2.0`, then ensures Pi settings contain that package, replacing earlier `0.1.8`, `0.1.11`, `0.1.12`, `0.1.14`, `0.1.15`, and `0.1.16` pins when present. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. Earlier `0.1.16` `pi-engram init` still registers Engram MCP and must not be used for native-only setup; version `0.2.0` init does not create or change `mcp.json` and warns about an existing `mcpServers.engram` entry. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
+This source version of `engram setup pi` runs `pi install npm:gentle-engram@0.4.0`, then ensures Pi settings contain that package, replacing earlier `0.1.8`, `0.1.11`, `0.1.12`, `0.1.14`, `0.1.15`, `0.1.16`, `0.2.0`, and `0.3.0` pins when present. Released Engram core `3.3.0` still pins `0.3.0`; use the explicit manual install below to select `0.4.0`. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. Earlier `0.1.16` `pi-engram init` still registers Engram MCP and must not be used for native-only setup; version `0.2.0` init does not create or change `mcp.json` and warns about an existing `mcpServers.engram` entry. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
 
 Pi 0.99.0 and later ship built-in MCP (`mcp.json`, `/mcp`, `pi mcp add`); an installed `pi-mcp-adapter` replaces that built-in support, so neither `engram setup pi` nor `pi-engram init` adds it. An existing adapter entry in `settings.json` is left untouched.
 
@@ -73,7 +73,7 @@ When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also
 Manual equivalent:
 
 ```bash
-pi install npm:gentle-engram@0.2.0
+pi install npm:gentle-engram@0.4.0
 ```
 
 Restart Pi after installation.
