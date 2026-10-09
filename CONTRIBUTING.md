@@ -339,6 +339,37 @@ Why hybrid:
 
 ---
 
+## Automated Dependency Updates
+
+Dependabot preserves the existing Go, GitHub Actions and Docker coverage and
+checks Obsidian's `plugin/obsidian/package.json` and tracked lockfile every
+Monday at 09:00 UTC. The npm job allows at most three open version-update PRs
+and has a three-day cooldown for new versions. The cooldown does not apply to
+security updates and does not replace dependency vetting or npm install safety.
+Pi coverage is deferred; its current manifest declares only peer dependencies.
+
+Bot-authored PRs are not exempt from the approved-issue checks:
+
+1. A maintainer creates or reuses an issue covering the specific proposed update
+   and approves it with `status:approved`.
+2. Add `Closes #N`, `Fixes #N`, or `Resolves #N` to the bot PR body, preserving
+   the generated update details. Do not reuse the configuration setup issue as
+   authorization for subsequent dependency upgrades.
+3. Keep exactly one canonical `type:chore` label. The PR remains blocked until
+   the required issue checks pass; CI and human review still decide merge.
+
+No automatic issue approval, check bypass or auto-merge is configured.
+The npm-hygiene audit is separate: preserving the root `.npmrc` is not proof
+that independent nested-package installs enforce its controls.
+
+Run `go test . -run '^TestDependabot' -count=1` to check the versioned policy
+and preservation of the other ecosystems. After merge to the default branch,
+inspect Dependabot's update logs and an actual Obsidian update PR for
+manifest/lockfile consistency, labels and passing checks. Configuration tests
+do not prove vendor-schema validation, bot execution or successful rollout.
+
+---
+
 ## Maintainer Triage Cadence
 
 Engram uses a lightweight, regular cadence so contributors know what to expect.
