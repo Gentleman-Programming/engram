@@ -165,28 +165,68 @@ func codexRegisterAt(ctx context.Context, client *http.Client, base, host, cwd, 
 	return codexAcknowledgedID(fields, host, true)
 }
 
+const codexCoreUpgradeReason = "Engram core lacks runtime session resolution. Upgrade the core to match the CLI, then manually restart the running Engram server and start a new Codex session."
+
 func codexRuntimeAt(ctx context.Context, client *http.Client, base, host, cwd, project, operation string) string {
+	id, _ := codexRuntimeResult(ctx, client, base, host, cwd, project, operation)
+	return id
+}
+
+func codexRuntimeResult(ctx context.Context, client *http.Client, base, host, cwd, project, operation string) (string, string) {
+	const failure = "Codex host session resolution could not be confirmed"
+	if operation == "resolve" {
+		var health struct {
+			Status       string          `json:"status"`
+			Service      string          `json:"service"`
+			Capabilities map[string]bool `json:"capabilities"`
+		}
+		if !codexJSON(ctx, client, http.MethodGet, base+"/health", nil, &health) || health.Status != "ok" || health.Service != "engram" {
+			return "", "Cannot confirm Engram core health response; check the server endpoint and connection"
+		}
+		if !health.Capabilities["runtime_session_resolution"] {
+			return "", codexCoreUpgradeReason
+		}
+	}
 	body, _ := json.Marshal(map[string]string{"id": host, "directory": cwd, "project": project})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/runtime-sessions/"+operation, strings.NewReader(string(body)))
 	if err != nil {
-		return ""
+		return "", failure
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return ""
+		return "", failure
 	}
 	defer func() { _ = response.Body.Close() }()
 	var fields map[string]json.RawMessage
-	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&fields) != nil {
-		return ""
+	data, readErr := io.ReadAll(io.LimitReader(response.Body, 65537))
+	decodeErr := json.Unmarshal(data, &fields)
+	if readErr != nil || len(data) > 65536 {
+		return "", failure
+	}
+	if response.StatusCode == http.StatusNotFound && operation == "resolve" {
+		var message string
+		if decodeErr == nil && json.Unmarshal(fields["error"], &message) == nil && message == "sql: no rows in result set" {
+			return "", "Codex host session is not registered; start a new Codex session to register it"
+		}
+		// A plain HTTP 404 is an absent route, not a missing identity.
+		if decodeErr != nil && strings.TrimSpace(string(data)) == "404 page not found" {
+			return "", codexCoreUpgradeReason
+		}
+	}
+	if response.StatusCode != http.StatusOK || decodeErr != nil {
+		return "", failure
 	}
 	var status string
 	if json.Unmarshal(fields["status"], &status) != nil || (operation == "resolve" && status != "resolved") || (operation == "end" && status != "ended") {
-		return ""
+		return "", failure
 	}
 	fields["status"] = json.RawMessage(`"created"`)
-	return codexAcknowledgedID(fields, host, true)
+	id := codexAcknowledgedID(fields, host, true)
+	if id == "" {
+		return "", failure
+	}
+	return id, ""
 }
 
 func cmdCodexLifecycle(action string) {
@@ -215,28 +255,34 @@ func runCodexLifecycle(action string, data []byte, base string) string {
 
 // The guard owns its context so a failed resolution can retain timeout evidence.
 func runCodexLifecycleContext(ctx context.Context, action string, data []byte, base string) string {
+	id, _ := runCodexLifecycleResult(ctx, action, data, base)
+	return id
+}
+
+func runCodexLifecycleResult(ctx context.Context, action string, data []byte, base string) (string, string) {
+	const failure = "Codex host session resolution could not be confirmed"
 	var in codexPromptInput
 	if json.Unmarshal(data, &in) != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.CWD) == "" || base == "" {
-		return ""
+		return "", failure
 	}
 	_, client := hookEndpointClient(base)
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
-		return ""
+		return "", failure
 	}
 	project, ok := codexProjectAuthority(authority)
 	if !ok {
-		return ""
+		return "", failure
 	}
 	switch action {
 	case "codex-register":
-		return codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, project)
+		return codexRegisterAt(ctx, client, base, in.SessionID, in.CWD, project), ""
 	case "codex-resolve":
-		return codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, project, "resolve")
+		return codexRuntimeResult(ctx, client, base, in.SessionID, in.CWD, project, "resolve")
 	case "codex-session-end":
 		_ = codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, project, "end")
 	}
-	return ""
+	return "", failure
 }
 
 // hookEndpointClient shares endpoint selection across native hooks. Explicit TCP
@@ -362,7 +408,14 @@ func codexJSON(ctx context.Context, c *http.Client, method, endpoint string, bod
 		return false
 	}
 	defer func() { _ = response.Body.Close() }()
-	return response.StatusCode >= 200 && response.StatusCode < 300 && (target == nil || json.NewDecoder(response.Body).Decode(target) == nil)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false
+	}
+	if target == nil {
+		return true
+	}
+	decoder := json.NewDecoder(response.Body)
+	return decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
 }
 func codexNudgeAllowed(path string, now time.Time) bool {
 	cooldown := 15 * time.Minute

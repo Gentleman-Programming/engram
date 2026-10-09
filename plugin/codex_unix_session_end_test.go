@@ -284,7 +284,7 @@ func codexFixtureEndpoint(t *testing.T, port *string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, body, found := strings.Cut(string(data), "func codexHookURL() string {")
+	_, body, found := strings.Cut(strings.ReplaceAll(string(data), "\r\n", "\n"), "func codexHookURL() string {")
 	body, _, ended := strings.Cut(body, "\n}\n")
 	if !found || !ended {
 		t.Fatal("endpoint selector boundary changed")

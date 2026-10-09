@@ -23,6 +23,8 @@ func TestNativeHooksSocket(t *testing.T) {
 		switch r.URL.Path {
 		case "/sessions/host":
 			w.WriteHeader(http.StatusNotFound)
+		case "/health":
+			codexMockHealth(w)
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"socket-project","project_source":"config"}`)
 		case "/sessions":

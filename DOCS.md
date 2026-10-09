@@ -798,6 +798,9 @@ value or selecting ordinary tests/other benchmarks exits with status 2 before
 SQLite configuration. The default unset variable leaves normal test startup
 unchanged. This variable is not an Engram runtime setting and does not enable
 counters in production or persist an environment change in the parent shell.
+Without the opt-in, the allocator benchmark skips before creating fixtures and
+prints the required variable; ordinary all-benchmark runs remain supported.
+Startup subprocess checks also accept the successful coverage summary from `go test -cover`.
 
 The benchmark compares the frozen baseline with actual production SQL, verifies
 five identical candidates, and reports mean SQLite allocator current-before,
@@ -810,7 +813,7 @@ These are library-wide `sqlite3_memory_used`/`sqlite3_memory_highwater` counters
 not temporary-only memory, Go heap, RSS, or disk usage; configured auxiliary
 PAGECACHE memory is excluded. Warm-up, allocator globals, and cache history can
 still affect comparisons even across fresh fixtures. No hard memory bound is
-asserted; unavailable or inconsistent counters fail explicitly. The standard
+asserted; with the opt-in enabled, unavailable or inconsistent counters fail explicitly. The standard
 `ns/op` covers both queries together, not individual query latency. Measurement
 results must be collected on the target host; no results are implied here.
 
