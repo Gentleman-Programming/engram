@@ -3,52 +3,10 @@ package store
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-
-	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
-
-func runtimeScopeTestPath(root, path string) string {
-	relative := func(value string) string {
-		rel, err := filepath.Rel(projectpkg.RuntimeWorktreeDirectory(root), value)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "<outside-test-root>"
-		}
-		return filepath.ToSlash(rel)
-	}
-	canonical := projectpkg.RuntimeWorktreeDirectory(path)
-	return fmt.Sprintf("{stored=%q canonical=%q equal=%t}", relative(path), relative(canonical), path == canonical)
-}
-
-func runtimeSessionDiagnostic(root string, rootSession *Session, rootErr error, continuation *Session, continuationErr error, requested string) string {
-	rootPath := "<missing>"
-	if rootSession != nil {
-		rootPath = runtimeScopeTestPath(root, rootSession.Directory)
-	}
-	continuationPath := "<missing>"
-	if continuation != nil {
-		continuationPath = runtimeScopeTestPath(root, continuation.Directory)
-	}
-	return fmt.Sprintf("runtime scope diagnostic: root=%s root_read=%v continuation=%s continuation_read=%v requested=%s", rootPath, rootErr, continuationPath, continuationErr, runtimeScopeTestPath(root, requested))
-}
-
-func TestRuntimeSessionScopeAndConcurrencyDiagnosticHandlesNilSessions(t *testing.T) {
-	root := t.TempDir()
-	requested := root + string(filepath.Separator) + "."
-	diagnostic := runtimeSessionDiagnostic(root, nil, sql.ErrNoRows, nil, sql.ErrNoRows, requested)
-	for _, want := range []string{"root=<missing>", "root_read=sql: no rows in result set", "continuation=<missing>", "continuation_read=sql: no rows in result set", "requested={stored=\"", "canonical=\".\"", "equal=false}"} {
-		if !strings.Contains(diagnostic, want) {
-			t.Fatalf("diagnostic %q missing %q", diagnostic, want)
-		}
-	}
-	if strings.Contains(diagnostic, root) {
-		t.Fatalf("diagnostic exposed temp root %q: %s", root, diagnostic)
-	}
-}
 
 func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 	root := t.TempDir()
@@ -72,9 +30,6 @@ func TestRuntimeSessionScopeAndConcurrency(t *testing.T) {
 	for _, host := range []string{"one", "two", "one"} {
 		id, err := s.ResolveRuntimeSessionWithOwnershipMode(host, project, filepath.Join(root, "."), SessionOwnershipShared)
 		if err != nil || id != host+":resume:2" {
-			rootSession, rootErr := s.GetSession(host)
-			continuation, continuationErr := s.GetSession(host + ":resume:2")
-			t.Log(runtimeSessionDiagnostic(root, rootSession, rootErr, continuation, continuationErr, filepath.Join(root, ".")))
 			t.Fatalf("resolve %s = %q, %v", host, id, err)
 		}
 	}
