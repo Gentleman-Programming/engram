@@ -61,7 +61,31 @@ Non-required PR checks include the Claude plugin version guard, lint, Windows se
 
 ### Merge Queue Activation (administrators)
 
-Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
+The `main` merge queue is already active. Contributors submit eligible PRs to the
+queue; the six required contexts above also run on each merge group.
+
+The effective queue rule was observed on **2026-10-09** with these settings:
+
+| Setting | Observed value |
+|---------|----------------|
+| Grouping strategy | `ALLGREEN` |
+| Merge method | `SQUASH` |
+| Check response timeout | 60 minutes |
+| Maximum entries to build (`max_entries_to_build`) | 5 |
+| Minimum entries to merge (`min_entries_to_merge`) | 1 |
+| Maximum entries to merge (`max_entries_to_merge`) | 5 |
+| Minimum-group wait (`min_entries_to_merge_wait_minutes`) | 5 minutes |
+
+This is an observed configuration snapshot, not a recommendation to change
+settings or a guarantee that they remain unchanged. Consult the
+[effective `main` rules](https://api.github.com/repos/Gentleman-Programming/engram/rules/branches/main)
+for current settings; the [audit in #1736](https://github.com/Gentleman-Programming/engram/issues/1736#issuecomment-6089006647)
+records the supporting evidence.
+
+Any queue-policy change requires explicit owner/admin approval and an authorized
+administrator. If rollback is approved, disable or remove only the queue rule;
+retain the existing required contexts and unrelated rules. This documentation
+correction does not authorize settings changes.
 
 ## Claude Plugin Version Rule
 
