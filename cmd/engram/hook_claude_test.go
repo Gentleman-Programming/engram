@@ -206,7 +206,7 @@ func TestCodexEndedSessionStart409DeniesWrite(t *testing.T) {
 			_, _ = w.Write([]byte(`{"context":""}`))
 			return
 		}
-		if r.URL.Path == "/runtime-sessions/resolve" {
+		if r.URL.Path == "/runtime-sessions/resolve" || r.URL.Path == "/health" {
 			production.ServeHTTP(w, r)
 			return
 		}
@@ -278,6 +278,10 @@ func TestCodexCallConfirmsSharedHostBeforeBinding(t *testing.T) {
 				t.Errorf("cwd = %q", r.URL.Query().Get("cwd"))
 			}
 			_, _ = w.Write([]byte(`{"project":"project-b","project_source":"config"}`))
+			return
+		}
+		if r.URL.Path == "/health" {
+			production.ServeHTTP(w, r)
 			return
 		}
 		if r.URL.Path != "/runtime-sessions/resolve" || r.Method != http.MethodPost {
@@ -391,11 +395,22 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 		{"malformed", 201, `{`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var resolverRequests atomic.Int32
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/project/current" {
 					_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 					return
 				}
+				if r.URL.Path == "/health" {
+					codexMockHealth(w)
+					return
+				}
+				if r.URL.Path != "/runtime-sessions/resolve" || r.Method != http.MethodPost {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				resolverRequests.Add(1)
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			}))
@@ -410,6 +425,9 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 			}
 			if err := json.Unmarshal(response, &result); err != nil || result.HookSpecificOutput.PermissionDecision != "deny" || result.HookSpecificOutput.UpdatedInput != nil {
 				t.Fatalf("response=%s err=%v", response, err)
+			}
+			if got := resolverRequests.Load(); got != 1 {
+				t.Fatalf("resolver requests=%d, want 1", got)
 			}
 		})
 	}
@@ -502,6 +520,10 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				var gets, posts, registrations atomic.Int32
 				endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					delay := tc.project
+					if r.URL.Path == "/health" {
+						codexMockHealth(w)
+						return
+					}
 					switch r.URL.Path {
 					case "/project/current":
 						gets.Add(1)
@@ -617,6 +639,9 @@ func TestHookSessionConfirmationSharedDeadline(t *testing.T) {
 					deadline, ok := r.Context().Deadline()
 					if !ok || !deadline.Equal(started.Add(4*time.Second)) {
 						t.Fatalf("confirmation deadline = %v, want start + 4s", deadline)
+					}
+					if r.URL.Path == "/health" {
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`))}, nil
 					}
 					switch r.URL.Path {
 					case "/project/current":
@@ -1209,6 +1234,10 @@ func TestCodexPreToolUseReadsDoNotRequireSessionOrInput(t *testing.T) {
 
 func TestCodexPreToolUseCommandWritesAllowAndBoundInput(t *testing.T) {
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			codexMockHealth(w)
+			return
+		}
 		if r.URL.Path == "/project/current" {
 			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 			return

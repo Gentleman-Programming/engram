@@ -550,7 +550,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"service":      "engram",
 		"version":      s.version,
 		"instance_id":  s.instanceID,
-		"capabilities": map[string]bool{"isolated_session_registration": true, "root_session_resume": true},
+		"capabilities": map[string]bool{"isolated_session_registration": true, "root_session_resume": true, "runtime_session_resolution": true},
 	})
 }
 

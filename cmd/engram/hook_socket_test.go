@@ -21,6 +21,8 @@ func TestNativeHooksSocket(t *testing.T) {
 	var captures atomic.Int32
 	endpoint := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/health":
+			codexMockHealth(w)
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"socket-project","project_source":"config"}`)
 		case "/sessions":
