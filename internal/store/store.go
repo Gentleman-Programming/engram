@@ -4515,7 +4515,7 @@ func (s *Store) ExportReviewClearEvents() ([]ReviewClearEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []ReviewClearEvent
 	for rows.Next() {
 		var event ReviewClearEvent
