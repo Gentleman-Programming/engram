@@ -60,16 +60,7 @@ func (c candidateFallbackConn) PrepareContext(ctx context.Context, query string)
 	if p, ok := c.Conn.(driver.ConnPrepareContext); ok {
 		return p.PrepareContext(ctx, query)
 	}
-	return c.Conn.Prepare(query)
-}
-func (c candidateFallbackConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	if b, ok := c.Conn.(driver.ConnBeginTx); ok {
-		return b.BeginTx(ctx, opts)
-	}
-	if opts.ReadOnly || opts.Isolation != driver.IsolationLevel(sql.LevelDefault) {
-		return nil, errors.New("unsupported transaction options")
-	}
-	return c.Conn.Begin()
+	return c.Prepare(query)
 }
 func (c candidateFallbackConn) Ping(ctx context.Context) error {
 	if p, ok := c.Conn.(driver.Pinger); ok {
