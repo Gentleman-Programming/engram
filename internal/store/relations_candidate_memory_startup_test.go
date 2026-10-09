@@ -22,6 +22,15 @@ const candidateMemorySelectorError = "candidate memory startup: ENGRAM_TEST_SQLI
 // Parse the effective flags (including duplicate selectors) before configuring
 // SQLite. Ordinary tests/other benchmarks cannot accidentally inherit the mode.
 func configureCandidateMemoryBenchmarkStartup() error {
+	// Validate probe scope before any tests, benchmarks or fixtures can run.
+	if os.Getenv(candidateCounterProbeEnv) != "" {
+		if !flag.Parsed() {
+			flag.Parse()
+		}
+		if flag.Lookup("test.run").Value.String() != "^TestCandidateSQLiteCounterProbe$" || flag.Lookup("test.bench").Value.String() != "" {
+			return errors.New("counter probe requires its isolated single-test invocation")
+		}
+	}
 	mode := os.Getenv(candidateMemoryCountersEnv)
 	if mode == "" {
 		return nil
@@ -47,14 +56,17 @@ func configureCandidateMemoryBenchmarkStartup() error {
 // opt-in must exit before tests or fixtures run; default startup still works.
 func TestCandidateMemoryBenchmarkStartup(t *testing.T) {
 	for _, tc := range []struct {
-		name, mode, run, bench string
-		exit                   int
-		out, errout            string
+		name, mode, run, bench, probe string
+		extra                         []string
+		exit                          int
+		out, errout                   string
 	}{
-		{"default", "", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "", 0, "PASS\n", ""},
-		{"invalid value", "true", "^$", "^$", 2, "", "candidate memory startup: ENGRAM_TEST_SQLITE_MEMORY_COUNTERS accepts only 1\n"},
-		{"wrong selector", "1", "^$", "^$", 2, "", candidateMemorySelectorError},
-		{"tests selected", "1", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "^BenchmarkCandidateQuerySQLiteMemory$", 2, "", candidateMemorySelectorError},
+		{"default", "", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "", "", nil, 0, "PASS\n", ""},
+		{"invalid value", "true", "^$", "^$", "", nil, 2, "", "candidate memory startup: ENGRAM_TEST_SQLITE_MEMORY_COUNTERS accepts only 1\n"},
+		{"wrong selector", "1", "^$", "^$", "", nil, 2, "", candidateMemorySelectorError},
+		{"tests selected", "1", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "^BenchmarkCandidateQuerySQLiteMemory$", "", nil, 2, "", candidateMemorySelectorError},
+		{"probe overridden selector", "", "^TestCandidateSQLiteCounterProbe$", "", "enabled", []string{"-test.run=^TestCandidateSQLiteCounterProbe$|^OtherWork$"}, 2, "", "candidate memory startup: counter probe requires its isolated single-test invocation\n"},
+		{"probe benchmark", "", "^TestCandidateSQLiteCounterProbe$", "^BenchmarkCandidateQuerySQLiteMemory$", "enabled", nil, 2, "", "candidate memory startup: counter probe requires its isolated single-test invocation\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binary, err := os.Executable()
@@ -64,7 +76,8 @@ func TestCandidateMemoryBenchmarkStartup(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, binary, "-test.run="+tc.run, "-test.bench="+tc.bench, "-test.count=1")
-			if tc.mode != "" {
+			cmd.Args = append(cmd.Args, tc.extra...)
+			if tc.mode != "" || tc.probe != "" {
 				// Rejected scopes need no fixture/benchmark execution, even if the gate regresses.
 				cmd.Args = append(cmd.Args, "-test.list=^$")
 			}
@@ -77,6 +90,7 @@ func TestCandidateMemoryBenchmarkStartup(t *testing.T) {
 			if tc.mode != "" {
 				cmd.Env = append(cmd.Env, candidateMemoryCountersEnv+"="+tc.mode)
 			}
+			cmd.Env = append(cmd.Env, candidateCounterProbeEnv+"="+tc.probe)
 			var out, errout bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &errout
 			runErr := cmd.Run()

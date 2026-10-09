@@ -841,6 +841,8 @@ An isolated enablement probe can check the disabled control and enabled modes:
 go test ./internal/store -run '^TestCandidateSQLiteCounterProbe$' -count=1 -v
 ```
 
+Probe startup requires the effective `-test.run=^TestCandidateSQLiteCounterProbe$`
+selector and no benchmark selector; overwritten or mixed selectors exit 2 before any tests or SQLite configuration.
 Each mode starts a fresh test subprocess, configures `SQLITE_CONFIG_MEMSTATUS`
 before opening its temporary fixture, and checks the configuration result and
 allocator counters. This probe does not enable counters in production or in the

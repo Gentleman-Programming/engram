@@ -24,9 +24,6 @@ const candidateCounterProbePrefix = "sqlite_counter_probe "
 // in the parent test runner or in a production binary.
 func TestCandidateSQLiteCounterProbe(t *testing.T) {
 	if mode := os.Getenv(candidateCounterProbeEnv); mode != "" {
-		if !candidateCounterProbeInvocation() {
-			t.Fatal("counter probe requires its isolated single-test invocation")
-		}
 		runCandidateCounterProbe(t, mode)
 		return
 	}
@@ -80,15 +77,6 @@ func TestCandidateSQLiteCounterProbe(t *testing.T) {
 			}
 		})
 	}
-}
-
-func candidateCounterProbeInvocation() bool {
-	for _, arg := range os.Args[1:] {
-		if arg == "-test.run=^TestCandidateSQLiteCounterProbe$" {
-			return true
-		}
-	}
-	return false
 }
 
 type candidateCounterProbeResult struct {
