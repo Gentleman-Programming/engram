@@ -1496,3 +1496,185 @@ type claudeGateVerdict struct {
 	PermissionDecisionReason string         `json:"permissionDecisionReason"`
 	UpdatedInput             map[string]any `json:"updatedInput"`
 }
+
+// claudeDriftEndpoint serves the production session API for db while answering
+// project resolution with the drifted cwd authority supplied by the caller.
+func claudeDriftEndpoint(t *testing.T, db *store.Store, authority string, override http.HandlerFunc) {
+	t.Helper()
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/project/current" {
+			_, _ = io.WriteString(w, authority)
+			return
+		}
+		if override != nil && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions/") {
+			override(w, r)
+			return
+		}
+		production.ServeHTTP(w, r)
+	}))
+	t.Cleanup(endpoint.Close)
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+}
+
+func claudeGateWrite(t *testing.T, host, cwd string) claudeGateVerdict {
+	t.Helper()
+	input, _ := json.Marshal(map[string]any{
+		"session_id": host, "cwd": cwd, "tool_name": "mcp__engram__mem_save",
+		"tool_input": map[string]any{"title": "t", "content": "c", "session_id": "untrusted-model-id"},
+	})
+	var response struct {
+		HookSpecificOutput claudeGateVerdict `json:"hookSpecificOutput"`
+	}
+	output := guardClaudePreToolUse(input)
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("invalid hook output %s: %v", output, err)
+	}
+	return response.HookSpecificOutput
+}
+
+func newClaudeDriftStore(t *testing.T) (*store.Store, string) {
+	t.Helper()
+	root := t.TempDir()
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, root
+}
+
+// Issue #1717: a registered session must keep accepting writes after the
+// agent's cwd moves somewhere that resolves to another project.
+func TestClaudeRegisteredSessionSurvivesProjectResolutionDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		subdir    string
+		authority string
+	}{
+		{"config dir subfolder", "docs", `{"project":"docs","project_source":"dir_basename"}`},
+		{"umbrella child repo", "child", `{"project":"child","project_source":"git_root"}`},
+		{"removed worktree", "removed-worktree", `{"project":"removed-worktree","project_source":"dir_basename"}`},
+		{"multi-repo dir", "multi", `{"project":"","project_source":"ambiguous","error_hint":"multiple repositories"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, root := newClaudeDriftStore(t)
+			const host = "claude-drift-host"
+			if err := db.StartSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			claudeDriftEndpoint(t, db, tc.authority, nil)
+
+			got := claudeGateWrite(t, host, filepath.Join(root, tc.subdir))
+
+			if got.PermissionDecision == "deny" || got.UpdatedInput["session_id"] != host || got.UpdatedInput["title"] != "t" {
+				t.Fatalf("drifted write = %+v, want bound to %s", got, host)
+			}
+			session, err := db.GetSession(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.Project != "client" || session.Directory != root || session.EndedAt != nil {
+				t.Fatalf("session changed: %+v", session)
+			}
+			if _, err := db.GetSession("untrusted-model-id"); err == nil {
+				t.Fatal("model-supplied session was created")
+			}
+		})
+	}
+}
+
+func TestClaudeUnknownSessionWithUnresolvableCWDStillDenies(t *testing.T) {
+	db, root := newClaudeDriftStore(t)
+	claudeDriftEndpoint(t, db, `{"project":"","project_source":"ambiguous","error_hint":"multiple repositories"}`, nil)
+
+	got := claudeGateWrite(t, "unknown-host", root)
+
+	if got.PermissionDecision != "deny" || got.UpdatedInput != nil {
+		t.Fatalf("unknown session = %+v, want deny", got)
+	}
+	if _, err := db.GetSession("unknown-host"); err == nil {
+		t.Fatal("unknown session was registered from an unresolvable cwd")
+	}
+}
+
+func TestClaudeEndedSessionAfterDriftDeniesWithCause(t *testing.T) {
+	db, root := newClaudeDriftStore(t)
+	const host = "claude-ended-host"
+	if err := db.StartSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(host, "finished"); err != nil {
+		t.Fatal(err)
+	}
+	claudeDriftEndpoint(t, db, `{"project":"docs","project_source":"dir_basename"}`, nil)
+
+	got := claudeGateWrite(t, host, filepath.Join(root, "docs"))
+
+	want := "Claude host session registration could not be confirmed (session_already_ended)"
+	if got.PermissionDecision != "deny" || got.PermissionDecisionReason != want || got.UpdatedInput != nil {
+		t.Fatalf("ended session = %+v, want deny %q", got, want)
+	}
+	session, err := db.GetSession(host)
+	if err != nil || session.EndedAt == nil {
+		t.Fatalf("ended session reopened: %+v, %v", session, err)
+	}
+}
+
+func TestClaudeSessionLookupFailureAfterDriftFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"server error", http.StatusInternalServerError, `{"error":"boom"}`},
+		{"malformed", http.StatusOK, `{`},
+		{"blank project", http.StatusOK, `{"id":"claude-lookup-host","project":" ","directory":"/work"}`},
+		{"other session", http.StatusOK, `{"id":"other","project":"client","directory":"/work"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, root := newClaudeDriftStore(t)
+			const host = "claude-lookup-host"
+			if err := db.StartSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatal(err)
+			}
+			claudeDriftEndpoint(t, db, `{"project":"docs","project_source":"dir_basename"}`, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			got := claudeGateWrite(t, host, filepath.Join(root, "docs"))
+
+			if got.PermissionDecision != "deny" || got.UpdatedInput != nil {
+				t.Fatalf("lookup failure = %+v, want deny", got)
+			}
+		})
+	}
+}
+
+// #1717 + #1624: a resumed session whose cwd drifted still binds to its live
+// continuation through the persisted root scope.
+func TestClaudeResumedSessionAfterDriftBindsContinuation(t *testing.T) {
+	db, root := newClaudeDriftStore(t)
+	const host = "claude-resumed-drift-host"
+	if err := db.StartSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(host, "quit"); err != nil {
+		t.Fatal(err)
+	}
+	continuation, err := db.ResumeSessionWithOwnershipMode(host, "client", root, store.SessionOwnershipProjectOwned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeDriftEndpoint(t, db, `{"project":"docs","project_source":"dir_basename"}`, nil)
+
+	got := claudeGateWrite(t, host, filepath.Join(root, "docs"))
+
+	if got.PermissionDecision == "deny" || got.UpdatedInput["session_id"] != continuation {
+		t.Fatalf("resumed drifted write = %+v, want bound to %s", got, continuation)
+	}
+	if session, err := db.GetSession(host); err != nil || session.EndedAt == nil {
+		t.Fatalf("ended root reopened: %+v, %v", session, err)
+	}
+}

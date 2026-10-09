@@ -138,25 +138,44 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 		cancel()
 	}()
 	var authority json.RawMessage
-	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
-		return "", errHookSessionUnconfirmed
-	}
+	resolved := codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority)
 	project, ok := codexProjectAuthority(authority)
-	if !ok {
+	err := errHookSessionUnconfirmed
+	if resolved && ok {
+		var code string
+		code, err = registerHookSession(ctx, client, base, id, project, cwd, projectOwned)
+		if code != "session_project_conflict" && code != "session_already_ended" {
+			if err != nil {
+				return "", err
+			}
+			return id, nil
+		}
+	}
+	if ctx.Err() != nil {
 		return "", errHookSessionUnconfirmed
 	}
-	code, err := registerHookSession(ctx, client, base, id, project, cwd, projectOwned)
-	if code != "session_already_ended" {
-		return id, err
-	}
-	// Claude keeps the session ID on --resume, so the root stays ended and
-	// SessionStart registered a continuation. Bind to it only if it is live;
-	// the gate itself never creates one (#1624).
-	continuation, ok := liveHookContinuation(ctx, client, base, id)
+	// The cwd no longer names the session's project (subfolder, child repo,
+	// removed worktree, multi-repo parent; #1717) or the session has ended
+	// (#1624). Either way, use the session the server already knows.
+	persisted, ok := persistedHookSession(ctx, client, base, id)
 	if !ok {
 		return "", err
 	}
-	return continuation.ID, nil
+	if persisted.EndedAt == nil {
+		// Registration still proves the session is live and renews its lease.
+		if _, err := registerHookSession(ctx, client, base, id, persisted.Project, persisted.Directory, projectOwned); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	// Claude keeps the session ID on --resume, so the root stays ended and
+	// SessionStart registered a continuation. Bind to it only if it is live;
+	// the gate itself never creates one.
+	continuation, ok := liveHookContinuation(ctx, client, base, persisted)
+	if !ok {
+		return "", fmt.Errorf("%w (session_already_ended)", errHookSessionUnconfirmed)
+	}
+	return continuation, nil
 }
 
 // registerHookSession posts one registration and returns the server's error
@@ -205,14 +224,24 @@ type hookSession struct {
 	EndedAt       *string `json:"ended_at"`
 }
 
+// persistedHookSession reads an existing session's owner and scope. Any
+// lookup failure reports false so the gate fails closed.
+func persistedHookSession(ctx context.Context, client *http.Client, base, id string) (hookSession, bool) {
+	var persisted hookSession
+	if !codexJSON(ctx, client, http.MethodGet, base+"/sessions/"+url.PathEscape(id), nil, &persisted) ||
+		persisted.ID != id || strings.TrimSpace(persisted.Project) == "" {
+		return hookSession{}, false
+	}
+	return persisted, true
+}
+
 // liveHookContinuation resolves the live continuation of an ended root from
 // the root's persisted scope and renews its lease. It never registers a new
 // identity; any failure reports false so the gate fails closed.
-func liveHookContinuation(ctx context.Context, client *http.Client, base, root string) (hookSession, bool) {
-	var persisted hookSession
-	if !codexJSON(ctx, client, http.MethodGet, base+"/sessions/"+url.PathEscape(root), nil, &persisted) ||
-		persisted.ID != root || strings.TrimSpace(persisted.Project) == "" || strings.TrimSpace(persisted.Directory) == "" {
-		return hookSession{}, false
+func liveHookContinuation(ctx context.Context, client *http.Client, base string, persisted hookSession) (string, bool) {
+	root := persisted.ID
+	if strings.TrimSpace(persisted.Directory) == "" {
+		return "", false
 	}
 	scope, _ := json.Marshal(map[string]string{
 		"id": root, "project": persisted.Project, "directory": persisted.Directory, "ownership_mode": persisted.OwnershipMode,
@@ -224,13 +253,12 @@ func liveHookContinuation(ctx context.Context, client *http.Client, base, root s
 	}
 	if !codexJSON(ctx, client, http.MethodPost, base+"/runtime-sessions/resolve", scope, &resolved) ||
 		resolved.Status != "resolved" || resolved.ResumedFrom != root || !codexContinuation(resolved.ID, root) {
-		return hookSession{}, false
+		return "", false
 	}
 	if _, err := registerHookSession(ctx, client, base, resolved.ID, persisted.Project, persisted.Directory, persisted.OwnershipMode == "project_owned"); err != nil {
-		return hookSession{}, false
+		return "", false
 	}
-	persisted.ID = resolved.ID
-	return persisted, true
+	return resolved.ID, true
 }
 
 // hookSessionErrorCode accepts only short snake_case server codes, so a denial
