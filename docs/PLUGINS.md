@@ -71,6 +71,7 @@ The plugin:
 - **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
 - **Injects session-only runtime context** into the compaction prompt; manual `mem_context` and `GET /context` remain project/scope-scoped
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
+- **Captures delegation learnings** from OpenCode V1 `task` output and V2 `subagent` output (normalized internally to the legacy `Task` alias), using passive capture with source `task-complete`. Other tool results are not submitted for passive capture.
 - **Strips `<private>` tags** before sending data
 - **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `engram setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
 

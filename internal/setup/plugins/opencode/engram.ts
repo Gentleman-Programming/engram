@@ -855,8 +855,8 @@ export const Engram: Plugin = async (ctx) => {
       if (!registered || confirmedSessionID !== sessionId) return
       toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
 
-      // Passive capture: extract learnings from Task tool output
-      if (input.tool === "Task" && output) {
+      // V1 emits `task`; the V2 adapter normalizes `subagent` to `Task`.
+      if ((input.tool === "task" || input.tool === "Task") && output) {
         const text = typeof output === "string" ? output : JSON.stringify(output)
         if (text.length > 50) {
           await engramFetch("/observations/passive", {
@@ -1161,7 +1161,7 @@ async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
     }))
 
     registrations.push(await ctx.tool.hook("execute.after", async (call) => {
-      // V2 renamed the V1 `Task` delegation tool to `subagent`.
+      // Normalize V2 `subagent` to the shared handler’s legacy `Task` alias.
       const tool = call.tool === "subagent" ? "Task" : call.tool
       const output = call.status === "completed" ? v2ToolResultText(call.result) : ""
       await hooks["tool.execute.after"]({ tool, sessionID: call.sessionID, callID: call.id }, output)
