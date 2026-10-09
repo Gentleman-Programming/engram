@@ -85,6 +85,10 @@ type CloudServer struct {
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
 	listenAndServe      func(addr string, handler http.Handler) error
+	// version is the optional running build identifier surfaced in the
+	// dashboard chrome (Layout footer + LoginPage). Empty string keeps the
+	// chrome unchanged so un-versioned local builds render byte-identical.
+	version string
 }
 
 const defaultHost = "127.0.0.1"
@@ -176,6 +180,18 @@ func WithMaxPushBodyBytes(limit int64) Option {
 		if limit > 0 {
 			s.maxPushBodyBytes = limit
 		}
+	}
+}
+
+// WithVersion sets the build identifier (e.g. ldflags-injected semver) that
+// the dashboard chrome surfaces in the Layout footer and the LoginPage so
+// operators can confirm the running build from the browser alone. The value
+// is normalized: a leading "v" is stripped so the stored identifier is the
+// canonical bare semver — the Layout / LoginPage templates re-add the "v"
+// marker when rendering. Both "v1.20.3" and "1.20.3" are accepted.
+func WithVersion(version string) Option {
+	return func(s *CloudServer) {
+		s.version = strings.TrimPrefix(strings.TrimSpace(version), "v")
 	}
 }
 
@@ -294,6 +310,7 @@ func (s *CloudServer) routes() {
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
+		Version:           s.version,
 	})
 	s.mux.HandleFunc("GET /dashboard/bootstrap", s.handleDashboardBootstrapPage)
 	s.mux.HandleFunc("POST /dashboard/bootstrap", s.handleDashboardBootstrapSubmit)

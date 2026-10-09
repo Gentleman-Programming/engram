@@ -3,7 +3,9 @@ package dashboard
 // LoginPage renders the standalone login page (no layout wrapper).
 // ADAPTED: added next string parameter for post-login redirect; token-only form
 // (integrated dashboard uses ENGRAM_CLOUD_TOKEN, not user/password credentials).
-templ LoginPage(errorMsg string, next string) {
+// version is the optional build identifier (e.g. ldflags-injected semver).
+// Empty version omits the marker so local / un-versioned builds stay clean.
+templ LoginPage(errorMsg string, next string, version string) {
 	<!DOCTYPE html>
 	<html lang="en" data-theme="dark">
 		<head>
@@ -53,6 +55,11 @@ templ LoginPage(errorMsg string, next string) {
 						</form>
 					</section>
 				</main>
+if version != "" {
+						<div class="login-footer">
+							<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · v{ version }</small>
+						</div>
+					}
 			</div>
 		</body>
 	</html>
