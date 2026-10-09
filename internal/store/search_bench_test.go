@@ -21,6 +21,10 @@ var (
 
 // TestMain releases the shared benchmark corpus after all package tests finish.
 func TestMain(m *testing.M) {
+	if err := configureCandidateMemoryBenchmarkStartup(); err != nil {
+		fmt.Fprintln(os.Stderr, "candidate memory startup:", err)
+		os.Exit(2)
+	}
 	code := m.Run()
 	if searchBenchStore != nil {
 		_ = searchBenchStore.Close()

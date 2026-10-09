@@ -782,6 +782,71 @@ The benchmark creates isolated 15,000-observation databases with repeated title 
 
 Rank materialization uses temporary SQLite storage and adds allocations; `-benchmem` does not measure peak SQLite temporary-table memory. These benchmarks do not establish latency or memory bounds for other database sizes and distributions.
 
+##### SQLite allocator-memory comparison
+
+Run only against synthetic fixtures (1k/15k rows, 20 repeated term lists,
+single/selective project). In Git Bash or a POSIX shell, scope the test-only
+opt-in to this command:
+
+```sh
+ENGRAM_TEST_SQLITE_MEMORY_COUNTERS=1 go test ./internal/store -run '^$' -bench '^BenchmarkCandidateQuerySQLiteMemory$' -benchtime=1x -count=3
+```
+
+The test binary enables `SQLITE_CONFIG_MEMSTATUS` in `TestMain`, before opening
+any fixture. Only the exact selectors above are accepted; an invalid opt-in
+value or selecting ordinary tests/other benchmarks exits with status 2 before
+SQLite configuration. The default unset variable leaves normal test startup
+unchanged. This variable is not an Engram runtime setting and does not enable
+counters in production or persist an environment change in the parent shell.
+
+The benchmark compares the frozen baseline with actual production SQL, verifies
+five identical candidates, and reports mean SQLite allocator current-before,
+peak, current-after, and incremental-peak (peak minus current-before) in bytes,
+separately for each query. Fixture setup and bounded parity checks are excluded;
+the highwater counter is reset immediately before each fully consumed query.
+Cases are serial, use fresh fixtures, and exercise both execution orders.
+
+These are library-wide `sqlite3_memory_used`/`sqlite3_memory_highwater` counters,
+not temporary-only memory, Go heap, RSS, or disk usage; configured auxiliary
+PAGECACHE memory is excluded. Warm-up, allocator globals, and cache history can
+still affect comparisons even across fresh fixtures. No hard memory bound is
+asserted; unavailable or inconsistent counters fail explicitly. The standard
+`ns/op` covers both queries together, not individual query latency. Measurement
+results must be collected on the target host; no results are implied here.
+
+Without the opt-in, the Windows/amd64 validation returned zero for all allocator
+counters because this dependency defaults to `DEFAULT_MEMSTATUS=0`. That earlier
+run failed explicitly and produced no valid memory measurements. Do not treat
+zero as zero memory use or substitute Go heap/RSS for this metric; allocator
+counter consistency is checked on every measured query.
+
+Observed synthetic validation on Windows/amd64 with Go 1.26.4 (20 repetitions,
+three samples per execution order) gave these median library allocator peaks:
+
+| Observations | Project distribution | Original query | Materialized query |
+| --- | --- | --- | --- |
+| 1,000 | Single project | 5.23 MiB | 5.26 MiB |
+| 1,000 | 10% eligible project | 5.23 MiB | 5.26 MiB |
+| 15,000 | Single project | 7.34 MiB | 7.01 MiB |
+| 15,000 | 10% eligible project | 7.33 MiB | 5.72 MiB |
+
+These include the fixture's retained allocator baseline. At 1,000 rows the
+materialized query added about 30 KiB; at 15,000 rows it reduced allocator peak
+in these fixtures. This is neither a temporary-table-only measurement nor a
+production memory guarantee, and does not reproduce the reported latency tail.
+
+An isolated enablement probe can check the disabled control and enabled modes:
+
+```sh
+go test ./internal/store -run '^TestCandidateSQLiteCounterProbe$' -count=1 -v
+```
+
+Each mode starts a fresh test subprocess, configures `SQLITE_CONFIG_MEMSTATUS`
+before opening its temporary fixture, and checks the configuration result and
+allocator counters. This probe does not enable counters in production or in the
+parent test runner. The probe and opt-in benchmark startup share the generated
+C-style argument adapter, confined to test files.
+
 ### HTTP write timing diagnostics
 
 Set `ENGRAM_HTTP_WRITE_TIMING=1` before starting `engram serve`. The local server writes one `engram: http_write_timing` JSON record to stderr after each `POST /sessions`, `POST /observations`, and `POST /observations/passive` handler returns. Records contain only the enumerated operation/outcome, transaction attempt count, and request, connection-wait, transaction, commit, and response-write durations. For passive_capture, attempts and database-stage durations are totals across every learning saved by the request. `connection_wait_ms` is the store's `Begin` stage, including connection-pool or SQLite lock waiting; `transaction_ms` excludes that stage and commit.
