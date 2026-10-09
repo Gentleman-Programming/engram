@@ -1,0 +1,29 @@
+name: PR Size Notice
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-size-notice:
+    name: PR Size Notice
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-size-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Report current pull request size
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { publishSizeNotice } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/pr-size-notice.mjs`);
+            await publishSizeNotice({ github, context, core });

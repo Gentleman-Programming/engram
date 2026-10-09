@@ -57,7 +57,7 @@ All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
-Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the merge-queue, label-policy, and transient-artifacts script suites), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
+Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the merge-queue, label-policy, transient-artifacts, and PR-size-notice script suites), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
 ### Merge Queue Activation (administrators)
 
@@ -199,6 +199,36 @@ Replace the current `status:*` label with `status:possible-duplicate` while eval
 ### PR Size Exception (maintainers only)
 
 `size:exception` records explicit maintainer approval for a pull request to exceed the 400-line review budget. It applies only to pull requests and does not replace the requirement for a focused, reviewable change.
+
+The advisory **PR Size Notice** counts the current GitHub-reported additions plus
+deletions, without file exclusions or logical/authored-line adjustments. Exactly
+400 changed lines is within budget; 401 or more produces a warning. For example,
+200 additions plus 200 deletions is 400; 200 plus 201 is 401. Deleted files,
+generated output, and lockfiles are not excluded. Binary changes have only the
+line counts reported by GitHub; this is not a byte-size metric.
+
+The notice respects `size:exception` and never applies it automatically. Label
+presence represents the existing maintainer-owned policy; automated validation
+does not verify who applied the label. Maintainers remain responsible for grants.
+
+One consistently named informational check writes a fresh job summary on PR
+opening, edits (including base-branch retargeting), reopening, synchronization,
+and label addition/removal, including drafts.
+It refreshes when the diff shrinks or the exception changes; it does not post PR
+comments or run on merge groups. Actions retains historical runs, not one mutable
+summary across all revisions. Unavailable or invalid current metadata produces
+**Size unavailable**, never a claim that the PR is within budget. Summary-write
+errors are reported as warnings.
+
+The notice is non-required and non-blocking: a successful job means the advisory
+completed, not that the PR is under budget. No required contexts or rulesets are
+changed. It reads current PR metadata and runs only trusted base-revision code,
+with read-only permissions and no persisted checkout credentials. The workflow
+becomes available after it is merged into the base branch; local tests do not
+prove live fork events, summaries, or cancellation behavior.
+
+Run `node --test .github/scripts/pr-size-notice.test.mjs` for the boundary,
+exception, refresh, unavailable-data, and workflow regression checks.
 
 ### Namespace Contract
 

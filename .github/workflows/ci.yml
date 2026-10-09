@@ -52,7 +52,7 @@ jobs:
           node-version: "24"
 
       - name: Run policy helper tests
-        run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs
+        run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs
 
   unit-tests:
     name: Unit Tests
