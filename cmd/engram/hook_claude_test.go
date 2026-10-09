@@ -791,8 +791,10 @@ func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
 	requireAllowed := func(t *testing.T, session, cwd string) {
 		t.Helper()
 		decision, reason, updatedInput := gate(t, session, cwd)
-		if decision == "deny" {
-			t.Fatalf("registered session %s must keep writing from %s: deny %q", session, cwd, reason)
+		// The Claude allow path is decision-empty with bound input; any decision
+		// value (deny, allow, ask) means the gate shaped a different verdict.
+		if decision != "" {
+			t.Fatalf("registered session %s must keep writing from %s: decision %q (%s)", session, cwd, decision, reason)
 		}
 		if updatedInput["session_id"] != session || updatedInput["title"] != "gate write" {
 			t.Fatalf("bound input for %s = %v", session, updatedInput)
