@@ -63,6 +63,33 @@ Non-required PR checks include the Claude plugin version guard, lint, Windows se
 
 Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
 
+## Advisory AI Review
+
+CodeRabbit uses the versioned root [`.coderabbit.yaml`](.coderabbit.yaml). Its
+baseline is the [resolved Repository UI configuration](https://github.com/Gentleman-Programming/engram/pull/1728#issuecomment-6084792433);
+existing path instructions, generated-file exclusions and other settings are
+preserved. The only noise adjustments are the balanced `chill` profile and
+turning off the numeric docstring coverage warning. Documentation correctness
+still matters and remains part of review.
+
+CodeRabbit does not automatically approve PRs (`request_changes_workflow: false`),
+skips drafts, and does not replace human review or the required checks above.
+Generated outputs are excluded only from AI review, not from generation checks.
+Existing manually requested code-generation/fix features remain unchanged.
+
+Changes to this file require normal issue-first review. Run `go test . -run
+TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, and baseline
+preservation. Deliberate future settings changes must update the baseline test
+with their rationale. To pause automatic reviews on one PR, comment
+`@coderabbitai pause`; to disable them through configuration, change
+`reviews.auto_review.enabled` to `false` in a reviewed PR. Reverting the initial
+configuration-file addition restores selection of the existing UI configuration,
+provided that UI configuration has not changed.
+
+Installation permissions could not be audited with the available credentials.
+Live review behavior and noise reduction must be observed after rollout; local
+policy tests do not establish those results.
+
 ## Claude Plugin Version Rule
 
 When changing any file under `plugin/claude-code/` (including renames or deletions), increase the semantic version in both `plugin/claude-code/.claude-plugin/plugin.json` and the `engram` entry of `.claude-plugin/marketplace.json` to the same higher version. The PR and merge queue guard compare against the event's base commit; malformed, missing, or inconsistent versions fail. Changes outside the Claude plugin subtree need no version bump. The guard runs the policy from the trusted base whenever it exists. On the first PR introducing the policy, the base has no script, so CI must temporarily run the candidate's policy; this bootstrap cannot prevent that PR from weakening its own guard. After merge, subsequent PRs use the base policy.
