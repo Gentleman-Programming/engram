@@ -62,6 +62,7 @@ func TestCandidateMemoryBenchmarkStartup(t *testing.T) {
 		out, errout                   string
 	}{
 		{"default", "", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "", "", nil, 0, "PASS\n", ""},
+		{"unopted benchmark", "", "^$", "^BenchmarkCandidateQuerySQLiteMemory$/^Rows1000$/^Repeat20$/^SingleProject$/^BaselineFirst$", "", []string{"-test.benchtime=1x", "-test.v"}, 0, "", ""},
 		{"invalid value", "true", "^$", "^$", "", nil, 2, "", "candidate memory startup: ENGRAM_TEST_SQLITE_MEMORY_COUNTERS accepts only 1\n"},
 		{"wrong selector", "1", "^$", "^$", "", nil, 2, "", candidateMemorySelectorError},
 		{"tests selected", "1", "^TestCandidateQueryBenchmarkMatchesPublicLookup$", "^BenchmarkCandidateQuerySQLiteMemory$", "", nil, 2, "", candidateMemorySelectorError},
@@ -102,7 +103,14 @@ func TestCandidateMemoryBenchmarkStartup(t *testing.T) {
 				}
 				code = exit.ExitCode()
 			}
-			if code != tc.exit || out.String() != tc.out || errout.String() != tc.errout {
+			outOK := out.String() == tc.out
+			if tc.name == "default" && testing.CoverMode() != "" {
+				outOK = strings.HasPrefix(out.String(), tc.out+"coverage: ") && strings.HasSuffix(out.String(), "% of statements\n")
+			}
+			if tc.name == "unopted benchmark" {
+				outOK = strings.Contains(out.String(), "--- SKIP: BenchmarkCandidateQuerySQLiteMemory") && strings.Contains(out.String(), "requires "+candidateMemoryCountersEnv+"=1") && strings.Contains(out.String(), "\nPASS\n")
+			}
+			if code != tc.exit || !outOK || errout.String() != tc.errout {
 				t.Fatalf("startup: exit=%d stdout=%q stderr=%q, want exit=%d stdout=%q stderr=%q", code, out.String(), errout.String(), tc.exit, tc.out, tc.errout)
 			}
 		})
