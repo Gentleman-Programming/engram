@@ -235,6 +235,9 @@ func (s *CloudServer) pushBodyLimit() int64 {
 
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
+	s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusFound)
+	})
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	var dashboardStore dashboard.DashboardStore
 	if store, ok := s.store.(dashboard.DashboardStore); ok {

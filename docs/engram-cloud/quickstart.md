@@ -43,7 +43,11 @@ engram sync --cloud --status --project smoke-project
 ### 5) Verify browser dashboard
 
 Open:
-- `http://127.0.0.1:18080/dashboard`
+- `http://127.0.0.1:18080/` — redirects to `/dashboard/` with HTTP 302.
+- `http://127.0.0.1:18080/dashboard` — direct dashboard entrypoint.
+
+In authenticated deployments, an unauthenticated browser is then redirected to
+`/dashboard/login`. Unknown paths still return HTTP 404.
 
 In compose smoke mode, `/dashboard/login` redirects to `/dashboard/` (no bearer login needed).
 
