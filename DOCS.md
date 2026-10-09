@@ -376,7 +376,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - `200` with the refreshed observation payload when marked reviewed
   - `400` when `observation_id`/`id` is missing or the JSON body is invalid
   - `404` when the observation does not exist
-  - Local-only: updating `review_after` does not enqueue a sync mutation or propagate to other machines.
+  - Updating `review_after` atomically enqueues an observation sync mutation; the date propagates through git sync and enrolled cloud sync.
 
 ### Search
 
@@ -1249,7 +1249,7 @@ Actions:
 - `action: "list"` — returns observations whose `review_after` has passed. Optional parameters: `project` and `limit` (default 10).
 - `action: "mark_reviewed"` — requires `observation_id`; resets that observation's local review cycle using its type decay policy. The legacy `id` alias is accepted for compatibility.
 
-`mark_reviewed` is local-only for now: `review_after` is intentionally not part of sync payloads in this phase, so resetting the review cycle does not enqueue a sync mutation or propagate to other machines.
+`review_after` is replicated with observation sync mutations, including `mark_reviewed` resets. Sync preserves the original date instead of restarting the clock on import. Legacy payloads without this field preserve an existing local date; new observations derive it from `created_at` using the type's decay policy (the normal insertion time is used if `created_at` is absent). Explicit `null` clears the date. Concurrent changes follow the existing sync mutation application order; the last applied upsert wins. Previously imported observations with missing dates are not automatically backfilled.
 
 ### mem_pin
 

@@ -17104,7 +17104,7 @@ func TestMarkReviewedForProjectMatchesLegacyMixedCaseProject(t *testing.T) {
 	}
 }
 
-func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
+func TestMarkReviewedEnqueuesSyncMutation(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
@@ -17132,8 +17132,19 @@ func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPendingSyncMutations after: %v", err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("MarkReviewed enqueued sync mutation: before=%d after=%d", len(before), len(after))
+	if len(after) != len(before)+1 {
+		t.Fatalf("MarkReviewed mutation count: before=%d after=%d", len(before), len(after))
+	}
+	obs, err := s.GetObservation(obsID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(after[len(after)-1].Payload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if obs.ReviewAfter == nil || payload["review_after"] != *obs.ReviewAfter {
+		t.Fatalf("review mutation = %#v", payload)
 	}
 }
 

@@ -642,11 +642,13 @@ type syncObservationPayload struct {
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
-	CreatedAt      string  `json:"created_at,omitempty"`
-	UpdatedAt      string  `json:"updated_at,omitempty"`
-	Deleted        bool    `json:"deleted,omitempty"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
-	HardDelete     bool    `json:"hard_delete,omitempty"`
+	// Raw JSON distinguishes an absent legacy field from an explicit null reset.
+	ReviewAfter json.RawMessage `json:"review_after,omitempty"`
+	CreatedAt   string          `json:"created_at,omitempty"`
+	UpdatedAt   string          `json:"updated_at,omitempty"`
+	Deleted     bool            `json:"deleted,omitempty"`
+	DeletedAt   *string         `json:"deleted_at,omitempty"`
+	HardDelete  bool            `json:"hard_delete,omitempty"`
 }
 
 type syncPromptPayload struct {
@@ -4423,7 +4425,7 @@ func (s *Store) ObservationsNeedingReview(project string, limit int) ([]Observat
 
 // MarkReviewed resets an observation's review_after using its type's configured decay offset.
 // Types without a decay offset return to a NULL review_after value.
-// This lifecycle reset is intentionally local-only until the sync wire format includes review_after.
+// The reset and its sync upsert are committed atomically.
 func (s *Store) MarkReviewed(id int64) error {
 	return s.markReviewed(id, "")
 }
@@ -4456,8 +4458,10 @@ func (s *Store) markReviewed(id int64, project string) error {
 		if months, ok := decayReviewAfterMonths[observationType]; ok {
 			reviewAfter = time.Now().UTC().AddDate(0, months, 0).Format("2006-01-02 15:04:05")
 		}
-		update := `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`
-		updateArgs := []any{reviewAfter, id}
+		// Git sync compares updated_at with the chunk's subsecond timestamp.
+		// Keep this write precise so a review immediately after sync is exported.
+		update := `UPDATE observations SET review_after = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+		updateArgs := []any{reviewAfter, time.Now().UTC().Format(time.RFC3339Nano), id}
 		if project != "" {
 			update += ` AND LOWER(project) = ?`
 			updateArgs = append(updateArgs, project)
@@ -4473,7 +4477,11 @@ func (s *Store) markReviewed(id int64, project string) error {
 		if affected == 0 {
 			return ErrObservationNotFound
 		}
-		return nil
+		obs, err := s.getObservationTx(tx, id)
+		if err != nil {
+			return err
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 	})
 }
 
@@ -12187,6 +12195,9 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 }
 
 func observationPayloadFromObservation(obs *Observation) syncObservationPayload {
+	// Marshaling a nullable string cannot fail. Emit null so a reset for a type
+	// without a decay policy can clear the date on other machines.
+	reviewAfter, _ := json.Marshal(obs.ReviewAfter)
 	return syncObservationPayload{
 		SyncID:         obs.SyncID,
 		SessionID:      obs.SessionID,
@@ -12200,6 +12211,7 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		RevisionCount:  obs.RevisionCount,
 		DuplicateCount: obs.DuplicateCount,
 		LastSeenAt:     obs.LastSeenAt,
+		ReviewAfter:    reviewAfter,
 		CreatedAt:      obs.CreatedAt,
 		UpdatedAt:      obs.UpdatedAt,
 	}
@@ -12344,11 +12356,33 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		updatedAt = createdAt
 	}
 
+	var reviewAfter *string
+	if len(payload.ReviewAfter) > 0 {
+		if err := json.Unmarshal(payload.ReviewAfter, &reviewAfter); err != nil {
+			return fmt.Errorf("decode review_after: %w", err)
+		}
+		if reviewAfter != nil {
+			if _, err := parseObservationTime(*reviewAfter); err != nil {
+				return fmt.Errorf("invalid review_after: %w", err)
+			}
+		}
+	}
+
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
+		if len(payload.ReviewAfter) == 0 {
+			if months, ok := decayReviewAfterMonths[payload.Type]; ok {
+				created, parseErr := parseObservationTime(createdAt)
+				if parseErr != nil {
+					return fmt.Errorf("derive review_after from created_at: %w", parseErr)
+				}
+				date := created.AddDate(0, months, 0).Format("2006-01-02 15:04:05")
+				reviewAfter = &date
+			}
+		}
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -12362,6 +12396,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 			revisionCount,
 			duplicateCount,
 			payload.LastSeenAt,
+			reviewAfter,
 			createdAt,
 			updatedAt,
 		)
@@ -12383,6 +12418,9 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if payload.LastSeenAt == nil {
 		payload.LastSeenAt = existing.LastSeenAt
 	}
+	if len(payload.ReviewAfter) == 0 {
+		reviewAfter = existing.ReviewAfter
+	}
 	if strings.TrimSpace(payload.CreatedAt) == "" {
 		createdAt = existing.CreatedAt
 	}
@@ -12392,7 +12430,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = NULL
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,
@@ -12406,6 +12444,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		revisionCount,
 		duplicateCount,
 		payload.LastSeenAt,
+		reviewAfter,
 		createdAt,
 		updatedAt,
 		existing.ID,
@@ -13840,8 +13879,8 @@ func scanDeferredRow(row scannable) (DeferredRow, error) {
 
 // ListObservationSyncPayloads returns the decoded payloads of all sync_mutations
 // rows whose entity = 'observation'. Used by integration tests to assert that
-// new observation columns (review_after, expires_at, embedding*) are NOT present
-// in the sync wire format in Phase 1 (REQ-009).
+// local-only observation columns (expires_at, embedding*) remain absent from
+// the sync wire format; review_after is replicated.
 func (s *Store) ListObservationSyncPayloads() ([]any, error) {
 	rows, err := s.db.Query(`
 		SELECT payload

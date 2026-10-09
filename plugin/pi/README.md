@@ -287,7 +287,7 @@ For lifecycle review, `mem_review` keeps the collapsed output explicit without e
 ↳ ✓ reviewed #42
 ```
 
-`action=list` shows memories whose local `review_after` timestamp is due. The optional `project` selector filters `list` and scopes `mark_reviewed`; omit it to list due memories across all projects. `action=mark_reviewed` asks Engram core to reset that observation's local review clock according to its memory type. That review reset is local-only today: it updates the local lifecycle metadata but is not treated as a cloud/git sync mutation until the sync wire format carries lifecycle review fields.
+`action=list` shows memories whose local `review_after` timestamp is due. The optional `project` selector filters `list` and scopes `mark_reviewed`; omit it to list due memories across all projects. `action=mark_reviewed` asks Engram core to reset that observation's local review clock according to its memory type. That review reset atomically creates an observation sync mutation, preserving the same review date across git sync and enrolled cloud sync.
 
 Normal memory activity also updates the status bar with short progress/result text such as `🧠 engram · search…` and `🧠 engram · ✓ 4 results`. The extension does not use notifications for normal memory operations.
 

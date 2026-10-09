@@ -538,6 +538,25 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
 	includeObservationParentSessions(chunk, data.Sessions)
 	chunk.Mutations = append(filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime), filterUnexportedDeleteMutations(localDeletes, exportedDeletes)...)
+	// Typed snapshots omit null review dates. An explicit mutation carries the
+	// clear intent without changing how legacy snapshots are interpreted.
+	for _, observation := range chunk.Observations {
+		if observation.ReviewAfter != nil {
+			continue
+		}
+		mutations := synthesizeMutationsFromChunk(ChunkData{Observations: []store.Observation{observation}})
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(mutations[0].Payload), &fields); err != nil {
+			return nil, fmt.Errorf("encode review reset: %w", err)
+		}
+		fields["review_after"] = nil
+		payload, err := json.Marshal(fields)
+		if err != nil {
+			return nil, fmt.Errorf("encode review reset: %w", err)
+		}
+		mutations[0].Payload = string(payload)
+		chunk.Mutations = append(chunk.Mutations, mutations[0])
+	}
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
 	}
@@ -1861,7 +1880,7 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		if obs.DeletedAt != nil {
 			op = store.SyncOpDelete
 		}
-		payload, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"sync_id":         obs.SyncID,
 			"session_id":      obs.SessionID,
 			"type":            obs.Type,
@@ -1879,7 +1898,13 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 			"deleted":         obs.DeletedAt != nil,
 			"deleted_at":      obs.DeletedAt,
 			"hard_delete":     false,
-		})
+		}
+		// Legacy observation arrays omit null lifecycle fields. Preserve that
+		// absence so old chunks cannot clear an existing local review date.
+		if obs.ReviewAfter != nil {
+			fields["review_after"] = *obs.ReviewAfter
+		}
+		payload, err := json.Marshal(fields)
 		if err != nil {
 			continue
 		}

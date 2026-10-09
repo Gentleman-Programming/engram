@@ -240,23 +240,24 @@ type mutationSessionPayload struct {
 }
 
 type mutationObservationPayload struct {
-	SyncID         string  `json:"sync_id"`
-	SessionID      string  `json:"session_id"`
-	Type           string  `json:"type"`
-	Title          string  `json:"title"`
-	Content        string  `json:"content"`
-	ToolName       *string `json:"tool_name,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	Scope          string  `json:"scope"`
-	TopicKey       *string `json:"topic_key,omitempty"`
-	RevisionCount  int     `json:"revision_count,omitempty"`
-	DuplicateCount int     `json:"duplicate_count,omitempty"`
-	LastSeenAt     *string `json:"last_seen_at,omitempty"`
-	CreatedAt      string  `json:"created_at,omitempty"`
-	UpdatedAt      string  `json:"updated_at,omitempty"`
-	Deleted        bool    `json:"deleted,omitempty"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
-	HardDelete     bool    `json:"hard_delete,omitempty"`
+	SyncID         string          `json:"sync_id"`
+	SessionID      string          `json:"session_id"`
+	Type           string          `json:"type"`
+	Title          string          `json:"title"`
+	Content        string          `json:"content"`
+	ToolName       *string         `json:"tool_name,omitempty"`
+	Project        *string         `json:"project,omitempty"`
+	Scope          string          `json:"scope"`
+	TopicKey       *string         `json:"topic_key,omitempty"`
+	RevisionCount  int             `json:"revision_count,omitempty"`
+	DuplicateCount int             `json:"duplicate_count,omitempty"`
+	LastSeenAt     *string         `json:"last_seen_at,omitempty"`
+	ReviewAfter    json.RawMessage `json:"review_after,omitempty"`
+	CreatedAt      string          `json:"created_at,omitempty"`
+	UpdatedAt      string          `json:"updated_at,omitempty"`
+	Deleted        bool            `json:"deleted,omitempty"`
+	DeletedAt      *string         `json:"deleted_at,omitempty"`
+	HardDelete     bool            `json:"hard_delete,omitempty"`
 }
 
 type mutationPromptPayload struct {
