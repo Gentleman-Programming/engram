@@ -150,12 +150,15 @@ func confirmHookSession(id, cwd string, projectOwned bool) (confirmationErr erro
 }
 
 // hookSessionOwnerProject reports the project a persisted session is bound
-// to. Only a missing session (404) or a legacy blank-project row defers to
-// cwd-derived first registration; every other lookup failure returns an
-// error so the gate fails closed instead of silently re-deriving the write's
-// project from a degraded answer (#1717 review follow-up). Ended sessions
-// count too: their registration attempt is refused by the server with
-// session_already_ended, which the denial names.
+// to. Only a missing session (404) or a validated legacy blank-project row
+// defers to cwd-derived first registration; transport errors, non-2xx/404
+// statuses, malformed payloads, sessions that do not identify the requested
+// ID, and missing or non-string project fields all fail closed with a named
+// lookup cause instead of silently re-deriving the write's project (#1717
+// review follow-up). Success payloads decode without the error-body bound
+// because they carry the full session row, including large summaries. Ended
+// sessions count too: their registration attempt is refused by the server
+// with session_already_ended, which the denial names.
 func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id string) (owner string, known bool, lookupErr error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/sessions/"+url.PathEscape(id), nil)
 	if err != nil {
@@ -166,25 +169,25 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 		return "", false, &hookDenialError{message: "host session lookup failed"}
 	}
 	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit))
-	if err != nil {
-		return "", false, &hookDenialError{message: "host session lookup failed"}
-	}
 	switch {
 	case response.StatusCode == http.StatusNotFound:
 		// Unknown session: first registration derives the project from cwd.
 		return "", false, nil
 	case response.StatusCode >= 200 && response.StatusCode < 300:
+		// Success payloads are the full session row, including summaries that
+		// legitimately exceed the error-body bound, so they decode from the
+		// response body directly. The row must identify the requested session
+		// and carry a present string-valued project; only a validated blank
+		// project is the legacy row that defers to cwd-derived registration.
 		var session struct {
-			ID      string `json:"id"`
-			Project string `json:"project"`
+			ID      string  `json:"id"`
+			Project *string `json:"project"`
 		}
-		if json.Unmarshal(body, &session) != nil || session.ID != id {
+		if json.NewDecoder(response.Body).Decode(&session) != nil || session.ID != id || session.Project == nil {
 			return "", false, &hookDenialError{message: "host session lookup failed (malformed session)"}
 		}
-		owner := strings.TrimSpace(session.Project)
+		owner := strings.TrimSpace(*session.Project)
 		if owner == "" {
-			// Legacy blank-project row: keep the cwd-derived repair path.
 			return "", false, nil
 		}
 		return owner, true, nil

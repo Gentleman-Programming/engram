@@ -996,6 +996,12 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 		{"mismatched session id denies", func(w http.ResponseWriter) {
 			_, _ = io.WriteString(w, `{"id":"other","project":"docs"}`)
 		}, false},
+		{"missing project field denies", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"s9"}`)
+		}, false},
+		{"null project denies", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"s9","project":null}`)
+		}, false},
 		{"blank project defers to cwd resolution", func(w http.ResponseWriter) {
 			_, _ = io.WriteString(w, `{"id":"s9","project":""}`)
 		}, true},
@@ -1047,6 +1053,76 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 			}
 			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") {
 				t.Fatalf("%s must name the lookup cause, got %q", tc.name, bound.PermissionDecisionReason)
+			}
+		})
+	}
+}
+
+func TestClaudeLargeSessionLookupStillConfirms(t *testing.T) {
+	// GET /sessions/{id} returns the full session, including its summary; a
+	// legitimate 65,536-character summary must not truncate the payload into
+	// a malformed-session denial (#1762 review: only error bodies are bounded).
+	hugeSummary := strings.Repeat("s", 65536)
+	for _, tc := range []struct {
+		name     string
+		session  string
+		post     string
+		postCode int
+		wantDeny string
+	}{
+		{
+			name:     "active session with huge summary confirms without cwd resolution",
+			session:  `{"id":"s9","project":"client","summary":"` + hugeSummary + `"}`,
+			post:     `{"id":"s9","status":"created"}`,
+			postCode: http.StatusCreated,
+		},
+		{
+			name:     "ended session with huge summary keeps the already-ended cause",
+			session:  `{"id":"s9","project":"client","ended_at":"2026-01-01 00:00:00","summary":"` + hugeSummary + `"}`,
+			post:     `{"code":"session_already_ended","session_id":"s9"}`,
+			postCode: http.StatusConflict,
+			wantDeny: "already ended",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var derived bool
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+					_, _ = io.WriteString(w, tc.session)
+				case r.URL.Path == "/project/current":
+					derived = true
+					_, _ = io.WriteString(w, `{"project":"docs","project_source":"dir_basename"}`)
+				case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+					w.WriteHeader(tc.postCode)
+					_, _ = io.WriteString(w, tc.post)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer endpoint.Close()
+			t.Setenv("ENGRAM_URL", endpoint.URL)
+			input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+			var hook struct {
+				HookSpecificOutput struct {
+					PermissionDecision       string         `json:"permissionDecision"`
+					PermissionDecisionReason string         `json:"permissionDecisionReason"`
+					UpdatedInput             map[string]any `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+				t.Fatal(err)
+			}
+			bound := hook.HookSpecificOutput
+			if tc.wantDeny == "" {
+				if bound.PermissionDecision == "deny" || bound.UpdatedInput["session_id"] != "s9" || derived {
+					t.Fatalf("large session must confirm against its owner: decision=%q derived=%v (%s)", bound.PermissionDecision, derived, bound.PermissionDecisionReason)
+				}
+				return
+			}
+			if bound.PermissionDecision != "deny" || !strings.Contains(bound.PermissionDecisionReason, tc.wantDeny) || derived {
+				t.Fatalf("large ended session must keep its named cause: decision=%q derived=%v (%s)", bound.PermissionDecision, derived, bound.PermissionDecisionReason)
 			}
 		})
 	}
