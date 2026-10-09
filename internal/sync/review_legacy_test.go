@@ -41,7 +41,17 @@ func TestLegacyChunkReviewDateCompatibility(t *testing.T) {
 }
 
 func TestGitSyncClearsReviewDate(t *testing.T) {
-	a, b := newTestStore(t), newTestStore(t)
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DataDir = t.TempDir()
+	a, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	b := newTestStore(t)
 	if err := a.CreateSession("clear-review", "demo", "/tmp/demo"); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +87,13 @@ func TestGitSyncClearsReviewDate(t *testing.T) {
 	if err := a.MarkReviewed(id); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a, err = store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := New(a, dir).Export("a", "")
 	if err != nil {
 		t.Fatal(err)
@@ -93,5 +110,31 @@ func TestGitSyncClearsReviewDate(t *testing.T) {
 	}
 	if imported.ReviewAfter != nil {
 		t.Fatalf("review date not cleared: %s", *imported.ReviewAfter)
+	}
+	if repeat, err := New(a, dir).Export("a", ""); err != nil || !repeat.IsEmpty {
+		t.Fatalf("repeat export = %+v, %v", repeat, err)
+	}
+	// A second clear has its own receipt even when every write is in one second.
+	if err := a.ApplyPulledMutation(store.LocalChunkTargetKey, store.SyncMutation{Seq: 2, Entity: store.SyncEntityObservation, EntityKey: obs.SyncID, Op: store.SyncOpUpsert, Payload: string(payload)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(a, dir).Export("a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(b, dir).Import(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.MarkReviewed(id); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := New(a, dir).Export("a", ""); err != nil || result.IsEmpty {
+		t.Fatalf("second clear = %+v, %v", result, err)
+	}
+	if _, err := New(b, dir).Import(); err != nil {
+		t.Fatal(err)
+	}
+	imported, err = b.GetObservationBySyncID(obs.SyncID)
+	if err != nil || imported.ReviewAfter != nil {
+		t.Fatalf("second clear not propagated: %+v, %v", imported, err)
 	}
 }

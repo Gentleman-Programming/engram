@@ -1448,6 +1448,14 @@ func (s *Store) migrate() error {
 			content_rowid='id'
 		);
 
+			-- Local Git clear intent is independent of enrollment and cloud acks.
+			-- Retain events; manifest history owns export deduplication.
+			CREATE TABLE IF NOT EXISTS review_clear_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				event_key TEXT NOT NULL UNIQUE,
+				sync_id TEXT NOT NULL
+			);
+
 			CREATE TABLE IF NOT EXISTS sync_chunks (
 				target_key  TEXT NOT NULL DEFAULT 'local',
 				chunk_id    TEXT NOT NULL,
@@ -4439,14 +4447,15 @@ func (s *Store) MarkReviewedForProject(id int64, project string) error {
 
 func (s *Store) markReviewed(id int64, project string) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		query := `SELECT type FROM observations WHERE id = ? AND deleted_at IS NULL`
+		query := `SELECT type, review_after FROM observations WHERE id = ? AND deleted_at IS NULL`
 		args := []any{id}
 		if project != "" {
 			query += ` AND LOWER(project) = ?`
 			args = append(args, project)
 		}
 		var observationType string
-		err := tx.QueryRow(query, args...).Scan(&observationType)
+		var priorReviewAfter sql.NullString
+		err := tx.QueryRow(query, args...).Scan(&observationType, &priorReviewAfter)
 		if err == sql.ErrNoRows {
 			return ErrObservationNotFound
 		}
@@ -4458,10 +4467,8 @@ func (s *Store) markReviewed(id int64, project string) error {
 		if months, ok := decayReviewAfterMonths[observationType]; ok {
 			reviewAfter = time.Now().UTC().AddDate(0, months, 0).Format("2006-01-02 15:04:05")
 		}
-		// Git sync compares updated_at with the chunk's subsecond timestamp.
-		// Keep this write precise so a review immediately after sync is exported.
 		update := `UPDATE observations SET review_after = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`
-		updateArgs := []any{reviewAfter, time.Now().UTC().Format(time.RFC3339Nano), id}
+		updateArgs := []any{reviewAfter, Now(), id}
 		if project != "" {
 			update += ` AND LOWER(project) = ?`
 			updateArgs = append(updateArgs, project)
@@ -4481,8 +4488,43 @@ func (s *Store) markReviewed(id int64, project string) error {
 		if err != nil {
 			return err
 		}
-		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+		payload := observationPayloadFromObservation(obs)
+		if obs.ReviewAfter == nil && priorReviewAfter.Valid {
+			payload.ReviewAfter = json.RawMessage("null")
+			if _, err := s.execHook(tx, `INSERT INTO review_clear_events (event_key, sync_id) VALUES (?, ?)`, newSyncID("review-clear"), obs.SyncID); err != nil {
+				return err
+			}
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, payload)
 	})
+}
+
+// ReviewClearEvent is local-only intent; it is never part of cloud payloads.
+type ReviewClearEvent struct {
+	ID     int64
+	Key    string
+	SyncID string
+}
+
+// ExportReviewClearEvents returns retained events whose observation is still
+// live and undated. Restoring a date or deleting the observation suppresses it.
+func (s *Store) ExportReviewClearEvents() ([]ReviewClearEvent, error) {
+	rows, err := s.queryItHook(s.db, `SELECT e.id, e.event_key, e.sync_id FROM review_clear_events e
+		JOIN observations o ON o.sync_id = e.sync_id
+		WHERE o.review_after IS NULL AND o.deleted_at IS NULL ORDER BY e.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []ReviewClearEvent
+	for rows.Next() {
+		var event ReviewClearEvent
+		if err := rows.Scan(&event.ID, &event.Key, &event.SyncID); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 // ─── User Prompts ────────────────────────────────────────────────────────────
@@ -12195,9 +12237,12 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 }
 
 func observationPayloadFromObservation(obs *Observation) syncObservationPayload {
-	// Marshaling a nullable string cannot fail. Emit null so a reset for a type
-	// without a decay policy can clear the date on other machines.
-	reviewAfter, _ := json.Marshal(obs.ReviewAfter)
+	// Missing dates carry no clear intent. MarkReviewed emits an explicit null
+	// only when it actually removes a previously stored review date.
+	var reviewAfter json.RawMessage
+	if obs.ReviewAfter != nil {
+		reviewAfter, _ = json.Marshal(obs.ReviewAfter)
+	}
 	return syncObservationPayload{
 		SyncID:         obs.SyncID,
 		SessionID:      obs.SessionID,
