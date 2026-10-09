@@ -220,6 +220,8 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 							}
 						}
 						switch r.URL.Path {
+						case "/external/health":
+							_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
 						case "/external/project/current":
 							if tc.noProject {
 								if _, err := io.WriteString(w, `{"project":"","project_source":"ambiguous"}`); err != nil {
