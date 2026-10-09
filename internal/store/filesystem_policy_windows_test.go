@@ -53,6 +53,7 @@ func TestWindowsFilesystemResolverRequestsOpenedName(t *testing.T) {
 }
 
 func TestWindowsFilesystemAdapterRejectsResolvedRemotePath(t *testing.T) {
+	t.Setenv(EnvAllowUnsafeNFS, "0")
 	dataDir := t.TempDir()
 	var gotRoot string
 	setWindowsFilesystemAdapter(t,

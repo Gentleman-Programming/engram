@@ -9,6 +9,7 @@ import (
 )
 
 func TestCheckDataDirectoryFilesystemRejectsKnownRemote(t *testing.T) {
+	t.Setenv(EnvAllowUnsafeNFS, "0")
 	setFilesystemInspector(t, func(string) (filesystemInfo, error) {
 		return filesystemInfo{Type: "NFS", Support: filesystemRemote}, nil
 	})

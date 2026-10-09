@@ -164,6 +164,7 @@ func TestNewRejectsRemoteFilesystemBeforeSQLiteMutation(t *testing.T) {
 	setFilesystemInspector(t, func(string) (filesystemInfo, error) {
 		return filesystemInfo{Type: "CIFS", Support: filesystemRemote}, nil
 	})
+	t.Setenv(EnvAllowUnsafeNFS, "0")
 	_, err := New(FallbackConfig(dataDir))
 	var rejection *NetworkFilesystemError
 	if !errors.As(err, &rejection) {
@@ -193,6 +194,7 @@ func TestNewRejectsRemoteFilesystemBeforeSQLiteMutation(t *testing.T) {
 func TestNewRejectsRemoteFilesystemBeforeCreatingDataDirectory(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := filepath.Join(parent, "absent-data")
+	t.Setenv(EnvAllowUnsafeNFS, "0")
 	setFilesystemInspector(t, func(path string) (filesystemInfo, error) {
 		if path != parent {
 			t.Errorf("inspected %q, want existing parent %q", path, parent)
