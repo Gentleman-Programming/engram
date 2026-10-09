@@ -3618,7 +3618,10 @@ func TestClaudeCodeUserPromptHookWithoutJQFirstSaveThresholdIsExact(t *testing.T
 	const sessionID = "session-first-save-boundary"
 	fixedNow := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 	bashEnvPath := filepath.Join(t.TempDir(), "fixed-date.sh")
-	bashEnv := fmt.Sprintf(`date() {
+	bashEnv := fmt.Sprintf(`if [ "${ENGRAM_TEST_STDERR_WARNING:-}" = "true" ]; then
+  printf 'bash.exe: warning: could not find /tmp, please create!\n' >&2
+fi
+date() {
 case "$*" in
   "+%%s") printf '%%d\n' %d ;;
   *"2024-12-31 23:45:01"*) printf '%%d\n' %d ;;
@@ -3638,12 +3641,15 @@ esac
 	}
 
 	for _, tt := range []struct {
-		name      string
-		startedAt string
-		wantNudge bool
+		name          string
+		startedAt     string
+		wantNudge     bool
+		stderrWarning bool
 	}{
 		{name: "899 seconds", startedAt: "2024-12-31 23:45:01", wantNudge: false},
 		{name: "900 seconds", startedAt: "2024-12-31 23:45:00", wantNudge: true},
+		{name: "899 seconds with stderr warning", startedAt: "2024-12-31 23:45:01", wantNudge: false, stderrWarning: true},
+		{name: "900 seconds with stderr warning", startedAt: "2024-12-31 23:45:00", wantNudge: true, stderrWarning: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3664,11 +3670,12 @@ esac
 				t.Fatalf("parse test server URL: %v", err)
 			}
 
-			env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "BASH_ENV", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE", "ENGRAM_HOOK_MAX_TIME")
+			env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "BASH_ENV", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE", "ENGRAM_HOOK_MAX_TIME", "ENGRAM_TEST_STDERR_WARNING")
 			env = append(env,
 				"PATH="+strings.Join(pathDirs, string(os.PathListSeparator)),
 				"TMPDIR="+t.TempDir(),
 				"BASH_ENV="+bashEnvPath,
+				"ENGRAM_TEST_STDERR_WARNING="+strconv.FormatBool(tt.stderrWarning),
 				"ENGRAM_PORT="+serverURL.Port(),
 				"ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0",
 				"ENGRAM_HOOK_MAX_TIME=1",
@@ -3678,14 +3685,22 @@ esac
 				cmd := exec.Command(bashPath, scriptPath)
 				cmd.Env = env
 				cmd.Stdin = strings.NewReader(`{"cwd":"/workspace","session_id":"` + sessionID + `"}`)
-				output, err := cmd.CombinedOutput()
-				if err != nil {
-					t.Fatalf("run user prompt hook without jq: %v\noutput: %s", err, output)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout = &stdout
+				cmd.Stderr = &stderr
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("run user prompt hook without jq: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 				}
-				if !json.Valid(output) {
-					t.Fatalf("user prompt hook emitted invalid JSON %q", output)
+				if !json.Valid(stdout.Bytes()) {
+					t.Fatalf("user prompt hook emitted invalid JSON %q\nstderr: %s", stdout.String(), stderr.String())
 				}
-				return string(output)
+				if tt.stderrWarning && !strings.Contains(stderr.String(), "bash.exe: warning: could not find /tmp, please create!\n") {
+					t.Fatalf("controlled warning missing from stderr: %q", stderr.String())
+				}
+				if stderr.Len() > 0 {
+					t.Logf("user prompt hook stderr: %s", stderr.String())
+				}
+				return stdout.String()
 			}
 
 			runHook()
