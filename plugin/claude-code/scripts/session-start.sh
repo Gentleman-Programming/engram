@@ -47,11 +47,19 @@ PROJECT=$(resolve_project "$CWD") || PROJECT=""
 # Create session. Claude keeps the session ID on --resume, so resume=true lets
 # the server register a live continuation when the original session already ended.
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
+  # Roots created before Claude registered project_owned sessions are shared;
+  # resuming one keeps that mode so its continuation stays resolvable.
+  OWNERSHIP_MODE="project_owned"
+  ENCODED_SESSION_ID=$(printf '%s' "$SESSION_ID" | jq -sRr @uri 2>/dev/null)
+  if [ -n "$ENCODED_SESSION_ID" ] && engram_curl -sf "${ENGRAM_URL}/sessions/${ENCODED_SESSION_ID}" --max-time 1 2>/dev/null \
+    | jq -e --arg id "$SESSION_ID" '.id == $id and .ended_at != null and .ownership_mode == "shared"' >/dev/null 2>&1; then
+    OWNERSHIP_MODE="shared"
+  fi
   engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir, ownership_mode: "project_owned", resume: true}')" \
+    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" --arg mode "$OWNERSHIP_MODE" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}')" \
     > /dev/null
 fi
 
