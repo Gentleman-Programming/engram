@@ -96,7 +96,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
 	for _, required := range []string{
 		"pull_request:",
-		"types: [opened, edited, labeled, unlabeled, synchronize]",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
 		"check-issue-reference:",
 		"name: Check Issue Reference",
 		"check-issue-approved:",

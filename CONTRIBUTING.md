@@ -53,6 +53,13 @@ The active required contexts run automatically on every PR and merge queue group
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
 | **Plugin Tests** | The Pi plugin test suite runs from a clean checkout |
 
+PR Validation runs on PR opening, edits, label addition/removal, synchronization,
+and reopening. Reopening requests a fresh **Check Issue Reference** and
+**Check Issue Has status:approved** evaluation under the existing rules.
+Changes to labels on a linked issue do not themselves trigger PR Validation;
+the approval check fetches issue labels when the workflow runs. PR label events
+and linked-issue label events are distinct.
+
 All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
