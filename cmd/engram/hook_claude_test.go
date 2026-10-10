@@ -64,7 +64,7 @@ func TestClaudeEndedRegistrationCannotPersistBoundWrite(t *testing.T) {
 	if err := db.EndSession(host, "finished"); err != nil {
 		t.Fatal(err)
 	}
-	var registrationStatus int
+	var registrationStatus, registrations int
 	production := server.New(db, 0).Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -86,8 +86,15 @@ func TestClaudeEndedRegistrationCannotPersistBoundWrite(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			if req.ID != host || req.Project != "project-a" || req.OwnershipMode != "project_owned" {
-				t.Errorf("registration = %+v", req)
+			// CreateSession made a legacy shared root: SessionStart resumes it as
+			// shared, while the gate keeps registering project_owned.
+			registrations++
+			wantMode := "project_owned"
+			if registrations == 1 {
+				wantMode = "shared"
+			}
+			if req.ID != host || req.Project != "project-a" || req.OwnershipMode != wantMode {
+				t.Errorf("registration %d = %+v, want %s", registrations, req, wantMode)
 			}
 			err := db.StartSessionWithOwnershipMode(req.ID, req.Project, req.Directory, req.OwnershipMode)
 			if !errors.Is(err, store.ErrSessionAlreadyEnded) {
@@ -1024,6 +1031,29 @@ func TestClaudeShellLifecyclePersistsOnlyLiveHostWrites(t *testing.T) {
 	}
 	if _, err := db.GetSession("foreign-model-session"); err == nil {
 		t.Fatal("foreign model session was created")
+	}
+
+	// Roots created before Claude registered project_owned sessions are shared.
+	// Resume must keep that mode so the continuation stays resolvable.
+	const legacyHost = "shell-host-legacy-shared"
+	if err := db.CreateSession(legacyHost, project, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndSession(legacyHost, "finished"); err != nil {
+		t.Fatal(err)
+	}
+	start(legacyHost)
+	legacyContinuation := legacyHost + ":resume:2"
+	decision, bound = preToolUse(legacyHost, "after legacy resume")
+	if decision == "deny" || bound["session_id"] != legacyContinuation {
+		t.Fatalf("legacy resumed host decision %q, bound %v", decision, bound)
+	}
+	resumed, err := db.GetSession(legacyContinuation)
+	if err != nil || resumed.OwnershipMode != store.SessionOwnershipShared || resumed.EndedAt != nil {
+		t.Fatalf("legacy continuation = %+v, err = %v", resumed, err)
+	}
+	if legacy, err := db.GetSession(legacyHost); err != nil || legacy.EndedAt == nil {
+		t.Fatalf("legacy root reopened: %+v, %v", legacy, err)
 	}
 }
 

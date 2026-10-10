@@ -161,7 +161,7 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 
 **On session start** (`startup`, `resume`, `clear`, `fork`):
 1. Ensures the engram HTTP server is running
-2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration
+2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration. The registration is `project_owned`, except when the ended session is a legacy `shared` root (created before Claude registered project-owned sessions): it is resumed as `shared` so the continuation stays resolvable
 3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
 4. Injects previous session context into Claude's initial context
 
