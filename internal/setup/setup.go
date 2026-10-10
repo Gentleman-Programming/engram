@@ -153,7 +153,7 @@ func codexEngramBlockStr(command string) string {
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
-This protocol is REQUIRED; it MUST be treated as active—do not wait for the user to activate it.
+This protocol is REQUIRED; it MUST be treated as active — MUST NOT wait for the user to activate it.
 
 ## AVAILABLE TOOLS
 
