@@ -131,8 +131,13 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 
 		runHook(t, "session-end.sh", `{"session_id":"socket-session"}`, map[string]string{"ENGRAM_SOCKET": socketPath})
 
-		if lookup := <-requests; lookup.URL.Path != "/sessions/socket-session" {
-			t.Errorf("lookup path = %q, want /sessions/socket-session", lookup.URL.Path)
+		select {
+		case lookup := <-requests:
+			if lookup.URL.Path != "/sessions/socket-session" {
+				t.Errorf("lookup path = %q, want /sessions/socket-session", lookup.URL.Path)
+			}
+		default:
+			t.Fatal("expected a session lookup over the Unix socket")
 		}
 		select {
 		case request := <-requests:
