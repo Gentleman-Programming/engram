@@ -1,6 +1,8 @@
 package scripts
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -297,6 +299,279 @@ func TestPerfRatchetBootstrap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPerfRatchetAgainst(t *testing.T) {
+	one := benchmarkHeader + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n"
+	two := one + "BenchmarkScanProject_Page5000-8\t1\t100 ns/op\n"
+	const passed = "no statistically significant performance regression beyond +25%\n"
+	const bootstrap = "bootstrap: reference ratchet-reference lacks the complete benchmark suite; validated its successor against the versioned baseline and intentionally skipped cross-host timing comparison\n"
+	for _, tt := range []struct {
+		name, reference, candidate, baseline, diagnostic, diff string
+		bootstrap, compared                                    bool
+		fail                                                   string
+		code                                                   int
+		stdout                                                 string
+	}{
+		{name: "compares both revisions", reference: one, candidate: one, compared: true, stdout: passed},
+		{name: "equal suites still compare with bootstrap enabled", reference: one, candidate: one, bootstrap: true, compared: true, stdout: passed},
+		{name: "bootstraps a strict subset across host configurations", reference: one, candidate: two, bootstrap: true, stdout: bootstrap},
+		{name: "bootstraps an empty reference suite", reference: benchmarkHeader, candidate: two, bootstrap: true, stdout: bootstrap},
+		{
+			name: "rejects a subset without bootstrap permission", reference: one, candidate: two, code: 1,
+			diagnostic: "perf ratchet benchmark sets do not match; refusing a vacuous comparison\n",
+			diff:       "@@ -1 +1,2 @@\n+ScanProject_Page5000\n Search_Hit\n",
+		},
+		{
+			name: "rejects renamed reference benchmarks", reference: strings.ReplaceAll(one, "Search_Hit", "Old_Hit"), candidate: one, bootstrap: true, code: 1,
+			diagnostic: "perf ratchet benchmark sets do not match; refusing a vacuous comparison\n",
+			diff:       "@@ -1 +1 @@\n-Old_Hit\n+Search_Hit\n",
+		},
+		{
+			name: "rejects different same-runner configurations", reference: one, candidate: strings.ReplaceAll(one, "test-cpu", "other-cpu"), bootstrap: true, code: 1,
+			diagnostic: "perf ratchet benchmark configurations do not match after package normalization; refusing separate benchstat tables\n",
+			diff:       "@@ -1,4 +1,4 @@\n-cpu: test-cpu\n+cpu: other-cpu\n goarch: amd64\n goos: linux\n pkg: github.com/Gentleman-Programming/engram/v3/internal/store\n",
+		},
+		{
+			name: "rejects bootstrap outside the versioned suite", reference: one, candidate: two, baseline: one, bootstrap: true, code: 1,
+			diagnostic: "bootstrap benchmark suite does not match the versioned baseline\n",
+			diff:       "@@ -1 +1,2 @@\n+ScanProject_Page5000\n Search_Hit\n",
+		},
+		{name: "rejects an empty bootstrap baseline", reference: one, candidate: two, baseline: "empty", bootstrap: true, code: 1, diagnostic: "bootstrap requires non-empty versioned baseline and candidate benchmark output\n"},
+		{name: "cleans up after reference benchmark failure", reference: one, candidate: one, fail: "reference", code: 7, diagnostic: "fixture benchmark failed\n"},
+		{name: "cleans up after candidate benchmark failure", reference: one, candidate: one, fail: "candidate", code: 7, diagnostic: "fixture benchmark failed\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := tt.baseline
+			switch baseline {
+			case "":
+				// Bootstrap validates identities, not the baseline-producing host.
+				baseline = strings.ReplaceAll(tt.candidate, "test-cpu", "baseline-cpu")
+			case "empty":
+				baseline = ""
+			}
+			f := newPerfRatchetOperation(t, tt.reference, tt.candidate, baseline)
+			env := []string{"RATCHET_TEST_FAIL=" + tt.fail}
+			if tt.bootstrap {
+				env = append(env, "PERF_RATCHET_BOOTSTRAP=1")
+			}
+			stdout, stderr, code := f.run(t, env, "--against", "ratchet-reference")
+			wantStderr := "Preparing worktree (detached HEAD " + f.revision + ")\n" + tt.diagnostic
+			if tt.diff != "" {
+				wantStderr += "--- baseline\n+++ candidate\n" + tt.diff
+			}
+			if stdout != tt.stdout || normalizePerfRatchetDiff(stderr) != wantStderr || code != tt.code {
+				t.Fatalf("exit=%d stdout=%q stderr=%q; want exit=%d stdout=%q stderr=%q", code, stdout, stderr, tt.code, tt.stdout, wantStderr)
+			}
+			f.assertFile(t, ".perf-baseline.txt", baseline)
+			calls := "reference\n"
+			if tt.fail != "reference" {
+				calls += "candidate\n"
+			}
+			f.assertFile(t, "benchmark-calls", calls)
+			if tt.compared {
+				f.assertFile(t, "benchstat-calls", "benchstat\n")
+				f.assertFile(t, "compared-old", strings.ReplaceAll(tt.reference, "/engram/", "/engram/v3/"))
+				f.assertFile(t, "compared-new", strings.ReplaceAll(tt.candidate, "/engram/", "/engram/v3/"))
+			} else if _, err := os.Stat(filepath.Join(f.root, "benchstat-calls")); !os.IsNotExist(err) {
+				t.Fatalf("unexpected benchstat execution: %v", err)
+			}
+			f.assertRepositoryUnchanged(t)
+		})
+	}
+}
+
+func TestPerfRatchetUpdate(t *testing.T) {
+	baseline := benchmarkHeader + "BenchmarkOld_Hit-8\t1\t200 ns/op\n"
+	candidate := strings.ReplaceAll(benchmarkHeader, "/engram/", "/engram/v2/") + "BenchmarkSearch_Hit-8\t1\t100 ns/op\n"
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("benchmark_failure_%t", fail), func(t *testing.T) {
+			f := newPerfRatchetOperation(t, baseline, candidate, baseline)
+			env := []string{"PERF_RATCHET_COUNT=3"}
+			if fail {
+				env = append(env, "RATCHET_TEST_FAIL=candidate")
+			}
+			stdout, stderr, code := f.run(t, env, "--update")
+			wantStdout := "updated " + f.shellRoot + "/.perf-baseline.txt with 3 samples per benchmark\n"
+			wantStderr, wantCode, wantBaseline := "", 0, strings.ReplaceAll(candidate, "/engram/v2/", "/engram/v3/")
+			if fail {
+				wantStdout, wantStderr, wantCode, wantBaseline = "", "fixture benchmark failed\n", 7, baseline
+			}
+			if stdout != wantStdout || stderr != wantStderr || code != wantCode {
+				t.Fatalf("exit=%d stdout=%q stderr=%q; want exit=%d stdout=%q stderr=%q", code, stdout, stderr, wantCode, wantStdout, wantStderr)
+			}
+			f.assertFile(t, ".perf-baseline.txt", wantBaseline)
+			f.assertFile(t, "benchmark-calls", "candidate\n")
+			if _, err := os.Stat(filepath.Join(f.root, "benchstat-calls")); !os.IsNotExist(err) {
+				t.Fatalf("update must not invoke benchstat: %v", err)
+			}
+			if fail {
+				f.assertRepositoryUnchanged(t)
+			} else if got := f.git(t, "status", "--porcelain"); got != " M .perf-baseline.txt\n" {
+				t.Fatalf("update changed unexpected tracked files: %q", got)
+			}
+			f.assertWorktreeCleanup(t)
+		})
+	}
+}
+
+// Git and the production script are real; only timing-dependent executables are fixtures.
+type perfRatchetOperation struct {
+	root, shell, shellRoot, revision, head string
+	env                                    []string
+}
+
+func newPerfRatchetOperation(t *testing.T, reference, candidate, baseline string) *perfRatchetOperation {
+	t.Helper()
+	shell := perfRatchetShell()
+	if shell == "" {
+		t.Skip("a usable bash installation is required to test the shell ratchet")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required to test detached benchmark worktrees")
+	}
+	f := &perfRatchetOperation{root: t.TempDir(), shell: shell}
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "PERF_RATCHET_") && !strings.HasPrefix(e, "RATCHET_TEST_") && !strings.HasPrefix(e, "GIT_") && !strings.HasPrefix(e, "BASH_ENV=") && !strings.HasPrefix(e, "ENV=") {
+			f.env = append(f.env, e)
+		}
+	}
+	f.env = append(f.env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "LC_ALL=C", "PERF_RATCHET_COUNT=2", "PERF_RATCHET_THRESHOLD=25", "PERF_RATCHET_BOOTSTRAP=0")
+	for _, dir := range []string{"scripts", "bin"} {
+		if err := os.Mkdir(filepath.Join(f.root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile("perf-ratchet.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRatchetFixture(t, f.root, "scripts/perf-ratchet.sh", string(data))
+	writeRatchetFixture(t, f.root, ".perf-baseline.txt", baseline)
+	writeRatchetFixture(t, f.root, ".gitignore", "bin/\n*.bench\nbenchmark-calls\nbenchstat-calls\ncompared-*\n")
+	writeRatchetFixture(t, f.root, "reference.bench", reference)
+	writeRatchetFixture(t, f.root, "candidate.bench", candidate)
+	writeRatchetFixture(t, f.root, "revision.txt", "reference\n")
+	f.git(t, "-c", "init.templateDir=", "init", "-q", "-b", "main")
+	f.git(t, "config", "core.autocrlf", "false")
+	f.git(t, "add", ".")
+	f.git(t, "-c", "user.name=Ratchet Test", "-c", "user.email=ratchet@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+	f.git(t, "tag", "ratchet-reference")
+	writeRatchetFixture(t, f.root, "revision.txt", "candidate\n")
+	f.git(t, "add", "revision.txt")
+	f.git(t, "-c", "user.name=Ratchet Test", "-c", "user.email=ratchet@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "candidate")
+	f.head = f.git(t, "rev-parse", "HEAD")
+	f.revision = strings.TrimSpace(f.git(t, "rev-parse", "--short", "ratchet-reference"))
+	cmd := exec.Command(shell, "-c", "pwd")
+	cmd.Dir, cmd.Env = f.root, f.env
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.shellRoot = strings.TrimSpace(string(output))
+	f.executable(t, "go", `[[ "$*" == "test -run ^$ -bench fixture -benchtime=1s -count $PERF_RATCHET_COUNT ./internal/store" ]] || exit 99
+case "$PWD" in
+  "$RATCHET_TEST_ROOT") lane=candidate ;;
+  "$RATCHET_TEST_ROOT"/.perf-ratchet-*) lane=reference ;;
+  *) exit 98 ;;
+esac
+[[ "$(cat revision.txt)" == "$lane" ]] || exit 96
+printf '%s\n' "$lane" >> "$RATCHET_TEST_ROOT/benchmark-calls"
+if [[ "${RATCHET_TEST_FAIL:-}" == "$lane" ]]; then
+  printf 'fixture benchmark failed\n' >&2
+  exit 7
+fi
+cat "$RATCHET_TEST_ROOT/$lane.bench"
+`)
+	f.executable(t, "benchstat", `[[ $# == 2 ]] || exit 97
+printf 'benchstat\n' >> "$RATCHET_TEST_ROOT/benchstat-calls"
+cp "$1" "$RATCHET_TEST_ROOT/compared-old"
+cp "$2" "$RATCHET_TEST_ROOT/compared-new"
+printf 'BenchmarkSearch_Hit-8 100 ns/op 100 ns/op +0.00%% (p=1.000 n=2)\n'
+`)
+	return f
+}
+
+func (f *perfRatchetOperation) executable(t *testing.T, name, body string) {
+	t.Helper()
+	path := writeRatchetFixture(t, filepath.Join(f.root, "bin"), name, "#!/usr/bin/env bash\nset -eu\n"+body)
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *perfRatchetOperation) git(t *testing.T, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir, cmd.Env = f.root, f.env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+	return string(output)
+}
+
+func (f *perfRatchetOperation) run(t *testing.T, env []string, args ...string) (string, string, int) {
+	t.Helper()
+	wrapper := `export RATCHET_TEST_ROOT="$PWD"
+export PATH="$PWD/bin:$PATH" PERF_RATCHET_BENCHSTAT="$PWD/bin/benchstat" PERF_RATCHET_BENCHES=fixture
+exec "$BASH" scripts/perf-ratchet.sh "$@"`
+	cmd := exec.Command(f.shell, append([]string{"-c", wrapper, "ratchet"}, args...)...)
+	cmd.Dir, cmd.Env = f.root, append(append([]string{}, f.env...), env...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else {
+			t.Fatal(err)
+		}
+	}
+	return stdout.String(), stderr.String(), code
+}
+
+func (f *perfRatchetOperation) assertFile(t *testing.T, name, want string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.root, name))
+	if err != nil || string(data) != want {
+		t.Fatalf("%s = %q, err=%v; want %q", name, data, err, want)
+	}
+}
+
+func (f *perfRatchetOperation) assertRepositoryUnchanged(t *testing.T) {
+	t.Helper()
+	if got := f.git(t, "status", "--porcelain"); got != "" {
+		t.Fatalf("ratchet modified repository: %q", got)
+	}
+	f.assertWorktreeCleanup(t)
+}
+
+func (f *perfRatchetOperation) assertWorktreeCleanup(t *testing.T) {
+	t.Helper()
+	if got := f.git(t, "rev-parse", "HEAD"); got != f.head {
+		t.Fatalf("ratchet changed HEAD: %q, want %q", got, f.head)
+	}
+	if got := f.git(t, "worktree", "list", "--porcelain"); strings.Count(got, "worktree ") != 1 {
+		t.Fatalf("detached worktree registration leaked: %s", got)
+	}
+	paths, err := filepath.Glob(filepath.Join(f.root, ".perf-ratchet-*"))
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("detached worktree directory leaked: %v, err=%v", paths, err)
+	}
+}
+
+func normalizePerfRatchetDiff(stderr string) string {
+	// Diff headers contain temporary paths and timestamps; preserve every other byte.
+	lines := strings.SplitAfter(stderr, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "--- ") {
+			lines[i] = "--- baseline\n"
+		} else if strings.HasPrefix(line, "+++ ") {
+			lines[i] = "+++ candidate\n"
+		}
+	}
+	return strings.Join(lines, "")
 }
 
 func perfRatchetShell() string {
