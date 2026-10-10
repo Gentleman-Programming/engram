@@ -981,6 +981,67 @@ func TestStatusRibbonAndFooterPresent(t *testing.T) {
 	}
 }
 
+// TestBuildVersionRenderedInDashboardChrome asserts the configured build version
+// reaches both the layout footer and the login page, so operators can read which
+// build is serving a deployment without leaving the UI. Satisfies #1657.
+func TestBuildVersionRenderedInDashboardChrome(t *testing.T) {
+	const (
+		version    = "v1.20.3"
+		footerCopy = "ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY"
+	)
+
+	mux := http.NewServeMux()
+	Mount(mux, MountConfig{
+		RequireSession: func(r *http.Request) error {
+			if r.URL.Query().Get("auth") == "ok" {
+				return nil
+			}
+			return errUnauthorized
+		},
+		IsAdmin: func(_ *http.Request) bool { return false },
+		Store:   parityStoreStub{},
+		Version: version,
+	})
+
+	t.Run("layout footer", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, footerCopy+" · "+version) {
+			t.Errorf("expected %q followed by the build version, body: %s", footerCopy, body)
+		}
+	})
+
+	t.Run("login page", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/login", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, footerCopy+" · "+version) {
+			t.Errorf("expected %q followed by the build version on the login page, body: %s", footerCopy, body)
+		}
+	})
+}
+
+// TestUnknownBuildVersionRendersNoSuffix asserts a mount without a configured
+// version leaves the footer copy untouched rather than inventing a placeholder.
+// Satisfies #1657.
+func TestUnknownBuildVersionRendersNoSuffix(t *testing.T) {
+	mux := newAuthedMux(parityStoreStub{}, false)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	body := rec.Body.String()
+	if strings.Contains(body, "LIVE SYNC READY ·") {
+		t.Errorf("expected no version suffix when the version is unknown, body: %s", body)
+	}
+	if !strings.Contains(body, "ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY") {
+		t.Errorf("expected the footer copy itself to survive, body: %s", body)
+	}
+}
+
 // TestNavTabsRenderedCorrectly asserts that the nav tab hrefs are correct for
 // an admin user. Satisfies REQ-107.
 func TestNavTabsRenderedCorrectly(t *testing.T) {
