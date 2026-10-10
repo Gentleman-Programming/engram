@@ -48,7 +48,7 @@ func consolidateMutations(t *testing.T, s *Store, floor int64, keys ...string) [
 	if err != nil {
 		t.Fatalf("query sync_mutations: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []mutationRow
 	for rows.Next() {
 		var r mutationRow

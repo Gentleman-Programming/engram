@@ -289,9 +289,9 @@ func consolidateFingerprint(sources []Observation) string {
 	copy(ordered, sources)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|", consolidateFingerprintVersion)
+	_, _ = fmt.Fprintf(h, "%s|", consolidateFingerprintVersion)
 	for i := range ordered {
-		fmt.Fprintf(h, "%d|%s|%s|%d|", ordered[i].ID, ordered[i].SyncID, ordered[i].UpdatedAt, ordered[i].RevisionCount)
+		_, _ = fmt.Fprintf(h, "%d|%s|%s|%d|", ordered[i].ID, ordered[i].SyncID, ordered[i].UpdatedAt, ordered[i].RevisionCount)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
