@@ -307,14 +307,20 @@ func TestPerfRatchetAgainst(t *testing.T) {
 	const passed = "no statistically significant performance regression beyond +25%\n"
 	const bootstrap = "bootstrap: reference ratchet-reference lacks the complete benchmark suite; validated its successor against the versioned baseline and intentionally skipped cross-host timing comparison\n"
 	for _, tt := range []struct {
-		name, reference, candidate, baseline, diagnostic, diff string
-		bootstrap, compared                                    bool
-		fail                                                   string
-		code                                                   int
-		stdout                                                 string
+		name, reference, candidate, baseline, diagnostic, diff, report string
+		bootstrap, compared                                            bool
+		fail                                                           string
+		code                                                           int
+		stdout                                                         string
 	}{
 		{name: "compares both revisions", reference: one, candidate: one, compared: true, stdout: passed},
 		{name: "equal suites still compare with bootstrap enabled", reference: one, candidate: one, bootstrap: true, compared: true, stdout: passed},
+		{
+			name: "cleans up after significant comparison regression", reference: one,
+			candidate: strings.ReplaceAll(one, "100 ns/op", "200 ns/op"), compared: true, code: 1,
+			report:     "BenchmarkSearch_Hit-8 100 ns/op 200 ns/op +100.00% (p=0.002 n=2)\n",
+			diagnostic: fmt.Sprintf("PERFORMANCE REGRESSIONS beyond +25%%:\n  %-48s +100.00%% (p=0.002)\n", "BenchmarkSearch_Hit-8"),
+		},
 		{name: "bootstraps a strict subset across host configurations", reference: one, candidate: two, bootstrap: true, stdout: bootstrap},
 		{name: "bootstraps an empty reference suite", reference: benchmarkHeader, candidate: two, bootstrap: true, stdout: bootstrap},
 		{
@@ -352,6 +358,9 @@ func TestPerfRatchetAgainst(t *testing.T) {
 			}
 			f := newPerfRatchetOperation(t, tt.reference, tt.candidate, baseline)
 			env := []string{"RATCHET_TEST_FAIL=" + tt.fail}
+			if tt.report != "" {
+				env = append(env, "RATCHET_TEST_REPORT="+tt.report)
+			}
 			if tt.bootstrap {
 				env = append(env, "PERF_RATCHET_BOOTSTRAP=1")
 			}
@@ -436,7 +445,7 @@ func newPerfRatchetOperation(t *testing.T, reference, candidate, baseline string
 			f.env = append(f.env, e)
 		}
 	}
-	f.env = append(f.env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "LC_ALL=C", "PERF_RATCHET_COUNT=2", "PERF_RATCHET_THRESHOLD=25", "PERF_RATCHET_BOOTSTRAP=0")
+	f.env = append(f.env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "LC_ALL=C", "PERF_RATCHET_COUNT=2", "PERF_RATCHET_THRESHOLD=25", "PERF_RATCHET_BOOTSTRAP=0", "RATCHET_TEST_REPORT=BenchmarkSearch_Hit-8 100 ns/op 100 ns/op +0.00% (p=1.000 n=2)\n")
 	for _, dir := range []string{"scripts", "bin"} {
 		if err := os.Mkdir(filepath.Join(f.root, dir), 0o755); err != nil {
 			t.Fatal(err)
@@ -487,7 +496,7 @@ cat "$RATCHET_TEST_ROOT/$lane.bench"
 printf 'benchstat\n' >> "$RATCHET_TEST_ROOT/benchstat-calls"
 cp "$1" "$RATCHET_TEST_ROOT/compared-old"
 cp "$2" "$RATCHET_TEST_ROOT/compared-new"
-printf 'BenchmarkSearch_Hit-8 100 ns/op 100 ns/op +0.00%% (p=1.000 n=2)\n'
+printf '%s' "$RATCHET_TEST_REPORT"
 `)
 	return f
 }
