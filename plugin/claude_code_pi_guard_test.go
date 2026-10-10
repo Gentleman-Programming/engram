@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,9 @@ func piGuardServer(t *testing.T) (*httptest.Server, *piGuardRequests) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.add(r.Method + " " + r.URL.Path)
 		switch r.URL.Path {
+		case "/sessions/pi-guard-session":
+			// Model first registration rather than a malformed persisted session.
+			w.WriteHeader(http.StatusNotFound)
 		case "/project/current":
 			_, _ = w.Write([]byte(`{"project":"pi-guard","project_source":"config"}`))
 		case "/sessions":
@@ -68,7 +72,11 @@ func piGuardHookInput(t *testing.T, payload map[string]any) string {
 
 func buildEngramBinary(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "engram")
+	name := "engram"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/engram")
 	cmd.Dir = repoRoot(t)
 	if out, err := cmd.CombinedOutput(); err != nil {
