@@ -954,6 +954,7 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 		Project       string `json:"project"`
 		Directory     string `json:"directory"`
 		OwnershipMode string `json:"ownership_mode"`
+		Resume        bool   `json:"resume"`
 	}
 	var registrations int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -993,6 +994,11 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 	}
 	if registered.OwnershipMode != "project_owned" {
 		t.Fatalf("ownership_mode = %q, want project_owned", registered.OwnershipMode)
+	}
+	// Issue #1624: Claude reuses the session ID on --resume; resume lets the
+	// server register a live continuation instead of refusing the ended root.
+	if !registered.Resume {
+		t.Fatal("session registration must request resume")
 	}
 }
 
@@ -1072,6 +1078,62 @@ func TestSessionStartSkipsClaudeMCPRegistration(t *testing.T) {
 			}
 			if stderr != "" {
 				t.Fatalf("SessionStart stderr = %q, want no registration warning", stderr)
+			}
+		})
+	}
+}
+
+// Issue #1624: roots created before Claude registered project_owned sessions
+// are shared. Resuming one must keep that mode so the continuation stays
+// resolvable; every other case still registers project_owned.
+func TestSessionStartResumeKeepsLegacySharedOwnership(t *testing.T) {
+	requireHookBinaries(t)
+
+	for _, tc := range []struct {
+		name     string
+		lookup   string
+		wantMode string
+	}{
+		{"ended legacy shared root", `{"id":"claude-resumed","ownership_mode":"shared","ended_at":"2026-10-09 12:00:00"}`, "shared"},
+		{"ended project_owned root", `{"id":"claude-resumed","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, "project_owned"},
+		{"live shared root", `{"id":"claude-resumed","ownership_mode":"shared"}`, "project_owned"},
+		{"other session", `{"id":"other","ownership_mode":"shared","ended_at":"2026-10-09 12:00:00"}`, "project_owned"},
+		{"unknown session", "", "project_owned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var registered struct {
+				OwnershipMode string `json:"ownership_mode"`
+				Resume        bool   `json:"resume"`
+			}
+			var registrations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/claude-resumed" && tc.lookup != "":
+					_, _ = io.WriteString(w, tc.lookup)
+				case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+					if err := json.NewDecoder(r.Body).Decode(&registered); err != nil {
+						t.Errorf("decode session registration: %v", err)
+						return
+					}
+					registrations++
+					w.WriteHeader(http.StatusCreated)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			stubDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(stubDir, "engram"), []byte("#!/bin/bash\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("write engram stub: %v", err)
+			}
+			runHook(t, "session-start.sh", `{"session_id":"claude-resumed","cwd":`+strconv.Quote(t.TempDir())+`,"source":"resume"}`,
+				map[string]string{"ENGRAM_URL": srv.URL, "PATH": stubDir + ":" + os.Getenv("PATH")})
+
+			if registrations != 1 || !registered.Resume || registered.OwnershipMode != tc.wantMode {
+				t.Fatalf("registrations = %d, registration = %+v, want resume with %s", registrations, registered, tc.wantMode)
 			}
 		})
 	}
