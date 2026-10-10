@@ -1995,7 +1995,12 @@ func TestClaudeEndedSessionWithoutLiveContinuationDenies(t *testing.T) {
 			if got.PermissionDecision != "deny" || got.PermissionDecisionReason != want || got.UpdatedInput != nil {
 				t.Fatalf("ended host = %+v, want deny %q", got, want)
 			}
-			if _, err := db.GetSession(host + ":resume:3"); err == nil {
+			// The ID a wrongly created continuation would get in each case.
+			next := host + ":resume:2"
+			if tc.endContinuation {
+				next = host + ":resume:3"
+			}
+			if _, err := db.GetSession(next); err == nil {
 				t.Fatal("gate created a continuation")
 			}
 		})
