@@ -2,15 +2,14 @@
 name: engram-memory
 description: "ALWAYS ACTIVE — Persistent memory protocol. You MUST save decisions, conventions, bugs, and discoveries to engram proactively. Do NOT wait for the user to ask."
 ---
-
 # Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
-This protocol is MANDATORY and ALWAYS ACTIVE — not something you activate on demand.
+This protocol is REQUIRED; it MUST be treated as active—do not wait for the user to activate it.
 
 ## AVAILABLE TOOLS
 
-Core tools are loaded automatically at session start by the UserPromptSubmit hook.
+Core tools are loaded automatically at session start.
 They are available immediately — no manual ToolSearch needed.
 
 - `mem_save`, `mem_search`, `mem_context`, `mem_session_summary`
@@ -20,11 +19,13 @@ Deferred tools (use ToolSearch only if needed):
 - `mem_update`, `mem_review`, `mem_pin`, `mem_unpin`, `mem_suggest_topic_key`
 - `mem_session_start`, `mem_session_end`, `mem_doctor`, `mem_capture_passive`
 
-**Fallback**: If tools are unexpectedly unavailable, run `engram setup codex`
-again and restart Codex. Setup repairs the durable MCP config and
-permissions allowlist for the `mcp__engram__...` server ids.
+**Fallback**: If tools are unexpectedly unavailable, run `engram setup <agent>`
+again and restart your agent. (Each agent fills in its own name.)
+Setup repairs the durable MCP config and the permissions allowlist for the
+`mcp__engram__...` server ids. If the MCP config is a symlink or another
+non-regular path, replace it manually before rerunning setup.
 
-## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
+## PROACTIVE SAVE TRIGGERS (REQUIRED — do NOT wait for the user to ask)
 
 Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 
@@ -67,7 +68,7 @@ Format for `mem_save`:
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
 
-### Topic update rules (mandatory)
+### Topic update rules (REQUIRED)
 
 - Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)
 - If the same topic evolves, call `mem_save` with the same `topic_key` so memory is updated (upsert) instead of creating a new observation
@@ -91,9 +92,9 @@ Also search memory PROACTIVELY when:
 
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
-## SESSION CLOSE PROTOCOL (mandatory)
+## SESSION CLOSE PROTOCOL (REQUIRED)
 
-Before ending a session or saying "done" / "that's it", you MUST:
+Before ending a session or saying "done" / "that's it" / "listo", you MUST:
 1. Call `mem_session_summary` with this structure:
 
 ## Goal
@@ -114,14 +115,38 @@ Before ending a session or saying "done" / "that's it", you MUST:
 ## Relevant Files
 - path/to/file — [what it does or what changed]
 
-This is NOT optional. If you skip this, the next session starts blind.
+This is NOT OPTIONAL. If you skip this, the next session starts blind.
+
+## PASSIVE CAPTURE — automatic learning extraction
+
+When completing a task or subtask, include a "## Key Learnings:" section at the end of your response
+with numbered items. Engram will automatically extract and save these as observations.
+
+Example:
+## Key Learnings:
+
+1. bcrypt cost=12 is the right balance for our server performance
+2. JWT refresh tokens need atomic rotation to prevent race conditions
+
+You can also call `mem_capture_passive(content)` directly with any text that contains a learning section.
+This is a safety net — it captures knowledge even if you forget to call mem_save explicitly.
 
 ## AFTER COMPACTION
 
-If you see a message about compaction or context reset:
+If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
 1. IMMEDIATELY call `mem_session_summary` with the compacted summary content — this persists what was done before compaction
 2. Then call `mem_context` to recover any additional context from previous sessions
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
-All core tools are loaded automatically by the hook at session start. If they are unexpectedly missing, rerun `engram setup codex` and restart Codex.
+
+## Codex session binding
+
+For Engram write and session MCP tools, the Codex plugin binds `session_id` to
+Codex's authoritative session identity before the tool runs. Do not invent, reuse,
+or try to override this value. Read-only tools are unchanged.
+
+**Fallback**: If tools are unexpectedly unavailable, run `engram setup codex`
+again and restart Codex. Setup repairs the durable MCP config and
+permissions allowlist for the `mcp__engram__...` server ids. If the MCP config
+is a symlink or another non-regular path, replace it manually before rerunning setup.
