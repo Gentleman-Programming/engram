@@ -327,9 +327,30 @@ test('documents the active required contexts and safe merge queue activation', (
     assert.match(contributing, new RegExp(`\\*\\*${context.replace('*', '\\*')}\\*\\*`));
   }
 
-  assert.match(contributing, /Merge this compatibility PR first/i);
-  assert.match(contributing, /`main`-scoped merge queue/i);
-  assert.match(contributing, /one concurrent build/i);
-  assert.match(contributing, /squash merge/i);
-  assert.match(contributing, /disabl(?:e|ing) (?:or removing )?only that queue rule/i);
+  const queueSection = contributing.match(/### Merge Queue Activation \(administrators\)([\s\S]*?)\r?\n## /)?.[1];
+  assert.ok(queueSection, 'expected the existing merge queue section and anchor');
+  assert.match(queueSection, /The `main` merge queue is already active/);
+  assert.match(queueSection, /observed on \*\*2026-10-09\*\*/);
+
+  for (const row of [
+    '| Grouping strategy | `ALLGREEN` |',
+    '| Merge method | `SQUASH` |',
+    '| Check response timeout | 60 minutes |',
+    '| Maximum entries to build (`max_entries_to_build`) | 5 |',
+    '| Minimum entries to merge (`min_entries_to_merge`) | 1 |',
+    '| Maximum entries to merge (`max_entries_to_merge`) | 5 |',
+    '| Minimum-group wait (`min_entries_to_merge_wait_minutes`) | 5 minutes |',
+  ]) {
+    assert.ok(queueSection.includes(row), `expected observed queue setting: ${row}`);
+  }
+
+  assert.match(queueSection, /observed configuration snapshot, not a recommendation to change\s+settings/);
+  assert.match(queueSection, /not a recommendation to change\s+settings or a guarantee that they remain unchanged/);
+  assert.match(queueSection, /explicit owner\/admin approval and an authorized\s+administrator/);
+  assert.match(queueSection, /disable or remove only the queue rule/);
+  assert.match(queueSection, /retain the existing required contexts and unrelated rules/);
+  assert.match(queueSection, /does not authorize settings changes/);
+  assert.match(queueSection, /https:\/\/api\.github\.com\/repos\/Gentleman-Programming\/engram\/rules\/branches\/main/);
+  assert.match(queueSection, /issuecomment-6089006647/);
+  assert.doesNotMatch(queueSection, /Merge this compatibility PR first|one concurrent build/i);
 });

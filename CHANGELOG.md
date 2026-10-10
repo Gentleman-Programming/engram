@@ -23,6 +23,8 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 ### Memory core
 
+- **fix(claude):** bind the PreToolUse write gate to the session's registered owner project instead of re-deriving it from the hook cwd (#1717). Writes from a registered session now succeed wherever the shell is — subfolders, sibling or cloned repositories, removed worktrees, and ambiguous directories no longer deny the gate. The cwd names the project only on first registration. Denials now name their actual cause (`already ended`, `session_project_conflict` with owner and requested projects, project-resolution failures with the server's reason) instead of the single generic "registration could not be confirmed" message shared with #1624.
+
 - **feat(mcp):** add an optional validated `project` argument to `mem_get_observation` for response context. Observation lookup remains ID-based and is not filtered by project ownership.
 - **fix(store):** upgrade the embedded SQLite runtime to 3.51.3, which includes SQLite's upstream WAL-reset integrity fix. Engram's WAL and network-filesystem policies are unchanged.
 

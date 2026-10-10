@@ -51,6 +51,36 @@ For schema details, use [DOCS.md — Database Schema](../../DOCS.md#database-sch
 - New-record write tools resolve the project from cwd/config or a bound session; do not invent a project when there is ambiguity. Update/delete assertions do not change save/session recovery rules.
 - Search is progressive: compact results first, `mem_get_observation` only when full content is needed.
 
+## Save conflict candidate relevance
+
+`mem_save` keeps the original OR-based FTS query and raw BM25 scores, then applies
+an opt-in title/topic relevance gate in `internal/store` inside the ranked SQL
+query, before materialization, the positive candidate limit, and pending relation
+writes. A deterministic SQLite function uses the same Go relevance rule; rejected
+matches never become result rows read by Go. `CandidateTimings.RowsRead` reports
+consumed result rows, not the amount of work performed by the FTS index. BM25 still orders eligible candidates; its default maximum
+rank of `0.0` is not a semantic relevance threshold.
+
+The gate accepts a retrieved candidate when it shares a nonempty `topic_key`,
+shares at least two distinct significant title terms, or both titles reduce to
+the same single significant term. Terms are case-insensitive letter/digit words;
+punctuation separates words except that `+` and `#` are preserved in technical
+identifiers (`C++` and `C#` remain distinct). Bare punctuation does not count as a
+term. Duplicates do not count twice, and common English
+connectives and generic change verbs (such as `updated` and `fixed`) are ignored.
+Matches only in content do not establish title relevance. Missing or different
+topic keys do not veto otherwise relevant titles. Topic-key saves continue to
+revise the existing observation rather than creating a new same-topic record.
+
+This is a lexical heuristic, not semantic conflict detection: synonyms or titles
+sharing just one term can still miss a real conflict, and the ignored-word list
+is English-specific. A matching topic key is a signal among retrieved candidates,
+not a separate topic-only search. Title normalization applies only to the gate;
+retrieval still follows the original FTS trigram matching rules, including its
+short-query limitations. `ScanProject` and ordinary `FindCandidates`
+callers retain their existing broad recall unless they explicitly opt into the
+save gate. No new user setting or schema migration is required.
+
 ## Replay-safe store saves
 
 `AddObservationParams.OperationID` optionally binds a save to a durable local result in `observation_save_operations`. The ledger uses a `v1:` SHA-256 fingerprint of length-prefixed, normalized request fields (including redacted/truncated content), computed before session ownership resolution. An identical replay returns the committed ID before ownership, dedupe, topic revisions, or sync mutations can run again; a changed payload returns `ErrObservationOperationConflict`.

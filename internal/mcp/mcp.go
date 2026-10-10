@@ -53,12 +53,12 @@ type MCPConfig struct {
 	// auto-resolution; per-call project arguments remain separately validated.
 	DefaultProject string
 
-	// BM25Floor overrides the default BM25 score floor used by FindCandidates
-	// during conflict candidate detection (REQ-001). The floor is the minimum
-	// acceptable BM25 rank (negative; closer to 0 = better match). Candidates
-	// whose score falls below this threshold are excluded.
+	// BM25Floor preserves the deprecated minimum-rank override used by
+	// FindCandidates during conflict candidate detection. Raw FTS5 BM25 ranks
+	// are negative; smaller (more negative) ranks are better matches. This legacy
+	// floor excludes ranks below its value, unlike a relevance maximum.
 	//
-	// nil means "use the store default" (-2.0). An explicit pointer value
+	// nil uses the store's maximum-rank default (0.0). An explicit pointer value
 	// (including 0.0) is forwarded directly. Using a pointer avoids the
 	// zero-value ambiguity where 0.0 would otherwise be indistinguishable
 	// from "not set".
@@ -1628,9 +1628,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Build CandidateOptions, forwarding any MCPConfig overrides.
 		// nil fields mean "use store defaults"; explicit pointer values override.
 		candOpts := store.CandidateOptions{
-			Project:   project,
-			Scope:     scope,
-			BM25Floor: cfg.BM25Floor, // nil → store default (-2.0); explicit value overrides
+			Project:              project,
+			Scope:                scope,
+			BM25Floor:            cfg.BM25Floor, // nil retains ordinary negative ranks.
+			RequireSaveRelevance: true,
 		}
 		if cfg.Limit != nil {
 			candOpts.Limit = *cfg.Limit

@@ -97,6 +97,8 @@ Engram (single Go binary)
 SQLite + FTS5 (~/.engram/engram.db)
 ```
 
+Codex mutating Engram tools require the running core's `/health` response to advertise `capabilities.runtime_session_resolution: true` before resolving the host session. `root_session_resume` alone is not sufficient. If the core is incompatible, upgrade it to match the CLI, manually restart the running Engram server, and start a new Codex session. Hooks never restart the server automatically. Unregistered sessions and connection or invalid-response failures remain safely blocked with distinct diagnostics; read-only and non-Engram calls are unaffected.
+
 A **Go binary** with SQLite + FTS5 full-text search, exposed through CLI, HTTP API, MCP, and an interactive TUI. It works with any MCP-compatible agent, including Claude Code, OpenCode, Gemini CLI, Codex, VS Code (Copilot), Antigravity, Cursor, and Windsurf. No Node.js, Python, or Docker is required: one binary, one SQLite file.
 
 **[Docs →](docs/ARCHITECTURE.md)**

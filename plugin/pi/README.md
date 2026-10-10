@@ -68,6 +68,25 @@ reload still skips persistence shutdown. Each new native session must establish
 its own registration. Cross-runtime bridge routing and hook suppression are
 consumer responsibilities, not a process-global readiness signal.
 
+Until a consumer of this protocol ships, the Claude Code plugin suppresses its own
+hooks with the guard that pi-claude-bridge documents for Claude Code hooks: when
+`PI_CODING_AGENT` is non-empty, every plugin hook script and `engram hook claude-pre-tool-use`
+exit 0 with no output and no requests. Pi's native Engram owns the session and its
+prompts, so the Claude child that the bridge starts records nothing. A Pi without
+native Engram therefore gets no capture from those hooks either.
+
+The guard reads an inherited environment variable, so it applies to every Claude Code
+process that inherits it, not only to bridge children. For example, a tmux, zellij or IDE
+server first started from Pi's shell passes `PI_CODING_AGENT` to every session it opens
+later, and a `claude` started there records nothing in Engram, without any warning. Clear
+it there (`env -u PI_CODING_AGENT claude`) when that session should use the plugin.
+
+With the guard active, `claude-pre-tool-use` no longer binds a session id. This only matters
+if the Claude child exposes Engram MCP tools, which the bridge's default `strictMcpConfig`
+prevents. In that case the server resolves the write like any omitted-session write: the single
+active runtime session for that project and directory, `manual-save-<project>` when there is
+none, or a fail-closed error when several match. Use Pi's native `mem_*` tools instead.
+
 ## Per-save prompt capture
 
 Native `mem_save` honors `capture_prompt` (optional boolean, default `true`). It sends the available current turn's already-redacted, truncated prompt for the same session/project to Go core, which best-effort stores it using exact session/project/stored-content dedupe. Missing context or a capture failure does not fail the observation save. Prompt rows are independent; no observation-ID link is created.

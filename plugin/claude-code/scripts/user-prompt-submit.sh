@@ -15,6 +15,13 @@
 #
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
+# Under Pi (PI_CODING_AGENT non-empty) every hook is a silent no-op; this script checks it before the
+# Windows fast path below, which runs before _helpers.sh is sourced.
+if [ -n "${PI_CODING_AGENT:-}" ]; then
+  [ -t 0 ] || while IFS= read -r _engram_pi_line; do :; done 2>/dev/null
+  exit 0
+fi
+
 ENGRAM_HOOK_MAX_TIME="${ENGRAM_HOOK_MAX_TIME:-0.2}"
 
 # Windows Git Bash/MSYS2 can fail while forking helper processes under

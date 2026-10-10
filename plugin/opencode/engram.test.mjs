@@ -119,6 +119,7 @@ function assertNoRegistration(runtime, message) {
 
 async function createRuntime(t, {
   directory = "/work/engram",
+  adapterPath = "./engram.ts",
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
 	manifestExists = false,
@@ -155,6 +156,7 @@ async function createRuntime(t, {
   const requests = []
   const healthURLs = []
 	const spawns = []
+  const syncSpawns = []
 	const startupEvents = []
 	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
 	else process.env.ENGRAM_URL = configuredEngramURL
@@ -178,10 +180,13 @@ async function createRuntime(t, {
   } else {
     delete globalThis.Bun
   }
-  childProcess.spawnSync = (_command, args) => ({
-    status: args[0] === "instance-id" && !identityLookupFails ? 0 : 1,
-    stdout: args[0] === "instance-id" && !identityLookupFails ? "00000000000000000000000000000000\n" : "",
-  })
+  childProcess.spawnSync = (command, args, options) => {
+    syncSpawns.push({ args: [command, ...args], options })
+    return {
+      status: args[0] === "instance-id" && !identityLookupFails ? 0 : 1,
+      stdout: args[0] === "instance-id" && !identityLookupFails ? "00000000000000000000000000000000\n" : "",
+    }
+  }
   childProcess.spawn = (command, args, options) => {
     let errorListener
     let exitListener
@@ -257,7 +262,7 @@ async function createRuntime(t, {
     syncBuiltinESMExports()
 	})
   runtimeImport += 1
-  const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
+  const moduleURL = new URL(`${adapterPath}?sdk-runtime=${runtimeImport}`, import.meta.url)
   const module = await import(moduleURL.href)
   let factory = module.Engram
   if (selectLegacyDefault) {
@@ -292,6 +297,7 @@ async function createRuntime(t, {
     sessionGetIDs,
     requests,
     healthURLs,
+    syncSpawns,
 		spawns,
 		startupEvents,
   }
@@ -563,6 +569,40 @@ test("V1 default selection initializes only the Engram factory once", async (t) 
   assert.equal(runtime.healthURLs.length, 1, "the selected factory runs once")
   assert.equal(runtime.startupEvents.filter((event) => event === "project-current:response").length, 1)
 })
+
+for (const adapterPath of ["./engram.ts", "../../internal/setup/plugins/opencode/engram.ts"]) {
+  test(`Windows internal launches preserve options and hide consoles: ${adapterPath}`, async (t) => {
+    let healthChecks = 0
+    const runtime = await createRuntime(t, {
+      adapterPath,
+      installBun: false,
+      engramBin: "custom-engram",
+      directory: "C:\\work\\engram",
+      manifestExists: true,
+      healthOK: () => ++healthChecks > 1,
+    })
+    assert.deepEqual(runtime.syncSpawns, [{
+      args: ["custom-engram", "instance-id"],
+      options: { encoding: "utf8", windowsHide: true },
+    }])
+    assert.deepEqual(runtime.spawns.map(({ args, options }) => ({ args, options })), [
+      { args: ["custom-engram", "serve"], options: { detached: true, stdio: "ignore", windowsHide: true } },
+      { args: ["custom-engram", "sync", "--import"], options: { cwd: "C:\\work\\engram", detached: true, stdio: "ignore", windowsHide: true } },
+    ])
+    assert.ok(runtime.spawns.every(({ child }) => child.events.includes("unref")))
+    assert.deepEqual(runtime.startupEvents, ["project-current:response", "import:spawn"])
+    assert.equal(runtime.healthURLs.length, 2)
+    await runtime.event("session.created", session("runtime"))
+    assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  })
+
+  test(`Windows internal launches remain gated: ${adapterPath}`, async (t) => {
+    const runtime = await createRuntime(t, { adapterPath, configuredEngramURL: "http://127.0.0.1:17437" })
+    assert.deepEqual(runtime.syncSpawns, [])
+    assert.deepEqual(runtime.spawns, [])
+    assert.deepEqual(runtime.healthURLs, ["http://127.0.0.1:17437/health"])
+  })
+}
 
 test("adapter initializes and returns hooks without Bun or ENGRAM_URL", async (t) => {
   const runtime = await createRuntime(t, { installBun: false })

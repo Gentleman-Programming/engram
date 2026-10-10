@@ -53,6 +53,13 @@ The active required contexts run automatically on every PR and merge queue group
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
 | **Plugin Tests** | The Pi plugin test suite runs from a clean checkout |
 
+PR Validation runs on PR opening, edits, label addition/removal, synchronization,
+and reopening. Reopening requests a fresh **Check Issue Reference** and
+**Check Issue Has status:approved** evaluation under the existing rules.
+Changes to labels on a linked issue do not themselves trigger PR Validation;
+the approval check fetches issue labels when the workflow runs. PR label events
+and linked-issue label events are distinct.
+
 All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
@@ -61,7 +68,85 @@ Non-required PR checks include the Claude plugin version guard, lint, Windows se
 
 ### Merge Queue Activation (administrators)
 
-Merge this compatibility PR first. Then an administrator may enable a `main`-scoped merge queue with one concurrent build, one PR per group, and squash merge. Do not edit rulesets as part of this compatibility change. Rollback is disabling or removing only that queue rule.
+The `main` merge queue is already active. Contributors submit eligible PRs to the
+queue; the six required contexts above also run on each merge group.
+
+The effective queue rule was observed on **2026-10-09** with these settings:
+
+| Setting | Observed value |
+|---------|----------------|
+| Grouping strategy | `ALLGREEN` |
+| Merge method | `SQUASH` |
+| Check response timeout | 60 minutes |
+| Maximum entries to build (`max_entries_to_build`) | 5 |
+| Minimum entries to merge (`min_entries_to_merge`) | 1 |
+| Maximum entries to merge (`max_entries_to_merge`) | 5 |
+| Minimum-group wait (`min_entries_to_merge_wait_minutes`) | 5 minutes |
+
+This is an observed configuration snapshot, not a recommendation to change
+settings or a guarantee that they remain unchanged. Consult the
+[effective `main` rules](https://api.github.com/repos/Gentleman-Programming/engram/rules/branches/main)
+for current settings; the [audit in #1736](https://github.com/Gentleman-Programming/engram/issues/1736#issuecomment-6089006647)
+records the supporting evidence.
+
+Any queue-policy change requires explicit owner/admin approval and an authorized
+administrator. If rollback is approved, disable or remove only the queue rule;
+retain the existing required contexts and unrelated rules. This documentation
+correction does not authorize settings changes.
+
+## Advisory AI Review
+
+CodeRabbit uses the versioned root [`.coderabbit.yaml`](.coderabbit.yaml). Its
+baseline is the [resolved Repository UI configuration](https://github.com/Gentleman-Programming/engram/pull/1728#issuecomment-6084792433);
+existing path instructions, generated-file exclusions and other settings are
+preserved. The only noise adjustments are the balanced `chill` profile and
+turning off the numeric docstring coverage warning. Documentation correctness
+still matters and remains part of review.
+
+JS/TS test suites have additional path instructions alongside the preserved
+Go-test and thin-adapter guidance:
+
+| Test surface | Instruction glob |
+|--------------|------------------|
+| Repository policy scripts | `.github/scripts/*.test.mjs` |
+| Obsidian | `plugin/obsidian/test/*.test.mjs` |
+| OpenCode JavaScript | `plugin/opencode/*.test.mjs` |
+| OpenCode TypeScript | `plugin/opencode/*.test.mts` |
+| Pi, including nested suites | `plugin/pi/test/**/*.test.mjs` |
+
+These instructions prioritize deterministic setup/cleanup, relevant success,
+error and boundary cases, and observable effects: returned values, outgoing
+requests, persisted files, warnings and prohibited side effects. Useful
+isolated mocks, stubs and internal seams remain valid when they protect real
+contracts, as do workflow, schema and package structural-contract checks.
+Assertions that merely mirror implementation details or fixtures deserve scrutiny;
+this is not a blanket integration-test or style-rewrite requirement. Helper-only
+files retain generic/plugin review without a dedicated test-suite instruction.
+These globs add guidance, not review exclusions or new required checks.
+
+CodeRabbit does not automatically approve PRs (`request_changes_workflow: false`),
+skips drafts, and does not replace human review or the required checks above.
+Generated outputs are excluded only from AI review, not from generation checks.
+Existing manually requested code-generation/fix features remain unchanged.
+
+Changes to this file require normal issue-first review. Run `go test . -run
+TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, JS/TS
+instruction content/scope, documentation and baseline preservation. The original
+export hash is retained: only the five exact JS/TS instruction blocks are removed
+before comparing all other settings. Deliberate future settings changes must
+update the baseline test with their rationale. Local path examples exercise a
+limited plain-glob contract, not CodeRabbit's matcher, schema validation or live
+instruction overlap. To pause automatic reviews on one PR, comment
+`@coderabbitai pause`; to disable them through configuration, change
+`reviews.auto_review.enabled` to `false` in a reviewed PR. Reverting the initial
+configuration-file addition restores selection of the existing UI configuration,
+provided that UI configuration has not changed.
+
+Installation permissions could not be audited with the available credentials.
+Live review behavior and noise reduction must be observed after rollout; local
+policy tests do not establish those results. Inspect representative live feedback
+on these test surfaces and record useful findings, noise and limitations before
+claiming improved test-review quality.
 
 ## Claude Plugin Version Rule
 
@@ -222,10 +307,13 @@ errors are reported as warnings.
 
 The notice is non-required and non-blocking: a successful job means the advisory
 completed, not that the PR is under budget. No required contexts or rulesets are
-changed. It reads current PR metadata and runs only trusted base-revision code,
-with read-only permissions and no persisted checkout credentials. The workflow
-becomes available after it is merged into the base branch; local tests do not
-prove live fork events, summaries, or cancellation behavior.
+changed. It reads current PR metadata and checks out `github.workflow_sha`, the
+immutable commit of the executing trusted workflow, so its companion script is
+available even when a pull request's historical base predates the notice. It
+never checks out or executes pull-request head code, and retains read-only
+permissions and no persisted checkout credentials. The workflow becomes
+available after it is merged into the base branch; local tests do not prove live
+fork events, summaries, or cancellation behavior.
 
 Run `node --test .github/scripts/pr-size-notice.test.mjs` for the boundary,
 exception, refresh, unavailable-data, and workflow regression checks.

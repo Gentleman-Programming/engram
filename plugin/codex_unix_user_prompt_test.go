@@ -74,6 +74,8 @@ func TestCodexUnixUserPromptSubmitValidatesObservationsAndFirstSaveThreshold(t *
 			sessionID := fmt.Sprintf("nudge-%d-%d", time.Now().UnixNano(), index)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
+				case "/health":
+					_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
 				case "/project/current":
 					_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
 				case "/runtime-sessions/resolve":
@@ -142,6 +144,8 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/health":
+			_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
 		case "/sessions":
@@ -264,6 +268,8 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	run := exec.Command(bashPath, "-c", `PATH="$1:$PATH"; export PATH; "$2"`, "codex-test", binDir, adapterPath)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/health":
+			_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
 		case "/runtime-sessions/resolve":

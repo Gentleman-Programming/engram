@@ -196,7 +196,7 @@ async function engramFetchResult(
 }
 
 function localInstanceID(): string {
-  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8" })
+  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", windowsHide: true })
   const id = (result.stdout ?? "").toString().trim()
   if (result.status !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
   return id
@@ -691,6 +691,7 @@ export const Engram: Plugin = async (ctx) => {
       const serverChild = spawn(ENGRAM_BIN, ["serve"], {
         detached: true,
         stdio: "ignore",
+        windowsHide: true,
       })
       serverChild.on("error", () => warn("startup"))
       serverChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("startup") })
@@ -713,6 +714,7 @@ export const Engram: Plugin = async (ctx) => {
           cwd: ctx.directory,
           detached: true,
           stdio: "ignore",
+          windowsHide: true,
         })
         importChild.on("error", () => warn("import"))
         importChild.on("exit", (code, signal) => { if (code !== null && code !== 0 || signal) warn("import") })

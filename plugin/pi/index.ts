@@ -131,8 +131,9 @@ When the user asks to recall past work:
 
 ### SESSION CLOSE PROTOCOL
 
-Before ending a session or saying "done", call \`mem_session_summary\`
+Before explicitly closing or handing off the session, call \`mem_session_summary\`
 with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files.
+Ordinary task completion or merely saying "done" does not require a session summary.
 If \`mem_session_summary\` fails because Engram cannot detect a project, ask the user
 which project should receive the summary, then retry with \`project: "<name>"\`.
 

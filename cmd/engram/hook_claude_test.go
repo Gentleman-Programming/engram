@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,7 +219,7 @@ func TestCodexEndedSessionStart409DeniesWrite(t *testing.T) {
 			_, _ = w.Write([]byte(`{"context":""}`))
 			return
 		}
-		if r.URL.Path == "/runtime-sessions/resolve" {
+		if r.URL.Path == "/runtime-sessions/resolve" || r.URL.Path == "/health" {
 			production.ServeHTTP(w, r)
 			return
 		}
@@ -290,6 +291,10 @@ func TestCodexCallConfirmsSharedHostBeforeBinding(t *testing.T) {
 				t.Errorf("cwd = %q", r.URL.Query().Get("cwd"))
 			}
 			_, _ = w.Write([]byte(`{"project":"project-b","project_source":"config"}`))
+			return
+		}
+		if r.URL.Path == "/health" {
+			production.ServeHTTP(w, r)
 			return
 		}
 		if r.URL.Path != "/runtime-sessions/resolve" || r.Method != http.MethodPost {
@@ -403,11 +408,22 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 		{"malformed", 201, `{`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var resolverRequests atomic.Int32
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/project/current" {
 					_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 					return
 				}
+				if r.URL.Path == "/health" {
+					codexMockHealth(w)
+					return
+				}
+				if r.URL.Path != "/runtime-sessions/resolve" || r.Method != http.MethodPost {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				resolverRequests.Add(1)
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			}))
@@ -422,6 +438,9 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 			}
 			if err := json.Unmarshal(response, &result); err != nil || result.HookSpecificOutput.PermissionDecision != "deny" || result.HookSpecificOutput.UpdatedInput != nil {
 				t.Fatalf("response=%s err=%v", response, err)
+			}
+			if got := resolverRequests.Load(); got != 1 {
+				t.Fatalf("resolver requests=%d, want 1", got)
 			}
 		})
 	}
@@ -514,7 +533,14 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				var gets, posts, registrations atomic.Int32
 				endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					delay := tc.project
+					if r.URL.Path == "/health" {
+						codexMockHealth(w)
+						return
+					}
 					switch r.URL.Path {
+					case "/sessions/host":
+						w.WriteHeader(http.StatusNotFound)
+						return
 					case "/project/current":
 						gets.Add(1)
 					case "/sessions", "/runtime-sessions/resolve":
@@ -630,6 +656,12 @@ func TestHookSessionConfirmationSharedDeadline(t *testing.T) {
 					if !ok || !deadline.Equal(started.Add(4*time.Second)) {
 						t.Fatalf("confirmation deadline = %v, want start + 4s", deadline)
 					}
+					if r.URL.Path == "/sessions/host" {
+						return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+					}
+					if r.URL.Path == "/health" {
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`))}, nil
+					}
 					switch r.URL.Path {
 					case "/project/current":
 						gets++
@@ -732,6 +764,447 @@ func TestClaudeRegistrationRequiresMatchingCreatedResponse(t *testing.T) {
 	}
 }
 
+// Keep this fixture outside host Git ancestry without changing package-wide discovery.
+func isolateClaudeGitFixture(t *testing.T, root string) {
+	t.Helper()
+	ceiling := root
+	if inherited := os.Getenv("GIT_CEILING_DIRECTORIES"); inherited != "" {
+		ceiling += string(os.PathListSeparator) + inherited
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", ceiling)
+}
+
+func TestClaudeFixtureGitCeiling(t *testing.T) {
+	root := t.TempDir()
+	inherited := filepath.Join(root, "existing") + string(os.PathListSeparator) + filepath.Join(root, "other")
+	for _, tt := range []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{"empty inherited ceiling", "", root},
+		{"preserve inherited ceilings", inherited, root + string(os.PathListSeparator) + inherited},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GIT_CEILING_DIRECTORIES", tt.existing)
+			t.Run("fixture", func(t *testing.T) {
+				isolateClaudeGitFixture(t, root)
+				if got := os.Getenv("GIT_CEILING_DIRECTORIES"); got != tt.want {
+					t.Fatalf("fixture Git ceiling = %q, want %q", got, tt.want)
+				}
+			})
+			if got := os.Getenv("GIT_CEILING_DIRECTORIES"); got != tt.existing {
+				t.Fatalf("inherited Git ceiling after fixture = %q, want %q", got, tt.existing)
+			}
+		})
+	}
+}
+
+func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("requires git: %v", err)
+	}
+	root := t.TempDir()
+	isolateClaudeGitFixture(t, root)
+	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	production := server.New(db, 0).Handler()
+	endpoint := httptest.NewServer(production)
+	defer endpoint.Close()
+	t.Setenv("ENGRAM_URL", endpoint.URL)
+
+	gate := func(t *testing.T, session, cwd string) (decision, reason string, updatedInput map[string]any) {
+		t.Helper()
+		request, _ := json.Marshal(map[string]any{
+			"session_id": session, "cwd": cwd, "tool_name": "mcp__engram__mem_save",
+			"tool_input": map[string]any{"title": "gate write", "content": "bound", "session_id": "foreign-model-session"},
+		})
+		var hook struct {
+			HookSpecificOutput struct {
+				PermissionDecision       string         `json:"permissionDecision"`
+				PermissionDecisionReason string         `json:"permissionDecisionReason"`
+				UpdatedInput             map[string]any `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(guardClaudePreToolUse(request), &hook); err != nil {
+			t.Fatalf("gate output for %s from %s: %v", session, cwd, err)
+		}
+		bound := hook.HookSpecificOutput
+		return bound.PermissionDecision, bound.PermissionDecisionReason, bound.UpdatedInput
+	}
+	requireAllowed := func(t *testing.T, session, cwd string) {
+		t.Helper()
+		decision, reason, updatedInput := gate(t, session, cwd)
+		if decision == "deny" {
+			t.Fatalf("registered session %s must keep writing from %s: deny %q", session, cwd, reason)
+		}
+		if updatedInput["session_id"] != session || updatedInput["title"] != "gate write" {
+			t.Fatalf("bound input for %s = %v", session, updatedInput)
+		}
+		sessionRow, err := db.GetSession(session)
+		if err != nil || sessionRow.EndedAt != nil {
+			t.Fatalf("session %s after gate: %+v err=%v", session, sessionRow, err)
+		}
+	}
+	resolvesTo := func(t *testing.T, cwd string, wantProject string, wantStatus int) {
+		t.Helper()
+		response, err := http.Get(endpoint.URL + "/project/current?cwd=" + url.QueryEscape(cwd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = response.Body.Close() }()
+		body, _ := io.ReadAll(response.Body)
+		if response.StatusCode != wantStatus {
+			t.Fatalf("/project/current?cwd=%s = %d %s, want status %d", cwd, response.StatusCode, body, wantStatus)
+		}
+		if wantProject != "" && !strings.Contains(string(body), "\"project\":\""+wantProject+"\"") {
+			t.Fatalf("/project/current?cwd=%s = %s, want project %q", cwd, body, wantProject)
+		}
+	}
+
+	// Layout 1 (issue matrix): non-git project dir with .engram/config.json, write from a subfolder.
+	clientDir := filepath.Join(root, "client")
+	if err := os.MkdirAll(filepath.Join(clientDir, ".engram"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(clientDir, "docs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clientDir, ".engram", "config.json"), []byte(`{"project_name":"client"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvesTo(t, clientDir, "client", http.StatusOK)
+	requireAllowed(t, "s1", clientDir)
+	resolvesTo(t, filepath.Join(clientDir, "docs"), "docs", http.StatusOK)
+	requireAllowed(t, "s1", filepath.Join(clientDir, "docs"))
+
+	// Layout 2 (issue matrix): umbrella config dir, write from a child git repository.
+	umbrellaDir := filepath.Join(root, "umbrella")
+	if err := os.MkdirAll(filepath.Join(umbrellaDir, ".engram"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(umbrellaDir, ".engram", "config.json"), []byte(`{"project_name":"umbrella"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(umbrellaDir, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "-q", filepath.Join(umbrellaDir, "child")).CombinedOutput(); err != nil {
+		t.Fatalf("git init umbrella child: %v: %s", err, out)
+	}
+	requireAllowed(t, "s2", umbrellaDir)
+	resolvesTo(t, filepath.Join(umbrellaDir, "child"), "child", http.StatusOK)
+	requireAllowed(t, "s2", filepath.Join(umbrellaDir, "child"))
+
+	// Layout 3 (issue matrix): cwd is an unrelated directory whose basename resolves elsewhere.
+	strayDir := filepath.Join(root, "removed-worktree")
+	if err := os.MkdirAll(strayDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolvesTo(t, strayDir, "removed-worktree", http.StatusOK)
+	requireAllowed(t, "s1", strayDir)
+
+	// Layout 5 (gantit): clone into the session's non-git cwd; the cwd never moves.
+	wsDir := filepath.Join(root, "ws")
+	if err := os.MkdirAll(wsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requireAllowed(t, "s5", wsDir)
+	bareDir := filepath.Join(root, "child.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "clone", "-q", bareDir, filepath.Join(wsDir, "child")).CombinedOutput(); err != nil {
+		t.Fatalf("git clone into session cwd: %v: %s", err, out)
+	}
+	// Pin the remote label independently of the platform's local path separators.
+	// This only changes fixture metadata; no network operation is performed.
+	if out, err := exec.Command("git", "-C", filepath.Join(wsDir, "child"), "remote", "set-url", "origin", "https://example.invalid/child.git").CombinedOutput(); err != nil {
+		t.Fatalf("git set fixture origin: %v: %s", err, out)
+	}
+	resolvesTo(t, wsDir, "", http.StatusConflict) // project_transition_conflict before the binding exists
+	requireAllowed(t, "s5", wsDir)
+	resolvesTo(t, filepath.Join(wsDir, "child"), "child", http.StatusOK) // one resolution writes the binding
+	resolvesTo(t, wsDir, "child", http.StatusOK)                         // git_child promotion
+	requireAllowed(t, "s5", wsDir)
+	owner, err := db.GetSession("s5")
+	if err != nil || owner.Project != "ws" {
+		t.Fatalf("session s5 owner = %+v err=%v, want project ws after clone binding", owner, err)
+	}
+
+	// Layout 4 (issue matrix): ambiguous cwd must still deny an unregistered session, naming the cause.
+	multiDir := filepath.Join(root, "multi")
+	for _, repo := range []string{"r1", "r2"} {
+		if err := os.MkdirAll(filepath.Join(multiDir, repo), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "init", "-q", filepath.Join(multiDir, repo)).CombinedOutput(); err != nil {
+			t.Fatalf("git init %s: %v: %s", repo, err, out)
+		}
+	}
+	ambiguousResponse, err := http.Get(endpoint.URL + "/project/current?cwd=" + url.QueryEscape(multiDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ambiguousBody, _ := io.ReadAll(ambiguousResponse.Body)
+	_ = ambiguousResponse.Body.Close()
+	if ambiguousResponse.StatusCode != http.StatusOK || !strings.Contains(string(ambiguousBody), `"project_source":"ambiguous"`) || !strings.Contains(string(ambiguousBody), `"error_hint"`) {
+		t.Fatalf("ambiguous precondition /project/current?cwd=%s = %d %s", multiDir, ambiguousResponse.StatusCode, ambiguousBody)
+	}
+	decision, reason, updatedInput := gate(t, "s4-unknown", multiDir)
+	if decision != "deny" || updatedInput != nil {
+		t.Fatalf("ambiguous cwd for unregistered session must deny: %+v", decision)
+	}
+	if reason == "" || strings.Contains(reason, "registration could not be confirmed") || !strings.Contains(reason, "ambiguous") {
+		t.Fatalf("ambiguous denial must name the cause, got %q", reason)
+	}
+	if _, err := db.GetSession("s4-unknown"); err == nil {
+		t.Fatal("denied ambiguous registration created a session")
+	}
+
+	// S6: an ended session denies with its own cause, distinct from the generic message.
+	if response, err := http.Post(endpoint.URL+"/sessions/s1/end", "application/json", strings.NewReader(`{}`)); err != nil || response.StatusCode != http.StatusOK {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("end s1: err=%v status=%v", err, response)
+	}
+	decision, reason, updatedInput = gate(t, "s1", clientDir)
+	if decision != "deny" || updatedInput != nil {
+		t.Fatalf("ended session must deny: %q", decision)
+	}
+	if reason == "" || strings.Contains(reason, "registration could not be confirmed") || !strings.Contains(reason, "already ended") {
+		t.Fatalf("ended-session denial must name the cause, got %q", reason)
+	}
+}
+
+func TestClaudeConflictDenialNamesSessionProjects(t *testing.T) {
+	// Defensive naming contract: if a registration still conflicts, the denial
+	// carries the server's session_project_conflict fields instead of the generic text.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+			_, _ = io.WriteString(w, `{"id":"s9","project":"client","directory":"/w","started_at":"2026-10-10 00:00:00"}`)
+		case r.URL.Path == "/project/current":
+			_, _ = io.WriteString(w, `{"project":"client","project_source":"config"}`)
+		case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"code":"session_project_conflict","error":"session ownership does not match write project: session \"s9\" belongs to \"client\", not \"docs\"","owner_project":"client","requested_project":"docs","session_id":"s9"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ENGRAM_URL", server.URL)
+	input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+	var hook struct {
+		HookSpecificOutput struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+		t.Fatal(err)
+	}
+	reason := hook.HookSpecificOutput.PermissionDecisionReason
+	if hook.HookSpecificOutput.PermissionDecision != "deny" || reason == "" || strings.Contains(reason, "registration could not be confirmed") || !strings.Contains(reason, "session_project_conflict") || !strings.Contains(reason, "client") || !strings.Contains(reason, "docs") {
+		t.Fatalf("conflict denial must name code and projects, got %q", reason)
+	}
+}
+
+func TestClaudeDegradedSessionLookupFailsClosed(t *testing.T) {
+	// A session lookup that errors (5xx) must deny with a named cause instead
+	// of silently re-deriving the write's project from the cwd: a degraded
+	// answer is not "first registration" (#1717 review follow-up).
+	var derived bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+		case r.URL.Path == "/project/current":
+			derived = true
+			_, _ = io.WriteString(w, `{"project":"docs","project_source":"dir_basename"}`)
+		case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+			t.Errorf("cwd-derived registration reached the server after a failed lookup")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"id":"s9","status":"created"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ENGRAM_URL", server.URL)
+	input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+	var hook struct {
+		HookSpecificOutput struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+		t.Fatal(err)
+	}
+	reason := hook.HookSpecificOutput.PermissionDecisionReason
+	if hook.HookSpecificOutput.PermissionDecision != "deny" || !strings.Contains(reason, "session lookup failed") || derived {
+		t.Fatalf("degraded lookup must fail closed with a named cause, got %q derived=%v", reason, derived)
+	}
+}
+
+func TestClaudeSessionLookupOutcomes(t *testing.T) {
+	// Pin every session-lookup outcome (#1762 review follow-up): transport
+	// failures, malformed 2xx payloads, and mismatched session IDs deny
+	// without ever touching cwd resolution; a legacy blank-project row defers
+	// to the cwd path and allows the write.
+	for _, tc := range []struct {
+		name       string
+		sessionGet func(w http.ResponseWriter)
+		wantAllow  bool
+	}{
+		{"transport failure denies without cwd resolution", nil, false},
+		{"malformed 2xx session denies without cwd resolution", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{`)
+		}, false},
+		{"mismatched session id denies", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"other","project":"docs"}`)
+		}, false},
+		{"missing project field denies", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"s9"}`)
+		}, false},
+		{"null project denies", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"s9","project":null}`)
+		}, false},
+		{"blank project defers to cwd resolution", func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, `{"id":"s9","project":""}`)
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var derived, posted bool
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+					tc.sessionGet(w)
+				case r.URL.Path == "/project/current":
+					derived = true
+					_, _ = io.WriteString(w, `{"project":"docs","project_source":"dir_basename"}`)
+				case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+					posted = true
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, `{"id":"s9","status":"created"}`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Setenv("ENGRAM_URL", endpoint.URL)
+			if tc.sessionGet == nil {
+				endpoint.Close() // transport failure: connection refused
+			} else {
+				defer endpoint.Close()
+			}
+			input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+			var hook struct {
+				HookSpecificOutput struct {
+					PermissionDecision       string         `json:"permissionDecision"`
+					PermissionDecisionReason string         `json:"permissionDecisionReason"`
+					UpdatedInput             map[string]any `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+				t.Fatal(err)
+			}
+			bound := hook.HookSpecificOutput
+			if tc.wantAllow {
+				if bound.PermissionDecision == "deny" || bound.UpdatedInput["session_id"] != "s9" || !derived || !posted {
+					t.Fatalf("blank-project row must defer to cwd resolution and allow: decision=%q derived=%v posted=%v (%s)", bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
+				}
+				return
+			}
+			if bound.PermissionDecision != "deny" || bound.UpdatedInput != nil || derived || posted {
+				t.Fatalf("%s must deny without cwd resolution or registration: decision=%q derived=%v posted=%v (%s)", tc.name, bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
+			}
+			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") {
+				t.Fatalf("%s must name the lookup cause, got %q", tc.name, bound.PermissionDecisionReason)
+			}
+		})
+	}
+}
+
+func TestClaudeLargeSessionLookupStillConfirms(t *testing.T) {
+	// GET /sessions/{id} returns the full session, including its summary; a
+	// legitimate 65,536-character summary must not truncate the payload into
+	// a malformed-session denial (#1762 review: only error bodies are bounded).
+	hugeSummary := strings.Repeat("s", 65536)
+	for _, tc := range []struct {
+		name     string
+		session  string
+		post     string
+		postCode int
+		wantDeny string
+	}{
+		{
+			name:     "active session with huge summary confirms without cwd resolution",
+			session:  `{"id":"s9","project":"client","summary":"` + hugeSummary + `"}`,
+			post:     `{"id":"s9","status":"created"}`,
+			postCode: http.StatusCreated,
+		},
+		{
+			name:     "ended session with huge summary keeps the already-ended cause",
+			session:  `{"id":"s9","project":"client","ended_at":"2026-01-01 00:00:00","summary":"` + hugeSummary + `"}`,
+			post:     `{"code":"session_already_ended","session_id":"s9"}`,
+			postCode: http.StatusConflict,
+			wantDeny: "already ended",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var derived bool
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+					_, _ = io.WriteString(w, tc.session)
+				case r.URL.Path == "/project/current":
+					derived = true
+					_, _ = io.WriteString(w, `{"project":"docs","project_source":"dir_basename"}`)
+				case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+					w.WriteHeader(tc.postCode)
+					_, _ = io.WriteString(w, tc.post)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer endpoint.Close()
+			t.Setenv("ENGRAM_URL", endpoint.URL)
+			input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
+			var hook struct {
+				HookSpecificOutput struct {
+					PermissionDecision       string         `json:"permissionDecision"`
+					PermissionDecisionReason string         `json:"permissionDecisionReason"`
+					UpdatedInput             map[string]any `json:"updatedInput"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+				t.Fatal(err)
+			}
+			bound := hook.HookSpecificOutput
+			if tc.wantDeny == "" {
+				if bound.PermissionDecision == "deny" || bound.UpdatedInput["session_id"] != "s9" || derived {
+					t.Fatalf("large session must confirm against its owner: decision=%q derived=%v (%s)", bound.PermissionDecision, derived, bound.PermissionDecisionReason)
+				}
+				return
+			}
+			if bound.PermissionDecision != "deny" || !strings.Contains(bound.PermissionDecisionReason, tc.wantDeny) || derived {
+				t.Fatalf("large ended session must keep its named cause: decision=%q derived=%v (%s)", bound.PermissionDecision, derived, bound.PermissionDecisionReason)
+			}
+		})
+	}
+}
+
 func TestShouldCheckForUpdatesSkipsInternalHook(t *testing.T) {
 	if shouldCheckForUpdates([]string{"hook", "claude-pre-tool-use"}) {
 		t.Fatal("internal hook must not run the update check before emitting a Claude hook response")
@@ -744,6 +1217,10 @@ func TestCmdHookWritesTransformedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/project/current" {
 			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
+			return
+		}
+		if r.URL.Path == "/sessions/claude-session" {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		if r.URL.Path == "/sessions" {
@@ -1255,6 +1732,10 @@ func TestCodexPreToolUseReadsDoNotRequireSessionOrInput(t *testing.T) {
 
 func TestCodexPreToolUseCommandWritesAllowAndBoundInput(t *testing.T) {
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			codexMockHealth(w)
+			return
+		}
 		if r.URL.Path == "/project/current" {
 			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 			return
@@ -1510,7 +1991,7 @@ func TestClaudeEndedSessionWithoutLiveContinuationDenies(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := response.HookSpecificOutput
-			want := "Claude host session registration could not be confirmed (session_already_ended)"
+			want := `Claude host session "claude-ended-host" already ended`
 			if got.PermissionDecision != "deny" || got.PermissionDecisionReason != want || got.UpdatedInput != nil {
 				t.Fatalf("ended host = %+v, want deny %q", got, want)
 			}

@@ -368,6 +368,8 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 			_, _ = io.WriteString(w, `{"project":"codex-lifecycle","project_source":"config"}`)
 		case "/context":
 			_, _ = io.WriteString(w, `{"context":""}`)
+		case "/health":
+			production.ServeHTTP(w, r)
 		case "/sessions", "/runtime-sessions/resolve":
 			if reject.Load() {
 				rejected.Add(1)
@@ -482,6 +484,10 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 	}
 }
 
+func codexMockHealth(w http.ResponseWriter) {
+	_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
+}
+
 func codexMockResolved(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		ID string `json:"id"`
@@ -507,6 +513,8 @@ func TestCodexUserPromptFirstMessageIsNetworkIndependent(t *testing.T) {
 				case "/project/current":
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, tc.authority)
+				case "/health":
+					codexMockHealth(w)
 				case "/runtime-sessions/resolve":
 					codexMockResolved(w, r)
 				case "/prompts":
@@ -534,6 +542,8 @@ func TestCodexUserPromptSubsequentMessageSharesDeadlineAndPersistsOnce(t *testin
 		switch r.URL.Path {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+		case "/health":
+			codexMockHealth(w)
 		case "/runtime-sessions/resolve":
 			codexMockResolved(w, r)
 		case "/prompts":
@@ -578,6 +588,8 @@ func TestCodexUserPromptProjectAuthorityMatchesUnixJQ(t *testing.T) {
 				switch r.URL.Path {
 				case "/project/current":
 					_, _ = io.WriteString(w, tc.authority)
+				case "/health":
+					codexMockHealth(w)
 				case "/runtime-sessions/resolve":
 					codexMockResolved(w, r)
 				case "/sessions/s-1":
@@ -622,6 +634,8 @@ func TestCodexUserPromptReminderBoundaries(t *testing.T) {
 				case "/project/current":
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/health":
+					codexMockHealth(w)
 				case "/runtime-sessions/resolve":
 					codexMockResolved(w, r)
 				case "/sessions/s":
@@ -670,6 +684,8 @@ func TestCodexUserPromptExactReminderCutoffs(t *testing.T) {
 				switch r.URL.Path {
 				case "/project/current":
 					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/health":
+					codexMockHealth(w)
 				case "/runtime-sessions/resolve":
 					codexMockResolved(w, r)
 				case "/sessions/s":
@@ -800,6 +816,8 @@ func TestCodexUserPromptTimeoutFailsOpenWithoutRetry(t *testing.T) {
 		switch r.URL.Path {
 		case "/project/current":
 			_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+		case "/health":
+			codexMockHealth(w)
 		case "/runtime-sessions/resolve":
 			_, _ = io.WriteString(w, `{"id":"timeout","status":"resolved"}`)
 		case "/prompts":
