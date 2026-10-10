@@ -129,7 +129,7 @@ func (s *Store) ConsolidateObservations(p ConsolidateParams) (*ConsolidateResult
 	}
 
 	if !p.Confirm {
-		tx, err := s.db.Begin()
+		tx, err := s.beginTxHook()
 		if err != nil {
 			return nil, err
 		}
@@ -357,14 +357,16 @@ func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Obse
 	ordered := make([]Observation, len(plan.Sources))
 	copy(ordered, plan.Sources)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	survivorSyncID := syncID
 	for i := range ordered {
 		src := ordered[i]
 		if _, err := s.execHook(tx,
 			`UPDATE observations
 			 SET deleted_at = datetime('now'),
-			     updated_at = datetime('now')
+			     updated_at = datetime('now'),
+			     superseded_by_sync_id = ?
 			 WHERE id = ? AND deleted_at IS NULL`,
-			src.ID,
+			survivorSyncID, src.ID,
 		); err != nil {
 			return nil, err
 		}
@@ -383,15 +385,28 @@ func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Obse
 			continue
 		}
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, src.SyncID, SyncOpDelete, syncObservationPayload{
-			SyncID:    src.SyncID,
-			SessionID: src.SessionID,
-			Project:   src.Project,
-			Deleted:   true,
-			DeletedAt: &deletedAt,
+			SyncID:             src.SyncID,
+			SessionID:          src.SessionID,
+			Project:            src.Project,
+			Deleted:            true,
+			DeletedAt:          &deletedAt,
+			SupersededBySyncID: &survivorSyncID,
 		}); err != nil {
 			return nil, err
 		}
 	}
 
 	return s.getObservationTx(tx, survivorID)
+}
+
+// DetectResurrectedObservations returns live observations that still carry
+// superseded_by_sync_id: rows a consolidation soft-deleted that a concurrent
+// peer edit resurrected under full-payload last-write-wins (the documented
+// anomaly of issue #242's design, §3). One query, most recent change first.
+func (s *Store) DetectResurrectedObservations() ([]Observation, error) {
+	return s.queryObservations(
+		`SELECT ` + observationSelectColumns + ` FROM observations
+		 WHERE deleted_at IS NULL AND superseded_by_sync_id IS NOT NULL
+		 ORDER BY datetime(updated_at) DESC, id DESC`,
+	)
 }

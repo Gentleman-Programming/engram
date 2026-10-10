@@ -178,6 +178,11 @@ type Observation struct {
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`
+	// SupersededBySyncID names the survivor observation that consolidated this
+	// row away (issue #242 option (c)). Set on soft-deleted sources in the
+	// consolidation transaction; a live row carrying it is the resurrection
+	// anomaly the detector surfaces.
+	SupersededBySyncID *string `json:"superseded_by_sync_id,omitempty"`
 }
 
 const (
@@ -446,7 +451,7 @@ var legacySyncReviewAfterMonths = map[string]int{
 }
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
+	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at, superseded_by_sync_id`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -663,6 +668,9 @@ type syncObservationPayload struct {
 	Deleted     bool            `json:"deleted,omitempty"`
 	DeletedAt   *string         `json:"deleted_at,omitempty"`
 	HardDelete  bool            `json:"hard_delete,omitempty"`
+	// SupersededBySyncID rides consolidation deletes (and peer upserts) so
+	// peers mark the same provenance (issue #242 option (c)).
+	SupersededBySyncID *string `json:"superseded_by_sync_id,omitempty"`
 }
 
 type syncPromptPayload struct {
@@ -1554,6 +1562,7 @@ func (s *Store) migrate() error {
 		{name: "pinned", definition: "BOOLEAN NOT NULL DEFAULT 0"},
 		{name: "updated_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "deleted_at", definition: "TEXT"},
+		{name: "superseded_by_sync_id", definition: "TEXT"},
 	}
 	for _, c := range observationColumns {
 		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
@@ -12315,21 +12324,22 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		reviewAfter, _ = json.Marshal(obs.ReviewAfter)
 	}
 	return syncObservationPayload{
-		SyncID:         obs.SyncID,
-		SessionID:      obs.SessionID,
-		Type:           obs.Type,
-		Title:          obs.Title,
-		Content:        obs.Content,
-		ToolName:       obs.ToolName,
-		Project:        obs.Project,
-		Scope:          obs.Scope,
-		TopicKey:       obs.TopicKey,
-		RevisionCount:  obs.RevisionCount,
-		DuplicateCount: obs.DuplicateCount,
-		LastSeenAt:     obs.LastSeenAt,
-		ReviewAfter:    reviewAfter,
-		CreatedAt:      obs.CreatedAt,
-		UpdatedAt:      obs.UpdatedAt,
+		SyncID:             obs.SyncID,
+		SessionID:          obs.SessionID,
+		Type:               obs.Type,
+		Title:              obs.Title,
+		Content:            obs.Content,
+		ToolName:           obs.ToolName,
+		Project:            obs.Project,
+		Scope:              obs.Scope,
+		TopicKey:           obs.TopicKey,
+		RevisionCount:      obs.RevisionCount,
+		DuplicateCount:     obs.DuplicateCount,
+		LastSeenAt:         obs.LastSeenAt,
+		ReviewAfter:        reviewAfter,
+		CreatedAt:          obs.CreatedAt,
+		UpdatedAt:          obs.UpdatedAt,
+		SupersededBySyncID: obs.SupersededBySyncID,
 	}
 }
 
@@ -12497,8 +12507,8 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 			}
 		}
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at, superseded_by_sync_id)
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -12515,6 +12525,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 			reviewAfter,
 			createdAt,
 			updatedAt,
+			payload.SupersededBySyncID,
 		)
 		if err != nil {
 			return err
@@ -12546,7 +12557,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = NULL, superseded_by_sync_id = ?
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,
@@ -12563,6 +12574,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		reviewAfter,
 		createdAt,
 		updatedAt,
+		payload.SupersededBySyncID,
 		existing.ID,
 	)
 	if err != nil {
@@ -12596,8 +12608,8 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		updatedAt = *deletedAt
 	}
 	_, err = s.execHook(tx,
-		`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE id = ?`,
-		deletedAt, updatedAt, existing.ID,
+		`UPDATE observations SET deleted_at = ?, updated_at = ?, superseded_by_sync_id = COALESCE(?, superseded_by_sync_id) WHERE id = ?`,
+		deletedAt, updatedAt, payload.SupersededBySyncID, existing.ID,
 	)
 	return err
 }
@@ -12770,7 +12782,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 	return scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
-		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &o.SupersededBySyncID,
 	)
 }
 
@@ -12959,6 +12971,13 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		return nil
 	}
 
+	// The copy below selects superseded_by_sync_id; guarantee it exists even
+	// when this migration runs outside migrate()'s observationColumns loop
+	// (direct callers, error-branch tests).
+	if err := s.addColumnIfNotExists("observations", "superseded_by_sync_id", "TEXT"); err != nil {
+		return fmt.Errorf("migrate legacy observations: add superseded column: %w", err)
+	}
+
 	tx, err := s.beginTxHook()
 	if err != nil {
 		return fmt.Errorf("migrate legacy observations: begin tx: %w", err)
@@ -12985,6 +13004,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			deleted_at TEXT,
+			superseded_by_sync_id TEXT,
 			FOREIGN KEY (session_id) REFERENCES sessions(id)
 		);
 	`); err != nil {
@@ -12995,7 +13015,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		INSERT INTO observations_migrated (
 			id, sync_id, session_id, type, title, content, tool_name, project,
 			scope, topic_key, normalized_hash, revision_count, duplicate_count,
-			last_seen_at, pinned, created_at, updated_at, deleted_at
+			last_seen_at, pinned, created_at, updated_at, deleted_at, superseded_by_sync_id
 		)
 		SELECT
 			CASE
@@ -13019,7 +13039,8 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			0,
 			COALESCE(NULLIF(created_at, ''), datetime('now')),
 			COALESCE(NULLIF(updated_at, ''), NULLIF(created_at, ''), datetime('now')),
-			deleted_at
+			deleted_at,
+			superseded_by_sync_id
 		FROM observations
 		ORDER BY rowid;
 	`); err != nil {
