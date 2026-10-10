@@ -113,6 +113,8 @@ type CandidateOptions struct {
 type CandidateTimings struct {
 	Lookup  time.Duration
 	Inserts time.Duration
+	// RowsRead counts result rows consumed by Go, not SQLite FTS index work.
+	RowsRead int
 }
 
 // ─── Phase 3 types ────────────────────────────────────────────────────────────
@@ -412,20 +414,23 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		queryText = title
 	}
 	ftsQuery := sanitizeFTSCandidates(queryText)
-	var relevanceTerms []string
-	queryLimit := limit
-	if opts.RequireSaveRelevance {
-		relevanceTerms = saveCandidateTerms(queryText)
-		// Keep BM25 ordering, but do not let rejected matches consume the limit.
-		// Rows are read only until enough eligible candidates have been found.
-		queryLimit = -1
-	}
 	if ftsQuery == "" {
 		return nil, nil
 	}
 
+	args := []any{ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope}
+	if opts.RequireSaveRelevance {
+		// Filter titles/topics inside the ranked CTE before materialization.
+		// Keep original FTS scores and a positive SQL result limit: incidental
+		// content matches must not consume the cap or cross into the Go loop.
+		query = strings.Replace(query, "AND o.scope = ?", "AND o.scope = ?\n\t\t  AND engram_save_candidate_relevant(?, ?, o.title, o.topic_key) = 1", 1)
+		// Unit separator cannot occur in normalized terms. Avoid NUL, which
+		// SQLite text-function argument conversion treats as a terminator.
+		args = append(args, strings.Join(saveCandidateTerms(queryText), "\x1f"), sourceTopic)
+	}
+	args = append(args, threshold, limit)
 	// Apply the rank predicate in SQL before ordering and limiting.
-	rows, err := s.db.Query(query, ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope, threshold, queryLimit)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
@@ -447,13 +452,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			}
 			return nil, fmt.Errorf("FindCandidates: scan: %w", err)
 		}
-		if opts.RequireSaveRelevance && !saveCandidateRelevant(relevanceTerms, sourceTopic, rc.title, rc.topicKey) {
-			continue
+		if opts.Timings != nil {
+			opts.Timings.RowsRead++
 		}
 		raw = append(raw, rc)
-		if opts.RequireSaveRelevance && len(raw) == limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		if closeErr := rows.Close(); closeErr != nil {

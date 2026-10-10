@@ -54,8 +54,11 @@ For schema details, use [DOCS.md — Database Schema](../../DOCS.md#database-sch
 ## Save conflict candidate relevance
 
 `mem_save` keeps the original OR-based FTS query and raw BM25 scores, then applies
-an opt-in title/topic relevance gate in `internal/store` before the candidate
-limit and before creating pending relations. BM25 still orders eligible candidates; its default maximum
+an opt-in title/topic relevance gate in `internal/store` inside the ranked SQL
+query, before materialization, the positive candidate limit, and pending relation
+writes. A deterministic SQLite function uses the same Go relevance rule; rejected
+matches never become result rows read by Go. `CandidateTimings.RowsRead` reports
+consumed result rows, not the amount of work performed by the FTS index. BM25 still orders eligible candidates; its default maximum
 rank of `0.0` is not a semantic relevance threshold.
 
 The gate accepts a retrieved candidate when it shares a nonempty `topic_key`,

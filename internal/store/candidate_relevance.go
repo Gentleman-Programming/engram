@@ -1,10 +1,38 @@
 package store
 
 import (
+	"database/sql/driver"
 	"sort"
 	"strings"
 	"unicode"
+
+	sqlite "modernc.org/sqlite"
 )
+
+func init() {
+	// Register once before any store connections open. Both SQL and Go use
+	// the same deterministic rule; there is no per-store/global mutable state.
+	if err := sqlite.RegisterDeterministicScalarFunction("engram_save_candidate_relevant", 4,
+		func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			encodedTerms, _ := args[0].(string)
+			sourceTopic, _ := args[1].(string)
+			title, _ := args[2].(string)
+			var sourceTerms []string
+			if encodedTerms != "" {
+				sourceTerms = strings.Split(encodedTerms, "\x1f")
+			}
+			var topic *string
+			if value, ok := args[3].(string); ok {
+				topic = &value
+			}
+			if saveCandidateRelevant(sourceTerms, sourceTopic, title, topic) {
+				return int64(1), nil
+			}
+			return int64(0), nil
+		}); err != nil {
+		panic(err)
+	}
+}
 
 // saveCandidateTerms normalizes title words for the opt-in save relevance gate.
 // Unlike candidateTerms, it is not used by broad-recall scans. Common English

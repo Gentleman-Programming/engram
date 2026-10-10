@@ -28,12 +28,16 @@ func TestFindCandidatesSaveRelevanceBeforeLimitAndInsert(t *testing.T) {
 	if len(broad) != 1 || broad[0].ID == eligibleID {
 		t.Fatalf("fixture must put an irrelevant content match first: %+v", broad)
 	}
-	got, err := s.FindCandidates(sourceID, CandidateOptions{Limit: 1, RequireSaveRelevance: true})
+	var timings CandidateTimings
+	got, err := s.FindCandidates(sourceID, CandidateOptions{Limit: 1, RequireSaveRelevance: true, Timings: &timings})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].ID != eligibleID || got[0].JudgmentID == "" {
 		t.Fatalf("eligible candidate must survive filtering before limit: %+v", got)
+	}
+	if timings.RowsRead != 1 {
+		t.Errorf("rows consumed = %d, want only one eligible row", timings.RowsRead)
 	}
 	count, err := s.CountRelations(ListRelationsOptions{Status: "pending"})
 	if err != nil {
@@ -49,6 +53,36 @@ func TestFindCandidatesSaveRelevanceBeforeLimitAndInsert(t *testing.T) {
 	}
 	if len(after) != 1 || after[0].ID != broad[0].ID || after[0].Score != broad[0].Score {
 		t.Fatalf("default retrieval changed: before=%+v after=%+v", broad, after)
+	}
+}
+
+func TestFindCandidatesSaveRelevanceNoEligibleRowsConsumed(t *testing.T) {
+	s := setupRelationsStore(t)
+	for i := 0; i < 32; i++ {
+		_, err := s.AddObservation(AddObservationParams{
+			SessionID: "ses-rel-test", Type: "decision", Project: "testproject", Scope: "project",
+			Title:   fmt.Sprintf("Database retention policy %d", i),
+			Content: fmt.Sprintf("Policy %d: browser keyboard shortcuts", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceID, _ := addTestObs(t, s, "Browser keyboard shortcuts", "decision", "testproject", "project")
+	var timings CandidateTimings
+	got, err := s.FindCandidates(sourceID, CandidateOptions{Limit: 1, RequireSaveRelevance: true, Timings: &timings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 || timings.RowsRead != 0 {
+		t.Fatalf("irrelevant rows must be excluded in SQL: candidates=%+v rows=%d", got, timings.RowsRead)
+	}
+	count, err := s.CountRelations(ListRelationsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("unexpected pending relations: %d", count)
 	}
 }
 
