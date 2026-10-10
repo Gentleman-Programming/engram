@@ -280,10 +280,13 @@ errors are reported as warnings.
 
 The notice is non-required and non-blocking: a successful job means the advisory
 completed, not that the PR is under budget. No required contexts or rulesets are
-changed. It reads current PR metadata and runs only trusted base-revision code,
-with read-only permissions and no persisted checkout credentials. The workflow
-becomes available after it is merged into the base branch; local tests do not
-prove live fork events, summaries, or cancellation behavior.
+changed. It reads current PR metadata and checks out `github.workflow_sha`, the
+immutable commit of the executing trusted workflow, so its companion script is
+available even when a pull request's historical base predates the notice. It
+never checks out or executes pull-request head code, and retains read-only
+permissions and no persisted checkout credentials. The workflow becomes
+available after it is merged into the base branch; local tests do not prove live
+fork events, summaries, or cancellation behavior.
 
 Run `node --test .github/scripts/pr-size-notice.test.mjs` for the boundary,
 exception, refresh, unavailable-data, and workflow regression checks.

@@ -16,10 +16,11 @@ jobs:
       group: ${{ github.workflow }}-size-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
-      - name: Check out trusted base revision
+      - name: Check out trusted workflow revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # Keep the script aligned with this trusted workflow, even for older PR bases.
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Report current pull request size
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8

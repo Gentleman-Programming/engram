@@ -83,6 +83,27 @@ test('summary publication errors stay informative rather than failing the job', 
   assert.deepEqual(effects.warnings, ['PR size notice summary could not be published.']);
 });
 
+test('checks out the executing workflow revision when the PR base lacks the script', () => {
+  const workflow = fs.readFileSync('.github/workflows/pr-size-notice.yml', 'utf8');
+  const workflowSha = 'a'.repeat(40);
+  const oldBaseSha = 'b'.repeat(40);
+  const forkHeadSha = 'c'.repeat(40);
+  const contextRefs = {
+    'github.workflow_sha': workflowSha,
+    'github.event.pull_request.base.sha': oldBaseSha,
+    'github.event.pull_request.head.sha': forkHeadSha,
+  };
+  const scriptsByRevision = new Map([
+    [workflowSha, new Set(['.github/scripts/pr-size-notice.mjs'])],
+    [oldBaseSha, new Set()],
+    [forkHeadSha, new Set(['.github/scripts/pr-size-notice.mjs'])],
+  ]);
+  const expression = workflow.match(/^          ref: \$\{\{ ([\w.]+) \}\}$/m)?.[1];
+  const checkoutSha = contextRefs[expression];
+  assert.equal(checkoutSha, workflowSha, 'checkout must match the trusted executing workflow, not the historical PR base or fork head');
+  assert.ok(scriptsByRevision.get(checkoutSha)?.has('.github/scripts/pr-size-notice.mjs'));
+});
+
 test('workflow is trusted-base, SHA-pinned, read-only, non-blocking and comment-free', () => {
   const workflow = fs.readFileSync('.github/workflows/pr-size-notice.yml', 'utf8');
   assert.match(workflow, /^  pull_request_target:/m);
@@ -91,7 +112,8 @@ test('workflow is trusted-base, SHA-pinned, read-only, non-blocking and comment-
   assert.match(workflow, /^  pull-requests: read$/m);
   assert.match(workflow, /name: PR Size Notice/);
   assert.match(workflow, /cancel-in-progress: true/);
-  assert.match(workflow, /ref: \$\{\{ github.event.pull_request.base.sha \}\}/);
+  assert.match(workflow, /ref: \$\{\{ github.workflow_sha \}\}/);
+  assert.doesNotMatch(workflow, /github.event.pull_request.base.sha/);
   assert.match(workflow, /persist-credentials: false/);
   assert.doesNotMatch(workflow, /pull_request.head|createComment|updateComment|checks\./);
   assert.deepEqual([...workflow.matchAll(/uses: ([^\s]+)@([a-f0-9]{40})/g)].map((match) => match[1]), ['actions/checkout', 'actions/github-script']);
