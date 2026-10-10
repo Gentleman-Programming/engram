@@ -32,7 +32,7 @@ func deferredRowIDsCLI(t *testing.T, db *sql.DB) []string {
 	if err != nil {
 		t.Fatalf("deferredRowIDsCLI: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	ids := []string{}
 	for rows.Next() {
 		var id string
@@ -40,6 +40,9 @@ func deferredRowIDsCLI(t *testing.T, db *sql.DB) []string {
 			t.Fatalf("deferredRowIDsCLI: scan: %v", err)
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("deferredRowIDsCLI: rows: %v", err)
 	}
 	return ids
 }
@@ -53,7 +56,9 @@ func seedPruneFixture(t *testing.T, cfg store.Config) *sql.DB {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	s.Close()
+	if err := s.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
 	db := openTestDB(t, cfg)
 	seedAgedDeadRowCLI(t, db, "dead-a-old", "relation", "cloud", "proj-a", "relation_dead", "dead", 45)
 	seedAgedDeadRowCLI(t, db, "dead-a-1", "relation", "cloud", "proj-a", "relation_dead", "dead", 10)

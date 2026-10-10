@@ -30,7 +30,7 @@ func deferredSyncIDs(t *testing.T, s *Store) []string {
 	if err != nil {
 		t.Fatalf("deferredSyncIDs: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	ids := []string{}
 	for rows.Next() {
 		var id string
@@ -263,7 +263,7 @@ func TestPruneDeadRowsCandidateQueryUsesIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var details []string
 	for rows.Next() {
 		var id, parent, notused int

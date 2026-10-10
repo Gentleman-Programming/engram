@@ -691,7 +691,7 @@ func cmdConflictsPrune(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	result, err := s.PruneDeadRows(store.PruneDeadRowsOptions{
 		MaxAgeDays:  maxAgeDays,

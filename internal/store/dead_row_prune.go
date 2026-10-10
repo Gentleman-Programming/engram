@@ -168,7 +168,7 @@ func selectPruneDeadRowCandidates(db queryer, opts PruneDeadRowsOptions) ([]prun
 	if err != nil {
 		return nil, fmt.Errorf("prune dead rows: select: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var candidates []pruneDeadRowCandidate
 	for rows.Next() {
 		var c pruneDeadRowCandidate
