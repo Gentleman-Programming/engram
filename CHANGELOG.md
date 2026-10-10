@@ -21,6 +21,11 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Core release recovery (Engram 3.3.2)
+
+- **chore(deps):** classify the existing `modernc.org/libc v1.70.0` requirement as direct so the unchanged release module-tidy gate passes; dependency versions and runtime behavior are unchanged.
+- The Engram `v3.3.1` binary release stopped at that gate before GoReleaser. Preserve its existing tag and Cloud image; `gentle-engram@0.4.1` is already published and is not republished by this recovery.
+
 ### Patch release preparation (Engram 3.3.1 / gentle-engram 0.4.1)
 
 - **chore(release):** align the Pi package and core installer on `gentle-engram@0.4.1`, including idempotent upgrades from `0.4.0` without changing unrelated Pi settings or MCP configuration.
