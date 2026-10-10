@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # Baseline: PR #1728, CodeRabbit reply #6084792433 (Repository UI).
-# Keep existing settings; only the profile and docstring percentage check differ.
+# Preserve the baseline except for noise adjustments and JS/TS test guidance (#1742).
 language: en-US
 tone_instructions: ''
 early_access: false
@@ -57,6 +57,51 @@ reviews:
       instructions: New or modified endpoints need handler tests (parsing/validation) and route+response tests. If a payload or route changes, update docs in the same PR.
     - path: '**/*_test.go'
       instructions: Verify coverage of happy path, error paths, and edge cases. Tests must be deterministic. Behavior changes without tests should be blocked.
+    - path: '.github/scripts/*.test.mjs'
+      instructions: >-
+        Prefer deterministic, isolated setup and cleanup. Check relevant success paths,
+        error paths and boundaries through observable behavior: returned values,
+        outgoing requests, persisted files, warnings and prohibited side effects.
+        Mocks, stubs and internal seams are useful when they protect real contracts;
+        workflow, schema and package structural-contract checks are valid. Flag assertions
+        that only mirror implementation details or fixtures; do not require blanket
+        integration-test or style rewrites.
+    - path: 'plugin/obsidian/test/*.test.mjs'
+      instructions: >-
+        Prefer deterministic, isolated setup and cleanup. Check relevant success paths,
+        error paths and boundaries through observable behavior: returned values,
+        outgoing requests, persisted files, warnings and prohibited side effects.
+        Mocks, stubs and internal seams are useful when they protect real contracts;
+        workflow, schema and package structural-contract checks are valid. Flag assertions
+        that only mirror implementation details or fixtures; do not require blanket
+        integration-test or style rewrites.
+    - path: 'plugin/opencode/*.test.mjs'
+      instructions: >-
+        Prefer deterministic, isolated setup and cleanup. Check relevant success paths,
+        error paths and boundaries through observable behavior: returned values,
+        outgoing requests, persisted files, warnings and prohibited side effects.
+        Mocks, stubs and internal seams are useful when they protect real contracts;
+        workflow, schema and package structural-contract checks are valid. Flag assertions
+        that only mirror implementation details or fixtures; do not require blanket
+        integration-test or style rewrites.
+    - path: 'plugin/opencode/*.test.mts'
+      instructions: >-
+        Prefer deterministic, isolated setup and cleanup. Check relevant success paths,
+        error paths and boundaries through observable behavior: returned values,
+        outgoing requests, persisted files, warnings and prohibited side effects.
+        Mocks, stubs and internal seams are useful when they protect real contracts;
+        workflow, schema and package structural-contract checks are valid. Flag assertions
+        that only mirror implementation details or fixtures; do not require blanket
+        integration-test or style rewrites.
+    - path: 'plugin/pi/test/**/*.test.mjs'
+      instructions: >-
+        Prefer deterministic, isolated setup and cleanup. Check relevant success paths,
+        error paths and boundaries through observable behavior: returned values,
+        outgoing requests, persisted files, warnings and prohibited side effects.
+        Mocks, stubs and internal seams are useful when they protect real contracts;
+        workflow, schema and package structural-contract checks are valid. Flag assertions
+        that only mirror implementation details or fixtures; do not require blanket
+        integration-test or style rewrites.
   abort_on_close: true
   disable_cache: false
   slop_detection:

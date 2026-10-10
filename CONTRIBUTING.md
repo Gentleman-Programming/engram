@@ -103,15 +103,40 @@ preserved. The only noise adjustments are the balanced `chill` profile and
 turning off the numeric docstring coverage warning. Documentation correctness
 still matters and remains part of review.
 
+JS/TS test suites have additional path instructions alongside the preserved
+Go-test and thin-adapter guidance:
+
+| Test surface | Instruction glob |
+|--------------|------------------|
+| Repository policy scripts | `.github/scripts/*.test.mjs` |
+| Obsidian | `plugin/obsidian/test/*.test.mjs` |
+| OpenCode JavaScript | `plugin/opencode/*.test.mjs` |
+| OpenCode TypeScript | `plugin/opencode/*.test.mts` |
+| Pi, including nested suites | `plugin/pi/test/**/*.test.mjs` |
+
+These instructions prioritize deterministic setup/cleanup, relevant success,
+error and boundary cases, and observable effects: returned values, outgoing
+requests, persisted files, warnings and prohibited side effects. Useful
+isolated mocks, stubs and internal seams remain valid when they protect real
+contracts, as do workflow, schema and package structural-contract checks.
+Assertions that merely mirror implementation details or fixtures deserve scrutiny;
+this is not a blanket integration-test or style-rewrite requirement. Helper-only
+files retain generic/plugin review without a dedicated test-suite instruction.
+These globs add guidance, not review exclusions or new required checks.
+
 CodeRabbit does not automatically approve PRs (`request_changes_workflow: false`),
 skips drafts, and does not replace human review or the required checks above.
 Generated outputs are excluded only from AI review, not from generation checks.
 Existing manually requested code-generation/fix features remain unchanged.
 
 Changes to this file require normal issue-first review. Run `go test . -run
-TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, and baseline
-preservation. Deliberate future settings changes must update the baseline test
-with their rationale. To pause automatic reviews on one PR, comment
+TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, JS/TS
+instruction content/scope, documentation and baseline preservation. The original
+export hash is retained: only the five exact JS/TS instruction blocks are removed
+before comparing all other settings. Deliberate future settings changes must
+update the baseline test with their rationale. Local path examples exercise a
+limited plain-glob contract, not CodeRabbit's matcher, schema validation or live
+instruction overlap. To pause automatic reviews on one PR, comment
 `@coderabbitai pause`; to disable them through configuration, change
 `reviews.auto_review.enabled` to `false` in a reviewed PR. Reverting the initial
 configuration-file addition restores selection of the existing UI configuration,
@@ -119,7 +144,9 @@ provided that UI configuration has not changed.
 
 Installation permissions could not be audited with the available credentials.
 Live review behavior and noise reduction must be observed after rollout; local
-policy tests do not establish those results.
+policy tests do not establish those results. Inspect representative live feedback
+on these test surfaces and record useful findings, noise and limitations before
+claiming improved test-review quality.
 
 ## Claude Plugin Version Rule
 
