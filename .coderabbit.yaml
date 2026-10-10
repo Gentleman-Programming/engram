@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # Baseline: PR #1728, CodeRabbit reply #6084792433 (Repository UI).
-# Preserve the baseline except for noise adjustments and JS/TS test guidance (#1742).
+# Preserve the baseline except for noise adjustments, JS/TS tests (#1742) and workflows (#1743).
 language: en-US
 tone_instructions: ''
 early_access: false
@@ -102,6 +102,32 @@ reviews:
         workflow, schema and package structural-contract checks are valid. Flag assertions
         that only mirror implementation details or fixtures; do not require blanket
         integration-test or style rewrites.
+    - path: '.github/workflows/*.yml'
+      instructions: >-
+        Review GitHub Actions permissions and trust boundaries in event context.
+        Require minimum necessary job/token permissions and justification for legitimate
+        write scopes; do not prescribe blanket contents: read for release, package
+        publishing, OIDC or repository maintenance jobs.
+        Review secret/credential handling for exposure in logs, scripts and untrusted code.
+        Distinguish trusted-base or trusted-workflow metadata/label checks from checking
+        out or executing attacker-controlled pull request code with privileged credentials,
+        including pull_request_target and workflow_run paths. Check checkout provenance
+        and treat fork inputs, PR metadata and downloaded artifacts as untrusted data;
+        flag unsafe interpolation or execution, not legitimate metadata processing.
+        Do not blanket-ban privileged events or replace deterministic checks/human review.
+    - path: '.github/workflows/*.yaml'
+      instructions: >-
+        Review GitHub Actions permissions and trust boundaries in event context.
+        Require minimum necessary job/token permissions and justification for legitimate
+        write scopes; do not prescribe blanket contents: read for release, package
+        publishing, OIDC or repository maintenance jobs.
+        Review secret/credential handling for exposure in logs, scripts and untrusted code.
+        Distinguish trusted-base or trusted-workflow metadata/label checks from checking
+        out or executing attacker-controlled pull request code with privileged credentials,
+        including pull_request_target and workflow_run paths. Check checkout provenance
+        and treat fork inputs, PR metadata and downloaded artifacts as untrusted data;
+        flag unsafe interpolation or execution, not legitimate metadata processing.
+        Do not blanket-ban privileged events or replace deterministic checks/human review.
   abort_on_close: true
   disable_cache: false
   slop_detection:

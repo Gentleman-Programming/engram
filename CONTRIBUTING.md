@@ -124,16 +124,33 @@ this is not a blanket integration-test or style-rewrite requirement. Helper-only
 files retain generic/plugin review without a dedicated test-suite instruction.
 These globs add guidance, not review exclusions or new required checks.
 
+GitHub Actions workflows have dedicated advisory instructions:
+
+| Workflow surface | Instruction glob |
+|------------------|------------------|
+| Workflow YAML | `.github/workflows/*.yml` |
+| Alternative YAML extension | `.github/workflows/*.yaml` |
+
+Review guidance considers event context, minimum necessary job/token permissions,
+secret exposure and checkout/execution provenance. It distinguishes trusted-base
+or trusted-workflow metadata/label checks from executing attacker-controlled PR
+code with privileged credentials. Fork inputs, PR metadata and downloaded
+artifacts remain untrusted data. Require justification for legitimate write scopes
+(releases, package publishing, OIDC and repository maintenance), rather than
+blanket `contents: read` or bans on privileged events. This adds no workflow,
+permission or required-check changes and does not replace actionlint or zizmor.
+
 CodeRabbit does not automatically approve PRs (`request_changes_workflow: false`),
 skips drafts, and does not replace human review or the required checks above.
 Generated outputs are excluded only from AI review, not from generation checks.
 Existing manually requested code-generation/fix features remain unchanged.
 
 Changes to this file require normal issue-first review. Run `go test . -run
-TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, JS/TS
-instruction content/scope, documentation and baseline preservation. The original
-export hash is retained: only the five exact JS/TS instruction blocks are removed
-before comparing all other settings. Deliberate future settings changes must
+TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, JS/TS and
+workflow instruction content/scope, documentation and baseline preservation.
+The original export hash is retained: only the five exact JS/TS instruction
+blocks and two exact workflow instruction blocks are removed before comparing
+all other settings. Deliberate future settings changes must
 update the baseline test with their rationale. Local path examples exercise a
 limited plain-glob contract, not CodeRabbit's matcher, schema validation or live
 instruction overlap. To pause automatic reviews on one PR, comment
@@ -146,7 +163,9 @@ Installation permissions could not be audited with the available credentials.
 Live review behavior and noise reduction must be observed after rollout; local
 policy tests do not establish those results. Inspect representative live feedback
 on these test surfaces and record useful findings, noise and limitations before
-claiming improved test-review quality.
+claiming improved test-review quality. For workflow guidance, observe representative
+safe/unsafe review feedback without executing unsafe examples; record useful
+findings, false positives and limitations before claiming improved security review.
 
 ## Claude Plugin Version Rule
 

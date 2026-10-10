@@ -29,12 +29,19 @@ func TestCodeRabbitDocstringPercentageDisabled(t *testing.T) {
 func TestCodeRabbitPreservesExportedSettings(t *testing.T) {
 	content, _ := codeRabbitConfig(t)
 	// Source: PR #1728, CodeRabbit reply #6084792433. Remove only the five
-	// exact JS/TS instruction blocks from #1742 and restore the two noise
-	// adjustments, then compare every remaining exported setting. The original
-	// hash stays unchanged; new or altered unrelated settings still fail.
+	// exact JS/TS blocks (#1742) and two exact workflow blocks (#1743), then
+	// restore the two noise adjustments and compare every exported setting.
+	// The original hash stays unchanged; unrelated settings still fail.
 	for _, glob := range codeRabbitJSTestPaths {
 		block := "    - path: '" + glob + "'\n      instructions: >-\n"
 		for _, line := range strings.Split(codeRabbitJSTestInstructions, "\n") {
+			block += "        " + line + "\n"
+		}
+		content = strings.Replace(content, block, "", 1)
+	}
+	for _, glob := range codeRabbitWorkflowPaths {
+		block := "    - path: '" + glob + "'\n      instructions: >-\n"
+		for _, line := range strings.Split(codeRabbitWorkflowInstructions, "\n") {
 			block += "        " + line + "\n"
 		}
 		content = strings.Replace(content, block, "", 1)
@@ -50,7 +57,7 @@ func TestCodeRabbitPreservesExportedSettings(t *testing.T) {
 	got := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(strings.Join(lines, "\n")))))
 	const want = "25258494aec855af73fcc94a1a7880a74456042416e9191500845d1792193434"
 	if got != want {
-		t.Fatalf("exported settings changed beyond the noise adjustments and exact JS/TS instructions: hash %s, want %s", got, want)
+		t.Fatalf("exported settings changed beyond the noise adjustments and exact JS/TS/workflow instructions: hash %s, want %s", got, want)
 	}
 }
 
@@ -160,6 +167,114 @@ func TestCodeRabbitJSTestDocumentation(t *testing.T) {
 	section, _, _ = strings.Cut(section, "\n## ")
 	for _, text := range append(append([]string{}, codeRabbitJSTestPaths...),
 		"isolated mocks", "structural-contract checks", "not CodeRabbit's matcher", "live feedback") {
+		if !strings.Contains(section, text) {
+			t.Errorf("Advisory AI Review documentation missing %q", text)
+		}
+	}
+}
+
+var codeRabbitWorkflowPaths = []string{
+	".github/workflows/*.yml",
+	".github/workflows/*.yaml",
+}
+
+const codeRabbitWorkflowInstructions = `Review GitHub Actions permissions and trust boundaries in event context.
+Require minimum necessary job/token permissions and justification for legitimate
+write scopes; do not prescribe blanket contents: read for release, package
+publishing, OIDC or repository maintenance jobs.
+Review secret/credential handling for exposure in logs, scripts and untrusted code.
+Distinguish trusted-base or trusted-workflow metadata/label checks from checking
+out or executing attacker-controlled pull request code with privileged credentials,
+including pull_request_target and workflow_run paths. Check checkout provenance
+and treat fork inputs, PR metadata and downloaded artifacts as untrusted data;
+flag unsafe interpolation or execution, not legitimate metadata processing.
+Do not blanket-ban privileged events or replace deterministic checks/human review.`
+
+func TestCodeRabbitWorkflowScope(t *testing.T) {
+	_, config := codeRabbitConfig(t)
+	var got []string
+	for _, rule := range config.Reviews.PathInstructions {
+		if strings.HasPrefix(rule.Path, ".github/workflows/") {
+			got = append(got, rule.Path)
+		}
+	}
+	if !reflect.DeepEqual(got, codeRabbitWorkflowPaths) {
+		t.Fatalf("workflow paths = %v, want %v", got, codeRabbitWorkflowPaths)
+	}
+
+	// Check every current workflow and the selected plain-glob boundaries,
+	// not CodeRabbit's minimatch implementation or review quality.
+	files, err := os.ReadDir(".github/workflows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		file string
+		want bool
+	}{
+		{".github/workflows/example.yaml", true},
+		{".github/workflows/nested/example.yml", false},
+		{".github/dependabot.yml", false},
+		{".github/scripts/pr-size-notice.mjs", false},
+		{".github/workflows/example.yml.bak", false},
+	}
+	for _, file := range files {
+		if !file.IsDir() && (path.Ext(file.Name()) == ".yml" || path.Ext(file.Name()) == ".yaml") {
+			cases = append(cases, struct {
+				file string
+				want bool
+			}{path.Join(".github/workflows", file.Name()), true})
+		}
+	}
+	for _, tt := range cases {
+		t.Run(tt.file, func(t *testing.T) {
+			matched := false
+			for _, glob := range got {
+				ok, err := path.Match(glob, tt.file)
+				if err != nil {
+					t.Fatalf("invalid workflow glob %q: %v", glob, err)
+				}
+				matched = matched || ok
+			}
+			if matched != tt.want {
+				t.Fatalf("workflow paths match %q = %t, want %t", tt.file, matched, tt.want)
+			}
+		})
+	}
+}
+
+func TestCodeRabbitWorkflowGuidance(t *testing.T) {
+	_, config := codeRabbitConfig(t)
+	want := strings.Join(strings.Fields(codeRabbitWorkflowInstructions), " ")
+	for _, glob := range codeRabbitWorkflowPaths {
+		t.Run(glob, func(t *testing.T) {
+			var instructions []string
+			for _, rule := range config.Reviews.PathInstructions {
+				if rule.Path == glob {
+					instructions = append(instructions, rule.Instructions)
+				}
+			}
+			if !reflect.DeepEqual(instructions, []string{want}) {
+				t.Fatalf("instructions for %q = %q, want one privilege/provenance-aware rule %q", glob, instructions, want)
+			}
+		})
+	}
+}
+
+func TestCodeRabbitWorkflowDocumentation(t *testing.T) {
+	content, err := os.ReadFile("CONTRIBUTING.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, ok := strings.Cut(string(content), "## Advisory AI Review")
+	if !ok {
+		t.Fatal("missing Advisory AI Review section")
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	for _, text := range append(append([]string{}, codeRabbitWorkflowPaths...),
+		"minimum necessary", "trusted-base", "privileged credentials",
+		"legitimate write scopes", "without executing unsafe examples",
+		"false positives", "two exact workflow instruction blocks") {
 		if !strings.Contains(section, text) {
 			t.Errorf("Advisory AI Review documentation missing %q", text)
 		}
