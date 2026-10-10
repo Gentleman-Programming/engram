@@ -136,7 +136,7 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
-- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
+- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically. Dead rows are kept as evidence of discarded mutations; nothing removes them automatically, and `engram conflicts prune --apply` bounds them by age and per-scope count.
 
 ### SQLite Configuration
 
@@ -191,7 +191,7 @@ engram import <file>          Import memories from JSON
 engram sync                   Export new memories to .engram/ [--all: every project]
 engram sync --cloud --project <name>
                               Sync one project against the configured cloud endpoint
-engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred
+engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred, prune
 engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
 engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
 engram projects list          List projects with observation/session/prompt counts
@@ -913,6 +913,17 @@ Inspect or replay the `sync_apply_deferred` queue.
 - Default: list rows with sync_id, apply_status, retry_count, first_seen_at.
 - `--inspect <sync_id>`: print full decoded payload for one row; exits non-zero when not found.
 - `--replay`: call `ReplayDeferred()` and print retried/succeeded/failed/dead counts.
+
+```
+engram conflicts prune [--max-age-days <N>] [--max-per-scope <N>] [--dry-run] [--apply]
+```
+
+Bound dead rows in `sync_apply_deferred` (`apply_status='dead'` only; deferred retry state is never touched). A dead row is selected when its `first_seen_at` is older than `--max-age-days` (default 30), or when it falls beyond the newest `--max-per-scope` (default 1000) dead rows of its scope (`target_key` + `project`), so one noisy peer cannot evict another scope's evidence.
+
+- `--dry-run` (default): print what would be evicted and delete nothing.
+- `--apply`: delete the selected rows in one transaction.
+- Output reports the total, per-scope counts split into `by_age` and `by_cap`, and counts by entity, `reason_code`, and age bucket (`0-6d`, `7-29d`, `30d+`, or `unknown` when `first_seen_at` does not parse as a date), so eviction is never silent.
+- `--dry-run` and `--apply` are mutually exclusive, and `--max-age-days` / `--max-per-scope` must be positive integers; invalid input exits with an error before opening the store.
 
 ### Cloud CLI (opt-in)
 
