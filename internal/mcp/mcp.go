@@ -235,6 +235,7 @@ var ProfileAgent = map[string]bool{
 	"mem_capture_passive":   true, // extract learnings from text — referenced in Gemini/Codex protocol
 	"mem_save_prompt":       true, // save user prompts
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
+	"mem_consolidate":       true, // atomic merge of related observations — memory garbage collection (engram#242)
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
 	"mem_list_projects":     true, // enumerate all known projects for cross-project discovery (engram#675)
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
@@ -319,7 +320,7 @@ var coreTools = []coreToolDesc{
 var deferredTools = []string{
 	"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
 	"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
-	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
+	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects", "mem_consolidate",
 }
 
 // memoryWritingTools contains every registered tool that can mutate persistent
@@ -328,7 +329,7 @@ var memoryWritingTools = []string{
 	"mem_save", "mem_update", "mem_review", "mem_delete",
 	"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
 	"mem_session_start", "mem_session_end", "mem_capture_passive",
-	"mem_merge_projects", "mem_judge", "mem_compare",
+	"mem_merge_projects", "mem_judge", "mem_compare", "mem_consolidate",
 }
 
 func hasRegisteredMemoryWriter(allowlist map[string]bool) bool {
@@ -662,6 +663,34 @@ Examples:
 				),
 			),
 			queuedWriteHandler(writeQueue, handleDelete(s)),
+		)
+	}
+
+	// ─── mem_consolidate (profile: agent, deferred) ──────────────────────
+	if shouldRegister("mem_consolidate", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_consolidate",
+				mcp.WithDescription("Atomically merge N live observations into one survivor (memory garbage collection, engram#242). Dry-run by default: returns the plan and a plan_fingerprint and writes nothing. Execute with confirm=true plus that fingerprint; if any source changed in between, the call refuses and returns the fresh fingerprint."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Consolidate Memories"),
+				mcp.WithReadOnlyHintAnnotation(false),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithIdempotentHintAnnotation(false),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithArray("ids",
+					mcp.Required(),
+					mcp.Description("Local observation IDs to consolidate (at least two, all live, same project)"),
+					mcp.WithNumberItems(),
+				),
+				mcp.WithString("title", mcp.Description("Optional survivor title; defaults to joining source titles newest-first")),
+				mcp.WithString("content", mcp.Description("Optional survivor content; defaults to joining source contents newest-first with a consolidated_from provenance list")),
+				mcp.WithString("type", mcp.Description("Optional survivor type; defaults to the newest source's type")),
+				mcp.WithString("topic_key", mcp.Description("Optional survivor topic key; never inherited from sources")),
+				mcp.WithBoolean("dry_run", mcp.Description("Plan only, write nothing (default true)")),
+				mcp.WithBoolean("confirm", mcp.Description("Execute the consolidation; requires the matching plan_fingerprint")),
+				mcp.WithString("plan_fingerprint", mcp.Description("Fingerprint of the plan being confirmed")),
+			),
+			queuedWriteHandler(writeQueue, handleConsolidate(s)),
 		)
 	}
 
@@ -1896,6 +1925,85 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 			mode = "permanently deleted"
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d %s", id, mode)), nil
+	}
+}
+
+// handleConsolidate serves mem_consolidate (engram#242). The default call is
+// a dry-run returning the full plan and its fingerprint; confirm executes
+// only against that exact fingerprint and a mismatch refuses while surfacing
+// the fresh fingerprint so the caller re-plans instead of guessing.
+func handleConsolidate(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		ids, argErr := int64SliceArg(req, "ids")
+		if argErr != nil {
+			return mcp.NewToolResultError(argErr.Error()), nil
+		}
+		if len(ids) < 2 {
+			return mcp.NewToolResultError("ids requires at least two live observation IDs"), nil
+		}
+		confirm := boolArg(req, "confirm", false)
+		// dry_run defaults to true as the safe protocol default (no confirm = plan
+		// only). Execution refuses when dry_run is present with any value other
+		// than an explicit boolean false — a mistyped truthy value must never
+		// bypass the contradiction guard on a destructive tool.
+		if confirm {
+			if raw, ok := req.GetArguments()["dry_run"]; ok {
+				if b, isBool := raw.(bool); !isBool || b {
+					return mcp.NewToolResultError("confirm=true cannot be combined with dry_run; omit dry_run to execute"), nil
+				}
+			}
+		}
+		fingerprint, _ := req.GetArguments()["plan_fingerprint"].(string)
+
+		res, err := s.ConsolidateObservations(store.ConsolidateParams{
+			IDs: ids,
+			Overrides: store.ConsolidateOverrides{
+				Title:    strArg(req, "title", ""),
+				Content:  strArg(req, "content", ""),
+				Type:     strArg(req, "type", ""),
+				TopicKey: strArg(req, "topic_key", ""),
+			},
+			Confirm:     confirm,
+			Fingerprint: fingerprint,
+		})
+		if err != nil {
+			if errors.Is(err, store.ErrConsolidateFingerprintMismatch) && res != nil && res.Plan != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to consolidate: %s. Re-run without confirm to inspect the fresh plan (plan_fingerprint=%s)", err.Error(), res.Plan.Fingerprint)), nil
+			}
+			return mcp.NewToolResultError("Failed to consolidate: " + err.Error()), nil
+		}
+
+		envelope := map[string]any{"dry_run": !confirm}
+		if res.Plan != nil {
+			envelope["plan_fingerprint"] = res.Plan.Fingerprint
+			envelope["source_count"] = len(res.Plan.Sources)
+			sources := make([]map[string]any, 0, len(res.Plan.Sources))
+			for i := range res.Plan.Sources {
+				sources = append(sources, map[string]any{
+					"id":    res.Plan.Sources[i].ID,
+					"title": res.Plan.Sources[i].Title,
+				})
+			}
+			envelope["sources"] = sources
+			envelope["survivor"] = map[string]any{
+				"session_id": res.Plan.Survivor.SessionID,
+				"title":      res.Plan.Survivor.Title,
+				"type":       res.Plan.Survivor.Type,
+				"scope":      res.Plan.Survivor.Scope,
+				"project":    res.Plan.Survivor.Project,
+			}
+		}
+		if res.Survivor != nil {
+			envelope["survivor_id"] = res.Survivor.ID
+			envelope["survivor_sync_id"] = res.Survivor.SyncID
+			envelope["title"] = res.Survivor.Title
+			envelope["consolidated"] = len(res.Plan.Sources)
+		}
+		encoded, err := json.Marshal(envelope)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to encode consolidation result: " + err.Error()), nil
+		}
+		return mcp.NewToolResultText(string(encoded)), nil
 	}
 }
 
@@ -3710,6 +3818,38 @@ func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return int(v)
+}
+
+// strArg reads a string argument, falling back to defaultVal when absent or
+// mistyped.
+func strArg(req mcp.CallToolRequest, key string, defaultVal string) string {
+	if v, ok := req.GetArguments()[key].(string); ok {
+		return v
+	}
+	return defaultVal
+}
+
+// int64SliceArg reads an array-of-numbers argument (JSON numbers arrive as
+// float64). Absent or non-numeric entries are skipped; fractional values
+// refuse instead of truncating — a silently truncated ID could target the
+// wrong observation on a destructive tool.
+func int64SliceArg(req mcp.CallToolRequest, key string) ([]int64, error) {
+	raw, ok := req.GetArguments()[key].([]any)
+	if !ok {
+		return nil, nil
+	}
+	out := make([]int64, 0, len(raw))
+	for _, v := range raw {
+		f, ok := v.(float64)
+		if !ok {
+			continue
+		}
+		if math.Trunc(f) != f {
+			return nil, fmt.Errorf("%s must contain integer observation IDs", key)
+		}
+		out = append(out, int64(f))
+	}
+	return out, nil
 }
 
 // historyCursorArg reads the optional history_cursor argument as a

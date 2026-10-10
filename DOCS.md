@@ -1376,6 +1376,16 @@ Suggest a stable `topic_key` from `type + title` (or content fallback). Uses fam
 
 Delete an observation by ID with mandatory caller-supplied `expected_project`, for example `{ "id": 42, "expected_project": "engram", "hard_delete": true }`. Uses soft-delete by default (`deleted_at`); optional hard-delete for permanent removal. Both modes reject invalid or mismatched assertions before changing data.
 
+### mem_consolidate
+
+Atomically merge N related observations into one survivor — memory garbage collection (engram#242). The default call is a **dry-run**: it returns the plan (sources and the synthesized survivor preview) and a `plan_fingerprint`, and writes nothing. Execute with `confirm=true` plus that fingerprint, for example `{ "ids": [11, 12, 13], "confirm": true, "plan_fingerprint": "…" }`.
+
+Parameters: `ids` (required, at least two live observations in one project), optional survivor overrides `title`, `content`, `type`, `topic_key` (defaults synthesize from the sources newest-first; `topic_key` is never inherited), `dry_run` (default `true`), `confirm`, `plan_fingerprint`.
+
+Refusals before any write: missing or already-deleted sources, duplicated or fewer than two IDs, sources spanning projects, and provenance cycles. If any source changed between plan and confirm, the fingerprint mismatch refuses the call and the error surfaces the fresh fingerprint — re-run the dry-run and confirm against the new plan instead of guessing. The fingerprint binds the previewed survivor, so pass the same survivor overrides in the plan and confirm calls; overriding only at confirm is refused as drift. Execution is one transaction: a failed insert can never leave the deletes applied. Sources are soft-deleted with `superseded_by_sync_id` provenance and the survivor content always carries a `## consolidated_from` sync-id list.
+
+Peer-edit anomaly (documented): a concurrent peer edit to a source can resurrect it after the consolidation propagated; there are no vector clocks. A missing or null `superseded_by_sync_id` never erases an existing link, so the resurrected live row keeps its marker and surfaces as a resurrection for re-inspection; the `consolidated_from` footer in the survivor content is the durable content-level trace. Older clients that strip unknown fields when relaying can still lose the marker, so mixed-version preservation is not unconditional.
+
 ### mem_save_prompt
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.

@@ -2847,6 +2847,7 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 		"mem_current_project", // added REQ-313: discovery tool recommended first call
 		"mem_judge",           // REQ-003: conflict verdict tool (Phase D)
 		"mem_compare",         // REQ-011: persist agent-judged semantic verdict (Phase G)
+		"mem_consolidate",     // engram#242: atomic merge of related observations (agent hygiene, dry-run default)
 		"mem_doctor",          // read-only operational diagnostics
 		"mem_review",          // lifecycle review list/maintenance
 		"mem_pin",             // local context priority
