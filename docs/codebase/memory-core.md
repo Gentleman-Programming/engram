@@ -61,7 +61,9 @@ rank of `0.0` is not a semantic relevance threshold.
 The gate accepts a retrieved candidate when it shares a nonempty `topic_key`,
 shares at least two distinct significant title terms, or both titles reduce to
 the same single significant term. Terms are case-insensitive letter/digit words;
-punctuation separates words, duplicates do not count twice, and common English
+punctuation separates words except that `+` and `#` are preserved in technical
+identifiers (`C++` and `C#` remain distinct). Bare punctuation does not count as a
+term. Duplicates do not count twice, and common English
 connectives and generic change verbs (such as `updated` and `fixed`) are ignored.
 Matches only in content do not establish title relevance. Missing or different
 topic keys do not veto otherwise relevant titles. Topic-key saves continue to

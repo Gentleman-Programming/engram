@@ -21,6 +21,7 @@ func TestHandleSave_RelevanceGate(t *testing.T) {
 		{"real conflict different titles", "Keep sessions for auth middleware", "Session authentication policy", "Replace sessions with JWT for auth", true},
 		{"short equivalent titles", "Redis", "Redis cache policy", "REDIS", true},
 		{"technical singleton titles", "C++", "Compiler language policy", "C++", true},
+		{"technical near miss", "C#", "Compare this language with C++", "C++", false},
 		{"repeated incidental term", "Browser database retention", "Backup retention configuration", "Browser browser browser shortcuts", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

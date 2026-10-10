@@ -12,8 +12,13 @@ import (
 func saveCandidateTerms(title string) []string {
 	terms := make(map[string]struct{})
 	for _, term := range strings.FieldsFunc(strings.ToLower(title), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '+' && r != '#'
 	}) {
+		// Technical identifiers retain +/# (C++ and C# are distinct). Bare
+		// punctuation alone is not evidence of a shared subject.
+		if strings.IndexFunc(term, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) < 0 {
+			continue
+		}
 		switch term {
 		case "a", "an", "the", "and", "or", "for", "to", "of", "in", "on", "with", "from", "by", "at", "as", "is", "are", "be", "was", "were", "we", "it", "this", "that", "use", "used", "using", "add", "added", "update", "updated", "fix", "fixed", "implement", "implemented":
 			continue
