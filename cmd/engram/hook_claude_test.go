@@ -754,11 +754,48 @@ func TestClaudeRegistrationRequiresMatchingCreatedResponse(t *testing.T) {
 	}
 }
 
+// Keep this fixture outside host Git ancestry without changing package-wide discovery.
+func isolateClaudeGitFixture(t *testing.T, root string) {
+	t.Helper()
+	ceiling := root
+	if inherited := os.Getenv("GIT_CEILING_DIRECTORIES"); inherited != "" {
+		ceiling += string(os.PathListSeparator) + inherited
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", ceiling)
+}
+
+func TestClaudeFixtureGitCeiling(t *testing.T) {
+	root := t.TempDir()
+	inherited := filepath.Join(root, "existing") + string(os.PathListSeparator) + filepath.Join(root, "other")
+	for _, tt := range []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{"empty inherited ceiling", "", root},
+		{"preserve inherited ceilings", inherited, root + string(os.PathListSeparator) + inherited},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GIT_CEILING_DIRECTORIES", tt.existing)
+			t.Run("fixture", func(t *testing.T) {
+				isolateClaudeGitFixture(t, root)
+				if got := os.Getenv("GIT_CEILING_DIRECTORIES"); got != tt.want {
+					t.Fatalf("fixture Git ceiling = %q, want %q", got, tt.want)
+				}
+			})
+			if got := os.Getenv("GIT_CEILING_DIRECTORIES"); got != tt.existing {
+				t.Fatalf("inherited Git ceiling after fixture = %q, want %q", got, tt.existing)
+			}
+		})
+	}
+}
+
 func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("requires git: %v", err)
 	}
 	root := t.TempDir()
+	isolateClaudeGitFixture(t, root)
 	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
 	if err != nil {
 		t.Fatal(err)
@@ -872,6 +909,11 @@ func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
 	}
 	if out, err := exec.Command("git", "clone", "-q", bareDir, filepath.Join(wsDir, "child")).CombinedOutput(); err != nil {
 		t.Fatalf("git clone into session cwd: %v: %s", err, out)
+	}
+	// Pin the remote label independently of the platform's local path separators.
+	// This only changes fixture metadata; no network operation is performed.
+	if out, err := exec.Command("git", "-C", filepath.Join(wsDir, "child"), "remote", "set-url", "origin", "https://example.invalid/child.git").CombinedOutput(); err != nil {
+		t.Fatalf("git set fixture origin: %v: %s", err, out)
 	}
 	resolvesTo(t, wsDir, "", http.StatusConflict) // project_transition_conflict before the binding exists
 	requireAllowed(t, "s5", wsDir)
