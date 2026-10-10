@@ -21,6 +21,11 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Patch release preparation (Engram 3.3.1 / gentle-engram 0.4.1)
+
+- **chore(release):** align the Pi package and core installer on `gentle-engram@0.4.1`, including idempotent upgrades from `0.4.0` without changing unrelated Pi settings or MCP configuration.
+- **fix(pi):** include the already-merged correction reserving session summaries for explicit closure (#1771) in the new Pi package artifact.
+
 ### Memory core
 
 - **fix(claude):** bind the PreToolUse write gate to the session's registered owner project instead of re-deriving it from the hook cwd (#1717). Writes from a registered session now succeed wherever the shell is — subfolders, sibling or cloned repositories, removed worktrees, and ambiguous directories no longer deny the gate. The cwd names the project only on first registration. Denials now name their actual cause (`already ended`, `session_project_conflict` with owner and requested projects, project-resolution failures with the server's reason) instead of the single generic "registration could not be confirmed" message shared with #1624.

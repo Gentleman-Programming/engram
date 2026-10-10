@@ -1919,7 +1919,7 @@ test("root resume compatibility negotiates support and fails closed", async () =
           const result = await registeredTools.get("mem_save").execute("compat", { title: "compat", content: "compat" }, undefined, undefined, ctx);
           assert.equal(!!result.isError, !supported && !fresh && !activeMapping, JSON.stringify({ health, mode, result }));
           if (!supported && !fresh && !activeMapping) {
-            assert.match(JSON.stringify(result), /gentle-engram 0\.4\.0/);
+            assert.match(JSON.stringify(result), /gentle-engram 0\.4\.1/);
             assert.match(JSON.stringify(result), /core .*root_session_resume.*3\.0\.0.*[Uu]pgrade/);
             assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
             assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => !body.resume));
