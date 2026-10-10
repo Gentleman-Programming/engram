@@ -62,42 +62,80 @@ function canonicalEngramToolName(tool: string): string {
 // ─── Memory Instructions ─────────────────────────────────────────────────────
 // These get injected into the agent's context so it knows to call mem_save.
 
-const MEMORY_INSTRUCTIONS = `## Engram Persistent Memory — Protocol
+const MEMORY_INSTRUCTIONS = `# Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
+This protocol is REQUIRED; it MUST be treated as active — MUST NOT wait for the user to activate it.
 
-### WHEN TO SAVE (mandatory — not optional)
+## AVAILABLE TOOLS
 
-Call \`mem_save\` IMMEDIATELY after any of these:
-- Bug fix completed
+Core tools are loaded automatically at session start.
+They are available immediately — no manual ToolSearch needed.
+
+- \`mem_save\`, \`mem_search\`, \`mem_context\`, \`mem_session_summary\`
+- \`mem_get_observation\`, \`mem_save_prompt\`, \`mem_current_project\`, \`mem_judge\`, \`mem_compare\`
+
+Deferred tools (use ToolSearch only if needed):
+- \`mem_update\`, \`mem_review\`, \`mem_pin\`, \`mem_unpin\`, \`mem_suggest_topic_key\`
+- \`mem_session_start\`, \`mem_session_end\`, \`mem_doctor\`, \`mem_capture_passive\`
+
+**Fallback**: If tools are unexpectedly unavailable, run \`engram setup <agent>\`
+again and restart your agent. (Each agent fills in its own name.)
+Setup repairs the durable MCP config and the permissions allowlist for the
+\`mcp__engram__...\` server ids. If the MCP config is a symlink or another
+non-regular path, replace it manually before rerunning setup.
+
+## PROACTIVE SAVE TRIGGERS (REQUIRED — do NOT wait for the user to ask)
+
+Call \`mem_save\` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+
+### After decisions or conventions
 - Architecture or design decision made
+- Team convention documented or established
+- Workflow change agreed upon
+- Tool or library choice made with tradeoffs
+
+### After completing work
+- Bug fix completed (include root cause)
+- Feature implemented with non-obvious approach
+- Notion/Jira/GitHub artifact created or updated with significant content
+- Configuration change or environment setup done
+
+### After discoveries
 - Non-obvious discovery about the codebase
-- Configuration change or environment setup
+- Gotcha, edge case, or unexpected behavior found
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+
+### After user confirmation or rejection
+- User confirms a recommendation you made ("go with that", "let's do that", "sounds good", "agreed", "perfect", or the equivalent in the user's language)
+- User rejects an option or approach ("no, better X", "not that one", or the equivalent in the user's language)
+- User expresses a preference ("I prefer X over Y", "always do it this way", or the equivalent in the user's language)
+- User makes a decision after you presented tradeoffs or options
+- A discussion concludes with a clear direction chosen — even if the agent proposed it
+
+### Self-check — ask yourself after EVERY task:
+> "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something non-obvious, or establish a convention? If yes, call mem_save NOW."
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
 - **scope**: \`project\` (default) | \`personal\` | \`global\`
-- **topic_key** (optional, recommended for evolving decisions): stable key like \`architecture/auth-model\`
+- **topic_key** (optional but recommended for evolving topics): stable key like \`architecture/auth-model\`
 - **content**:
   **What**: One sentence — what was done
   **Why**: What motivated it (user request, bug, performance, etc.)
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
 
-Topic rules:
-- Different topics must not overwrite each other (e.g. architecture vs bugfix)
-- Reuse the same \`topic_key\` to update an evolving topic instead of creating new observations
-- If unsure about the key, call \`mem_suggest_topic_key\` first and then reuse it
-- Use \`mem_update\` when you have an exact observation ID to correct
+### Topic update rules (REQUIRED)
 
-### DELIVERY GUARANTEE
+- Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)
+- If the same topic evolves, call \`mem_save\` with the same \`topic_key\` so memory is updated (upsert) instead of creating a new observation
+- If unsure about the key, call \`mem_suggest_topic_key\` first, then reuse that key consistently
+- If you already know the exact ID to fix, use \`mem_update\`
 
-Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
-
-### WHEN TO SEARCH MEMORY
+## WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
 "how did we solve", or the equivalent in the user's language, or references to past work:
@@ -110,9 +148,13 @@ Also search memory PROACTIVELY when:
 - The user mentions a topic you have no context on — check if past sessions covered it
 - The user's FIRST message references the project, a feature, or a problem — call \`mem_search\` with keywords from their message to check for prior work before responding
 
-### SESSION CLOSE PROTOCOL (mandatory)
+## DELIVERY GUARANTEE
 
-Before ending a session or saying "done" / "that's it", you MUST:
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
+
+## SESSION CLOSE PROTOCOL (REQUIRED)
+
+Before ending a session or saying "done" / "that's it" / "listo", you MUST:
 1. Call \`mem_session_summary\` with this structure:
 
 ## Goal
@@ -133,9 +175,43 @@ Before ending a session or saying "done" / "that's it", you MUST:
 ## Relevant Files
 - path/to/file — [what it does or what changed]
 
-This is NOT optional. If you skip this, the next session starts blind.
+This is NOT OPTIONAL. If you skip this, the next session starts blind.
 
-### AFTER COMPACTION
+## PASSIVE CAPTURE — automatic learning extraction
+
+When completing a task or subtask, include a "## Key Learnings:" section at the end of your response
+with numbered items. Engram will automatically extract and save these as observations.
+
+Example:
+## Key Learnings:
+
+1. bcrypt cost=12 is the right balance for our server performance
+2. JWT refresh tokens need atomic rotation to prevent race conditions
+
+You can also call \`mem_capture_passive(content)\` directly with any text that contains a learning section.
+This is a safety net — it captures knowledge even if you forget to call mem_save explicitly.
+
+## AFTER COMPACTION
+
+If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
+1. IMMEDIATELY call \`mem_session_summary\` with the compacted summary content — this persists what was done before compaction
+2. Then call \`mem_context\` to recover any additional context from previous sessions
+3. Only THEN continue working
+
+Do not skip step 1. Without it, everything done before compaction is lost from memory.
+
+## OpenCode plugin binding
+
+For Engram write and session MCP tools, the OpenCode plugin binds \`session_id\` to
+OpenCode's authoritative session identity before the tool runs. Do not invent, reuse,
+or try to override this value. Read-only tools are unchanged.
+
+**Fallback**: If tools are unexpectedly unavailable, run \`engram setup opencode\`
+again and restart OpenCode. Setup repairs the durable MCP config and the permissions
+allowlist for the \`mcp__engram__...\` server ids. If the MCP config is a symlink
+or another non-regular path, replace it manually before rerunning setup.
+
+### Compaction note for OpenCode
 
 If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
 1. IMMEDIATELY call \`mem_session_summary\` with the compacted summary content — this persists what was done before compaction
@@ -350,7 +426,7 @@ export const Engram: Plugin = async (ctx) => {
 
   // Track child session IDs so we can suppress their tool-hook registrations.
   // OpenCode's parentID is the authoritative ownership signal; titles are not.
-  // Children must not register as top-level Engram sessions because that causes
+  // Children MUST NOT register as top-level Engram sessions because that causes
   // session inflation (e.g. 170 sessions for 1 real conversation, issue #116).
   const subAgentSessions = new Set<string>()
 
@@ -493,7 +569,7 @@ export const Engram: Plugin = async (ctx) => {
       return false
     }
     // A close-requested child may repeat its authoritative reclassification
-    // to retry a failed end. Parentless events must not revive it as a root.
+    // to retry a failed end. Parentless events MUST NOT revive it as a root.
     if (closeRequestedSessions.has(sessionId)) {
       if (!parentID) return false
       parentSessions.set(sessionId, parentID)
@@ -1119,7 +1195,7 @@ function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
-  const hooks: Record<string | symbol, any> = await Engram({
+  const hooks: Record<string | symbol, unknown> = await Engram({
     directory: ctx.location.directory,
     project: { id: ctx.location.project?.id },
     client: {
@@ -1201,7 +1277,7 @@ async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
               const translated = v1SessionEvent(event, ctx.location.directory)
               if (translated) await hooks.event({ event: translated })
             } catch {
-              // One failing event must not stop lifecycle tracking.
+              // One failing event MUST NOT stop lifecycle tracking.
             }
           }
         } catch {
