@@ -157,12 +157,15 @@ if [ "$SESSION_REGISTERED" = 1 ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
-You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
+You have Engram memory tools. The agent MUST follow this protocol without waiting for activation.
 
-### CORE TOOLS — always available, no ToolSearch needed
+### AVAILABLE TOOLS
+Use the Engram tools actually exposed by Codex, with their registered MCP names
+(`mcp__engram__mem_*` or `mcp__plugin_engram_engram__mem_*`). The names below are
+logical names; availability and discovery follow Codex's host-specific interface.
+
 mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
-
-Use ToolSearch for other tools: mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
+mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:

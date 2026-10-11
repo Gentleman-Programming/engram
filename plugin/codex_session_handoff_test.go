@@ -325,6 +325,24 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						if !strings.Contains(output, "ACTIVE PROTOCOL") {
 							t.Error("confirmed registration missing active protocol")
 						}
+						if event != "compact" {
+							for _, want := range []string{
+								"The agent MUST follow this protocol without waiting for activation",
+								"tools actually exposed by Codex", "registered MCP names",
+								"mcp__engram__mem_*", "mcp__plugin_engram_engram__mem_*",
+								"User confirms", "User rejects", "Feature implemented with non-obvious approach",
+								"If memory work fails or needs follow-up, still send the answer",
+							} {
+								if !strings.Contains(output, want) {
+									t.Errorf("confirmed %s instructions missing %q", event, want)
+								}
+							}
+							for _, forbidden := range []string{"ToolSearch", "CORE TOOLS", "always available", "Deferred tools"} {
+								if strings.Contains(output, forbidden) {
+									t.Errorf("confirmed %s imposes Claude discovery assumption %q", event, forbidden)
+								}
+							}
+						}
 					} else if event != "compact" {
 						for _, forbidden := range []string{"ACTIVE PROTOCOL", "Call `mem_save`", "Call `mem_session_summary`", "call mem_search"} {
 							if strings.Contains(output, forbidden) {

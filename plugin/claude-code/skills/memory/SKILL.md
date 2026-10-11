@@ -5,7 +5,7 @@ description: "ALWAYS ACTIVE — Persistent memory protocol. You MUST save decisi
 # Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
-This protocol is REQUIRED; it MUST be treated as active — MUST NOT wait for the user to activate it.
+The agent MUST follow this protocol without waiting for activation.
 
 ## AVAILABLE TOOLS
 
@@ -18,12 +18,6 @@ They are available immediately — no manual ToolSearch needed.
 Deferred tools (use ToolSearch only if needed):
 - `mem_update`, `mem_review`, `mem_pin`, `mem_unpin`, `mem_suggest_topic_key`
 - `mem_session_start`, `mem_session_end`, `mem_doctor`, `mem_capture_passive`
-
-**Fallback**: If tools are unexpectedly unavailable, run `engram setup <agent>`
-again and restart your agent. (Each agent fills in its own name.)
-Setup repairs the durable MCP config and the permissions allowlist for the
-`mcp__engram__...` server ids. If the MCP config is a symlink or another
-non-regular path, replace it manually before rerunning setup.
 
 ## PROACTIVE SAVE TRIGGERS (REQUIRED — do NOT wait for the user to ask)
 
@@ -116,11 +110,17 @@ Before ending a session or saying "done" / "that's it" / "listo", you MUST:
 - path/to/file — [what it does or what changed]
 
 This is NOT OPTIONAL. If you skip this, the next session starts blind.
+Summary persistence does not end the session. Claude's SessionEnd hook owns
+lifecycle closure independently of the agent's summary.
 
-## PASSIVE CAPTURE — automatic learning extraction
+## PASSIVE CAPTURE — adapter-specific safety net
 
-When completing a task or subtask, include a "## Key Learnings:" section at the end of your response
-with numbered items. Engram will automatically extract and save these as observations.
+When completing a task or subtask, include a "## Key Learnings:" section with
+numbered items. Automatic capture is adapter-specific: Claude's SubagentStop hook
+forwards eligible delegated/subagent output for server-side extraction. Ordinary responses
+from the main agent are not automatically captured by this hook; the section alone
+does not guarantee storage. Use `mem_save` as the primary path for significant,
+verified knowledge.
 
 Example:
 ## Key Learnings:
@@ -129,7 +129,7 @@ Example:
 2. JWT refresh tokens need atomic rotation to prevent race conditions
 
 You can also call `mem_capture_passive(content)` directly with any text that contains a learning section.
-This is a safety net — it captures knowledge even if you forget to call mem_save explicitly.
+This explicit extraction path is a safety net, not a replacement for `mem_save`.
 
 ## AFTER COMPACTION
 

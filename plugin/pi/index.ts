@@ -96,12 +96,27 @@ These instructions are injected by gentle-engram, the Pi-native memory provider.
 ### WHEN TO SAVE (mandatory — not optional)
 
 Call \`mem_save\` IMMEDIATELY after any of these:
-- Bug fix completed
+- Bug fix completed (include the root cause)
+- Feature implemented with a non-obvious approach
+- Notion/Jira/GitHub artifact created or updated with significant content
+- Configuration change or environment setup done
 - Architecture or design decision made
+- Team convention documented or established
+- Workflow change agreed upon
+- Tool or library choice made with tradeoffs
 - Non-obvious discovery about the codebase
-- Configuration change or environment setup
+- Gotcha, edge case, or unexpected behavior found
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+- User confirms or rejects a recommendation or approach
+- User expresses a preference or makes a decision after presented options
+- Discussion concludes with a clear direction chosen
+
+After EVERY task, self-check: "Did I or the user make a decision, confirm or reject
+an approach, express a preference, fix a bug, learn something non-obvious, or
+establish a convention?" If yes, call \`mem_save\` now. Save verified, significant
+conclusions rather than routine progress, source dumps, or speculation. Never save
+secrets, credentials, private content, or personal data.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
@@ -113,6 +128,23 @@ Format for \`mem_save\`:
   **Why**: What motivated it
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you
+
+### NATIVE SESSION ATTRIBUTION
+
+Native \`mem_save\`, \`mem_save_prompt\`, \`mem_session_summary\`, and \`mem_capture_passive\`
+derive attribution from the current Pi host session and confirmed Engram registration.
+Do not invent or override \`session_id\`; gentle-engram owns the effective persisted
+identity, including resumed continuations and explicit cross-project targets.
+\`mem_session_end\` accepts only the current Pi host session ID; the extension
+resolves the effective persisted ID. Ordinary task completion does not end it.
+
+### PASSIVE CAPTURE
+
+Pi automatically scans eligible non-Engram tool outputs after redaction; only
+recognized structured learnings are persisted, not arbitrary output.
+Final assistant responses are not automatically captured. For significant learnings
+in a response, call \`mem_save\` or \`mem_capture_passive\` explicitly before replying;
+a final \`## Key Learnings:\` section alone is not a persistence guarantee.
 
 ### DELIVERY GUARANTEE
 

@@ -1507,16 +1507,40 @@ Behavior:
 
 The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
 
+The agent MUST follow this protocol without waiting for activation.
+
+### AVAILABLE TOOLS
+
+Use the Engram tools actually exposed by the host, with their registered names.
+Names such as `mem_save` below are logical names; OpenCode uses qualified names
+such as `engram_mem_save`. Claude Code's core/deferred tools and ToolSearch
+conventions are Claude-specific, not a bootstrap requirement for other hosts.
+If tools are unavailable, use `engram setup <agent>` with the supported host name
+and restart that host. Setup repairs host-specific registration; do not assume
+Claude MCP names or permission allowlists on every host.
+
 ### WHEN TO SAVE (mandatory)
 
-Call `mem_save` IMMEDIATELY after any of these:
+Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 
-- Bug fix completed
+- Bug fix completed (include root cause)
 - Architecture or design decision made
-- Non-obvious discovery about the codebase
+- Team convention documented or established
+- Workflow change agreed upon
+- Tool or library choice made with tradeoffs
+- Feature implemented with non-obvious approach
+- Notion/Jira/GitHub artifact created or updated with significant content
+- Non-obvious discovery about the codebase, gotcha, or edge case found
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+- User confirms a recommendation ("go with that", "sounds good", "agreed", or the equivalent in the user's language)
+- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
+- User makes a decision after presented tradeoffs or options
+- A discussion concludes with a clear direction chosen, even if the agent proposed it
+
+After every task, ask whether a decision, confirmation, preference, bug fix,
+discovery, or convention needs saving; if so, call `mem_save` now.
 
 Format for `mem_save`:
 
@@ -1582,10 +1606,33 @@ Before ending a session or saying "done" / "listo" / "that's it", you MUST call 
 ```
 
 This is NOT OPTIONAL. If you skip this, the next session starts blind.
+Summary persistence does not end the session. Follow the host-specific lifecycle
+contract: Claude/Codex SessionEnd hooks and the OpenCode adapter own closure;
+Pi uses its explicit closure contract; Gemini additionally requires
+`mem_session_end` after `mem_session_summary` succeeds.
+
+Codex registers the native PreToolUse command `engram hook codex-pre-tool-use`
+for `mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. It resolves the
+authoritative Codex host session to the server-confirmed Engram identity before
+binding supported write/session arguments: `session_id` for writes and `id` for
+session start/end. `mem_session_end` uses `id`, not `session_id`. Read-only tools
+are unchanged; malformed inputs or unconfirmed host resolution deny mutating calls.
+For direct/nonintercepted clients, reuse this exact identity supplied by the
+lifecycle hook as `session_id` for attributed writes and as `id` for session end.
+Never invent IDs or reconstruct resume suffixes. OpenCode binds attributed writes
+to the server-confirmed authoritative root session; Claude binds write/session
+tools through its host hook. Generic/direct MCP clients retain their
+explicit-session contract.
 
 ### PASSIVE CAPTURE
 
-When completing a task, include a `## Key Learnings:` section at the end of your response with numbered items. Engram will automatically extract and save these as observations.
+When completing a task or subtask, include a `## Key Learnings:` section with
+numbered items. Automatic capture is adapter-specific: Claude/Codex SubagentStop
+hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
+output for server-side extraction. Other adapters may support eligible tool
+outputs through their own contracts. Ordinary responses are not universally
+captured; a learning section alone does not guarantee storage. Use `mem_save`
+as the primary path for significant, verified knowledge.
 
 Example:
 
@@ -1596,11 +1643,18 @@ Example:
 2. JWT refresh tokens need atomic rotation to prevent race conditions
 ```
 
-You can also call `mem_capture_passive(content)` directly with any text that contains a learning section.
+You can also call `mem_capture_passive(content)` directly, when available, with
+text containing a learning section. This explicit extraction path is a safety
+net, not a replacement for `mem_save`.
 
 ### AFTER COMPACTION
 
-If you see a message about compaction or context reset:
+Follow the host-specific recovery contract when supplied. In OpenCode, persist
+the compacted summary with `mem_session_summary`, then continue using the already
+injected session-only context. Do not automatically call project-scoped
+`mem_context`; use it only when explicitly requested.
+
+Otherwise, if you see compaction, context reset, or "FIRST ACTION REQUIRED":
 
 1. IMMEDIATELY call `mem_session_summary` with the compacted summary content
 2. Then call `mem_context` to recover additional context from previous sessions

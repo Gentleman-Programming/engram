@@ -332,6 +332,30 @@ Pi sends eligible non-Engram tool results to Engram for passive scanning after r
 - Prompt context tied to meaningful saved observations
 - Cross-machine/team memory once a project is enrolled in Engram Cloud
 
+### Injected memory contract
+
+The Pi-native Memory Protocol requires proactive `mem_save` for significant decisions,
+conventions, workflow/tool choices, completed non-obvious work, discoveries and
+preferences, including user confirmation or rejection and a self-check after every
+task. Save verified conclusions, not routine progress or sensitive content.
+
+Memory attribution comes from Pi's host session and confirmed Engram registration,
+not a model-supplied `session_id`. Use native `mem_*` tools rather than alternative
+MCP names. Recall starts with `mem_context`; ordinary search is project-scoped AND.
+An empty scoped search gets one `match_mode: "any", all_projects: true` retry before
+concluding that no memory exists.
+
+Explicit session closure or handoff requires a structured `mem_session_summary`;
+ordinary task completion or saying "done" does not summarize or end the session.
+Outcome-specific [compaction guidance](#compaction-recovery) takes precedence over
+manual fallback instructions. Memory failure MUST NOT prevent the user-facing answer.
+
+Automatic passive scanning covers eligible tool outputs, **not final assistant
+responses**. A final `## Key Learnings:` section alone is not persisted by Pi; save
+significant response learnings explicitly with `mem_save` or `mem_capture_passive`
+before replying. Protocol sandbox tests check instruction delivery, not autonomous
+agent compliance.
+
 ### Automatic user-prompt capture
 
 Prompts with more than 10 trimmed characters are captured once at
