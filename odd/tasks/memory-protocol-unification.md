@@ -52,7 +52,7 @@ files plus semantic BCP14 assessment (T5).
 - [x] T4 | isolated real-host probes | — | Pi probe: obs 5179 saved via Ollama qwen3.6. OpenCode HTTP: obs 5180 +
       session registration. Report at `.git/engram-memory-probes/t4-real-host/T4_VERIFICATION_REPORT.md`.
 - [x] T5 | inline + independent verifier | — | Seam checks: 14/14 files, shared phrase consistent, no Claude ToolSearch
-      in protocol prose, SSH-signed on all 9 commits, version bumps verified. All tests pass. Delivery slice ready.
+      in protocol prose, SSH-signed on all 10 commits, version bumps verified. All tests pass. Delivery slice ready.
 
 ## Acceptance criteria
 
@@ -74,9 +74,10 @@ waiting for activation`.
 
 ## Delivery
 
-9 commits on `feat/memory-protocol-unification`:
+10 commits on `feat/memory-protocol-unification`:
 
 ```
+c773b4a fix(memory): add protocol-consistency tests for session-start.sh and host assets
 17460ef fix(types): define EngramHooks type to replace unknown-valued hook record
 7067ac8 fix(memory): enforce RFC 2119 normative keywords across all sources
 021d129 fix(memory): unify Go memoryProtocolMarkdown with enriched protocol
@@ -88,7 +89,7 @@ ab7e5d5 fix(memory): unify host-contract corrections across all agents
 a99d04f fix(memory): remove Claude ToolSearch from Claude SKILL.md
 ```
 
-16 files changed (was 14; +2 for ENHANCE_TYPES `EngramHooks` type fix), ~520 insertions, ~130 deletions.
+18 files changed (+4 for session-start.sh shared phrase fix + protocol-consistency tests), ~540 insertions, ~130 deletions.
 
 **Issue:** [Gentleman-Programming/engram#1786](https://github.com/Gentleman-Programming/engram/issues/1786)
 **PR:** [Gentleman-Programming/engram#1787](https://github.com/Gentleman-Programming/engram/pull/1787) — `Fixes #1786`
@@ -105,6 +106,7 @@ a99d04f fix(memory): remove Claude ToolSearch from Claude SKILL.md
 - 2026-10-11: Issue #1786 created (docs_improvement, covers all 4 problems).
 - 2026-10-11: PR #1787 created (`Fixes #1786`), branch pushed.
 - 2026-10-11: ENHANCE_TYPES — CodeRabbit flagged `hooks: Record<string | symbol, unknown>` (V2 adapter calls them as callable); fixed with `EngramHooks` type (index signature callable + named properties) in both `plugin/opencode/engram.ts` and `internal/setup/plugins/opencode/engram.ts`. Commit `17460ef`.
+- 2026-10-11: ENHANCE_TESTS — Claude session-start.sh lacked the shared phrase (had variant instead); `TestMemoryProtocolSessionStartSh` added to cover both session-start.sh copies + assert shared phrase presence and host-specific forbidden phrase absence; `TestMemoryProtocolHostAssets` updated to drop Claude-specific assertion for SKILL.md (unified). Commit `c773b4a`.
 
 ## Implementation notes
 
