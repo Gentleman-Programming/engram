@@ -52,7 +52,7 @@ files plus semantic BCP14 assessment (T5).
 - [x] T4 | isolated real-host probes | — | Pi probe: obs 5179 saved via Ollama qwen3.6. OpenCode HTTP: obs 5180 +
       session registration. Report at `.git/engram-memory-probes/t4-real-host/T4_VERIFICATION_REPORT.md`.
 - [x] T5 | inline + independent verifier | — | Seam checks: 14/14 files, shared phrase consistent, no Claude ToolSearch
-      in protocol prose, SSH-signed on all 10 commits, version bumps verified. All tests pass. Delivery slice ready.
+      in protocol prose, SSH-signed on all 11 commits, version bumps verified. All tests pass. Delivery slice ready.
 
 ## Acceptance criteria
 
@@ -74,10 +74,10 @@ waiting for activation`.
 
 ## Delivery
 
-10 commits on `feat/memory-protocol-unification`:
+11 commits on `feat/memory-protocol-unification`:
 
 ```
-c773b4a fix(memory): add protocol-consistency tests for session-start.sh and host assets
+c3dad89 fix(memory): add protocol-consistency tests for session-start.sh and host assets
 17460ef fix(types): define EngramHooks type to replace unknown-valued hook record
 7067ac8 fix(memory): enforce RFC 2119 normative keywords across all sources
 021d129 fix(memory): unify Go memoryProtocolMarkdown with enriched protocol
