@@ -221,6 +221,49 @@ For Claude Code, rerunning setup updates the marketplace and the user-scope `eng
 
 <div align="center"><img src="assets/branding/engram-logo-only.png" width="28" alt="" /></div>
 
+## Read-only compatibility observations
+
+Before considering an existing store, run the explicit-path probe:
+
+```sh
+engram compatibility --data-dir /absolute/path/to/fixture --json
+```
+
+This command dispatches before updates, configuration, orphan migration or
+`Store.New`. It reads directory metadata, the SQLite header and `.instance-id`
+only; it does not load SQLite, read memories, create directories/locks or repair
+identity. Exactly one `--data-dir` and one `--json` are accepted; any other
+argument, including `--help`, prints the usage line to stderr. Invalid arguments
+or unsafe metadata produce exit 2, no stdout and a diagnostic on stderr.
+`engram help` lists the command. Successful observations produce exit 0 and one
+JSON object with `revision: 1`, `source: "offline"`, both authorization flags
+false and, for an existing store, its `instance_id`. Status is `fresh` for
+an empty directory, `legacy_schema`/`future_schema` for non-current headers,
+or `unknown_shape` for a current header. Missing directories, malformed headers,
+missing/invalid identity, nonregular database/identity entries, database-name
+ambiguity, WAL/SHM/journal sidecars and observed metadata changes are rejected.
+Directory aliases are resolved; no filesystem path is returned in the JSON.
+
+**Offline success never authorizes opening an existing store.** A current header
+cannot prove schema shape, and normal schema-1 startup still executes DDL and
+repairs. These observations are not atomic snapshots or leases; an undetected
+race cannot grant permission because offline authorization is always false.
+
+`GET /compatibility` provides the actual running store's startup facts, under
+the same optional bearer authentication as other protected API routes. A
+successful current-schema startup returns `source: "active"`, `status: "ready"`,
+`active_reuse_authorized: true`, its actual `instance_id`, a per-store-opening
+random `runtime_id`, and `capability: "startup-verified-store-v1"`. The response
+is not derived from `/health`, release version or externally supplied metadata.
+Nil, closed, generation-invalidated and future-schema-skipped handles return
+`status: "unknown"` and deny reuse. Reads do not open SQLite connections or
+resolve configuration. Startup facts do not certify arbitrary external in-place
+schema edits or future changes; clients must not treat this response as a lease,
+an authentication token or offline migration permission. Compare explicit store
+identity when reusing a selected runtime; never silently substitute another
+endpoint. Unknown evidence should leave memory disabled, with guidance to back
+up, update and restart the existing server, then recheck.
+
 ## For agents
 
 Treat Engram as a curated project memory, not a transcript sink. Use this operating contract throughout the session.

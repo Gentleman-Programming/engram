@@ -704,6 +704,12 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "compatibility" {
+		if code := runCompatibility(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			exitFunc(code)
+		}
+		return
+	}
 	if len(os.Args) < 2 {
 		printUsage()
 		exitFunc(1)
@@ -3758,6 +3764,9 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
+  compatibility --data-dir <absolute-directory> --json
+                     Read-only offline store observation (JSON). It never opens, migrates or repairs
+                     the store, and never authorizes automatic opening; see README
   search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)

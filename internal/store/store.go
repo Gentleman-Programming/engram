@@ -878,11 +878,14 @@ func (s *Store) DataDir() string {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db         *sql.DB
-	cfg        Config
-	instanceID string
-	generation *databaseGeneration
-	hooks      storeHooks
+	compatibilityClosed    atomic.Bool
+	compatibilityReady     bool
+	compatibilityRuntimeID string
+	db                     *sql.DB
+	cfg                    Config
+	instanceID             string
+	generation             *databaseGeneration
+	hooks                  storeHooks
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -1088,11 +1091,19 @@ func newStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
+	if s.compatibilityReady {
+		var runtimeID [16]byte
+		if _, err := rand.Read(runtimeID[:]); err != nil {
+			return nil, fmt.Errorf("engram: runtime identity: %w", err)
+		}
+		s.compatibilityRuntimeID = hex.EncodeToString(runtimeID[:])
+	}
 	succeeded = true
 	return s, nil
 }
 
 func (s *Store) Close() error {
+	s.compatibilityClosed.Store(true)
 	return s.db.Close()
 }
 
@@ -1215,6 +1226,7 @@ func (s *Store) runStartupMigrations() error {
 				return fmt.Errorf("engram: set user_version: %w", err)
 			}
 		}
+		s.compatibilityReady = true
 		return nil
 	})
 }
