@@ -30,16 +30,16 @@ func runCompatibility(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if invalid || !jsonFlag || dir == "" {
-		fmt.Fprintln(stderr, "Usage: engram compatibility --data-dir <absolute-directory> --json")
+		_, _ = fmt.Fprintln(stderr, "Usage: engram compatibility --data-dir <absolute-directory> --json")
 		return 2
 	}
 	result, err := store.ProbeCompatibility(dir)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
-		fmt.Fprintln(stderr, "compatibility: cannot encode result")
+		_, _ = fmt.Fprintln(stderr, "compatibility: cannot encode result")
 		return 2
 	}
 	return 0

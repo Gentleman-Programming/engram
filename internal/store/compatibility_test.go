@@ -123,13 +123,13 @@ func TestCompatibilityActiveStartupFacts(t *testing.T) {
 				if _, err := db.Exec("PRAGMA user_version=2"); err != nil {
 					t.Fatal(err)
 				}
-				db.Close()
+				_ = db.Close()
 			}
 			s, err := New(cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			count := migrateRunCount.Load()
 			before := compatibilityHash(t, cfg.DataDir)
 			r := s.ActiveCompatibility()
@@ -142,7 +142,7 @@ func TestCompatibilityActiveStartupFacts(t *testing.T) {
 			if count != migrateRunCount.Load() || before != compatibilityHash(t, cfg.DataDir) {
 				t.Fatal("active read changed store")
 			}
-			s.Close()
+			_ = s.Close()
 			if s.ActiveCompatibility().ActiveReuseAuthorized {
 				t.Fatal("closed store authorized")
 			}

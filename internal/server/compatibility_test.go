@@ -14,7 +14,7 @@ func TestCompatibilityEndpointBoundToActualStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	s := New(st, 0)
 	s.SetVersion("old-unrelated-version")
 	s.instanceID = "untrusted-external-metadata"
@@ -38,7 +38,7 @@ func TestCompatibilityEndpointBoundToActualStore(t *testing.T) {
 	if w.Code != 401 {
 		t.Fatalf("auth status %d", w.Code)
 	}
-	st.Close()
+	_ = st.Close()
 	t.Setenv("ENGRAM_HTTP_TOKEN", "")
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/compatibility", nil))
