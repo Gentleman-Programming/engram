@@ -94,11 +94,13 @@ func ProbeCompatibility(dir string) (Compatibility, error) {
 		if err != nil || statErr != nil || !os.SameFile(dbInfo, opened) || string(header[:16]) != "SQLite format 3\x00" {
 			return fail()
 		}
+		// Bytes 18/19 are the file format write/read versions: 1 = rollback
+		// journal, 2 = WAL. The normal opener uses WAL, so both must be accepted.
 		pageSize := int(binary.BigEndian.Uint16(header[16:18]))
 		if pageSize == 1 {
 			pageSize = 65536
 		}
-		if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 || dbInfo.Size()%int64(pageSize) != 0 || header[18] != 1 || header[19] != 1 {
+		if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 || dbInfo.Size()%int64(pageSize) != 0 || (header[18] != 1 && header[18] != 2) || (header[19] != 1 && header[19] != 2) {
 			return fail()
 		}
 		schema := binary.BigEndian.Uint32(header[60:64])

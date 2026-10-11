@@ -149,3 +149,62 @@ func TestCompatibilityActiveStartupFacts(t *testing.T) {
 		})
 	}
 }
+
+// A store created by the normal opener uses WAL journaling, which writes 2 to
+// header bytes 18/19. The offline probe must classify it, not reject it.
+func TestCompatibilityProbeAcceptsRealWALStore(t *testing.T) {
+	cfg := FallbackConfig(t.TempDir())
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Checkpoint and close the last connection so SQLite removes the WAL and
+	// shared-memory sidecars, leaving a quiescent WAL-mode database.
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, sidecar := range []string{"engram.db-wal", "engram.db-shm"} {
+		if _, err := os.Stat(filepath.Join(cfg.DataDir, sidecar)); !os.IsNotExist(err) {
+			t.Fatalf("%s still present after the last connection closed", sidecar)
+		}
+	}
+	header := make([]byte, 100)
+	f, err := os.Open(filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.Read(header)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header[18] != 2 || header[19] != 2 {
+		t.Fatalf("fixture is not a WAL store: header bytes 18/19 = %d/%d", header[18], header[19])
+	}
+	before := compatibilityHash(t, cfg.DataDir)
+	r, err := ProbeCompatibility(cfg.DataDir)
+	if err != nil {
+		entries, _ := os.ReadDir(cfg.DataDir)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("real WAL store rejected: %v (entries %v)", err, names)
+	}
+	if r.Status != "unknown_shape" || r.OfflineAutomaticOpeningAuthorized || r.ActiveReuseAuthorized || r.InstanceID != s.InstanceID() {
+		t.Fatalf("unexpected classification: %+v", r)
+	}
+	if after := compatibilityHash(t, cfg.DataDir); before != after {
+		t.Fatal("probe mutated the store")
+	}
+}
