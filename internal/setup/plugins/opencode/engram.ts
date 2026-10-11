@@ -373,6 +373,16 @@ export function shouldNudgeForObservations(
 const CAPTURE_PROMPT = Symbol("engram.capturePrompt")
 const DELIVER_WARNING = Symbol("engram.deliverWarning")
 type CapturePrompt = (sourceSessionID: string, content: string, sourceInboxID?: string) => Promise<void>
+type DeliverWarning = (append: (text: string) => boolean) => void
+
+/** Hooks returned by the Engram plugin — callable string-keyed V2 hooks plus named event/dispose. */
+type EngramHooks = {
+  dispose?: () => Promise<void>
+  event: (data: unknown) => Promise<void>
+} & { [key: string]: (...args: unknown[]) => unknown } & {
+  [CAPTURE_PROMPT]: CapturePrompt
+  [DELIVER_WARNING]: DeliverWarning
+}
 
 export const Engram: Plugin = async (ctx) => {
   // Finite categories bound deduplication and pending memory per instance.
@@ -1188,7 +1198,7 @@ function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
-  const hooks: Record<string | symbol, unknown> = await Engram({
+  const hooks: EngramHooks = await Engram({
     directory: ctx.location.directory,
     project: { id: ctx.location.project?.id },
     client: {
