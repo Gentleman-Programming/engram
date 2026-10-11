@@ -9,13 +9,13 @@ The agent MUST follow this protocol without waiting for activation.
 
 ## AVAILABLE TOOLS
 
-Core tools are loaded automatically at session start.
-They are available immediately — no manual ToolSearch needed.
+Use the Engram tools actually exposed by Claude Code, with their registered MCP names.
+The names below are logical names; availability and discovery follow Claude's
+host interface, not a universal bootstrap or deferred-tool split.
 
 - `mem_save`, `mem_search`, `mem_context`, `mem_session_summary`
 - `mem_get_observation`, `mem_save_prompt`, `mem_current_project`, `mem_judge`, `mem_compare`
 
-Deferred tools (use ToolSearch only if needed):
 - `mem_update`, `mem_review`, `mem_pin`, `mem_unpin`, `mem_suggest_topic_key`
 - `mem_session_start`, `mem_session_end`, `mem_doctor`, `mem_capture_passive`
 
