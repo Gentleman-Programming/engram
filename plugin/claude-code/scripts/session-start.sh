@@ -51,7 +51,11 @@ if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
   # resuming one keeps that mode so its continuation stays resolvable.
   OWNERSHIP_MODE="project_owned"
   ENCODED_SESSION_ID=$(printf '%s' "$SESSION_ID" | jq -sRr @uri 2>/dev/null)
-  if [ -n "$ENCODED_SESSION_ID" ] && engram_curl -sf "${ENGRAM_URL}/sessions/${ENCODED_SESSION_ID}" --max-time 1 2>/dev/null \
+  SESSION=""
+  if [ -n "$ENCODED_SESSION_ID" ]; then
+    SESSION=$(engram_curl -sf "${ENGRAM_URL}/sessions/${ENCODED_SESSION_ID}" --max-time 1 2>/dev/null)
+  fi
+  if [ -n "$SESSION" ] && printf '%s' "$SESSION" \
     | jq -e --arg id "$SESSION_ID" '.id == $id and .ended_at != null and .ownership_mode == "shared"' >/dev/null 2>&1; then
     OWNERSHIP_MODE="shared"
   fi
