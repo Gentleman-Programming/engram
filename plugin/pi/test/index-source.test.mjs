@@ -226,8 +226,12 @@ function buildInitializeEngramServerForTest({
   instanceID = "00000000000000000000000000000000",
   engramUrl = "http://127.0.0.1:7437",
   legacyMessage = "legacy server message",
+  startupAllowed = true,
+  resolveInstanceID = () => instanceID,
 }) {
-  const body = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
+  // Extract from the opening brace, retaining the policy gate rather than
+  // skipping to the old URL early return.
+  const body = extractFunctionBody("initializeEngramServer", "{\n");
   class DeterministicStartupError extends Error {}
   const factory = new Function(
     "CONFIGURED_ENGRAM_URL",
@@ -239,14 +243,17 @@ function buildInitializeEngramServerForTest({
     "ENGRAM_URL",
     "legacyEngramServerMessage",
     "DeterministicStartupError",
+    "ENGRAM_STARTUP_ALLOWED",
+    "resolveInstanceID",
     `
+    const ENGRAM_DISABLED_NOTICE = "Engram memory is disabled by startup policy";
     let localEngramInstanceID = "";
     class ForeignOwnershipError extends DeterministicStartupError {
       constructor(evidence) { super("Engram server ownership mismatch at " + ENGRAM_URL); this.evidence = evidence; }
     }
     const localEngramVersion = () => "unknown";
     const missingInstanceIdentityMessage = () => "missing identity";
-    const localInstanceID = () => instanceID;
+    const localInstanceID = resolveInstanceID;
     async function initializeEngramServer() {
       ${body}
     }
@@ -267,7 +274,24 @@ function buildInitializeEngramServerForTest({
     engramUrl,
     () => legacyMessage,
     DeterministicStartupError,
+    startupAllowed,
+    resolveInstanceID,
   );
+}
+
+for (const configuredUrl of [false, true]) {
+  test(`initialization policy gate precedes identity and URL early return (configured URL=${configuredUrl})`, async () => {
+    const effects = [];
+    const initialize = buildInitializeEngramServerForTest({
+      configuredUrl, startupAllowed: false,
+      resolveInstanceID: () => { effects.push("identity"); return "unused"; },
+      probeEngramHealth: async () => { effects.push("health"); return "ready"; },
+      spawnAndWaitForEngram: async () => { effects.push("spawn"); },
+      waitForEngramReadiness: async () => { effects.push("wait"); },
+    });
+    await assert.rejects(initialize(), /memory is disabled by startup policy/);
+    assert.deepEqual(effects, [], "disabled initialization has no identity, HTTP, spawn or readiness effects");
+  });
 }
 
 function buildLocalInstanceIDForTest({ spawnSync, DeterministicStartupError = class extends Error {}, instanceIDFailureMessage = buildInstanceIDFailureMessageForTest() }) {
