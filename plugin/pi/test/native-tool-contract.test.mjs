@@ -1938,6 +1938,78 @@ test("root resume compatibility negotiates support and fails closed", async () =
   }
 });
 
+test("retired sandbox self-heal cannot consume lost-ack capability evidence", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  let retiredClock;
+  try {
+    const refuse = async (url) => {
+      if (new URL(url).pathname === "/project/current") return new Response('{"project":"retry-project"}');
+      throw new Error("connection refused");
+    };
+    globalThis.fetch = refuse;
+    await withPluginSandbox("engram-pi-retired-heal-", async ({ sandbox, clock }) => {
+      retiredClock = clock;
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const refused = await registeredTools.get("mem_search").execute("refused", { query: "outage", project: "retry-project" }, undefined, undefined, runtimeContext("retired"));
+      assert.equal(refused.isError, true);
+      assert.equal(clock.pending(), 1, JSON.stringify(refused));
+      let liveHealth = 0;
+      globalThis.fetch = async (url) => {
+        assert.equal(new URL(url).pathname, "/health", "live heal must only probe health");
+        liveHealth++;
+        return new Response('{}');
+      };
+      await clock.advance();
+      assert.equal(liveHealth, 1, "a live sandbox retains ordinary self-heal policy");
+      assert.equal(clock.pending(), 0);
+      globalThis.fetch = refuse;
+      const again = await registeredTools.get("mem_search").execute("refused-again", { query: "outage", project: "retry-project" }, undefined, undefined, runtimeContext("retired"));
+      assert.equal(again.isError, true);
+      assert.equal(clock.pending(), 1, "retirement must cancel a newly scheduled heal");
+    }, { controlledDelay: 5000 });
+
+    let healthChecks = 0;
+    const posts = [];
+    const writes = [];
+    const entries = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = new URL(url).pathname;
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: healthChecks++ !== 0 } }));
+      if (path === "/project/current") return new Response('{"project":"retry-project"}');
+      if (path === "/sessions") {
+        posts.push(body);
+        return new Response(posts.length === 1 ? "truncated acknowledgement" : JSON.stringify({ id: body.id, status: "created" }));
+      }
+      if (path === "/observations") {
+        writes.push(body);
+        return new Response('{"id":1,"status":"saved"}');
+      }
+      return new Response('{}');
+    };
+    await withPluginSandbox("engram-pi-after-heal-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      await retiredClock.advance();
+      const ctx = runtimeContext("retry-compat");
+      ctx.sessionManager.getBranch = () => entries;
+      const result = await registeredTools.get("mem_save").execute("lost-ack", { title: "retry", content: "retry" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true, JSON.stringify({ healthChecks, result }));
+      assert.match(JSON.stringify(result), /resume support changed.*retry/i);
+      assert.deepEqual(posts.map(({ resume }) => resume), [false]);
+      assert.equal(writes.length, 0);
+      assert.equal(entries.length, 0, "lost acknowledgement must not adopt an identity");
+      assert.equal(healthChecks, 2, "retired heal must not consume the new stub's health evidence");
+    });
+  } finally {
+    retiredClock?.dispose();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("root resume compatibility pins retry support after lost acknowledgement", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
