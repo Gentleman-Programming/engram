@@ -47,7 +47,11 @@ func TestCmdSaveAvoidsForeignManualSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close verification store: %v", err)
+		}
+	}()
 	after, err := s.GetSession(legacy)
 	if err != nil {
 		t.Fatal(err)
