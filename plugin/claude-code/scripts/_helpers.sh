@@ -119,6 +119,7 @@ engram_curl() {
 engram_health_matches_instance() {
   local expected="$1" response
   response=$(engram_curl -sf "${ENGRAM_URL}/health" --max-time 1 2>/dev/null) || return 1
+  [ -n "$response" ] || return 1
   printf '%s' "$response" | jq -e --arg expected "$expected" '.instance_id? == $expected' >/dev/null 2>&1
 }
 
@@ -134,6 +135,7 @@ resolve_project() {
     [ -n "$ENGRAM_SOCKET" ] && printf '%s\n' "warning: Engram could not resolve the project over the Unix socket; check that the server is running and ENGRAM_SOCKET is configured." >&2
     return 1
   }
+  [ -n "$response" ] || return 1
   printf '%s' "$response" | jq -er '
     if (.project | type) == "string"
       and (.project | gsub("^[[:space:]]+|[[:space:]]+$"; "") | length) > 0

@@ -26,6 +26,8 @@ Pi and OpenCode activity renews the local runtime lease through their existing s
 
 Pi sends `resume: true` for runtime-root registration and adopts only a valid acknowledged effective ID. The Go core selects numeric continuations; Pi persists the mapping in its session entries for reloads and uses it for attributed writes and shutdown `/end`. Legacy `:resume:<uuid>` mappings are re-registered as-is; an ended mapping falls back to root registration with `resume: true`. Reload does not end the session. Ownership conflicts and an older server's `409 session_already_ended` block writes rather than triggering client-generated identities.
 
+When resuming an ended, directory-bound host, new numeric continuations inherit its persisted project, directory, and ownership mode after registration ownership checks. After a received `409 runtime session scope conflict`, Codex looks up the ended root and makes at most one resolve/end request with its persisted directory and mode while retaining the caller's requested project: `shared` hosts still allow cross-project use, but `project_owned` hosts reject foreign projects. This rebinding is limited to that confirmed rejection; normal paths, unrelated errors, and uncertain transport failures do not trigger it. Fresh and live-host paths keep their existing registration and resolution behavior.
+
 ### Codex on Windows
 - The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
 - The adapter reads the setup-owned absolute pin and invokes its native hook command.
@@ -144,7 +146,7 @@ plugin/claude-code/
 │   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
 │   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
-│   └── session-end.sh             # Logs end-of-session event at session end
+│   └── session-end.sh             # Ends the session (or its live resume continuation)
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
 ```
 
@@ -153,14 +155,15 @@ plugin/claude-code/
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
    Before rewriting input, the hook confirms project-owned session registration using one shared HTTP budget (four seconds by default). Set `ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT` in the hook process environment to a positive Go duration such as `8s` or `500ms` to override it; unset, blank, invalid, overflowed, zero, or negative values use `4s`. A session that is already registered is confirmed against its registered owner project (#1717): the cwd names the project only on first registration, so writes keep succeeding wherever the shell currently is. The default leaves one second within the configured five-second hook timeout for process startup and verdict output. If increasing the budget, also raise the host's configured PreToolUse timeout above that budget with startup/output headroom; the environment variable does not change the host timeout. The same variable applies to Codex PreToolUse (whose shipped outer timeout is ten seconds), but not to Codex prompt capture. This is a slow-server mitigation, not a fix for autosync latency. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; unexplained failures retain `Claude host session registration could not be confirmed`. Denials the server explains name their cause instead: an ended session reports `host session ... already ended`, a project conflict reports `session_project_conflict` with the owner and requested projects, and a cwd the server cannot resolve for first registration reports the resolution failure with the server's reason. Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
+   Claude Code keeps the same `session_id` on `--resume`. When that original session has already ended, the hook binds the call to the live `<id>:resume:N` continuation that SessionStart registered, resolved from the original session's persisted project and directory. The ended session stays ended, and the hook never creates a continuation itself; with no live continuation the call is denied with `host session ... already ended`.
 2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 
 Session binding is best-effort if the host times out the PreToolUse hook: normal permission flow can continue without the rewrite, so an explicit wrong same-project session ID might be persisted. This limitation was reproduced with an induced one-second hook timeout in a scratch test; it has not been observed with the production hook timeout.
 
-**On session start** (`startup`):
+**On session start** (`startup`, `resume`, `clear`, `fork`):
 1. Ensures the engram HTTP server is running
-2. Creates a new session via the API
+2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration. The registration is `project_owned`, except when the ended session is a legacy `shared` root (created before Claude registered project-owned sessions): it is resumed as `shared` so the continuation stays resolvable. A new continuation inherits the complete persisted root scope, so a same-project resume from another non-Git directory or linked worktree does not split registration from write binding and closure.
 3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
 4. Injects previous session context into Claude's initial context
 
@@ -168,6 +171,11 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 1. Injects the previous session context + compacted summary
 2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
 3. This ensures no work is lost when context is compressed
+
+**On session end**:
+The hook looks up the session first. If the original session has already ended (a resumed conversation), it ends the live continuation through `POST /runtime-sessions/end` with the session's persisted project, directory, and ownership mode; otherwise it calls `POST /sessions/{id}/end` as before. Both calls are bounded and fail open.
+
+Resume does not rewrite or skip an already-existing continuation with a conflicting scope. Those identities still fail closed; start a new host conversation if one was created with incompatible scope by an older core. Blank legacy bindings and directory-less isolated sessions are not silently converted into runtime-bound identities. Use a matching updated core for the new-continuation behavior; updating only plugin assets does not change registration semantics.
 
 **On user prompt submit**:
 The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompts/capture-decision` endpoint whether to capture a prompt. This replaces capture's former `GET /project/current` read, rather than adding another human-prompt preflight. Go skips blank prompts and prompts whose trimmed content starts with `<task-notification>` or `<agent-message`; only a valid `capture` decision with canonical project metadata permits `POST /prompts`, using the original content unchanged. Filtering affects persistence only, not ToolSearch or save reminders, and does not delete existing rows. The Windows Git Bash safe path remains builtin-only and skips all prompt persistence and API calls.
@@ -339,6 +347,7 @@ The `engram conflicts <sub-command>` command provides read and scan access to th
 | `engram conflicts stats` | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes |
 | `engram conflicts scan` | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
 | `engram conflicts deferred` | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay` |
+| `engram conflicts prune` | Bound dead rows in `sync_apply_deferred` by age and per-scope count; dry run by default, deletes with `--apply` |
 
 When `--project` is omitted, the command falls back to the cwd-detected project (same resolution as all other `engram` commands).
 

@@ -424,8 +424,22 @@ const (
 )
 
 // decayReviewAfterMonths maps observation type → month offset for review_after.
-// Types absent from this map get review_after = NULL (Phase 1 behavior).
+// These are initial review prompts, not expiration deadlines. Unmapped types
+// receive no default; existing rows are not backfilled.
 var decayReviewAfterMonths = map[string]int{
+	"decision":     decayDecisionMonths,
+	"policy":       decayPolicyMonths,
+	"preference":   decayPreferenceMonths,
+	"config":       decayPreferenceMonths,
+	"discovery":    decayDecisionMonths,
+	"pattern":      decayDecisionMonths,
+	"architecture": decayPolicyMonths,
+	"bugfix":       decayPolicyMonths,
+}
+
+// Legacy sync payloads without review_after retain their original derivation
+// contract. New local defaults must not reinterpret imported historical records.
+var legacySyncReviewAfterMonths = map[string]int{
 	"decision":   decayDecisionMonths,
 	"policy":     decayPolicyMonths,
 	"preference": decayPreferenceMonths,
@@ -3451,6 +3465,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		// attempt may become the terminal response.
 		claimed = false
 		id = root
+		var resumeScope *Session
 		validateIsolation := func(sessionID string) error {
 			if !isolated {
 				return nil
@@ -3478,7 +3493,8 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			// Validate terminal root ownership before looking up any continuation.
 			// A compatible suffix cannot bypass the requested identity's owner.
 			var endedAt *string
-			err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
+			var rootDirectory, rootMode string
+			err := tx.QueryRow(`SELECT ended_at, ifnull(directory, ''), ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, root).Scan(&endedAt, &rootDirectory, &rootMode)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -3492,6 +3508,12 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 						return &SessionProjectConflictError{SessionID: root, OwnerProject: owner, RequestedProject: project}
 					}
 					return err
+				}
+				// Preserve the root's binding for new continuations, but only after
+				// validating the caller's original project and ownership request.
+				// Incomplete legacy and isolated identities retain their old paths.
+				if !isolated && owner != "" && strings.TrimSpace(rootDirectory) != "" && validSessionOwnershipMode(strings.TrimSpace(rootMode)) {
+					resumeScope = &Session{Project: owner, Directory: rootDirectory, OwnershipMode: strings.TrimSpace(rootMode)}
 				}
 				if mode == SessionOwnershipProjectOwned && owner == "" {
 					_, foreignOwner, err := foreignRecordOwnerTx(tx, root, project)
@@ -3576,7 +3598,13 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			}
 			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
 		}
-		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
+		// Never rewrite or skip an already-selected continuation. Resolve/end
+		// still reject any existing scope mismatch rather than repairing data.
+		registrationProject, registrationDirectory, registrationMode := project, directory, mode
+		if !found && resumeScope != nil {
+			registrationProject, registrationDirectory, registrationMode = resumeScope.Project, resumeScope.Directory, resumeScope.OwnershipMode
+		}
+		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
 		}
 		if !identityRepaired {
@@ -12459,7 +12487,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		if len(payload.ReviewAfter) == 0 {
-			if months, ok := decayReviewAfterMonths[payload.Type]; ok {
+			if months, ok := legacySyncReviewAfterMonths[payload.Type]; ok {
 				created, parseErr := parseObservationTime(createdAt)
 				if parseErr != nil {
 					return fmt.Errorf("derive review_after from created_at: %w", parseErr)
