@@ -25,6 +25,7 @@
 | `docs/engram-cloud/quickstart.md` | Recommended cloud path. |
 | `docs/engram-cloud/troubleshooting.md` | Cloud failures and recovery. |
 | `docs/CODEBASE-GUIDE.md` | Codebase guide landing page and reading path. |
+| `docs/ci-issue-validation.md` | Inactive issue-policy evaluator, API contract, regressions and evidence limits. |
 | `docs/codebase/*.md` | Split codebase guide pages by topic. |
 
 ## Main source files
