@@ -239,7 +239,7 @@ Memory operations are internal bookkeeping, never the user-facing answer. Comple
 
 ## SESSION CLOSE PROTOCOL (REQUIRED)
 
-Before ending a session or saying "done" / "that's it" / "listo", you MUST:
+Before ending a session or saying "done" / "that's it", you MUST:
 1. Call mem_session_summary with this structure:
 
 ## Goal
