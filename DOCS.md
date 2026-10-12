@@ -402,7 +402,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Context
 
-- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global&observations=N&prompts=N&sessions=N&pinned=N&compact=BOOL&max_bytes=N`
+- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global&observations=N&prompts=N&sessions=N&pinned=N&compact=BOOL&max_bytes=N&older_history=BOOL`
   - `observations`/`prompts`/`sessions`/`pinned`: `0` (or omitted/invalid) uses that section's legacy default, `>0` caps it (silently clamped to a `500` ceiling), `<0` omits the section and its `### ...` header entirely
   - `compact=true` drops the inline content preview from `Pinned`/`Recent Observations` bullets, keeping just `- [type] **title**`
   - `max_bytes`: `0`, omitted, invalid, or negative preserves the unbounded legacy output; a positive value caps the complete rendered context at that many bytes (silently clamped to `65536`). Truncation is UTF-8-safe and appends a `[truncated]` marker when it fits within the requested budget.
