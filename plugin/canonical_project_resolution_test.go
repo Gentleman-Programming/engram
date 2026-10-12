@@ -40,6 +40,9 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 					w.WriteHeader(http.StatusNoContent)
 				case "/context":
 					_, _ = w.Write([]byte(`{"context":""}`))
+				case "/sessions/canonical-session":
+					// Claude looks up an existing root before resuming; this one is new.
+					w.WriteHeader(http.StatusNotFound)
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
 					w.WriteHeader(http.StatusNotFound)

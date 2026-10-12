@@ -234,7 +234,7 @@ func TestAddObservationFinalizeHelperCompatibility(t *testing.T) {
 	}
 	p.TopicKey = ""
 	p.Title = "Independent observation"
-	p.Type = "discovery"
+	p.Type = "learning"
 	first, err := s.AddObservation(p)
 	if err != nil {
 		t.Fatal(err)

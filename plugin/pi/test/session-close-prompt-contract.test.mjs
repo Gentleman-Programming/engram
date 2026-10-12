@@ -21,8 +21,13 @@ test("explicit session closure or handoff still requires a structured summary", 
   assert.match(close, /If `mem_session_summary` fails because Engram cannot detect a project, ask the user\nwhich project should receive the summary, then retry with `project: "<name>"`\./);
 });
 
-test("important learnings still require immediate mem_save", () => {
-  assert.match(instructions, /Call `mem_save` IMMEDIATELY after any of these:\n- Bug fix completed/);
+test("important learnings still require the canonical topic workflow", () => {
+  const workflow = instructions.split("### CANONICAL TOPIC WORKFLOW (mandatory — not optional)\n\n")[1]?.split("\n### DELIVERY GUARANTEE")[0];
+  assert.ok(workflow, "mandatory canonical topic workflow must exist");
+  assert.match(workflow, /SEARCH first[\s\S]*`mem_search`[\s\S]*READ in full[\s\S]*`mem_get_observation`/);
+  assert.match(workflow, /SAME bounded topic[\s\S]*`mem_update`[\s\S]*Genuinely new topic[\s\S]*`mem_save`/);
+  assert.match(workflow, /Save when one of these happens:\n- Bug fix completed\n- Architecture or design decision made\n- Non-obvious discovery about the codebase\n- Configuration change or environment setup\n- Pattern established \(naming, structure, convention\)\n- User preference or constraint learned/);
+  assert.doesNotMatch(workflow, /Call `mem_save` IMMEDIATELY/);
 });
 
 test("compaction recovery retains its separate outcome guidance and fallback", () => {

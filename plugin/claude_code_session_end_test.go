@@ -92,18 +92,21 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 
 		mu.Lock()
 		defer mu.Unlock()
-		if len(paths) != 1 {
-			t.Fatalf("got %d requests, want 1", len(paths))
+		if len(paths) != 2 {
+			t.Fatalf("got %d requests, want lookup then end", len(paths))
+		}
+		if paths[0] != "/sessions/session%2Fid%3Fand%3Dmore" || methods[0] != http.MethodGet {
+			t.Errorf("lookup = %s %q, want GET of the encoded session", methods[0], paths[0])
 		}
 		wantPath := "/sessions/session%2Fid%3Fand%3Dmore/end"
-		if paths[0] != wantPath {
-			t.Errorf("request path = %q, want %q", paths[0], wantPath)
+		if paths[1] != wantPath {
+			t.Errorf("request path = %q, want %q", paths[1], wantPath)
 		}
-		if methods[0] != http.MethodPost {
-			t.Errorf("request method = %q, want POST", methods[0])
+		if methods[1] != http.MethodPost {
+			t.Errorf("request method = %q, want POST", methods[1])
 		}
-		if bodies[0] != "{}" {
-			t.Errorf("request body = %q, want {}", bodies[0])
+		if bodies[1] != "{}" {
+			t.Errorf("request body = %q, want {}", bodies[1])
 		}
 	})
 
@@ -119,7 +122,7 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = listener.Close() })
 
-		requests := make(chan *http.Request, 1)
+		requests := make(chan *http.Request, 2)
 		server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests <- r
 		})}
@@ -128,6 +131,14 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 
 		runHook(t, "session-end.sh", `{"session_id":"socket-session"}`, map[string]string{"ENGRAM_SOCKET": socketPath})
 
+		select {
+		case lookup := <-requests:
+			if lookup.URL.Path != "/sessions/socket-session" {
+				t.Errorf("lookup path = %q, want /sessions/socket-session", lookup.URL.Path)
+			}
+		default:
+			t.Fatal("expected a session lookup over the Unix socket")
+		}
 		select {
 		case request := <-requests:
 			if request.URL.Path != "/sessions/socket-session/end" {
@@ -138,6 +149,98 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 			}
 		default:
 			t.Fatal("expected a request over the Unix socket")
+		}
+	})
+
+	for _, tc := range []struct {
+		name, session  string
+		initiallyEnded bool
+	}{
+		{"live session", `{"id":"fallback-root","project":"client","directory":"/work","ownership_mode":"project_owned","ended_at":null}`, false},
+		{"ended root without project", `{"id":"fallback-root","project":"","directory":"/work","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, true},
+		{"ended root without directory", `{"id":"fallback-root","project":"client","directory":"","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, true},
+	} {
+		t.Run("uses regular end for "+tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var requests []string
+			ended := tc.initiallyEnded
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/fallback-root":
+					_, _ = io.WriteString(w, tc.session)
+				case r.Method == http.MethodPost && r.URL.Path == "/sessions/fallback-root/end":
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read end body: %v", err)
+						return
+					}
+					if string(body) != "{}" || r.Header.Get("Content-Type") != "application/json" {
+						t.Errorf("end body=%q content-type=%q, want {} and application/json", body, r.Header.Get("Content-Type"))
+						return
+					}
+					ended = true
+					_, _ = io.WriteString(w, `{"status":"ended"}`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			stdout, stderr := runHookWithStderr(t, "session-end.sh", `{"session_id":"fallback-root"}`, map[string]string{"ENGRAM_URL": srv.URL})
+			if stdout != "" || stderr != "" {
+				t.Errorf("hook stdout=%q stderr=%q, want both empty", stdout, stderr)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			want := "GET /sessions/fallback-root,POST /sessions/fallback-root/end"
+			if strings.Join(requests, ",") != want {
+				t.Errorf("requests=%v, want %s (no runtime end)", requests, want)
+			}
+			if !ended {
+				t.Error("session remains live after SessionEnd")
+			}
+		})
+	}
+
+	// Issue #1624: a resumed session keeps its ended root ID, so SessionEnd
+	// must close the live continuation through the runtime scope.
+	t.Run("ends the live continuation of an already-ended root", func(t *testing.T) {
+		var mu sync.Mutex
+		var requests []string
+		var runtimeBody map[string]string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			requests = append(requests, r.Method+" "+r.URL.Path)
+			switch r.URL.Path {
+			case "/sessions/resumed-root":
+				_, _ = io.WriteString(w, `{"id":"resumed-root","project":"client","directory":"/work","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`)
+			case "/runtime-sessions/end":
+				if err := json.NewDecoder(r.Body).Decode(&runtimeBody); err != nil {
+					t.Errorf("decode runtime end: %v", err)
+				}
+				_, _ = io.WriteString(w, `{"id":"resumed-root:resume:2","resumed_from":"resumed-root","status":"ended"}`)
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		runHook(t, "session-end.sh", `{"session_id":"resumed-root"}`, map[string]string{"ENGRAM_URL": srv.URL})
+
+		mu.Lock()
+		defer mu.Unlock()
+		want := []string{"GET /sessions/resumed-root", "POST /runtime-sessions/end"}
+		if strings.Join(requests, ",") != strings.Join(want, ",") {
+			t.Fatalf("requests = %v, want %v", requests, want)
+		}
+		wantBody := map[string]string{"id": "resumed-root", "project": "client", "directory": "/work", "ownership_mode": "project_owned"}
+		if fmt.Sprint(runtimeBody) != fmt.Sprint(wantBody) {
+			t.Errorf("runtime end body = %v, want %v", runtimeBody, wantBody)
 		}
 	})
 

@@ -137,7 +137,7 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
-- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
+- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` are excluded from ordinary replay. They include terminal discarded-mutation evidence and relations that exceeded the retry cap (5 attempts); cloud imports may rearm eligible retry-cap relations when their dependencies become available. `engram conflicts prune --apply` bounds the evidence eligible for pruning by age and per-scope count, preserving potentially recoverable retry-cap relations.
 
 ### SQLite Configuration
 
@@ -189,10 +189,11 @@ engram context [project]      Recent context [--project P|--all]
 engram stats                  Memory statistics [--project P|--all]
 engram export [file]          Export memories to JSON [--project P|--all]
 engram import <file>          Import memories from JSON
-engram sync                   Export new memories to .engram/ [--all: every project]
+engram sync                   Export new memories to .engram/, excluding prompts [--all: every project]
+engram sync --include-prompts  Intentionally include prompts in local Git export
 engram sync --cloud --project <name>
                               Sync one project against the configured cloud endpoint
-engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred
+engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred, prune
 engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
 engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
 engram projects list          List projects with observation/session/prompt counts
@@ -317,6 +318,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
   - `resume` is an optional boolean, default `false`. Without it, an ended session returns `409` with `code: "session_already_ended"`; ended rows are never reopened. `POST /sessions/{id}/end` remains the endpoint that sets `ended_at`.
   - With `resume: true`, a new or live root keeps its ID. For an ended root, the store atomically renews the lowest numeric live `<id>:resume:N` continuation, or creates the next ordinal after the maximum existing numeric suffix (starting at 2, no cap). Non-numeric suffixes and other roots are ignored. The selected continuation follows normal ownership and lease rules; conflicts return `409 session_project_conflict` without advancing further. Concurrent callers converge on one live continuation.
+  - A newly created continuation of a non-isolated ended root with a complete persisted binding inherits that root's project, directory, and ownership mode, after validating the caller's requested project/mode. `shared` roots retain cross-project registration permissions; `project_owned` roots still reject foreign-project requests. Existing continuations are not rewritten or skipped, and incomplete legacy or directory-less isolated registrations retain their existing behavior. Runtime resolve/end still require the root and continuation to match the supplied scope.
   - Success remains `201` with `{id, status:"created"}`. A continuation response also includes `resumed_from: <root id>` and returns the effective ID in `id`. Use that acknowledged ID for subsequent session-bound operations. MCP session registration does not opt into resume mode.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
   - Session IDs are opaque non-blank strings. The Pi adapter derives cross-project satellite IDs as `<runtimeID>@<project>` (registered `project_owned` with `resume: true`, `isolated: true`, and no directory). Capability preflight protects against old servers without a guessed version floor. Newly created satellites are never implicit directory-matched runtime candidates; Pi's explicit `cwd` only resolves the target project. This ensures an explicitly targeted write to another project never re-registers the runtime session under a second owner. See [plugin/pi/README.md](plugin/pi/README.md#cross-project-saves).
@@ -914,6 +916,20 @@ Inspect or replay the `sync_apply_deferred` queue.
 - Default: list rows with sync_id, apply_status, retry_count, first_seen_at.
 - `--inspect <sync_id>`: print full decoded payload for one row; exits non-zero when not found.
 - `--replay`: call `ReplayDeferred()` and print retried/succeeded/failed/dead counts.
+
+```
+engram conflicts prune [--max-age-days <N>] [--max-per-scope <N>] [--dry-run] [--apply]
+```
+
+Bound prune-eligible dead evidence in `sync_apply_deferred` (`apply_status='dead'` only; deferred retry state is never touched). An eligible row is selected when its `first_seen_at` is older than `--max-age-days` (default 30), or when it falls beyond the newest `--max-per-scope` (default 1000) eligible rows of its scope (`target_key` + `project`), so one noisy peer cannot evict another scope's evidence.
+
+Potentially recoverable retry-cap relations are excluded from both age pruning and cap ranking: scoped relation upserts with a nonempty project, five retries, an FK-missing or project-mismatch error, and matching `sync_id`, `entity_key` and `payload_sync_id`. They are preserved even while dependencies are missing, so a later cloud import can rearm them. This conservative metadata check does not validate the payload; matching rows remain protected even if they ultimately cannot recover. These limits therefore do not bound the entire dead-row backlog.
+
+- `--dry-run` (default): print what would be evicted and delete nothing.
+- `--apply`: delete the selected rows in one transaction.
+- Output reports the total, per-scope counts split into `by_age` and `by_cap`, and counts by entity, `reason_code`, and age bucket (`0-6d`, `7-29d`, `30d+`, or `unknown` when `first_seen_at` does not parse as a date), so eviction is never silent.
+- `--dry-run` and `--apply` are mutually exclusive, and `--max-age-days` / `--max-per-scope` must be positive integers; invalid input exits with an error before opening the store.
+- Unknown arguments are rejected, including unsupported `--project` filters and `--option=value` syntax. Use space-separated values, such as `--max-age-days 365`. Pruning examines all scopes; it does not accept a project filter.
 
 ### Cloud CLI (opt-in)
 
@@ -1731,12 +1747,28 @@ Share memories across machines, backup, or migrate:
 Share memories through git repositories using compressed chunks with a manifest index.
 
 - `engram sync` — Exports new memories as a gzipped JSONL chunk to `.engram/chunks/`
-- `engram sync --all` — Exports ALL memories from every project
+- `engram sync --all` — Exports memories from every project, excluding prompts by default
+- `engram sync --include-prompts` — Intentionally includes prompts in local Git export (also usable with `--all` or `--project NAME`)
 - `engram sync --import` — Imports chunks listed in the manifest that haven't been imported yet
 - `engram sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
 - `engram sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
 - `engram sync --project NAME` — Filters export to a specific project
 - Local sync projects hard deletes as canonical observation, prompt, and session delete mutations; child deletes precede their session and remain replay-safe through manifest history.
+
+Git export excludes prompt records and content-bearing prompt upserts by default, including prompts previously imported from another machine. The CLI prints a prompts-excluded notice even when there is nothing new to export. Local prompts are not deleted or altered. Prompt deletion tombstones still share identity and metadata (such as session, project, and deletion time), **not prompt content**, so deletions of previously shared prompts propagate.
+
+Keep private prompts local; opt in only when intentionally sharing reviewed prompts with your team:
+
+```bash
+engram sync --project my-project                 # prompts stay local
+engram sync --project my-project --include-prompts # intentionally share prompts
+```
+
+A later opt-in includes older omitted prompts and their required parent sessions, even after intervening default exports. Repeated exports retain the existing identity/deduplication and deletion rules. `--include-prompts` is invalid with `--import`, `--status`, or cloud sync, including cloud selected by `ENGRAM_CLOUD_SYNC=true`; rejection occurs before opening the store or creating sync artifacts.
+
+**Review before committing:** sessions and observations can also contain secrets or other sensitive content; prompt exclusion is not automatic redaction or a guarantee that a chunk is safe to publish. Inspect `.engram/` before adding it to Git. Committed content can remain permanently in Git history and other clones. Default exclusion does not rewrite old chunks or erase previously shared prompts from history. There is no interactive confirmation.
+
+Cloud sync and standalone `engram export` are unchanged: they do not adopt this Git-only prompt exclusion. Import remains compatible with historical prompt-bearing chunks.
 
 ```
 .engram/

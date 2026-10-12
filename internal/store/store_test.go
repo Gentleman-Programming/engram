@@ -16771,7 +16771,7 @@ func withinDays(t *testing.T, label, value string, expected time.Time, days int)
 }
 
 // TestAddObservation_DecayDefaults verifies that AddObservation populates
-// review_after for known types (decision, policy, preference) and leaves it
+// review_after for configured knowledge types and leaves it
 // NULL for unknown/unlisted types. expires_at is NULL for all types Phase 1.
 func TestAddObservation_DecayDefaults(t *testing.T) {
 	s := newTestStore(t)
@@ -16791,8 +16791,8 @@ func TestAddObservation_DecayDefaults(t *testing.T) {
 		{"preference", false, 3},
 		{"observation", true, 0},
 		{"manual", true, 0},
-		{"bugfix", true, 0},
-		{"architecture", true, 0},
+		{"bugfix", false, 12},
+		{"architecture", false, 12},
 		{"", true, 0},
 	}
 

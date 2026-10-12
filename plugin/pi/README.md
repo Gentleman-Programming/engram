@@ -351,6 +351,10 @@ its queues without a new `before_agent_start` capture.
 This changes automatic capture only, not explicit `mem_save_prompt` calls, and
 does not remove previously stored synthetic prompts.
 
+## Canonical topic workflow
+
+A memory is an evolving topic, not a log entry. Before writing, search the intended project and scope with `mem_search`, then read plausible candidates in full with `mem_get_observation`. If the topic already exists, update it with `mem_update`: keep the same `topic_key`, preserve every still-valid fact, rewrite only what changed, and record superseded facts as history inside the content. Use `mem_save` with a deliberate new `topic_key` only for genuinely uncovered topics. Do not merge across projects or scopes, and do not treat a matching suggested key or similar title as proof of identity.
+
 ## Private blocks
 
 `gentle-engram` redacts explicit private blocks before sending captured prompts, passive observations, or compaction summaries to Engram:

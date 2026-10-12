@@ -448,6 +448,20 @@ func upgradeStageOrder(stage string) int {
 // It reads the manifest to know what's already exported, then creates
 // a new chunk with only the new data.
 func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) {
+	return sy.ExportWithOptions(createdBy, project, GitExportOptions{})
+}
+
+// GitExportOptions controls intentional prompt sharing in local Git chunks.
+// It does not change standalone snapshots or cloud replication.
+type GitExportOptions struct {
+	IncludePrompts bool
+}
+
+// ExportWithOptions exports local Git data with an explicit sharing policy.
+func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitExportOptions) (*SyncResult, error) {
+	if sy.cloudMode && opts.IncludePrompts {
+		return nil, fmt.Errorf("include-prompts is only supported for local Git export")
+	}
 	project, _ = store.NormalizeProject(project)
 	if err := sy.ensureCloudPreflight(project); err != nil {
 		return nil, err
@@ -528,7 +542,8 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 
 	// Relations are filtered by chunk presence, not timestamp; see the
 	// rationale on filterRelationMutationsForExport and issue #353.
-	exportedRelations, exportedObservations, historicalObservations, exportedDeletes, err := sy.exportedChunkKeys(manifest)
+	historicalPrompts := make(map[string]struct{})
+	exportedRelations, exportedObservations, historicalObservations, exportedDeletes, err := sy.exportedChunkKeys(manifest, historicalPrompts)
 	if err != nil {
 		return nil, fmt.Errorf("scan exported relations: %w", err)
 	}
@@ -541,6 +556,16 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		return nil, err
 	}
 	chunk := sy.filterNewData(data, lastChunkTime)
+	// Prompt identity history, including deletes, overrides the watermark.
+	// Omitted prompts remain eligible later; shared or tombstoned identities do not.
+	chunk.Prompts = nil
+	if opts.IncludePrompts {
+		for _, prompt := range data.Prompts {
+			if _, shared := historicalPrompts[prompt.SyncID]; !shared {
+				chunk.Prompts = append(chunk.Prompts, prompt)
+			}
+		}
+	}
 	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
 	selected := make(map[string]bool)
 	for _, observation := range chunk.Observations {
@@ -1930,6 +1955,9 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		if obs.ReviewAfter != nil {
 			fields["review_after"] = *obs.ReviewAfter
 		}
+		if obs.SupersededBySyncID != nil {
+			fields["superseded_by_sync_id"] = *obs.SupersededBySyncID
+		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
 			continue
@@ -2228,7 +2256,7 @@ func filterObservationsForExport(observations []store.Observation, historical ma
 }
 
 func includeObservationParentSessions(chunk *ChunkData, sessions []store.Session) {
-	if len(chunk.Observations) == 0 {
+	if len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 {
 		return
 	}
 
@@ -2240,11 +2268,18 @@ func includeObservationParentSessions(chunk *ChunkData, sessions []store.Session
 	for _, session := range chunk.Sessions {
 		included[session.ID] = struct{}{}
 	}
+	parentIDs := make([]string, 0, len(chunk.Observations)+len(chunk.Prompts))
 	for _, observation := range chunk.Observations {
-		if _, ok := included[observation.SessionID]; ok {
+		parentIDs = append(parentIDs, observation.SessionID)
+	}
+	for _, prompt := range chunk.Prompts {
+		parentIDs = append(parentIDs, prompt.SessionID)
+	}
+	for _, parentID := range parentIDs {
+		if _, ok := included[parentID]; ok {
 			continue
 		}
-		if session, ok := byID[observation.SessionID]; ok {
+		if session, ok := byID[parentID]; ok {
 			chunk.Sessions = append(chunk.Sessions, session)
 			included[session.ID] = struct{}{}
 		}
@@ -2388,7 +2423,7 @@ func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewS
 
 // exportedChunkKeys scans manifest chunks for availability and historical
 // presence, independently of whether they contain authoritative review fields.
-func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
+func (sy *Syncer) exportedChunkKeys(m *Manifest, promptHistory ...map[string]struct{}) (map[string]struct{}, map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
 	relationKeys := make(map[string]struct{})
 	observationKeys := make(map[string]struct{})
 	historicalObservationKeys := make(map[string]struct{})
@@ -2420,9 +2455,21 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 			observationKeys[observation.SyncID] = struct{}{}
 			historicalObservationKeys[observation.SyncID] = struct{}{}
 		}
-		// Reconcile delete intent in manifest order. A later snapshot or upsert
-		// starts a new identity generation; a later delete restores suppression.
+		// Any historical prompt identity, even a tombstone, prevents
+		// opt-in from duplicating or resurrecting it.
+		for _, prompt := range chunk.Prompts {
+			for _, history := range promptHistory {
+				history[prompt.SyncID] = struct{}{}
+			}
+		}
 		for _, mutation := range effectiveMutationsForImport(chunk) {
+			if mutation.Entity == store.SyncEntityPrompt {
+				for _, history := range promptHistory {
+					history[mutation.EntityKey] = struct{}{}
+				}
+			}
+			// Reconcile delete intent in manifest order. A later snapshot or
+			// upsert starts a generation; a later delete restores suppression.
 			key := mutationIdentityKey(mutation)
 			if mutation.Op == store.SyncOpDelete {
 				deleteKeys[key] = struct{}{}
