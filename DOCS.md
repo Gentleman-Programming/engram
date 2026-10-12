@@ -126,6 +126,7 @@ The memory protocol's canonical prose is [Memory Protocol](#memory-protocol-full
 The live schema is created and incrementally migrated by `Store.migrate` in [`internal/store/store.go`](internal/store/store.go); treat that migration as the source of authority when this summary and the database differ.
 
 - **sessions** — `id` (TEXT PK), `project`, `ownership_mode`, `directory`, `started_at`, `ended_at`, `summary`, `runtime_lease_expires_at` (local-only runtime liveness; never synced or exported)
+- **session_finalizations** — local-only retry journal: `session_id` (PK/FK, cascades on session deletion), `summary_id`, `summary_sync_id`. Written atomically by `Store.FinalizeSession`; never synced or exported. It distinguishes successful local retries from sessions ended separately, without inferring finalization from arbitrary observations.
 - **observations** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `scope`, `topic_key`, `normalized_hash`, `revision_count`, `duplicate_count`, `last_seen_at`, `pinned`, `review_after`, `expires_at`, `embedding`, `embedding_model`, `embedding_created_at`, `created_at`, `updated_at`, `deleted_at`
 - **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`, `topic_key`)
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `content`, `project`, `created_at`; **prompt_tombstones** records deleted prompt `sync_id`, `session_id`, `project`, and `deleted_at`
