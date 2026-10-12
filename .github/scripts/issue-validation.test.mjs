@@ -152,14 +152,21 @@ test('closed PR does not evaluate issues', async () => {
   assert.deepEqual(await evaluateIssueValidation(f.github, prEvent()), []);
   assert.deepEqual(f.journal, [get()]);
 });
-const groupEvent = () => ({ repo, eventName: 'merge_group', payload: { action: 'checks_requested', merge_group: { base_ref: 'refs/heads/main', head_ref: `refs/heads/gh-readonly-queue/main/pr-2-${sha}`, head_sha: 'c'.repeat(40) } } });
-test('merge group validates complete queue prefix on explicit group SHA', async () => {
-  const f = fake({ pulls: [pull(), pull(2, 'Fixes #10'), pull(3)], issues: { 9: { labels: [{ name: 'status:approved' }] }, 10: { labels: [] } }, queue: [1, 2, 3].map((number) => ({ position: number, pullRequest: { number } })) });
-  conclusions(await evaluateIssueValidation(f.github, groupEvent()), 'c'.repeat(40), 'success', 'failure');
-  assert.deepEqual(f.journal, [['graphql', { ...repo, baseRef: 'main', cursor: null }], get(), get(2), issueGet(), issueGet(10), get(), get(2)]);
-});
-test('merge queue resolution failure targets known group as failure', async () => {
-  const f = fake({ fail: (m) => m === 'graphql' });
-  conclusions(await evaluateIssueValidation(f.github, groupEvent()), 'c'.repeat(40), 'failure', 'failure');
-  assert.deepEqual(f.journal, [['graphql', { ...repo, baseRef: 'main', cursor: null }]]);
+test('unsupported merge group ignores wrong-identity and malformed metadata without requests or writes', async () => {
+  const f = fake({
+    pulls: [pull(1, 'no closing reference'), pull(2)],
+    queue: [1, 2].map((number) => ({ position: number, pullRequest: { number } })),
+    change: () => pull(2),
+  });
+  const context = { repo, eventName: 'merge_group', payload: {
+    action: 'checks_requested',
+    merge_group: { base_ref: 'refs/heads/main', head_ref: `refs/heads/gh-readonly-queue/main/pr-2-${sha}`, head_sha: 'c'.repeat(40) },
+  } };
+  assert.deepEqual(await evaluateIssueValidation(f.github, context), []);
+  assert.deepEqual(f.journal, []);
+  f.unchanged();
+  context.payload.merge_group = { head_sha: null };
+  assert.deepEqual(await evaluateIssueValidation(f.github, context), []);
+  assert.deepEqual(f.journal, []);
+  f.unchanged();
 });

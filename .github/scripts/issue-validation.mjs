@@ -1,5 +1,3 @@
-import { resolveAssociatedPullRequests } from './merge-queue.mjs';
-
 const pullActions = new Set(['opened', 'edited', 'labeled', 'unlabeled', 'synchronize', 'reopened']);
 const numberValid = (number) => Number.isSafeInteger(number) && number > 0;
 const shaValid = (sha) => typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha);
@@ -42,8 +40,8 @@ async function validateIssues(github, repo, pull) {
   return { referenceErrors, approvedErrors };
 }
 
-async function evaluatePull(github, repo, pull, evidence) {
-  const { referenceErrors, approvedErrors } = evidence ?? await validateIssues(github, repo, pull);
+async function evaluatePull(github, repo, pull) {
+  const { referenceErrors, approvedErrors } = await validateIssues(github, repo, pull);
   // A final read narrows the race; it is not an atomic publication fence.
   try {
     const current = await readPull(github, repo, pull.number);
@@ -74,37 +72,9 @@ async function discoverPulls(github, repo) {
   return pulls;
 }
 
-async function evaluateGroup(github, repo, group) {
-  if (!shaValid(group?.head_sha)) throw new Error('Merge group target SHA is unavailable');
-  try {
-    const pulls = await resolveAssociatedPullRequests(github, { ...repo, baseRef: group.base_ref, headRef: group.head_ref });
-    for (const pull of pulls) validatePull(pull);
-    const evidence = [];
-    for (const pull of pulls) {
-      if (pull.state !== 'open') throw new Error(`Queued PR #${pull.number} is closed`);
-      evidence.push(await validateIssues(github, repo, pull));
-    }
-    const evaluations = [];
-    for (let index = 0; index < pulls.length; index += 1) {
-      evaluations.push(await evaluatePull(github, repo, pulls[index], evidence[index]));
-    }
-    return [{
-      headSha: group.head_sha,
-      reference: result(evaluations.filter((item) => item.reference.conclusion === 'failure').map((item) => item.reference.summary)),
-      approved: result(evaluations.filter((item) => item.approved.conclusion === 'failure').map((item) => item.approved.summary)),
-    }];
-  } catch (error) {
-    return [failure(group.head_sha, `Merge group metadata unavailable (${error.message})`)];
-  }
-}
-
 /** Read-only policy evaluation; callers own publication and error reporting. */
 export async function evaluateIssueValidation(github, context) {
   const { eventName, payload = {}, repo } = context;
-  if (eventName === 'merge_group') {
-    if (payload.action !== 'checks_requested') return [];
-    return evaluateGroup(github, repo, payload.merge_group);
-  }
   if (eventName === 'pull_request_target' || eventName === 'pull_request') {
     if (!pullActions.has(payload.action) || !numberValid(payload.pull_request?.number)) return [];
     const number = payload.pull_request.number;

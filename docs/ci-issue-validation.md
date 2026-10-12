@@ -11,7 +11,7 @@ serial, stacked-to-main slices.
 Run from the repository root:
 
 ```sh
-node --test .github/scripts/issue-validation.test.mjs
+node --test .github/scripts/issue-validation.test.mjs .github/scripts/merge-queue.test.mjs
 node --check .github/scripts/issue-validation.mjs
 ```
 
@@ -43,14 +43,19 @@ code or acquire credentials. Untrusted bodies and labels are only metadata.
 |-------|--------------------|
 | `pull_request_target` / `pull_request` | Opening, edits, labels, synchronization and reopening fetch the current PR, validate issues, then recheck PR metadata. Closed PRs are ignored. Event body/head fields are never validation evidence. |
 | `issues` | Only `labeled` / `unlabeled` for `status:approved` on an issue, not a PR. Paginate all open PR numbers, then fetch authoritative bodies/heads; only matching closing references become targets. |
-| `merge_group` | Only `checks_requested`; use the unchanged merge-queue resolver's full prefix through the tail PR, validating every constituent PR. Return one result on the explicit group `head_sha`, never a constituent head or inferred event SHA. |
+| `merge_group` | Unsupported: return no targets and make no API requests or writes, regardless of group metadata. Existing native queue validation remains the sole owner. |
 | Other inputs | Unrelated actions, labels and invalid routing identifiers produce no requests or targets. |
 
 Closing references retain exactly `/(?:closes|fixes|resolves)\s+#(\d+)/gi`,
 including its existing substring and whitespace behavior. Every match is checked,
 including duplicates; all linked issues must carry `status:approved`. Missing
-references fail both conclusions for ordinary PRs and queue constituents. For
-issue-label routing, no matching authoritative reference means no target.
+references fail both conclusions for ordinary PRs. For issue-label routing,
+no matching authoritative reference means no target.
+
+This evaluator handles only PR and issue contexts. Merge-group validation remains
+in the unchanged `.github/workflows/pr-check.yml` native jobs and
+`.github/scripts/merge-queue.mjs` helper, with its existing full queue-prefix
+semantics and tests. This module does not resolve or publish group heads.
 
 ## Failure and consistency boundaries
 
@@ -61,9 +66,9 @@ issue-label routing, no matching authoritative reference means no target.
 - PR head/body/state changes at the final read fail both conclusions on the
   previously fetched SHA, requesting fresh reconciliation. The evaluator does
   not chase changing heads indefinitely or claim approval for a closed PR.
-- A known target with unavailable recheck evidence receives failure. Merge queue
-  resolution errors fail the explicit group target. If initial PR discovery or
-  target resolution cannot complete, the evaluator throws; callers must report
+- A known PR target with unavailable recheck evidence receives failure. If
+  initial PR discovery or target resolution cannot complete, the evaluator
+  throws; callers must report
   that error rather than fabricate success or silently treat it as no targets.
 - Current labels, not the event's historical label state, decide approval. Thus a
   delayed approval event can observe revocation and vice versa. There are no
