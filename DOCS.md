@@ -188,7 +188,8 @@ engram context [project]      Recent context [--project P|--all]
 engram stats                  Memory statistics [--project P|--all]
 engram export [file]          Export memories to JSON [--project P|--all]
 engram import <file>          Import memories from JSON
-engram sync                   Export new memories to .engram/ [--all: every project]
+engram sync                   Export new memories to .engram/, excluding prompts [--all: every project]
+engram sync --include-prompts  Intentionally include prompts in local Git export
 engram sync --cloud --project <name>
                               Sync one project against the configured cloud endpoint
 engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred, prune
@@ -1714,12 +1715,28 @@ Share memories across machines, backup, or migrate:
 Share memories through git repositories using compressed chunks with a manifest index.
 
 - `engram sync` — Exports new memories as a gzipped JSONL chunk to `.engram/chunks/`
-- `engram sync --all` — Exports ALL memories from every project
+- `engram sync --all` — Exports memories from every project, excluding prompts by default
+- `engram sync --include-prompts` — Intentionally includes prompts in local Git export (also usable with `--all` or `--project NAME`)
 - `engram sync --import` — Imports chunks listed in the manifest that haven't been imported yet
 - `engram sync --status` — Shows how many chunks exist locally vs remotely (filesystem mode)
 - `engram sync --cloud --status --project <name>` — Shows local, remote, and pending chunk counts for the specified cloud project
 - `engram sync --project NAME` — Filters export to a specific project
 - Local sync projects hard deletes as canonical observation, prompt, and session delete mutations; child deletes precede their session and remain replay-safe through manifest history.
+
+Git export excludes prompt records and content-bearing prompt upserts by default, including prompts previously imported from another machine. The CLI prints a prompts-excluded notice even when there is nothing new to export. Local prompts are not deleted or altered. Prompt deletion tombstones still share identity and metadata (such as session, project, and deletion time), **not prompt content**, so deletions of previously shared prompts propagate.
+
+Keep private prompts local; opt in only when intentionally sharing reviewed prompts with your team:
+
+```bash
+engram sync --project my-project                 # prompts stay local
+engram sync --project my-project --include-prompts # intentionally share prompts
+```
+
+A later opt-in includes older omitted prompts and their required parent sessions, even after intervening default exports. Repeated exports retain the existing identity/deduplication and deletion rules. `--include-prompts` is invalid with `--import`, `--status`, or cloud sync, including cloud selected by `ENGRAM_CLOUD_SYNC=true`; rejection occurs before opening the store or creating sync artifacts.
+
+**Review before committing:** sessions and observations can also contain secrets or other sensitive content; prompt exclusion is not automatic redaction or a guarantee that a chunk is safe to publish. Inspect `.engram/` before adding it to Git. Committed content can remain permanently in Git history and other clones. Default exclusion does not rewrite old chunks or erase previously shared prompts from history. There is no interactive confirmation.
+
+Cloud sync and standalone `engram export` are unchanged: they do not adopt this Git-only prompt exclusion. Import remains compatible with historical prompt-bearing chunks.
 
 ```
 .engram/
