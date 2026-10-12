@@ -63,7 +63,7 @@ func TestContextHistoryCLIRealRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	after, err := s.Export()
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestContextHistoryHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Stdout = old; r.Close(); w.Close() })
+	t.Cleanup(func() { os.Stdout = old; _ = r.Close(); _ = w.Close() })
 	os.Stdout = w
 	output := make(chan string, 1)
 	go func() {
@@ -130,7 +130,7 @@ func TestContextHistoryHelp(t *testing.T) {
 		output <- string(data)
 	}()
 	printUsage()
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 	if !strings.Contains(<-output, "--older-history") {
 		t.Fatal("help omits --older-history")
