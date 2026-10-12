@@ -53,7 +53,7 @@ func TestServerInstructionsStaysUnderClientTruncationLimit(t *testing.T) {
 }
 
 func TestServerInstructionsUsesCandidateJudgmentIDs(t *testing.T) {
-	const candidateInstruction = "once per entry using that entry's judgment_id"
+	const candidateInstruction = "with candidates[].judgment_id"
 	const topLevelWarning = "never reuse the top-level judgment_id"
 
 	candidateIndex := strings.Index(serverInstructions, candidateInstruction)
