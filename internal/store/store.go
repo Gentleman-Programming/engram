@@ -3288,6 +3288,29 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	})
 }
 
+// ResolveManualSession registers an independent project-owned fallback session.
+// Keep the legacy ID when possible, but never claim a session owned by another
+// project. A separate deterministic namespace avoids interpreting the hash as
+// a legacy manual-save project suffix in diagnostics and ownership backfills.
+func (s *Store) ResolveManualSession(project, directory string) (string, error) {
+	project, _ = NormalizeProject(project)
+	id := manualSessionIDPrefix + project
+	err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned)
+	if err == nil {
+		return id, nil
+	}
+	var conflict *SessionProjectConflictError
+	if !errors.As(err, &conflict) {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(project))
+	id = "manual-fallback-" + hex.EncodeToString(digest[:])
+	if err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // runtimeSessionLeaseDuration bounds local runtime-session liveness. It is not
 // synchronized and never changes a session's terminal state.
 const runtimeSessionLeaseDuration = "+30 minutes"
@@ -3748,7 +3771,7 @@ const activeRuntimeSessionWindow = "-7 days"
 //   - A live lease suppresses unleased legacy candidates in its directory only.
 //     Where no live lease exists, preserve the legacy effective-activity window:
 //     the latest observation, falling back to started_at, must be recent.
-//   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
+//   - Exclude manual-save and manual-fallback sessions; those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
 //
@@ -3790,6 +3813,7 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 			  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
 			  AND s.ended_at IS NULL
 			  AND s.id NOT LIKE 'manual-save%'
+			  AND s.id NOT LIKE 'manual-fallback-%'
 			GROUP BY s.id
 		), live_leased_directories AS (
 			SELECT directory

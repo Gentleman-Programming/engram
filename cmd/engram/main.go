@@ -1523,9 +1523,10 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	sessionID := "manual-save-" + projectName
-	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
+	sessionID, err := s.ResolveManualSession(projectName, cwd)
+	if err != nil {
 		fatal(err)
+		return
 	}
 	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{

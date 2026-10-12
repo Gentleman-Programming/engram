@@ -183,6 +183,22 @@ The CLI `--json` and MCP tool return:
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
 
+### Manual-save session collisions across machines
+
+CLI `engram save` and MCP writes without `session_id` (when no matching runtime
+session is active) normally use `manual-save-{project}`. If that ID already
+belongs to a different project, new writes use an independent, deterministic
+`manual-fallback-{sha256(project)}` session. Newly created fallback sessions are
+`project_owned`; registration preserves the classification of any existing
+same-project session, including `shared`, rather than promoting it automatically.
+Repeated writes reuse that alternative ID; its registration still rejects a
+conflicting owner. The old session, observations, and prompts are not moved or
+rewritten. Explicit MCP `session_id` requests do not use this collision fallback.
+
+This unblocks new writes after importing or syncing a database from another
+machine; it does not transfer old history or repair stale project ownership.
+Review diagnostic evidence separately before any supported ownership repair.
+
 ### Manual-save ownership normalization and previously rescued sessions
 
 For ownership classification, the `manual-save-` prefix is literal, but the
