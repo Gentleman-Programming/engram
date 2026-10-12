@@ -277,7 +277,7 @@ func TestContextHistoryCalendarAndMembership(t *testing.T) {
 	if strings.Contains(got, "secret body") || strings.Contains(got, "title-3") || strings.Contains(got, "title-0") {
 		t.Fatal(got)
 	}
-	if !(strings.Index(got, "title-6") < strings.Index(got, "title-5") && strings.Index(got, "title-5") < strings.Index(got, "title-4")) {
+	if strings.Index(got, "title-6") >= strings.Index(got, "title-5") || strings.Index(got, "title-5") >= strings.Index(got, "title-4") {
 		t.Fatal(got)
 	}
 }
@@ -468,7 +468,7 @@ func TestContextHistoryQueryPlan(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			for rows.Next() {
 				var id, parent, unused int
 				var detail string
@@ -494,7 +494,7 @@ func BenchmarkOlderHistoryCurrentMonth(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	s.contextHistoryNow = func() time.Time { return time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC) }
 	_, err = s.db.Exec(`INSERT INTO sessions(id,project,directory) VALUES('bench','alpha',''); INSERT INTO observations(session_id,type,title,content,project,created_at) WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT 'bench',CASE WHEN x%2=0 THEN 'decision' ELSE 'bugfix' END,'sample',printf('%01000d',x),'alpha',CASE WHEN x<=80000 THEN datetime('2020-01-01',printf('+%d minutes',x)) ELSE datetime('2026-05-01',printf('+%d minutes',((x-80001)*2)%28000)) END FROM n`)
 	if err != nil {
@@ -519,7 +519,7 @@ func BenchmarkOlderHistoryLarge(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	_, err = s.db.Exec(`INSERT INTO sessions(id,project,directory) VALUES('bench','alpha',''); INSERT INTO observations(session_id,type,title,content,project,created_at) WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT 'bench','decision','sample',printf('%01000d',x),'alpha',datetime('2020-01-01',printf('+%d minutes',x)) FROM n`)
 	if err != nil {
 		b.Fatal(err)
