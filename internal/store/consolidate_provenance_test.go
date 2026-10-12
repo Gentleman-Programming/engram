@@ -138,8 +138,10 @@ func TestConsolidateProvenance_DeleteJournalRidesSupersededBy(t *testing.T) {
 }
 
 // Peer apply, upsert direction: superseded_by_sync_id replicates on both the
-// insert branch and the update branch (full-row last-write-wins: an upsert
-// without the field clears it, like every other column).
+// insert branch and the update branch. Contract agreed 2026-10-12 (#242):
+// a missing or null field never erases an existing link on any apply path;
+// a conflicting nonempty link follows last-applied ordering. Clearing
+// provenance is outside the consolidation contract entirely.
 func TestApplyObservationUpsertTx_ReplicatesSupersededBy(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("ses-peer", "proj-peer", "/tmp/peer"); err != nil {
@@ -176,15 +178,39 @@ func TestApplyObservationUpsertTx_ReplicatesSupersededBy(t *testing.T) {
 		t.Fatalf("insert branch must persist superseded_by_sync_id, got %v", got)
 	}
 
-	// Update branch: same sync_id, field cleared — last-write-wins.
+	// Update branch: a full-row upsert without the field (a stale peer row
+	// predating the consolidation) must preserve the existing link.
 	payload.SupersededBySyncID = nil
 	payload.Title = "Peer row edited"
 	apply(payload)
 	if err := s.db.QueryRow(`SELECT superseded_by_sync_id FROM observations WHERE sync_id = 'obs-peer-1'`).Scan(&got); err != nil {
-		t.Fatalf("select after update-branch apply: %v", err)
+		t.Fatalf("select after null-field update apply: %v", err)
 	}
-	if got.Valid {
-		t.Fatalf("update branch without the field must clear it (LWW), got %q", got.String)
+	if !got.Valid || got.String != superseded {
+		t.Fatalf("update branch without the field must preserve superseded_by_sync_id, got %v", got)
+	}
+
+	// A conflicting nonempty link follows last-applied ordering.
+	otherSurvivor := "obs-superseded-other"
+	payload.SupersededBySyncID = &otherSurvivor
+	payload.Title = "Peer row re-consolidated"
+	apply(payload)
+	if err := s.db.QueryRow(`SELECT superseded_by_sync_id FROM observations WHERE sync_id = 'obs-peer-1'`).Scan(&got); err != nil {
+		t.Fatalf("select after conflicting update apply: %v", err)
+	}
+	if !got.Valid || got.String != otherSurvivor {
+		t.Fatalf("conflicting nonempty link must follow last-applied ordering, got %v", got)
+	}
+
+	// A later field-less upsert still preserves the newest link.
+	payload.SupersededBySyncID = nil
+	payload.Title = "Peer row edited again"
+	apply(payload)
+	if err := s.db.QueryRow(`SELECT superseded_by_sync_id FROM observations WHERE sync_id = 'obs-peer-1'`).Scan(&got); err != nil {
+		t.Fatalf("select after second null-field update apply: %v", err)
+	}
+	if !got.Valid || got.String != otherSurvivor {
+		t.Fatalf("null-field upsert after re-consolidation must preserve the newest link, got %v", got)
 	}
 }
 
@@ -293,4 +319,189 @@ func TestDetectResurrectedObservations(t *testing.T) {
 	if got[0].SupersededBySyncID == nil {
 		t.Fatal("detector result must expose superseded_by_sync_id")
 	}
+}
+
+// Contract (#242, 2026-10-12): a later peer upsert may restore a consolidated
+// source, but its known provenance remains available. The resurrection upsert
+// is a full row predating the consolidation (no field, not deleted): it
+// restores liveness while the marker survives, so the one-query detector
+// surfaces the anomaly instead of hiding it.
+func TestApplyObservationUpsertTx_ResurrectionKeepsProvenanceDetectable(t *testing.T) {
+	s, ids, syncIDs := consolidateTestStore(t)
+	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := s.ConsolidateObservations(ConsolidateParams{
+		IDs:         ids,
+		Confirm:     true,
+		Fingerprint: plan.Plan.Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	stale := syncObservationPayload{
+		SyncID: syncIDs[0], SessionID: "ses-cons", Type: "decision",
+		Title: "Stale source", Content: "Stale source content",
+		Project: nullableString("proj-cons"), Scope: "project",
+	}
+	tx, err := s.beginTxHook()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := s.applyObservationUpsertTx(tx, stale); err != nil {
+		t.Fatalf("apply resurrection upsert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var deletedAt sql.NullString
+	var marker sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT deleted_at, superseded_by_sync_id FROM observations WHERE sync_id = ?`, syncIDs[0],
+	).Scan(&deletedAt, &marker); err != nil {
+		t.Fatalf("select resurrected source: %v", err)
+	}
+	if deletedAt.Valid {
+		t.Fatalf("resurrection upsert must restore liveness, deleted_at=%q", deletedAt.String)
+	}
+	if !marker.Valid || marker.String != res.Survivor.SyncID {
+		t.Fatalf("resurrection upsert must keep superseded_by_sync_id=%s, got %v", res.Survivor.SyncID, marker)
+	}
+
+	got, err := s.DetectResurrectedObservations()
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != ids[0] {
+		t.Fatalf("detector must return exactly the resurrected source, got %+v", got)
+	}
+	if got[0].SupersededBySyncID == nil || *got[0].SupersededBySyncID != res.Survivor.SyncID {
+		t.Fatalf("detector result must expose the surviving provenance, got %+v", got[0])
+	}
+}
+
+// Contract point 6, backup round-trip: export/import preserves the provenance
+// column. The field rides the full Observation struct in ExportData, so this
+// pins the surface (it cannot regress silently).
+func TestExportImportRoundTripPreservesSupersededBy(t *testing.T) {
+	s, ids, _ := consolidateTestStore(t)
+	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := s.ConsolidateObservations(ConsolidateParams{
+		IDs:         ids,
+		Confirm:     true,
+		Fingerprint: plan.Plan.Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	data, err := s.Export()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	fresh := newTestStore(t)
+	if _, err := fresh.Import(data); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	var got sql.NullString
+	if err := fresh.db.QueryRow(
+		`SELECT superseded_by_sync_id FROM observations WHERE sync_id = ?`, res.Survivor.SyncID,
+	).Scan(&got); err != nil {
+		t.Fatalf("select imported survivor: %v", err)
+	}
+	if got.Valid {
+		t.Fatalf("imported survivor must not be superseded, got %q", got.String)
+	}
+	for _, id := range ids {
+		src := s.getObservationByIDOrFatal(t, id)
+		if err := fresh.db.QueryRow(
+			`SELECT superseded_by_sync_id FROM observations WHERE sync_id = ?`, src.SyncID,
+		).Scan(&got); err != nil {
+			t.Fatalf("select imported source %d: %v", id, err)
+		}
+		if !got.Valid || got.String != res.Survivor.SyncID {
+			t.Fatalf("import must preserve superseded_by_sync_id for source %d, got %v", id, got)
+		}
+	}
+}
+
+// Contract point 6, out-of-order delivery: a consolidation delete that
+// arrives before its source is a no-op (no placeholder rows); when the stale
+// source upsert lands afterwards it becomes a live, unmarked row — the
+// durable provenance record for that window is the survivor's
+// consolidated_from footer.
+func TestApplyObservationDeleteTx_UnseenSourceNoOpThenStaleUpsert(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-peer3", "proj-peer3", "/tmp/peer3"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	deletedAt := "2026-10-12 09:00:00"
+	survivor := "obs-survivor-unseen"
+	del := syncObservationPayload{
+		SyncID: "obs-unseen", SessionID: "ses-peer3", Type: "decision",
+		Title: "Unseen source", Content: "Unseen source content",
+		Project: nullableString("proj-peer3"), Deleted: true, DeletedAt: &deletedAt,
+		SupersededBySyncID: &survivor,
+	}
+	tx, err := s.beginTxHook()
+	if err != nil {
+		t.Fatalf("begin delete: %v", err)
+	}
+	if err := s.applyObservationDeleteTx(tx, del); err != nil {
+		t.Fatalf("apply unseen delete: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit delete: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE sync_id = 'obs-unseen'`).Scan(&n); err != nil {
+		t.Fatalf("count placeholders: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("delete-before-source must not create placeholder rows, got %d", n)
+	}
+
+	stale := del
+	stale.Deleted = false
+	stale.DeletedAt = nil
+	stale.SupersededBySyncID = nil
+	tx, err = s.beginTxHook()
+	if err != nil {
+		t.Fatalf("begin upsert: %v", err)
+	}
+	if err := s.applyObservationUpsertTx(tx, stale); err != nil {
+		t.Fatalf("apply stale upsert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit upsert: %v", err)
+	}
+	var deletedAtAfter sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT deleted_at FROM observations WHERE sync_id = 'obs-unseen'`,
+	).Scan(&deletedAtAfter); err != nil {
+		t.Fatalf("select after stale upsert: %v", err)
+	}
+	if deletedAtAfter.Valid {
+		t.Fatalf("stale upsert after unseen delete must land live, deleted_at=%q", deletedAtAfter.String)
+	}
+}
+
+// getObservationByIDOrFatal loads an Observation by row id for round-trip
+// assertions.
+func (s *Store) getObservationByIDOrFatal(t *testing.T, id int64) Observation {
+	t.Helper()
+	var o Observation
+	if err := s.db.QueryRow(
+		`SELECT id, sync_id, session_id, type, title FROM observations WHERE id = ?`, id,
+	).Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title); err != nil {
+		t.Fatalf("load observation %d: %v", id, err)
+	}
+	return o
 }
