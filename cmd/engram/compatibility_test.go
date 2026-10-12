@@ -47,7 +47,11 @@ func TestCompatibilityEarlyDispatch(t *testing.T) {
 // Tests never execute an installed engram.
 func buildCompatibilityBinary(t *testing.T) string {
 	t.Helper()
-	binaryPath := filepath.Join(t.TempDir(), "engram")
+	binaryName := "engram"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binaryPath := filepath.Join(t.TempDir(), binaryName)
 	build := exec.Command("go", "build", "-ldflags=-X main.version="+compatibilityFixtureVersion, "-o", binaryPath, ".")
 	build.Env = append(os.Environ(), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOTOOLCHAIN=local")
 	if out, err := build.CombinedOutput(); err != nil {
