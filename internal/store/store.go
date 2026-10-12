@@ -160,24 +160,25 @@ const (
 )
 
 type Observation struct {
-	ID             int64   `json:"id"`
-	SyncID         string  `json:"sync_id"`
-	SessionID      string  `json:"session_id"`
-	Type           string  `json:"type"`
-	Title          string  `json:"title"`
-	Content        string  `json:"content"`
-	ToolName       *string `json:"tool_name,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	Scope          string  `json:"scope"`
-	TopicKey       *string `json:"topic_key,omitempty"`
-	RevisionCount  int     `json:"revision_count"`
-	DuplicateCount int     `json:"duplicate_count"`
-	LastSeenAt     *string `json:"last_seen_at,omitempty"`
-	ReviewAfter    *string `json:"review_after,omitempty"`
-	Pinned         bool    `json:"-"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
+	ID                 int64   `json:"id"`
+	SyncID             string  `json:"sync_id"`
+	SessionID          string  `json:"session_id"`
+	Type               string  `json:"type"`
+	Title              string  `json:"title"`
+	Content            string  `json:"content"`
+	ToolName           *string `json:"tool_name,omitempty"`
+	Project            *string `json:"project,omitempty"`
+	Scope              string  `json:"scope"`
+	TopicKey           *string `json:"topic_key,omitempty"`
+	RevisionCount      int     `json:"revision_count"`
+	DuplicateCount     int     `json:"duplicate_count"`
+	LastSeenAt         *string `json:"last_seen_at,omitempty"`
+	ReviewAfter        *string `json:"review_after,omitempty"`
+	SupersededBySyncID *string `json:"superseded_by_sync_id,omitempty"`
+	Pinned             bool    `json:"-"`
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
+	DeletedAt          *string `json:"deleted_at,omitempty"`
 }
 
 const (
@@ -262,22 +263,23 @@ type Stats struct {
 }
 
 type TimelineEntry struct {
-	ID             int64   `json:"id"`
-	SessionID      string  `json:"session_id"`
-	Type           string  `json:"type"`
-	Title          string  `json:"title"`
-	Content        string  `json:"content"`
-	ToolName       *string `json:"tool_name,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	Scope          string  `json:"scope"`
-	TopicKey       *string `json:"topic_key,omitempty"`
-	RevisionCount  int     `json:"revision_count"`
-	DuplicateCount int     `json:"duplicate_count"`
-	LastSeenAt     *string `json:"last_seen_at,omitempty"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
-	IsFocus        bool    `json:"is_focus"` // true for the anchor observation
+	SupersededBySyncID *string `json:"superseded_by_sync_id,omitempty"`
+	ID                 int64   `json:"id"`
+	SessionID          string  `json:"session_id"`
+	Type               string  `json:"type"`
+	Title              string  `json:"title"`
+	Content            string  `json:"content"`
+	ToolName           *string `json:"tool_name,omitempty"`
+	Project            *string `json:"project,omitempty"`
+	Scope              string  `json:"scope"`
+	TopicKey           *string `json:"topic_key,omitempty"`
+	RevisionCount      int     `json:"revision_count"`
+	DuplicateCount     int     `json:"duplicate_count"`
+	LastSeenAt         *string `json:"last_seen_at,omitempty"`
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
+	DeletedAt          *string `json:"deleted_at,omitempty"`
+	IsFocus            bool    `json:"is_focus"` // true for the anchor observation
 }
 
 type TimelineResult struct {
@@ -446,7 +448,7 @@ var legacySyncReviewAfterMonths = map[string]int{
 }
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
+	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at, superseded_by_sync_id`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -657,12 +659,13 @@ type syncObservationPayload struct {
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
 	// Raw JSON distinguishes an absent legacy field from an explicit null reset.
-	ReviewAfter json.RawMessage `json:"review_after,omitempty"`
-	CreatedAt   string          `json:"created_at,omitempty"`
-	UpdatedAt   string          `json:"updated_at,omitempty"`
-	Deleted     bool            `json:"deleted,omitempty"`
-	DeletedAt   *string         `json:"deleted_at,omitempty"`
-	HardDelete  bool            `json:"hard_delete,omitempty"`
+	ReviewAfter        json.RawMessage `json:"review_after,omitempty"`
+	SupersededBySyncID *string         `json:"superseded_by_sync_id,omitempty"`
+	CreatedAt          string          `json:"created_at,omitempty"`
+	UpdatedAt          string          `json:"updated_at,omitempty"`
+	Deleted            bool            `json:"deleted,omitempty"`
+	DeletedAt          *string         `json:"deleted_at,omitempty"`
+	HardDelete         bool            `json:"hard_delete,omitempty"`
 }
 
 type syncPromptPayload struct {
@@ -1598,6 +1601,9 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if err := s.addColumnIfNotExists("sync_delete_tombstones", "superseded_by_sync_id", "TEXT"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfNotExists("sync_delete_tombstones", "last_remote_mutation_seq", "INTEGER"); err != nil {
 		return err
 	}
@@ -1663,6 +1669,7 @@ func (s *Store) migrate() error {
 		definition string
 	}{
 		{name: "review_after", definition: "TEXT"},
+		{name: "superseded_by_sync_id", definition: "TEXT"},
 		{name: "expires_at", definition: "TEXT"},
 		{name: "embedding", definition: "BLOB"},
 		{name: "embedding_model", definition: "TEXT"},
@@ -5424,6 +5431,9 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, expected *string) e
 			if err := s.recordSyncDeleteTombstoneTx(tx, SyncEntityObservation, obs.SyncID, obs.SessionID, project, deletedAt); err != nil {
 				return fmt.Errorf("record hard observation tombstone: %w", err)
 			}
+			if err := s.preserveObservationDeleteProvenanceTx(tx, syncObservationPayload{SyncID: obs.SyncID, SessionID: obs.SessionID, Project: obs.Project, DeletedAt: &deletedAt, HardDelete: true, SupersededBySyncID: obs.SupersededBySyncID}, true); err != nil {
+				return err
+			}
 			obs.Project = nullableString(project)
 			if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, id); err != nil {
 				return err
@@ -5511,7 +5521,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 	// 3. Get observations BEFORE the focus (same session, older, chronological order)
 	beforeRows, err := s.queryItHook(s.db, `
 		SELECT id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at, superseded_by_sync_id
 		FROM observations
 		WHERE session_id = ? AND id < ? AND deleted_at IS NULL
 		ORDER BY id DESC
@@ -5528,7 +5538,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 		if err := beforeRows.Scan(
 			&e.ID, &e.SessionID, &e.Type, &e.Title, &e.Content,
 			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
-			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt, &e.SupersededBySyncID,
 		); err != nil {
 			return nil, err
 		}
@@ -5545,7 +5555,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 	// 4. Get observations AFTER the focus (same session, newer, chronological order)
 	afterRows, err := s.queryItHook(s.db, `
 		SELECT id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at, superseded_by_sync_id
 		FROM observations
 		WHERE session_id = ? AND id > ? AND deleted_at IS NULL
 		ORDER BY id ASC
@@ -5562,7 +5572,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 		if err := afterRows.Scan(
 			&e.ID, &e.SessionID, &e.Type, &e.Title, &e.Content,
 			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
-			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt, &e.SupersededBySyncID,
 		); err != nil {
 			return nil, err
 		}
@@ -5657,7 +5667,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 				if err := tkRows.Scan(
 					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
+					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &sr.SupersededBySyncID,
 				); err != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, ctxErr
@@ -5716,7 +5726,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		if err := rows.Scan(
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
+			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &sr.SupersededBySyncID,
 			&sr.Rank,
 		); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -5894,7 +5904,7 @@ func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []
 
 func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, ftsQuery, opts, limit)
+	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at, o.superseded_by_sync_id`, ftsQuery, opts, limit)
 }
 
 func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
@@ -5981,7 +5991,7 @@ func escapeLIKE(term string) string {
 
 func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
 	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, query, opts, limit)
+	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at, o.superseded_by_sync_id`, query, opts, limit)
 }
 
 func buildSearchPreviewLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
@@ -6521,19 +6531,20 @@ func (s *Store) ExportLocalDeleteTombstones(project string) ([]SyncMutation, err
 		args = append(args, project)
 	}
 	mutations := make([]SyncMutation, 0)
-	rows, err := s.queryItHook(s.db, `SELECT entity, entity_key, ifnull(session_id, ''), project, deleted_at, hard_delete FROM sync_delete_tombstones WHERE entity IN (?, ?) AND `+where, append([]any{SyncEntityObservation, SyncEntitySession}, args...)...)
+	rows, err := s.queryItHook(s.db, `SELECT entity, entity_key, ifnull(session_id, ''), project, deleted_at, hard_delete, superseded_by_sync_id FROM sync_delete_tombstones WHERE entity IN (?, ?) AND `+where, append([]any{SyncEntityObservation, SyncEntitySession}, args...)...)
 	if err != nil {
 		return nil, fmt.Errorf("export local delete tombstones: %w", err)
 	}
 	for rows.Next() {
 		var entity, key, sessionID, rowProject, deletedAt string
 		var hardDelete bool
-		if err := rows.Scan(&entity, &key, &sessionID, &rowProject, &deletedAt, &hardDelete); err != nil {
+		var provenance *string
+		if err := rows.Scan(&entity, &key, &sessionID, &rowProject, &deletedAt, &hardDelete, &provenance); err != nil {
 			return nil, closeRowsWithError(rows, err)
 		}
 		var payload any
 		if entity == SyncEntityObservation {
-			payload = syncObservationPayload{SyncID: key, SessionID: sessionID, Project: nullableString(rowProject), Deleted: true, DeletedAt: &deletedAt, HardDelete: hardDelete}
+			payload = syncObservationPayload{SyncID: key, SessionID: sessionID, Project: nullableString(rowProject), Deleted: true, DeletedAt: &deletedAt, HardDelete: hardDelete, SupersededBySyncID: provenance}
 		} else {
 			payload = syncSessionPayload{ID: key, Project: rowProject, Deleted: true, DeletedAt: &deletedAt, HardDelete: hardDelete}
 		}
@@ -6840,6 +6851,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, obs.Pinned, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
+			if err := s.preserveObservationProvenanceTx(tx, syncID, obs.SupersededBySyncID); err != nil {
+				return nil, fmt.Errorf("import observation provenance: %w", err)
+			}
 			result.ObservationsUpdated++
 			continue
 		}
@@ -6871,6 +6885,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 		}
 		n, _ := res.RowsAffected()
+		if err := s.preserveObservationProvenanceTx(tx, syncID, obs.SupersededBySyncID); err != nil {
+			return nil, fmt.Errorf("import observation provenance: %w", err)
+		}
 		result.ObservationsImported += int(n)
 	}
 
@@ -11199,6 +11216,16 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 	if entity == SyncEntitySession && strings.TrimSpace(entityKey) == "" {
 		return ErrSessionIDRequired
 	}
+	// Deletion and backfill payloads are intentionally partial. Preserve the
+	// structured link from the row or tombstone at the journal boundary.
+	if observation, ok := payload.(syncObservationPayload); ok {
+		link, err := s.observationProvenanceTx(tx, entityKey, observation.SupersededBySyncID)
+		if err != nil {
+			return err
+		}
+		observation.SupersededBySyncID = link
+		payload = observation
+	}
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = SyncSourceLocal
@@ -11582,6 +11609,11 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 			return fmt.Errorf("%w: mutation entity_key %q does not match payload sync_id %q", ErrPulledObservationIdentityInvalid, entityKey, payload.SyncID)
 		}
 		if mutation.Op == SyncOpDelete {
+			provenance, err := s.observationProvenanceTx(tx, payload.SyncID, payload.SupersededBySyncID)
+			if err != nil {
+				return err
+			}
+			payload.SupersededBySyncID = provenance
 			deletedAt := strings.TrimSpace(derefString(payload.DeletedAt))
 			if err := s.applyObservationDeleteTx(tx, payload); err != nil {
 				return err
@@ -11600,14 +11632,22 @@ func (s *Store) applyPulledMutationForDomainTx(tx *sql.Tx, mutation SyncMutation
 			}
 			if !cloud {
 				if !payload.HardDelete {
-					return nil
+					// Soft local deletes do not fence later cloud upserts. An
+					// inactive tombstone retains metadata without changing admission.
+					return s.preserveObservationDeleteProvenanceTx(tx, payload, false)
 				}
 				if deletedAt == "" {
 					deletedAt = Now()
 				}
-				return s.recordSyncDeleteTombstoneTx(tx, SyncEntityObservation, payload.SyncID, payload.SessionID, derefString(payload.Project), deletedAt)
+				if err := s.recordSyncDeleteTombstoneTx(tx, SyncEntityObservation, payload.SyncID, payload.SessionID, derefString(payload.Project), deletedAt); err != nil {
+					return err
+				}
+				return s.preserveObservationDeleteProvenanceTx(tx, payload, true)
 			}
-			return s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, payload.SessionID, derefString(payload.Project), payload.DeletedAt, payload.HardDelete, mutation.Seq)
+			if err := s.recordCloudDeleteTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, payload.SessionID, derefString(payload.Project), payload.DeletedAt, payload.HardDelete, mutation.Seq); err != nil {
+				return err
+			}
+			return s.preserveObservationDeleteProvenanceTx(tx, payload, true)
 		}
 		if cloud {
 			blocked, err := s.cloudUpsertBlockedByTombstoneTx(tx, targetKey, SyncEntityObservation, payload.SyncID, mutation.Seq)
@@ -12315,21 +12355,22 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		reviewAfter, _ = json.Marshal(obs.ReviewAfter)
 	}
 	return syncObservationPayload{
-		SyncID:         obs.SyncID,
-		SessionID:      obs.SessionID,
-		Type:           obs.Type,
-		Title:          obs.Title,
-		Content:        obs.Content,
-		ToolName:       obs.ToolName,
-		Project:        obs.Project,
-		Scope:          obs.Scope,
-		TopicKey:       obs.TopicKey,
-		RevisionCount:  obs.RevisionCount,
-		DuplicateCount: obs.DuplicateCount,
-		LastSeenAt:     obs.LastSeenAt,
-		ReviewAfter:    reviewAfter,
-		CreatedAt:      obs.CreatedAt,
-		UpdatedAt:      obs.UpdatedAt,
+		SyncID:             obs.SyncID,
+		SessionID:          obs.SessionID,
+		Type:               obs.Type,
+		Title:              obs.Title,
+		Content:            obs.Content,
+		ToolName:           obs.ToolName,
+		Project:            obs.Project,
+		Scope:              obs.Scope,
+		TopicKey:           obs.TopicKey,
+		RevisionCount:      obs.RevisionCount,
+		DuplicateCount:     obs.DuplicateCount,
+		LastSeenAt:         obs.LastSeenAt,
+		ReviewAfter:        reviewAfter,
+		SupersededBySyncID: obs.SupersededBySyncID,
+		CreatedAt:          obs.CreatedAt,
+		UpdatedAt:          obs.UpdatedAt,
 	}
 }
 
@@ -12519,6 +12560,9 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		if err != nil {
 			return err
 		}
+		if err := s.preserveObservationProvenanceTx(tx, payload.SyncID, payload.SupersededBySyncID); err != nil {
+			return err
+		}
 		return s.clearSyncDeleteTombstoneForUpsertTx(tx, SyncEntityObservation, payload.SyncID)
 	}
 	if err != nil {
@@ -12568,6 +12612,9 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if err != nil {
 		return err
 	}
+	if err := s.preserveObservationProvenanceTx(tx, payload.SyncID, payload.SupersededBySyncID); err != nil {
+		return err
+	}
 	return s.clearSyncDeleteTombstoneForUpsertTx(tx, SyncEntityObservation, payload.SyncID)
 }
 
@@ -12596,8 +12643,8 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		updatedAt = *deletedAt
 	}
 	_, err = s.execHook(tx,
-		`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE id = ?`,
-		deletedAt, updatedAt, existing.ID,
+		`UPDATE observations SET deleted_at = ?, updated_at = ?, superseded_by_sync_id = COALESCE(NULLIF(?, ''), superseded_by_sync_id) WHERE id = ?`,
+		deletedAt, updatedAt, payload.SupersededBySyncID, existing.ID,
 	)
 	return err
 }
@@ -12770,7 +12817,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 	return scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
-		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &o.SupersededBySyncID,
 	)
 }
 

@@ -362,9 +362,10 @@ func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Obse
 		if _, err := s.execHook(tx,
 			`UPDATE observations
 			 SET deleted_at = datetime('now'),
+			     superseded_by_sync_id = ?,
 			     updated_at = datetime('now')
 			 WHERE id = ? AND deleted_at IS NULL`,
-			src.ID,
+			syncID, src.ID,
 		); err != nil {
 			return nil, err
 		}
@@ -383,11 +384,12 @@ func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Obse
 			continue
 		}
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, src.SyncID, SyncOpDelete, syncObservationPayload{
-			SyncID:    src.SyncID,
-			SessionID: src.SessionID,
-			Project:   src.Project,
-			Deleted:   true,
-			DeletedAt: &deletedAt,
+			SyncID:             src.SyncID,
+			SessionID:          src.SessionID,
+			Project:            src.Project,
+			Deleted:            true,
+			DeletedAt:          &deletedAt,
+			SupersededBySyncID: &syncID,
 		}); err != nil {
 			return nil, err
 		}

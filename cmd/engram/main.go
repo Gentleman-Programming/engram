@@ -165,6 +165,9 @@ var (
 	syncExport = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
 		return sy.Export(createdBy, project)
 	}
+	syncExportWithPrompts = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
+		return sy.ExportWithOptions(createdBy, project, engramsync.GitExportOptions{IncludePrompts: true})
+	}
 	newCloudAutosyncManager = func(s *store.Store, _ any) cloudAutosyncManager {
 		mgr := autosync.New(s, nil, autosync.DefaultConfig())
 		return autosyncManagerAdapter{manager: mgr}
@@ -743,6 +746,14 @@ func main() {
 			fatal(err)
 		}
 		return
+	}
+
+	// Reject Git-only prompt options before startup can touch local or remote state.
+	if os.Args[1] == "sync" {
+		if err := validateSyncPromptPrivacy(os.Args[2:], envBool("ENGRAM_CLOUD_SYNC")); err != nil {
+			fatal(err)
+			return
+		}
 	}
 
 	if shouldCheckForUpdates(os.Args[1:]) {
@@ -2114,12 +2125,42 @@ func printCloudImportProgress(progress engramsync.ImportProgress) {
 		progress.LocalChunks, progress.RemoteChunks, progress.PendingChunks, progress.Percentage)
 }
 
+// validateSyncPromptPrivacy is a read-only preflight shared by main and cmdSync.
+// Leave help and existing project-parse errors to their established handlers.
+func validateSyncPromptPrivacy(args []string, cloudEnabled bool) error {
+	includePrompts, incompatible := false, cloudEnabled
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h", "help":
+			return nil
+		case "--project":
+			if _, err := requiredProjectValue(args, i); err != nil {
+				return nil
+			}
+			i++ // A project value is not a mode or help flag.
+		case "--include-prompts":
+			includePrompts = true
+		case "--import", "--status", "--cloud":
+			incompatible = true
+		}
+	}
+	if includePrompts && incompatible {
+		return fmt.Errorf("--include-prompts is only supported for local Git sync export; cannot combine with --import, --status, or cloud sync")
+	}
+	return nil
+}
+
 func cmdSync(cfg store.Config) {
+	if err := validateSyncPromptPrivacy(os.Args[2:], envBool("ENGRAM_CLOUD_SYNC")); err != nil {
+		fatal(err)
+		return
+	}
 	// Parse flags
 	doImport := false
 	doStatus := false
 	doAll := false
 	doCloud := false
+	includePrompts := false
 	literalProject := false
 	project := ""
 	projectProvided := false
@@ -2136,6 +2177,8 @@ func cmdSync(cfg store.Config) {
 			doAll = true
 		case "--cloud":
 			doCloud = true
+		case "--include-prompts":
+			includePrompts = true
 		case "--literal-project":
 			literalProject = true
 		case "--project":
@@ -2336,7 +2379,15 @@ func cmdSync(cfg store.Config) {
 			fmt.Printf("Exporting memories for project %q...\n", project)
 		}
 	}
-	result, err := syncExport(sy, username, project)
+	if !cloudEnabled && !includePrompts {
+		fmt.Println("Prompts excluded from Git sync (use --include-prompts to intentionally share them).")
+	}
+	var result *engramsync.SyncResult
+	if includePrompts {
+		result, err = syncExportWithPrompts(sy, username, project)
+	} else {
+		result, err = syncExport(sy, username, project)
+	}
 	if err != nil {
 		if cloudEnabled {
 			markCloudSyncFailure(s, cloudTargetKey, err)
@@ -2371,6 +2422,9 @@ func cmdSync(cfg store.Config) {
 		return
 	}
 	fmt.Println()
+	fmt.Println("Warning: sessions, observations, and any included prompts may contain sensitive content.")
+	fmt.Println("Review .engram/ before sharing; committed content can remain permanently in Git history.")
+	fmt.Println("Excluding prompts later does not erase existing chunks or Git history.")
 	fmt.Println("Add to git:")
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
 }
@@ -2391,9 +2445,10 @@ func printSkippedRelationWarnings(result *engramsync.ImportResult) {
 }
 
 func printSyncUsage() {
-	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT [--literal-project]]")
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--include-prompts] [--cloud --project PROJECT [--literal-project]]")
 	fmt.Println("--literal-project skips URL decoding of an explicit cloud project; normalization still applies.")
-	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
+	fmt.Println("Local sync exports project-scoped chunks to .engram/; prompts are excluded by default, including with --all.")
+	fmt.Println("--include-prompts intentionally shares prompts in local Git export only; incompatible with --import, --status, and cloud (including ENGRAM_CLOUD_SYNC).")
 	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
 }
 

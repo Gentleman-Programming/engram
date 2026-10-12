@@ -69,6 +69,7 @@ The sentence that organizes the whole repo:
 | Change cloud autosync | `internal/cloud/autosync/manager.go` | [Sync and Cloud](codebase/sync-and-cloud.md), `internal/cloud/remote/transport.go`, `DOCS.md#cloud-autosync` |
 | Change the dashboard | `internal/cloud/dashboard/dashboard.go` | [Dashboard](codebase/dashboard.md), `internal/cloud/dashboard/*_templ.go`, `internal/cloud/dashboard/static/styles.css` |
 | Change agent setup | `internal/setup/registry.go`, `internal/setup/agents.go`, `internal/setup/setup.go` | [Integrations](codebase/integrations.md), `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
+| Review CI issue-approval metadata | `.github/scripts/issue-validation.mjs` | [Read-only linked-issue validation](ci-issue-validation.md) |
 
 ## Full technical reference stays in DOCS.md
 

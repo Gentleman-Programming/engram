@@ -28,7 +28,7 @@ Local SQLite
 
 `internal/sync/sync.go` avoids one large shared JSON file. Each sync creates new chunks and a small manifest. That reduces merge conflicts and lets multiple machines generate memory in parallel.
 
-Project-scoped Git chunks carry sessions, observations, and the non-orphaned `memory_relations` graph for observations in that project. **Prompts are excluded by default**, including previously imported prompts. Intentional sharing through the core API requires `ExportWithOptions` with `GitExportOptions{IncludePrompts: true}`. Relation rows travel as existing `relation` sync mutations inside the chunk so imports reuse the same idempotent relation apply path as cloud sync.
+Project-scoped Git chunks carry sessions, observations, and the non-orphaned `memory_relations` graph for observations in that project. **Prompts are excluded by default**, including previously imported prompts. Intentional sharing requires `engram sync --include-prompts`; the core API is `ExportWithOptions` with `GitExportOptions{IncludePrompts: true}`. Relation rows travel as existing `relation` sync mutations inside the chunk so imports reuse the same idempotent relation apply path as cloud sync.
 
 Prompt exclusion happens before serialization, hashing, and counting, without changing local SQLite data. Prompt-delete tombstones still travel: they share identity and deletion metadata, not prompt content. Cloud replication and standalone `engram export` retain their existing prompt behavior; the Git opt-in option is rejected in cloud mode before effects. Import remains compatible with historical prompt-bearing chunks.
 

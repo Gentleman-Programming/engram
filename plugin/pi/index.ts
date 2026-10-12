@@ -100,41 +100,58 @@ You have access to Engram, a persistent memory system that survives across sessi
 The agent MUST follow this protocol without waiting for activation.
 These instructions are injected by gentle-engram, the Pi-native memory provider. Use the memory tools named in this section as the authoritative Pi memory contract. Do not infer alternative Engram tool names from other integrations unless the user explicitly asks you to use them.
 
-### WHEN TO SAVE (mandatory — not optional)
+### CANONICAL TOPIC WORKFLOW (mandatory — not optional)
 
-Call \`mem_save\` IMMEDIATELY after any of these:
-- Bug fix completed (include the root cause)
+A memory is an evolving topic, not a log entry. Follow this workflow for every learning worth persisting.
+
+1. **SEARCH first.** Use \`mem_search\` on the bounded subject in the intended project and scope before writing.
+2. **READ in full.** Use \`mem_get_observation\` on plausible candidates; search snippets are not enough to decide identity.
+3. **SAME bounded topic?** Use \`mem_update\` by ID. Keep the existing \`topic_key\`, preserve every still-valid fact, and rewrite only what changed. Record superseded facts as history inside the content instead of leaving competing current truths.
+4. **Genuinely new topic?** Use \`mem_save\` with a deliberate, distinct \`topic_key\`. If the learning is already covered, write nothing.
+5. **Ambiguous identity or failed lookup?** Do not blindly overwrite and do not fall back to a duplicate save. A failed read is not evidence of absence.
+6. **Never merge across projects or scopes.** A matching suggested \`topic_key\` or a similar title is a hint, not proof of identity.
+
+Save when one of these happens:
+- Bug fix completed
+- Architecture or design decision made
+- Non-obvious discovery about the codebase
+- Configuration change or environment setup
+- Pattern established (naming, structure, convention)
+- User preference or constraint learned
 - Feature implemented with a non-obvious approach
 - Notion/Jira/GitHub artifact created or updated with significant content
-- Configuration change or environment setup done
-- Architecture or design decision made
 - Team convention documented or established
 - Workflow change agreed upon
 - Tool or library choice made with tradeoffs
-- Non-obvious discovery about the codebase
 - Gotcha, edge case, or unexpected behavior found
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
 - User confirms or rejects a recommendation or approach
 - User expresses a preference or makes a decision after presented options
 - Discussion concludes with a clear direction chosen
 
+For completed bug fixes, include the root cause in the persisted content.
 After EVERY task, self-check: "Did I or the user make a decision, confirm or reject
 an approach, express a preference, fix a bug, learn something non-obvious, or
-establish a convention?" If yes, call \`mem_save\` now. Save verified, significant
-conclusions rather than routine progress, source dumps, or speculation. Never save
-secrets, credentials, private content, or personal data.
+establish a convention?" If yes, follow the canonical topic workflow now:
+update an existing topic, save a genuinely new topic, or write nothing if covered.
+Save verified, significant conclusions rather than routine progress, source dumps,
+or speculation. Never save secrets, credentials, private content, or personal data.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
 - **scope**: \`project\` (default) | \`personal\` | \`global\`
-- **topic_key**: stable key for evolving decisions when relevant
+- **topic_key**: stable, deliberate key for the topic; reuse via \`mem_update\` rather than duplicating
 - **content**:
   **What**: One sentence — what was done
   **Why**: What motivated it
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you
+
+Format for \`mem_update\`:
+- **id**: observation ID from \`mem_search\` / \`mem_get_observation\`
+- **expected_project**: project that owns the observation
+- **topic_key**: keep the existing key unless the topic itself changed
+- **content**: full rewritten content including every still-valid fact, with changed or superseded facts recorded as history
 
 ### NATIVE SESSION ATTRIBUTION
 
@@ -150,7 +167,7 @@ resolves the effective persisted ID. Ordinary task completion does not end it.
 Pi automatically scans eligible non-Engram tool outputs after redaction; only
 recognized structured learnings are persisted, not arbitrary output.
 Final assistant responses are not automatically captured. For significant learnings
-in a response, call \`mem_save\` or \`mem_capture_passive\` explicitly before replying;
+in a response, follow the canonical topic workflow before replying;
 a final \`## Key Learnings:\` section alone is not a persistence guarantee.
 
 ### DELIVERY GUARANTEE
@@ -1812,7 +1829,7 @@ const optionalBoolean = (description: string) => Type.Optional(Type.Boolean({ de
 
 const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   mem_search: Type.Object({
-    query: Type.String({ description: "Search query — natural language or keywords" }),
+    query: Type.String({ description: "Search query — natural language or keywords. Search existing memories before saving; snippets are not enough to decide identity." }),
     type: optionalString("Filter by observation type"),
     project: optionalString("Filter by project name"),
     scope: optionalString("Filter by scope: project, personal, or global. Omit to apply no scope filter."),
@@ -1822,22 +1839,22 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_save: Type.Object({
     title: Type.String({ description: "Short, searchable title" }),
-    content: Type.String({ description: "Structured memory content" }),
+    content: Type.String({ description: "Structured memory content. New topics only: search and read first; use mem_update for an existing topic." }),
     type: optionalString("Observation type/category"),
     scope: optionalString("Scope: project, personal, or global"),
-    topic_key: optionalString("Stable topic key for upserts"),
+    topic_key: optionalString("Stable, deliberate topic key; reuse via mem_update rather than duplicating"),
     project: optionalString("Optional explicit project"),
     cwd: optionalString("Optional directory whose Engram project receives this write; must agree with project when both are set"),
     capture_prompt: optionalBoolean("Capture the available session/project prompt for this save (default true); does not disable lifecycle capture"),
   }),
   mem_update: Type.Object({
-    id: Type.Number({ description: "Observation ID to update" }),
+    id: Type.Number({ description: "Observation ID to update. Update an existing observation by ID; preserve still-valid facts and keep its topic_key." }),
     expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     title: optionalString("New title"),
     content: optionalString("New content"),
     type: optionalString("New type/category"),
     scope: optionalString("New scope: project, personal, or global"),
-    topic_key: optionalString("New topic key"),
+    topic_key: optionalString("Keep the existing topic_key unless the topic itself changed"),
   }),
   mem_delete: Type.Object({
     id: Type.Number({ description: "Observation ID to delete" }),
@@ -1875,7 +1892,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     project: optionalString("Filter by project name"),
   }),
   mem_get_observation: Type.Object({
-    id: Type.Number({ description: "Observation ID to retrieve" }),
+    id: Type.Number({ description: "Observation ID to retrieve. Read in full before deciding identity or updating." }),
   }),
   mem_session_start: Type.Object({
     id: Type.String({ description: "Unique session identifier" }),
