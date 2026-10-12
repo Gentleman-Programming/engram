@@ -1859,7 +1859,12 @@ func cmdTimeline(cfg store.Config) {
 	}
 }
 
+var storeFormatContextWithOptions = func(s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+	return s.FormatContextWithOptions(project, scope, opts)
+}
+
 func cmdContext(cfg store.Config) {
+	olderHistory := false
 	projectName := ""
 	legacyProject := ""
 	scope := ""
@@ -1868,6 +1873,8 @@ func cmdContext(cfg store.Config) {
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "--older-history":
+			olderHistory = true
 		case "--project":
 			if i+1 >= len(os.Args) || strings.TrimSpace(os.Args[i+1]) == "" {
 				fatal(errors.New("context project selector requires a value"))
@@ -1926,7 +1933,12 @@ func cmdContext(cfg store.Config) {
 		return
 	}
 
-	ctx, err := storeFormatContext(s, resolved, scope)
+	var ctx string
+	if olderHistory {
+		ctx, err = storeFormatContextWithOptions(s, resolved, scope, store.ContextOptions{OlderHistory: true})
+	} else {
+		ctx, err = storeFormatContext(s, resolved, scope)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -3788,7 +3800,7 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-  context [project] [--project PROJECT|--all] [--scope SCOPE]
+  context [project] [--project PROJECT|--all] [--scope SCOPE] [--older-history]
                      Show recent context from previous sessions
   stats [--project PROJECT|--all]
                      Show memory system statistics
