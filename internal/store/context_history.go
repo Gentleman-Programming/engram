@@ -62,7 +62,8 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 	if err != nil {
 		return nil, nil, err
 	}
-	defer tx.Rollback()
+	// Cleanup is best effort; query and commit results remain authoritative.
+	defer func() { _ = tx.Rollback() }()
 	project, _ = NormalizeProject(project)
 	filter := "deleted_at IS NULL AND pinned = 0"
 	args := []any{}
@@ -87,13 +88,13 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 	for rows.Next() {
 		var o Observation
 		if err = scanObservationRow(rows, &o); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, nil, err
 		}
 		recent = append(recent, o)
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -113,7 +114,7 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 		var label, kind string
 		var count int
 		if err = rows.Scan(&label, &kind, &count); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, nil, err
 		}
 		g := groups[label]
@@ -125,7 +126,7 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 		g.types = append(g.types, fmt.Sprintf("%s: %d", historyLine(kind), count))
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -151,13 +152,13 @@ func (s *Store) contextHistory(project, scope string, limit int, now time.Time) 
 				var id int64
 				var title string
 				if err = rows.Scan(&id, &title); err != nil {
-					rows.Close()
+					_ = rows.Close()
 					return nil, nil, err
 				}
 				g.samples = append(g.samples, fmt.Sprintf("  - Sample #%d: %s\n", id, historyLine(title)))
 			}
 			err = rows.Err()
-			rows.Close()
+			_ = rows.Close()
 			if err != nil {
 				return nil, nil, err
 			}
