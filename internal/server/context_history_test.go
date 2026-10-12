@@ -14,7 +14,7 @@ func TestContextHistoryHTTPRealRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.CreateSession("real-history", "alpha", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestContextHistoryForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.CreateSession("history", "engram", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
