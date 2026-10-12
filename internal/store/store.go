@@ -424,8 +424,22 @@ const (
 )
 
 // decayReviewAfterMonths maps observation type → month offset for review_after.
-// Types absent from this map get review_after = NULL (Phase 1 behavior).
+// These are initial review prompts, not expiration deadlines. Unmapped types
+// receive no default; existing rows are not backfilled.
 var decayReviewAfterMonths = map[string]int{
+	"decision":     decayDecisionMonths,
+	"policy":       decayPolicyMonths,
+	"preference":   decayPreferenceMonths,
+	"config":       decayPreferenceMonths,
+	"discovery":    decayDecisionMonths,
+	"pattern":      decayDecisionMonths,
+	"architecture": decayPolicyMonths,
+	"bugfix":       decayPolicyMonths,
+}
+
+// Legacy sync payloads without review_after retain their original derivation
+// contract. New local defaults must not reinterpret imported historical records.
+var legacySyncReviewAfterMonths = map[string]int{
 	"decision":   decayDecisionMonths,
 	"policy":     decayPolicyMonths,
 	"preference": decayPreferenceMonths,
@@ -12459,7 +12473,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		if len(payload.ReviewAfter) == 0 {
-			if months, ok := decayReviewAfterMonths[payload.Type]; ok {
+			if months, ok := legacySyncReviewAfterMonths[payload.Type]; ok {
 				created, parseErr := parseObservationTime(createdAt)
 				if parseErr != nil {
 					return fmt.Errorf("derive review_after from created_at: %w", parseErr)
