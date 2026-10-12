@@ -203,7 +203,8 @@ func TestConsolidateObservations_Execute_JournalOrderSurvivorFirst(t *testing.T)
 // failed insert can never leave the deletes applied.
 func TestConsolidateObservations_AtomicRollback_InsertFailure(t *testing.T) {
 	s, ids, _ := consolidateTestStore(t)
-	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+	overrides := ConsolidateOverrides{Title: "BOOM survivor"}
+	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids, Overrides: overrides})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -224,10 +225,10 @@ func TestConsolidateObservations_AtomicRollback_InsertFailure(t *testing.T) {
 		IDs:         ids,
 		Confirm:     true,
 		Fingerprint: plan.Plan.Fingerprint,
-		Overrides:   ConsolidateOverrides{Title: "BOOM survivor"},
+		Overrides:   overrides,
 	})
-	if err == nil {
-		t.Fatal("expected the forced insert failure to surface")
+	if err == nil || !strings.Contains(err.Error(), "forced survivor insert failure") {
+		t.Fatalf("expected the forced insert failure, got %v", err)
 	}
 	if got := observationLiveCount(t, s); got != 3 {
 		t.Fatalf("rollback failed: live observations got %d, want 3 (sources must stay live)", got)
@@ -402,7 +403,7 @@ func TestConsolidateObservations_SurvivorDefaults(t *testing.T) {
 	overrides := ConsolidateOverrides{
 		Title:    "Explicit survivor title",
 		Content:  "Explicit survivor content.",
-		Type:     "decision",
+		Type:     "architecture",
 		TopicKey: "architecture/auth-model",
 	}
 	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids, Overrides: overrides})
@@ -428,7 +429,7 @@ func TestConsolidateObservations_SurvivorDefaults(t *testing.T) {
 	if derefString(surv.TopicKey) != "architecture/auth-model" {
 		t.Fatalf("explicit topic_key must be honored, got %q", derefString(surv.TopicKey))
 	}
-	if surv.Type != "decision" {
-		t.Fatalf("survivor type: got %q, want decision", surv.Type)
+	if surv.Type != "architecture" {
+		t.Fatalf("survivor type: got %q, want architecture", surv.Type)
 	}
 }

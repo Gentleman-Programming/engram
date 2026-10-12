@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -51,7 +52,7 @@ const consolidatedFromMarker = "## consolidated_from"
 
 // consolidateFingerprintVersion namespaces the plan fingerprint format so a
 // future formula change cannot silently confirm against old fingerprints.
-const consolidateFingerprintVersion = "consolidate:v1"
+const consolidateFingerprintVersion = "consolidate:v2"
 
 // consolidateSyncIDPattern matches observation sync ids inside a provenance
 // footer. newSyncID's random path emits hex and its fallback emits decimal;
@@ -80,8 +81,8 @@ type ConsolidateSurvivor struct {
 }
 
 // ConsolidatePlan is the resolved, refusal-checked plan. Sources are ordered
-// newest-first; Fingerprint covers every source field the atomicity guarantee
-// depends on.
+// newest-first; Fingerprint binds the resolved source snapshots and survivor
+// shown in this preview, not just source revision counters.
 type ConsolidatePlan struct {
 	IDs         []int64
 	Sources     []Observation
@@ -92,7 +93,8 @@ type ConsolidatePlan struct {
 
 // ConsolidateParams selects sources, overrides, and the plan/confirm protocol:
 // Confirm=false is the dry-run default; Confirm=true requires the
-// Fingerprint of the plan being confirmed.
+// Fingerprint of the plan being confirmed. Changed source state or a changed
+// resolved survivor requires a fresh preview and confirmation.
 type ConsolidateParams struct {
 	IDs         []int64
 	Overrides   ConsolidateOverrides
@@ -199,8 +201,11 @@ func (s *Store) buildConsolidationPlanTx(tx *sql.Tx, ids []int64, overrides Cons
 			project = resolved
 		}
 		project, _ = NormalizeProject(project)
+		if project == "" {
+			return nil, ErrProjectRequired
+		}
 		src.Project = nullableString(project)
-		if canonical == "" {
+		if i == 0 {
 			canonical = project
 		} else if project != canonical {
 			return nil, ErrConsolidateCrossProject
@@ -247,12 +252,16 @@ func (s *Store) buildConsolidationPlanTx(tx *sql.Tx, ids []int64, overrides Cons
 	}
 	survivor.Content = consolidateContentWithProvenance(baseContent, sources)
 
+	fingerprint, err := consolidateFingerprint(sources, survivor)
+	if err != nil {
+		return nil, err
+	}
 	return &ConsolidatePlan{
 		IDs:         ids,
 		Sources:     sources,
 		Survivor:    survivor,
 		Project:     canonical,
-		Fingerprint: consolidateFingerprint(sources),
+		Fingerprint: fingerprint,
 	}, nil
 }
 
@@ -281,25 +290,35 @@ func consolidateContentWithProvenance(base string, sources []Observation) string
 	return b.String()
 }
 
-// consolidateFingerprint hashes the source set: every field a write can
-// change (updated_at and revision_count move on every mutation path) plus the
-// identity fields. Sorted by id so list order never changes the fingerprint.
-func consolidateFingerprint(sources []Observation) string {
-	ordered := make([]Observation, len(sources))
-	copy(ordered, sources)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
-	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s|", consolidateFingerprintVersion)
-	for i := range ordered {
-		_, _ = fmt.Fprintf(h, "%d|%s|%s|%d|", ordered[i].ID, ordered[i].SyncID, ordered[i].UpdatedAt, ordered[i].RevisionCount)
+// consolidateFingerprint binds full source state and the resolved survivor.
+// Migration and diagnostic repair can change sources without advancing revision
+// counters. JSON frames fields unambiguously; ID sorting makes input order inert.
+func consolidateFingerprint(sources []Observation, survivor ConsolidateSurvivor) (string, error) {
+	type sourceSnapshot struct {
+		Observation
+		Pinned bool `json:"pinned"` // Observation excludes this field from sync JSON.
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	ordered := make([]sourceSnapshot, len(sources))
+	for i, source := range sources {
+		ordered[i] = sourceSnapshot{Observation: source, Pinned: source.Pinned}
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	payload, err := json.Marshal(struct {
+		Version  string
+		Sources  []sourceSnapshot
+		Survivor ConsolidateSurvivor
+	}{consolidateFingerprintVersion, ordered, survivor})
+	if err != nil {
+		return "", fmt.Errorf("encode consolidation fingerprint: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
 
 // executeConsolidationTx mutates inside the caller's transaction: survivor
-// INSERT first, its upsert journal row next (a peer mid-range never sees
-// deletes without a survivor), then one soft-delete plus journal row per
-// source, oldest-first for deterministic ranges. Unenrolled projects journal
+// INSERT first, its upsert journal row next, then one soft-delete plus journal
+// row per source in ID order. This orders the local journal, not remote visibility:
+// a peer may defer the survivor upsert if its parent session is missing.
+// Unenrolled projects journal
 // no cloud rows; their sources take the supersede-pending path, mirroring
 // DeleteObservation.
 func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Observation, error) {
@@ -334,7 +353,7 @@ func (s *Store) executeConsolidationTx(tx *sql.Tx, plan *ConsolidatePlan) (*Obse
 		}
 	}
 
-	// Oldest-first deletes keep journal ranges deterministic.
+	// ID-order deletes keep journal ranges deterministic.
 	ordered := make([]Observation, len(plan.Sources))
 	copy(ordered, plan.Sources)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
