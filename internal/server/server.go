@@ -458,6 +458,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /compatibility", requireAuth(s.handleCompatibility))
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 
 	// Sessions

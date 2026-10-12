@@ -187,46 +187,73 @@ func codexRuntimeResult(ctx context.Context, client *http.Client, base, host, cw
 			return "", codexCoreUpgradeReason
 		}
 	}
-	body, _ := json.Marshal(map[string]string{"id": host, "directory": cwd, "project": project})
+	scope := map[string]string{"id": host, "directory": cwd, "project": project}
+	id, reason, conflict := codexRuntimeRequest(ctx, client, base, host, scope, operation)
+	if !conflict {
+		return id, reason
+	}
+	// Only a received scope-conflict rejection permits rebinding. Normal paths,
+	// transport uncertainty and unrelated errors never add a lookup or replay.
+	root, known, lookupErr := hookSessionOwnerProject(ctx, client, base, host)
+	mode := strings.TrimSpace(root.OwnershipMode)
+	if lookupErr != nil || !known || root.EndedAt == nil || strings.TrimSpace(root.Directory) == "" || (mode != "shared" && mode != "project_owned") {
+		return "", failure
+	}
+	// Keep the caller's project: project-owned foreign requests remain rejected,
+	// while shared roots retain their existing cross-project permissions.
+	scope["directory"], scope["ownership_mode"] = root.Directory, mode
+	id, reason, _ = codexRuntimeRequest(ctx, client, base, host, scope, operation)
+	return id, reason
+}
+
+func codexRuntimeRequest(ctx context.Context, client *http.Client, base, host string, scope map[string]string, operation string) (string, string, bool) {
+	const failure = "Codex host session resolution could not be confirmed"
+	body, _ := json.Marshal(scope)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/runtime-sessions/"+operation, strings.NewReader(string(body)))
 	if err != nil {
-		return "", failure
+		return "", failure, false
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return "", failure
+		return "", failure, false
 	}
 	defer func() { _ = response.Body.Close() }()
 	var fields map[string]json.RawMessage
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, 65537))
 	decodeErr := json.Unmarshal(data, &fields)
 	if readErr != nil || len(data) > 65536 {
-		return "", failure
+		return "", failure, false
 	}
 	if response.StatusCode == http.StatusNotFound && operation == "resolve" {
 		var message string
 		if decodeErr == nil && json.Unmarshal(fields["error"], &message) == nil && message == "sql: no rows in result set" {
-			return "", "Codex host session is not registered; start a new Codex session to register it"
+			return "", "Codex host session is not registered; start a new Codex session to register it", false
 		}
 		// A plain HTTP 404 is an absent route, not a missing identity.
 		if decodeErr != nil && strings.TrimSpace(string(data)) == "404 page not found" {
-			return "", codexCoreUpgradeReason
+			return "", codexCoreUpgradeReason, false
+		}
+	}
+	if response.StatusCode == http.StatusConflict && decodeErr == nil {
+		var message string
+		if json.Unmarshal(fields["error"], &message) == nil && message == "runtime session scope conflict" {
+			return "", failure, true
 		}
 	}
 	if response.StatusCode != http.StatusOK || decodeErr != nil {
-		return "", failure
+		return "", failure, false
 	}
 	var status string
 	if json.Unmarshal(fields["status"], &status) != nil || (operation == "resolve" && status != "resolved") || (operation == "end" && status != "ended") {
-		return "", failure
+		return "", failure, false
 	}
 	fields["status"] = json.RawMessage(`"created"`)
 	id := codexAcknowledgedID(fields, host, true)
 	if id == "" {
-		return "", failure
+		return "", failure, false
 	}
-	return id, ""
+	return id, "", false
 }
 
 func cmdCodexLifecycle(action string) {

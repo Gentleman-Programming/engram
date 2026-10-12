@@ -25,6 +25,12 @@ const ENGRAM_PORT = Number.parseInt(optionalEnvironmentValue(process.env.ENGRAM_
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
+// Only absence preserves standalone behavior; every supplied value except literal
+// "allow" fails closed, including empty or whitespace values. Never execute notice text.
+const ENGRAM_STARTUP_ALLOWED = process.env.ENGRAM_STARTUP_POLICY === undefined
+  || process.env.ENGRAM_STARTUP_POLICY === "allow";
+const ENGRAM_DISABLED_NOTICE = "Engram memory is disabled by startup policy. Back up your existing Engram data, update Engram, restart its server and Pi, then recheck memory safety."
+  + (process.env.ENGRAM_STARTUP_NOTICE ? ` ${process.env.ENGRAM_STARTUP_NOTICE}` : "");
 
 // Only allowlisted metadata is logged; never pass request bodies, identities, or errors.
 type SessionTraceEvent =
@@ -1086,6 +1092,9 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 }
 
 async function initializeEngramServer(): Promise<void> {
+  // Defense in depth: a future caller must not bypass policy via an explicit URL
+  // or reach the potentially state-writing instance-id command.
+  if (!ENGRAM_STARTUP_ALLOWED) throw new Error(ENGRAM_DISABLED_NOTICE);
   if (CONFIGURED_ENGRAM_URL !== undefined) return;
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
@@ -1326,7 +1335,7 @@ function supportsRootSessionResume(health: unknown): boolean {
 function rootResumeCompatibilityError(health: unknown): Error {
   const version = health && typeof health === "object" && typeof (health as { version?: unknown }).version === "string"
     ? (health as { version: string }).version : "unknown";
-  return new Error(`gentle-engram 0.4.1 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
+  return new Error(`gentle-engram 0.4.2 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
 }
 
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
@@ -2468,6 +2477,17 @@ function installBridgeResponder(pi: ExtensionAPI, ctx: SessionContext, runtimeID
 }
 
 export default function registerEngram(pi: ExtensionAPI) {
+  if (!ENGRAM_STARTUP_ALLOWED) {
+    // No normal tools, protocol, bridge responder, capture or shutdown hooks.
+    pi.on("session_start", (_event: unknown, ctx: SessionContext) => {
+      try { ctx.ui?.setStatus?.("engram", "🧠 memory disabled"); } catch {}
+      try {
+        if (ctx.hasUI) ctx.ui?.notify?.(ENGRAM_DISABLED_NOTICE, "warning");
+        else process.stderr.write(`${ENGRAM_DISABLED_NOTICE}\n`);
+      } catch { /* A disposed UI must not interrupt a usable memory-free session. */ }
+    });
+    return;
+  }
   // Trace-only comparison is local to this factory, never persistence or ownership state.
   let previousTraceIdentity: string | undefined;
   const traceLifecycle = (event: "session_start" | "session_shutdown", id: string | undefined | (() => string), reason?: unknown) => {

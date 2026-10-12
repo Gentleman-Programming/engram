@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # Baseline: PR #1728, CodeRabbit reply #6084792433 (Repository UI).
-# Preserve the baseline except for noise adjustments, JS/TS tests (#1742) and workflows (#1743).
+# Preserve the baseline except for noise adjustments and guidance (#1742, #1743, #1744).
 language: en-US
 tone_instructions: ''
 early_access: false
@@ -45,10 +45,30 @@ reviews:
     - '!**/*.db-wal'
     - '!**/*.db-shm'
   path_instructions:
-    - path: internal/store/**/*.go
-      instructions: Persistence layer. SQL queries live here, never in handlers. No HTTP logic or HTML rendering. Schema changes require a test.
-    - path: internal/cloud/cloudstore/**/*.go
-      instructions: Cloud persistence. SQL stays here. Cloud is replication, not source of truth (SQLite local is). Admin-enforceable sync policies must be validated server-side and fail loudly, never drop data silently.
+    - path: 'internal/store/**/*.go'
+      instructions: >-
+        Persistence layer. SQL queries live here, never in handlers. No HTTP logic or HTML rendering. Schema changes require a test. For sync/import changes only:
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
+    - path: 'internal/cloud/cloudstore/**/*.go'
+      instructions: >-
+        Cloud persistence. SQL stays here. Cloud is replication, not source of truth (SQLite local is). Admin-enforceable sync policies must be validated server-side and fail loudly, never drop data silently. For sync/import changes only:
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
     - path: internal/cloud/dashboard/**/*.templ
       instructions: Every modified .templ must have its regenerated *_templ.go committed in the same PR (run templ generate). Never edit *_templ.go by hand. No business logic here.
     - path: plugin/**
@@ -128,6 +148,72 @@ reviews:
         and treat fork inputs, PR metadata and downloaded artifacts as untrusted data;
         flag unsafe interpolation or execution, not legitimate metadata processing.
         Do not blanket-ban privileged events or replace deterministic checks/human review.
+    - path: 'internal/sync/**/*.go'
+      instructions: >-
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
+    - path: 'internal/cloud/chunkcodec/**/*.go'
+      instructions: >-
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
+    - path: 'internal/cloud/autosync/**/*.go'
+      instructions: >-
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
+    - path: 'internal/cloud/remote/transport.go'
+      instructions: >-
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
+    - path: 'internal/cloud/cloudserver/cloudserver.go'
+      instructions: >-
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
+    - path: 'internal/cloud/cloudserver/mutations.go'
+      instructions: >-
+        Review sync/import changes against existing core contracts; local SQLite remains the source of truth.
+        Preserve records, stable identities, deletion semantics and review_after metadata,
+        including the existing distinction between omitted fields, explicit null and valid dates.
+        Check idempotent replay and deduplication without inventing new conflict-resolution rules.
+        Review transaction boundaries and partial failures; do not assume whole-sync atomicity.
+        Advance push acknowledgements and pull cursors only according to successfully accepted/persisted work.
+        Policy failures must remain explicit, not silently discard data or bypass enrollment/cloud pause.
+        Require deterministic regression evidence for changed behavior, including rejected-input side effects,
+        replay and recovery after partial failure; do not prescribe new sync algorithms, ownership or scheduling policy.
   abort_on_close: true
   disable_cache: false
   slop_detection:

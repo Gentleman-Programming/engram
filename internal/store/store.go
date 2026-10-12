@@ -424,8 +424,22 @@ const (
 )
 
 // decayReviewAfterMonths maps observation type → month offset for review_after.
-// Types absent from this map get review_after = NULL (Phase 1 behavior).
+// These are initial review prompts, not expiration deadlines. Unmapped types
+// receive no default; existing rows are not backfilled.
 var decayReviewAfterMonths = map[string]int{
+	"decision":     decayDecisionMonths,
+	"policy":       decayPolicyMonths,
+	"preference":   decayPreferenceMonths,
+	"config":       decayPreferenceMonths,
+	"discovery":    decayDecisionMonths,
+	"pattern":      decayDecisionMonths,
+	"architecture": decayPolicyMonths,
+	"bugfix":       decayPolicyMonths,
+}
+
+// Legacy sync payloads without review_after retain their original derivation
+// contract. New local defaults must not reinterpret imported historical records.
+var legacySyncReviewAfterMonths = map[string]int{
 	"decision":   decayDecisionMonths,
 	"policy":     decayPolicyMonths,
 	"preference": decayPreferenceMonths,
@@ -878,11 +892,14 @@ func (s *Store) DataDir() string {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db         *sql.DB
-	cfg        Config
-	instanceID string
-	generation *databaseGeneration
-	hooks      storeHooks
+	compatibilityClosed    atomic.Bool
+	compatibilityReady     bool
+	compatibilityRuntimeID string
+	db                     *sql.DB
+	cfg                    Config
+	instanceID             string
+	generation             *databaseGeneration
+	hooks                  storeHooks
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -1088,11 +1105,19 @@ func newStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
+	if s.compatibilityReady {
+		var runtimeID [16]byte
+		if _, err := rand.Read(runtimeID[:]); err != nil {
+			return nil, fmt.Errorf("engram: runtime identity: %w", err)
+		}
+		s.compatibilityRuntimeID = hex.EncodeToString(runtimeID[:])
+	}
 	succeeded = true
 	return s, nil
 }
 
 func (s *Store) Close() error {
+	s.compatibilityClosed.Store(true)
 	return s.db.Close()
 }
 
@@ -1215,6 +1240,7 @@ func (s *Store) runStartupMigrations() error {
 				return fmt.Errorf("engram: set user_version: %w", err)
 			}
 		}
+		s.compatibilityReady = true
 		return nil
 	})
 }
@@ -3276,6 +3302,29 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	})
 }
 
+// ResolveManualSession registers an independent project-owned fallback session.
+// Keep the legacy ID when possible, but never claim a session owned by another
+// project. A separate deterministic namespace avoids interpreting the hash as
+// a legacy manual-save project suffix in diagnostics and ownership backfills.
+func (s *Store) ResolveManualSession(project, directory string) (string, error) {
+	project, _ = NormalizeProject(project)
+	id := manualSessionIDPrefix + project
+	err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned)
+	if err == nil {
+		return id, nil
+	}
+	var conflict *SessionProjectConflictError
+	if !errors.As(err, &conflict) {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(project))
+	id = "manual-fallback-" + hex.EncodeToString(digest[:])
+	if err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // runtimeSessionLeaseDuration bounds local runtime-session liveness. It is not
 // synchronized and never changes a session's terminal state.
 const runtimeSessionLeaseDuration = "+30 minutes"
@@ -3416,6 +3465,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		// attempt may become the terminal response.
 		claimed = false
 		id = root
+		var resumeScope *Session
 		validateIsolation := func(sessionID string) error {
 			if !isolated {
 				return nil
@@ -3443,7 +3493,8 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			// Validate terminal root ownership before looking up any continuation.
 			// A compatible suffix cannot bypass the requested identity's owner.
 			var endedAt *string
-			err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
+			var rootDirectory, rootMode string
+			err := tx.QueryRow(`SELECT ended_at, ifnull(directory, ''), ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, root).Scan(&endedAt, &rootDirectory, &rootMode)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -3457,6 +3508,12 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 						return &SessionProjectConflictError{SessionID: root, OwnerProject: owner, RequestedProject: project}
 					}
 					return err
+				}
+				// Preserve the root's binding for new continuations, but only after
+				// validating the caller's original project and ownership request.
+				// Incomplete legacy and isolated identities retain their old paths.
+				if !isolated && owner != "" && strings.TrimSpace(rootDirectory) != "" && validSessionOwnershipMode(strings.TrimSpace(rootMode)) {
+					resumeScope = &Session{Project: owner, Directory: rootDirectory, OwnershipMode: strings.TrimSpace(rootMode)}
 				}
 				if mode == SessionOwnershipProjectOwned && owner == "" {
 					_, foreignOwner, err := foreignRecordOwnerTx(tx, root, project)
@@ -3541,7 +3598,13 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			}
 			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
 		}
-		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
+		// Never rewrite or skip an already-selected continuation. Resolve/end
+		// still reject any existing scope mismatch rather than repairing data.
+		registrationProject, registrationDirectory, registrationMode := project, directory, mode
+		if !found && resumeScope != nil {
+			registrationProject, registrationDirectory, registrationMode = resumeScope.Project, resumeScope.Directory, resumeScope.OwnershipMode
+		}
+		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
 		}
 		if !identityRepaired {
@@ -3736,7 +3799,7 @@ const activeRuntimeSessionWindow = "-7 days"
 //   - A live lease suppresses unleased legacy candidates in its directory only.
 //     Where no live lease exists, preserve the legacy effective-activity window:
 //     the latest observation, falling back to started_at, must be recent.
-//   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
+//   - Exclude manual-save and manual-fallback sessions; those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
 //
@@ -3778,6 +3841,7 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 			  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
 			  AND s.ended_at IS NULL
 			  AND s.id NOT LIKE 'manual-save%'
+			  AND s.id NOT LIKE 'manual-fallback-%'
 			GROUP BY s.id
 		), live_leased_directories AS (
 			SELECT directory
@@ -8762,6 +8826,10 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 
 		// Plan settled — only now does anything change.
 		for _, sessionID := range plan.claim {
+			// The ownership stamp also assigns the project and counts the session.
+			if plan.stampOwnershipMode[sessionID] {
+				continue
+			}
 			if _, err := s.execHook(tx, rescueSessionQuery.updateProject, target, sessionID); err != nil {
 				return err
 			}
@@ -8827,8 +8895,8 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 type rescuePlan struct {
 	// claim lists unowned sessions that will be moved to the target.
 	claim []string
-	// stampOwnershipMode identifies target-owned sessions whose blank ownership
-	// mode can be deterministically classified from their session ID.
+	// stampOwnershipMode identifies sessions owned by the target after rescue
+	// whose blank mode can be deterministically classified from their session ID.
 	stampOwnershipMode map[string]bool
 	// willOwn reports, for every session in scope, whether it belongs to the
 	// target once the plan is applied.
@@ -8882,6 +8950,9 @@ func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, r
 			}
 			plan.claim = append(plan.claim, sessionID)
 			plan.willOwn[sessionID] = true
+			if mode == "" {
+				plan.stampOwnershipMode[sessionID] = true
+			}
 		}
 	}
 	return plan, nil
@@ -12416,7 +12487,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		if len(payload.ReviewAfter) == 0 {
-			if months, ok := decayReviewAfterMonths[payload.Type]; ok {
+			if months, ok := legacySyncReviewAfterMonths[payload.Type]; ok {
 				created, parseErr := parseObservationTime(createdAt)
 				if parseErr != nil {
 					return fmt.Errorf("derive review_after from created_at: %w", parseErr)

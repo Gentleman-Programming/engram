@@ -128,6 +128,7 @@ func printDoctorUsage() {
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")
 	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair, and "+diagnostic.CheckOrphanedPendingRelations+", which spans all projects because both-endpoints-absent relations belong to no project.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: source_unrepairable lists source fields requiring manual investigation; repair cannot reconstruct missing type or content.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
 	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
@@ -137,6 +138,7 @@ func printDoctorRepairUsage() {
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")
 	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair, and "+diagnostic.CheckOrphanedPendingRelations+", which spans all projects because both-endpoints-absent relations belong to no project.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: source_unrepairable lists source fields requiring manual investigation; repair cannot reconstruct missing type or content.")
 	_, _ = fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
 	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
@@ -310,7 +312,8 @@ func cmdDoctorRepair(cfg store.Config) {
 			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-		}{report, directoryRepairs, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
+			SourceUnrepairable     []store.ObservationSourceUnrepairable      `json:"source_unrepairable"`
+		}{report, directoryRepairs, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath, sourceRepairs.Unrepairable})
 		return
 	}
 

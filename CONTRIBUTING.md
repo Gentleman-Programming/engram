@@ -140,6 +140,33 @@ artifacts remain untrusted data. Require justification for legitimate write scop
 blanket `contents: read` or bans on privileged events. This adds no workflow,
 permission or required-check changes and does not replace actionlint or zizmor.
 
+Sync/import paths have targeted advisory instructions:
+
+| Sync surface | Instruction glob |
+|--------------|------------------|
+| Chunk export/import and replay | `internal/sync/**/*.go` |
+| Wire encoding | `internal/cloud/chunkcodec/**/*.go` |
+| Automatic push/pull orchestration | `internal/cloud/autosync/**/*.go` |
+| Transport | `internal/cloud/remote/transport.go` |
+| Chunk and mutation handlers | `internal/cloud/cloudserver/cloudserver.go`, `internal/cloud/cloudserver/mutations.go` |
+
+The existing `internal/store/**/*.go` and
+`internal/cloud/cloudstore/**/*.go` ownership instructions are retained, with
+additional guidance conditional on sync/import changes only. No duplicate
+persistence rules are added or instruction-overlap precedence assumed.
+
+Review record/identity and deletion preservation, and the existing `review_after`
+contract: omitted fields, explicit null and valid dates are not interchangeable.
+Check idempotent replay, transaction boundaries and recovery from partial
+failures; do not assume whole-sync atomicity. Check that push acknowledgements
+and pull cursors reflect successfully accepted/persisted work according to
+existing contracts. Policy rejection must stay explicit without bypassing
+enrollment or cloud pause. Seek deterministic regression evidence for changed
+observable behavior, including rejected-input side effects, replay and recovery.
+This guidance does not prescribe new sync algorithms, ownership/conflict rules
+or review scheduling, change data formats, permissions or required CI checks,
+or guarantee protection against data loss.
+
 CodeRabbit does not automatically approve PRs (`request_changes_workflow: false`),
 skips drafts, and does not replace human review or the required checks above.
 Generated outputs are excluded only from AI review, not from generation checks.
@@ -147,10 +174,11 @@ Existing manually requested code-generation/fix features remain unchanged.
 
 Changes to this file require normal issue-first review. Run `go test . -run
 TestCodeRabbit -count=1` to check YAML parsing, the two adjustments, JS/TS and
-workflow instruction content/scope, documentation and baseline preservation.
+workflow and sync instruction content/scope, documentation and baseline preservation.
 The original export hash is retained: only the five exact JS/TS instruction
-blocks and two exact workflow instruction blocks are removed before comparing
-all other settings. Deliberate future settings changes must
+blocks, two exact workflow instruction blocks and six exact sync instruction
+blocks are removed, and the two conditional persistence additions are reverted
+before comparing all other settings. Deliberate future settings changes must
 update the baseline test with their rationale. Local path examples exercise a
 limited plain-glob contract, not CodeRabbit's matcher, schema validation or live
 instruction overlap. To pause automatic reviews on one PR, comment
@@ -166,6 +194,11 @@ on these test surfaces and record useful findings, noise and limitations before
 claiming improved test-review quality. For workflow guidance, observe representative
 safe/unsafe review feedback without executing unsafe examples; record useful
 findings, false positives and limitations before claiming improved security review.
+For sync guidance, inspect representative live feedback for metadata preservation,
+replay and partial-failure changes; record useful findings, false positives and
+limitations after rollout. These local configuration tests do not prove live
+review quality or sync correctness; deterministic sync tests and human review
+remain necessary.
 
 ## Claude Plugin Version Rule
 
