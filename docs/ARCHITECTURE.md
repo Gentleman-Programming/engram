@@ -65,7 +65,7 @@ Context injection depends on the integration and available context: Claude Code 
 
 ## MCP Tools
 
-The stdio MCP server exposes memory capture, retrieval, session context, and administration tools to agents; project resolution occurs at tool call time. The canonical inventory and tool contracts are in [DOCS.md MCP Tools](../DOCS.md#mcp-tools-23-tools).
+The stdio MCP server exposes memory capture, retrieval, session context, and administration tools to agents; project resolution occurs at tool call time. The canonical inventory and tool contracts are in [DOCS.md MCP Tools](../DOCS.md#mcp-tools-25-tools). MCP clients may use deferred `mem_judge_many` for ordered independent verdicts and `mem_session_finalize` for atomic summary/close. The local finalization journal is not a new cloud entity.
 
 ---
 
@@ -204,7 +204,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (23 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (25 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge

@@ -212,6 +212,24 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 
 ---
 
+## MCP Tool Reference — mem_session_finalize
+
+MCP clients can finalize an existing exact session with required `session_id` and caller-authored `summary`, plus the optional summary project-resolution fields. One transaction saves a structured observation, ends the session, queues the normal enrolled-project mutations and records a local retry journal. The existing free-text session summary is preserved.
+
+Successful local retries return the same `summary_id` / `summary_sync_id` with `state: already_finalized` and no writes. A session ended separately rejects rather than silently dropping or backfilling the supplied summary. The journal is not synced/exported, so imported ended sessions without a local marker reject too. This MCP addition does not change host hooks or native Pi/HTTP tools. See [the full contract](../DOCS.md#mem_session_finalize).
+
+## MCP Tool Reference — mem_judge_many
+
+Available in agent and admin profiles and explicit allowlists; deferred loading avoids eager schema duplication. After `mem_save` returns `judgment_required`, prefer this tool when available; otherwise call `mem_judge` for each candidate.
+
+Submit `judgments`, an array of 1–32 objects, plus optional shared `session_id` provenance. Each object requires `judgment_id` from `candidates[]` and `relation`; optional `reason`, `evidence`, and `confidence` follow `mem_judge`. Never reuse the top-level judgment ID for all candidates.
+
+The whole array shape/count and shared session type are checked before writes. Items run in submitted order within one queued task, using independent existing judgment transactions. Malformed entries, unknown IDs, invalid verdicts and project guard failures yield individual errors without stopping subsequent items.
+
+The JSON response has `outcomes` in input order. Each has zero-based `index`, `judgment_id` (null if unavailable), and `status` (`success` or `error`). Success includes `judgment_status`, the updated `relation` row, and any other fields from the existing judgment response; error includes an `error` string. Partial failure is not a top-level tool error; invalid array shape/count is.
+
+Repeated IDs are processed in order, so later successful decisions overwrite earlier ones. Identical retries converge the persisted verdict but retain existing sync mutation refresh semantics: this is not exactly-once delivery. Existing `mem_judge` remains unchanged.
+
 ## MCP Tool Reference — mem_judge
 
 `mem_judge` is available in the `agent` profile (`engram mcp --tools=agent`). It is NOT exposed in the `admin` profile.
