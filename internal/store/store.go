@@ -6137,6 +6137,9 @@ SELECT 1 FROM (
 // reproduces FormatContext's output byte-for-byte. See issue #163
 // (bounded-size injection).
 type ContextOptions struct {
+	// OlderHistory opts into a bounded overview outside the recent window.
+	OlderHistory bool
+
 	// MaxBytes caps the complete rendered context in bytes. Zero preserves the
 	// unbounded legacy output; a positive value returns at most that many bytes.
 	MaxBytes int
