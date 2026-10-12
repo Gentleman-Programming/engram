@@ -228,6 +228,19 @@ func TestHandleConsolidate_MalformedArgumentsRefuse(t *testing.T) {
 	if !res2.IsError {
 		t.Fatalf("fractional ids must refuse, got %s", callResultText(t, res2))
 	}
+
+	// Mixed-type arrays reject the ENTIRE input: malformed entries are never
+	// silently skipped, so a destructive tool can never act on a partially
+	// parsed ID list (CodeRabbit finding on #1814).
+	mixed := consolidateRequest(ids, nil)
+	mixed.Params.Arguments.(map[string]any)["ids"] = []any{float64(ids[0]), float64(ids[1]), "13"}
+	res3, err := handleConsolidate(s)(context.Background(), mixed)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res3.IsError {
+		t.Fatalf("mixed-type ids must refuse the entire input, got %s", callResultText(t, res3))
+	}
 	if got := liveObservationCount(t, s); got != 3 {
 		t.Fatalf("malformed arguments must not write, live count %d", got)
 	}

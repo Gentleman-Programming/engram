@@ -3833,6 +3833,11 @@ func strArg(req mcp.CallToolRequest, key string, defaultVal string) string {
 // float64). Absent or non-numeric entries are skipped; fractional values
 // refuse instead of truncating — a silently truncated ID could target the
 // wrong observation on a destructive tool.
+// int64SliceArg reads an argument as a slice of positive int64 observation
+// IDs. The whole input is rejected when any entry is non-numeric,
+// non-integral, non-positive, or outside the int64 range: malformed entries
+// are never silently skipped or truncated, so a destructive tool can never
+// act on a partially parsed ID list.
 func int64SliceArg(req mcp.CallToolRequest, key string) ([]int64, error) {
 	raw, ok := req.GetArguments()[key].([]any)
 	if !ok {
@@ -3842,10 +3847,10 @@ func int64SliceArg(req mcp.CallToolRequest, key string) ([]int64, error) {
 	for _, v := range raw {
 		f, ok := v.(float64)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("%s must contain integer observation IDs only", key)
 		}
-		if math.Trunc(f) != f {
-			return nil, fmt.Errorf("%s must contain integer observation IDs", key)
+		if math.Trunc(f) != f || f <= 0 || f >= 0x1p63 {
+			return nil, fmt.Errorf("%s must contain positive integer observation IDs", key)
 		}
 		out = append(out, int64(f))
 	}
