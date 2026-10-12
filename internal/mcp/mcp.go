@@ -238,6 +238,7 @@ var ProfileAgent = map[string]bool{
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
 	"mem_list_projects":     true, // enumerate all known projects for cross-project discovery (engram#675)
 	"mem_judge_many":        true,
+	"mem_session_finalize":  true,
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
 	"mem_doctor":            true, // read-only operational diagnostics for agents
@@ -249,11 +250,12 @@ var ProfileAgent = map[string]bool{
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
 // that are NOT referenced in any agent skill or memory protocol.
 var ProfileAdmin = map[string]bool{
-	"mem_judge_many":     true,
-	"mem_delete":         true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
-	"mem_stats":          true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
-	"mem_timeline":       true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
-	"mem_merge_projects": true, // destructive curation tool — not for agent use
+	"mem_judge_many":       true,
+	"mem_session_finalize": true,
+	"mem_delete":           true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
+	"mem_stats":            true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
+	"mem_timeline":         true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
+	"mem_merge_projects":   true, // destructive curation tool — not for agent use
 }
 
 // Profiles maps profile names to their tool sets.
@@ -321,7 +323,7 @@ var coreTools = []coreToolDesc{
 var deferredTools = []string{
 	"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
 	"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
-	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects", "mem_judge_many",
+	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects", "mem_judge_many", "mem_session_finalize",
 }
 
 // memoryWritingTools contains every registered tool that can mutate persistent
@@ -330,7 +332,7 @@ var memoryWritingTools = []string{
 	"mem_save", "mem_update", "mem_review", "mem_delete",
 	"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
 	"mem_session_start", "mem_session_end", "mem_capture_passive",
-	"mem_merge_projects", "mem_judge", "mem_judge_many", "mem_compare",
+	"mem_merge_projects", "mem_judge", "mem_judge_many", "mem_compare", "mem_session_finalize",
 }
 
 func hasRegisteredMemoryWriter(allowlist map[string]bool) bool {
@@ -901,6 +903,10 @@ GUIDELINES:
 			),
 			queuedWriteHandler(writeQueue, handleSessionSummary(s, cfg, activity)),
 		)
+	}
+
+	if shouldRegister("mem_session_finalize", allowlist) {
+		registerSessionFinalize(srv, s, cfg, activity, writeQueue)
 	}
 
 	// ─── mem_session_start (profile: agent, deferred) ───────────────────
@@ -3117,7 +3123,14 @@ func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice st
 // resolveSaveWriteProject resolves the write project target using the full MCP precedence:
 // explicit request parameter, existing session association, or nearest configuration/directory detection.
 func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
-	trimmedSessionID := strings.TrimSpace(sessionID)
+	return resolveSaveWriteProjectForSession(s, projectChoice, explicitProjectProvided, reason, strings.TrimSpace(sessionID), validateToken, true)
+}
+
+// resolveSaveWriteProjectForSession receives the identity selected by its caller.
+// Legacy saves trim IDs and permit explicit ambiguity recovery; finalization
+// preserves the exact stored ID and must never create a missing session.
+func resolveSaveWriteProjectForSession(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator, allowUnknownSessionRecovery bool) (projectpkg.DetectionResult, error) {
+	trimmedSessionID := sessionID
 	trimmedProjectChoice := strings.TrimSpace(projectChoice)
 	trimmedReason := strings.TrimSpace(reason)
 	var sessionProject string
@@ -3128,6 +3141,9 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return projectpkg.DetectionResult{}, err
+			}
+			if !allowUnknownSessionRecovery {
+				return projectpkg.DetectionResult{}, &unknownSessionError{SessionID: sessionID}
 			}
 			// Only genuine detector ambiguity admits an unregistered runtime ID.
 			// A bare explicit project (even an existing bucket) cannot bootstrap it.
