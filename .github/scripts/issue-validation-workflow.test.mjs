@@ -32,7 +32,9 @@ test('trusted immutable checkout, no persisted credentials or PR execution', () 
 
 test('empty global permissions and only justified job scopes', () => {
   const source = workflow();
-  assert.match(source, /\npermissions: \{\}\n/);
+  for (const newline of ['\n', '\r\n']) {
+    assert.match(source.replace(/\r?\n/g, newline), /\r?\npermissions: \{\}\r?\n/);
+  }
   const scopes = [...source.matchAll(/^      ([\w-]+): (read|write)$/gm)].map((match) => `${match[1]}:${match[2]}`).sort();
   assert.deepEqual(scopes, ['checks:write', 'contents:read', 'issues:read', 'pull-requests:read']);
 });
