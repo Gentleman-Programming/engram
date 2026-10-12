@@ -389,7 +389,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
 			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
 			Evidence:             mustJSON(observation),
-			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
+			SafeNextStep:         observationSourceRepairHint(scope.Project, observation.MissingFields),
 			RequiresConfirmation: true,
 		})
 	}
@@ -475,6 +475,16 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func observationSourceRepairHint(project string, missingFields []string) string {
+	hint := syncMutationRequiredFieldsRepairHint(project)
+	for _, field := range missingFields {
+		if field == "type" || field == "content" {
+			return hint + " Repair cannot reconstruct missing type or content; manual investigation is required. Inspect source_unrepairable in the repair output."
+		}
+	}
+	return hint + " Only titles recoverable from existing content can be repaired; sources without a recoverable title require manual investigation and appear in source_unrepairable."
 }
 
 func syncMutationRequiredFieldsRepairHint(project string) string {

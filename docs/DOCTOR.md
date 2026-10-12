@@ -175,13 +175,29 @@ The CLI `--json` and MCP tool return:
 - `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: any pending non-enrolled row there is legacy or otherwise pre-existing backlog, because new unenrolled local writes are not journaled.
 - `orphaned_observation_session` — warns when active or soft-deleted observations reference a missing session. Findings are grouped by the stored observation project and session ID. After reviewing a plan, `doctor repair` can create an immediately-ended, local-only, project-owned placeholder for a group with complete evidence; it preserves observations and never emits sync state. Apply revalidates the current observations inside the same transaction and derives the placeholder's start time and observation count from them, so a stale plan or a concurrent change cannot persist outdated placeholder metadata; a planned orphan that resolves before apply reports `noop` with zero applied rows.
 - `orphaned_pending_relations` — warns when pending `memory_relations` rows reference missing observations on both endpoints (no active row with that `sync_id`; a soft-deleted endpoint counts as absent, matching the conflicts listing). Such rows can never show a title in `engram conflicts show` and no verdict can ever be recorded against them, so they only inflate the pending backlog. The finding aggregates counts (candidates, one-endpoint-missing pending, live pending) with a bounded sample of candidate rows. The listing is deliberately unscoped: a relation with both endpoints absent belongs to no project. After review, `engram doctor repair --check orphaned_pending_relations --plan|--dry-run|--apply` reclassifies only those rows into the audited `orphaned` disposition — the same terminal state the hard-delete orphaning writers already produce — without recreating observations, fabricating verdicts, deleting audit rows, or touching relations that still have a live endpoint. Apply revalidates the predicate inside the transaction (a row judged after planning is never reclassified), backs up the database first, emits no sync journal mutation, and is idempotent; a rerun reports `noop` with zero applied rows. To roll back, stop Engram and manually restore the reported backup.
-- `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. The listing is deliberately unscoped.
+- `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. Rescue assigns the project and classifies a blank ownership mode in the same transaction, without requiring a store reopen. Existing ownership modes are preserved, and each rescued session is counted once. The listing is deliberately unscoped.
 - Session modes are `shared` and `project_owned`. Runtime and HTTP-created sessions default to `shared`; deterministic CLI and MCP manual-save sessions are `project_owned`. Shared sync can use old peers. Project-owned sync requires a mode-capable manifest (version 2); returning to an older manifest after project-owned sessions exist is unsupported and fails loudly.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
 
 ## Safety
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
+
+### Manual-save session collisions across machines
+
+CLI `engram save` and MCP writes without `session_id` (when no matching runtime
+session is active) normally use `manual-save-{project}`. If that ID already
+belongs to a different project, new writes use an independent, deterministic
+`manual-fallback-{sha256(project)}` session. Newly created fallback sessions are
+`project_owned`; registration preserves the classification of any existing
+same-project session, including `shared`, rather than promoting it automatically.
+Repeated writes reuse that alternative ID; its registration still rejects a
+conflicting owner. The old session, observations, and prompts are not moved or
+rewritten. Explicit MCP `session_id` requests do not use this collision fallback.
+
+This unblocks new writes after importing or syncing a database from another
+machine; it does not transfer old history or repair stale project ownership.
+Review diagnostic evidence separately before any supported ownership repair.
 
 ### Manual-save ownership normalization and previously rescued sessions
 
@@ -236,6 +252,8 @@ Orphaned-pending-relation reclassification under `orphaned_pending_relations` is
 
 Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. Run `engram doctor repair --check sync_mutation_required_fields --dry-run` first (add `--project <project>` to scope it); cloud-upgrade tooling instead requires configured cloud sync. The repair derives a sanitized, bounded title from local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
 
+Local observation sources are reported separately from pending mutations. `source_repairs` lists titles recoverable from the source's existing content. Missing `type` or `content` cannot be reconstructed: these fields require manual investigation, not automatic deletion or invented memory data. `source_unrepairable` lists each unresolved source's `id`, `sync_id`, `project`, remaining `missing_fields`, and explanatory `reason`, without exposing its content. A source may appear in both lists when its title is recoverable but another field remains missing. Sources without a derivable valid title also appear in `source_unrepairable`. An empty `source_repairs` list does not mean these findings have been resolved. `--plan` and `--dry-run` leave sources and sync mutations unchanged.
+
 The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Superseded evidence missing its reason, evidence, or timestamp remains blocking until manually repaired; complete terminal quarantined and superseded rows remain informational without keeping doctor in warning or blocked status.
 
 Project reclassification never deletes or deduplicates rows. Identity repair replaces the malformed source session row after remapping its references; it retains old journal rows as auditable retired evidence rather than deleting their payload history. Repair never edits sync cursors, acknowledges undelivered mutations, or writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
@@ -255,7 +273,7 @@ A strict `project_owned` registration of an ended legacy session with no project
 
 All repair modes print stable JSON to stdout:
 
-For `sync_mutation_required_fields`, `directory_repairs` lists pending session-directory payload backfills (`seq`, `project`, `entity_key`); `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence.
+For `sync_mutation_required_fields`, `directory_repairs` lists pending session-directory payload backfills (`seq`, `project`, `entity_key`); `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence. `source_repairs` lists recoverable source titles; `source_unrepairable` lists source fields requiring manual investigation and their reasons, including when no repair action is possible.
 
 ```json
 {

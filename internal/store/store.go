@@ -878,11 +878,14 @@ func (s *Store) DataDir() string {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db         *sql.DB
-	cfg        Config
-	instanceID string
-	generation *databaseGeneration
-	hooks      storeHooks
+	compatibilityClosed    atomic.Bool
+	compatibilityReady     bool
+	compatibilityRuntimeID string
+	db                     *sql.DB
+	cfg                    Config
+	instanceID             string
+	generation             *databaseGeneration
+	hooks                  storeHooks
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -1088,11 +1091,19 @@ func newStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
+	if s.compatibilityReady {
+		var runtimeID [16]byte
+		if _, err := rand.Read(runtimeID[:]); err != nil {
+			return nil, fmt.Errorf("engram: runtime identity: %w", err)
+		}
+		s.compatibilityRuntimeID = hex.EncodeToString(runtimeID[:])
+	}
 	succeeded = true
 	return s, nil
 }
 
 func (s *Store) Close() error {
+	s.compatibilityClosed.Store(true)
 	return s.db.Close()
 }
 
@@ -1215,6 +1226,7 @@ func (s *Store) runStartupMigrations() error {
 				return fmt.Errorf("engram: set user_version: %w", err)
 			}
 		}
+		s.compatibilityReady = true
 		return nil
 	})
 }
@@ -3276,6 +3288,29 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	})
 }
 
+// ResolveManualSession registers an independent project-owned fallback session.
+// Keep the legacy ID when possible, but never claim a session owned by another
+// project. A separate deterministic namespace avoids interpreting the hash as
+// a legacy manual-save project suffix in diagnostics and ownership backfills.
+func (s *Store) ResolveManualSession(project, directory string) (string, error) {
+	project, _ = NormalizeProject(project)
+	id := manualSessionIDPrefix + project
+	err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned)
+	if err == nil {
+		return id, nil
+	}
+	var conflict *SessionProjectConflictError
+	if !errors.As(err, &conflict) {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(project))
+	id = "manual-fallback-" + hex.EncodeToString(digest[:])
+	if err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // runtimeSessionLeaseDuration bounds local runtime-session liveness. It is not
 // synchronized and never changes a session's terminal state.
 const runtimeSessionLeaseDuration = "+30 minutes"
@@ -3750,7 +3785,7 @@ const activeRuntimeSessionWindow = "-7 days"
 //   - A live lease suppresses unleased legacy candidates in its directory only.
 //     Where no live lease exists, preserve the legacy effective-activity window:
 //     the latest observation, falling back to started_at, must be recent.
-//   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
+//   - Exclude manual-save and manual-fallback sessions; those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
 //
@@ -3792,6 +3827,7 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 			  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
 			  AND s.ended_at IS NULL
 			  AND s.id NOT LIKE 'manual-save%'
+			  AND s.id NOT LIKE 'manual-fallback-%'
 			GROUP BY s.id
 		), live_leased_directories AS (
 			SELECT directory
@@ -8776,6 +8812,10 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 
 		// Plan settled — only now does anything change.
 		for _, sessionID := range plan.claim {
+			// The ownership stamp also assigns the project and counts the session.
+			if plan.stampOwnershipMode[sessionID] {
+				continue
+			}
 			if _, err := s.execHook(tx, rescueSessionQuery.updateProject, target, sessionID); err != nil {
 				return err
 			}
@@ -8841,8 +8881,8 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 type rescuePlan struct {
 	// claim lists unowned sessions that will be moved to the target.
 	claim []string
-	// stampOwnershipMode identifies target-owned sessions whose blank ownership
-	// mode can be deterministically classified from their session ID.
+	// stampOwnershipMode identifies sessions owned by the target after rescue
+	// whose blank mode can be deterministically classified from their session ID.
 	stampOwnershipMode map[string]bool
 	// willOwn reports, for every session in scope, whether it belongs to the
 	// target once the plan is applied.
@@ -8896,6 +8936,9 @@ func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, r
 			}
 			plan.claim = append(plan.claim, sessionID)
 			plan.willOwn[sessionID] = true
+			if mode == "" {
+				plan.stampOwnershipMode[sessionID] = true
+			}
 		}
 	}
 	return plan, nil

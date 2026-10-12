@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer, get } from "node:http";
 import { createServer } from "node:net";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -39,6 +39,7 @@ const { appendFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
+appendFileSync(${JSON.stringify(spawnLog)}, "invoke=" + JSON.stringify(process.argv.slice(2)) + "\\n");
 const syntheticServePath = resolve("serve");
 const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
 if (process.argv.includes("sync") || process.argv.includes("--import")) { appendFileSync(${JSON.stringify(spawnLog)}, "sync --import\\n"); process.exit(0); }
@@ -93,8 +94,9 @@ setTimeout(() => {
     : { engramBin: binPath };
 }
 
-async function loadPlugin({ engramBin, port, cwd, sandbox }) {
-  delete process.env.ENGRAM_URL;
+async function loadPlugin({ engramBin, port, cwd, sandbox, explicitUrl }) {
+  if (explicitUrl) process.env.ENGRAM_URL = `http://127.0.0.1:${port}`;
+  else delete process.env.ENGRAM_URL;
   process.env.ENGRAM_BIN = engramBin;
   process.env.ENGRAM_PORT = String(port);
 
@@ -112,12 +114,14 @@ async function loadPlugin({ engramBin, port, cwd, sandbox }) {
   });
 
   const statusCalls = [];
+  const warnings = [];
   const ctx = {
+    hasUI: true,
     cwd,
     sessionManager: { getSessionId: () => "session-startup" },
-    ui: { setStatus: (key, text) => statusCalls.push([key, text]) },
+    ui: { setStatus: (key, text) => statusCalls.push([key, text]), notify: (message, severity) => warnings.push([message, severity]) },
   };
-  return { tools, hooks, ctx, statusCalls };
+  return { tools, hooks, ctx, statusCalls, warnings };
 }
 
 async function withFixture(options, run) {
@@ -126,8 +130,19 @@ async function withFixture(options, run) {
   const originalPort = process.env.ENGRAM_PORT;
   const originalUrl = process.env.ENGRAM_URL;
   const originalNodeOptions = process.env.NODE_OPTIONS;
+  const originalPolicy = process.env.ENGRAM_STARTUP_POLICY;
+  const originalNotice = process.env.ENGRAM_STARTUP_NOTICE;
+  const originalDataDir = process.env.ENGRAM_DATA_DIR;
+  const originalChild = process.env.GENTLE_PI_AGENTS_CHILD;
   let readyServer;
   try {
+    delete process.env.GENTLE_PI_AGENTS_CHILD;
+    if (options.policy === undefined) delete process.env.ENGRAM_STARTUP_POLICY;
+    else process.env.ENGRAM_STARTUP_POLICY = options.policy;
+    if (options.notice === undefined) delete process.env.ENGRAM_STARTUP_NOTICE;
+    else process.env.ENGRAM_STARTUP_NOTICE = options.notice;
+    process.env.ENGRAM_DATA_DIR = join(dir, "store");
+    await mkdir(process.env.ENGRAM_DATA_DIR);
     const spawnLog = join(dir, "spawns.log");
     await writeFile(spawnLog, "", "utf8");
     const port = await freePort();
@@ -157,9 +172,13 @@ async function withFixture(options, run) {
       process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
     }
     const sandbox = await createPluginSandbox(dir);
-    const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox });
+    const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox, explicitUrl: options.explicitUrl });
     await run({ ...plugin, spawnLog, dir, port, stopServer: () => new Promise((resolve) => readyServer.close(resolve)) });
   } finally {
+    if (originalChild === undefined) delete process.env.GENTLE_PI_AGENTS_CHILD; else process.env.GENTLE_PI_AGENTS_CHILD = originalChild;
+    if (originalPolicy === undefined) delete process.env.ENGRAM_STARTUP_POLICY; else process.env.ENGRAM_STARTUP_POLICY = originalPolicy;
+    if (originalNotice === undefined) delete process.env.ENGRAM_STARTUP_NOTICE; else process.env.ENGRAM_STARTUP_NOTICE = originalNotice;
+    if (originalDataDir === undefined) delete process.env.ENGRAM_DATA_DIR; else process.env.ENGRAM_DATA_DIR = originalDataDir;
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
@@ -167,6 +186,63 @@ async function withFixture(options, run) {
     if (readyServer?.listening) await new Promise((resolve) => readyServer.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+for (const policy of ["disabled", "invalid", "", " ", "ALLOW"]) {
+  for (const explicitUrl of [false, true]) {
+    test(`startup policy ${JSON.stringify(policy)} blocks all memory effects (explicit URL=${explicitUrl})`, async () => {
+      const requests = [];
+      const notice = 'Fixture recovery notice; $(touch must-not-execute)';
+      await withFixture({ policy, notice, explicitUrl, readyServer: true, requests }, async ({ hooks, tools, ctx, dir, spawnLog, warnings, statusCalls }) => {
+        const store = join(dir, "store");
+        const names = ["engram.db", "engram.db-wal", "engram.db-shm", ".instance-id"];
+        const bytes = names.map((name) => Buffer.from(`fixture bytes: ${name}\u0000`));
+        await Promise.all(names.map((name, index) => writeFile(join(store, name), bytes[index])));
+        assert.equal(tools.size, 0, "disabled memory exposes no normal tools");
+        assert.deepEqual([...hooks.keys()], ["session_start"], "only the warning/status hook is permitted");
+        const event = { systemPrompt: "base", prompt: "A sufficiently long user prompt", systemPromptOptions: { appendSystemPrompt: "existing" } };
+        for (const reason of ["fresh", "reload"]) {
+          await hooks.get("session_start")({ reason }, ctx);
+          for (const [name, payload] of [
+            ["input", { source: "interactive" }], ["message_start", { message: { role: "user" } }],
+            ["before_agent_start", event], ["tool_execution_end", { toolName: "Read", result: "x".repeat(100) }],
+            ["session_compact", { compactionEntry: { summary: "fixture summary" } }],
+            ["session_shutdown", { reason: reason === "reload" ? "reload" : "quit" }],
+          ]) assert.equal(await hooks.get(name)?.(payload, ctx), undefined);
+        }
+        assert.deepEqual(event, { systemPrompt: "base", prompt: "A sufficiently long user prompt", systemPromptOptions: { appendSystemPrompt: "existing" } });
+        assert.ok(warnings.length > 0);
+        for (const [message, severity] of warnings) {
+          assert.equal(severity, "warning");
+          assert.match(message, /memory.*disabled/i);
+          for (const step of ["back", "update", "restart", "recheck"]) assert.match(message, new RegExp(step, "i"));
+          assert.ok(message.includes(notice), "notice is display-only text");
+        }
+        assert.ok(statusCalls.every(([key, text]) => key === "engram" && /disabled/.test(text)));
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(await readFile(spawnLog, "utf8"), "", "no identity, version, serve or other binary invocation");
+        assert.deepEqual(requests, [], "no HTTP, retries or shutdown writes");
+        assert.deepEqual((await readdir(store)).sort(), [...names].sort(), "no new locks or identity files");
+        for (const [index, name] of names.entries()) assert.deepEqual(await readFile(join(store, name)), bytes[index]);
+        assert.equal(existsSync(join(dir, "must-not-execute")), false);
+      });
+    });
+  }
+}
+
+for (const policy of [undefined, "allow"]) {
+  test(`startup policy ${policy ?? "absent"} preserves normal memory`, async () => {
+    const requests = [];
+    await withFixture({ policy, readyServer: true, requests }, async ({ hooks, tools, ctx, spawnLog }) => {
+      assert.ok(tools.has("mem_save"));
+      await hooks.get("session_start")({}, ctx);
+      const result = await hooks.get("before_agent_start")({ systemPrompt: "base", prompt: "A normal user prompt" }, ctx);
+      assert.match(result.systemPrompt, /Engram Persistent Memory/);
+      await hooks.get("session_shutdown")({ reason: "quit" }, ctx);
+      assert.equal(await readFile(spawnLog, "utf8"), 'invoke=["instance-id"]\n');
+      for (const path of ["/sessions", "/prompts", "/sessions/session-startup/end"]) assert.ok(requests.some(({ url }) => url === path), path);
+    });
+  });
 }
 
 for (const replacement of ["retry", "recovery"]) {
@@ -244,8 +320,8 @@ test("manifest presence never triggers import while startup still detects the pr
       await hooks.get("session_start")({}, ctx);
       assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]]);
       await new Promise((resolve) => setTimeout(resolve, 200));
-      assert.equal(await readFile(spawnLog, "utf8"), "",
-        `startup with manifestPresent=${manifestPresent} must not spawn sync --import`);
+      assert.deepEqual((await readFile(spawnLog, "utf8")).trim().split("\n"), ['invoke=["instance-id"]'],
+        `startup with manifestPresent=${manifestPresent} must only resolve identity, not import`);
     });
   }
 });

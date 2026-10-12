@@ -39,9 +39,19 @@ var claudeEngramToolPrefixes = []string{
 	"mcp__plugin_engram_engram__",
 }
 
-// Leave one second of the Claude hook's five-second timeout for process startup
-// and emitting the verdict. Project resolution and registration share this budget.
+// The default leaves one second of Claude's five-second host timeout for startup
+// and verdict output. A configured budget also requires a longer host timeout.
 const hookSessionConfirmationTimeout = 4 * time.Second
+
+// hookSessionConfirmationBudget keeps all HTTP confirmation steps under one
+// deadline. Invalid or nonpositive overrides retain the fail-closed default.
+func hookSessionConfirmationBudget() time.Duration {
+	timeout, err := time.ParseDuration(strings.TrimSpace(os.Getenv("ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT")))
+	if err != nil || timeout <= 0 {
+		return hookSessionConfirmationTimeout
+	}
+	return timeout
+}
 
 var errHookSessionUnconfirmed = errors.New("host session registration could not be confirmed")
 
@@ -138,7 +148,7 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 	if base == "" {
 		return "", errHookSessionUnconfirmed
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
 	defer func() {
 		// Preserve timeout information even when a transport/JSON helper returns
 		// only a failed confirmation. Other failures keep the existing denial.
@@ -441,7 +451,7 @@ func guardCodexPreToolUse(input []byte) []byte {
 	if !idOK || !cwdOK {
 		return claudePreToolUseDeny("Codex host session resolution could not be confirmed")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
 	defer cancel()
 	effective, reason := runCodexLifecycleResult(ctx, "codex-resolve", input, codexHookURL())
 	if effective == "" {

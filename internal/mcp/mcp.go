@@ -3690,13 +3690,16 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 		if err == nil {
 			switch len(ids) {
 			case 0:
-				return defaultSessionID(project), nil
+				return s.ResolveManualSession(project, currentWorkingDirectory())
 			case 1:
 				return ids[0], nil
 			default:
 				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id, end other active matching sessions, or save independently with engram save. The resolved project is %q; pass that exact name as the --project value and never invent another. This writes to an independent project manual-save session and does not bind it to this MCP session", project)
 			}
 		}
+	}
+	if s != nil {
+		return s.ResolveManualSession(project, currentWorkingDirectory())
 	}
 	return defaultSessionID(project), nil
 }

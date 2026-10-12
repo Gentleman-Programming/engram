@@ -704,6 +704,12 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "compatibility" {
+		if code := runCompatibility(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			exitFunc(code)
+		}
+		return
+	}
 	if len(os.Args) < 2 {
 		printUsage()
 		exitFunc(1)
@@ -1517,9 +1523,10 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	sessionID := "manual-save-" + projectName
-	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
+	sessionID, err := s.ResolveManualSession(projectName, cwd)
+	if err != nil {
 		fatal(err)
+		return
 	}
 	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{
@@ -3758,6 +3765,9 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
+  compatibility --data-dir <absolute-directory> --json
+                     Read-only offline store observation (JSON). It never opens, migrates or repairs
+                     the store, and never authorizes automatic opening; see README
   search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
@@ -3850,6 +3860,13 @@ Environment:
   ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
                      Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
                      Falls back to system local time when unset or invalid.
+  ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT
+                     Total HTTP confirmation budget for Claude/Codex PreToolUse (default: 4s).
+                     Accepts a positive Go duration, e.g. 8s or 500ms; unset, blank,
+                     invalid, or nonpositive values use 4s. Increase the host hook timeout
+                     too, leaving time for process startup and verdict output.
+                     Does not change Codex prompt capture or bypass session confirmation.
+                     Mitigates slow confirmation; does not fix autosync latency.
   ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic (claude or opencode)
   ENGRAM_CLOUD_AUTOSYNC
                      Set to 1 to enable background autosync; also requires
