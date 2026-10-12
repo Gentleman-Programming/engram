@@ -51,6 +51,8 @@ func printConflictsUsage() {
 	fmt.Fprintln(os.Stderr, "             [--max-semantic N]  [--yes]")
 	fmt.Fprintln(os.Stderr, "  deferred   [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]")
 	fmt.Fprintln(os.Stderr, "  prune      [--max-age-days N]  [--max-per-scope N]  [--dry-run]  [--apply]")
+	fmt.Fprintln(os.Stderr, "             Unknown arguments are rejected; use space-separated option values.")
+	fmt.Fprintln(os.Stderr, "             Potentially recoverable retry-cap relations are preserved.")
 }
 
 func resolveConflictsProject(s *store.Store, explicit string, all bool) string {
@@ -672,6 +674,10 @@ func cmdConflictsPrune(cfg store.Config) {
 			dryRunFlag = true
 		case "--apply":
 			apply = true
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown prune argument: %s\n", args[i])
+			exitFunc(1)
+			return
 		}
 	}
 

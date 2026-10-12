@@ -230,6 +230,44 @@ func TestCmdConflictsPruneInvalidLimitLeavesRowsUnchanged(t *testing.T) {
 	}
 }
 
+func TestCmdConflictsPruneRejectsUnknownArguments(t *testing.T) {
+	for _, arg := range []string{"--max-age-days=365", "--max-age-day", "--project", "unexpected", "--"} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existing=%v", arg, existing), func(t *testing.T) {
+				cfg := testConfig(t)
+				var db *sql.DB
+				if existing {
+					db = seedPruneFixture(t, cfg)
+				}
+				opened := false
+				original := storeNew
+				storeNew = func(cfg store.Config) (*store.Store, error) {
+					opened = true
+					return original(cfg)
+				}
+				t.Cleanup(func() { storeNew = original })
+				withArgs(t, "engram", "conflicts", "prune", "--apply", arg)
+				stubExitWithPanic(t)
+				stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdConflicts(cfg) })
+				want := fmt.Sprintf("error: unknown prune argument: %s\n", arg)
+				if recovered != exitCode(1) || stdout != "" || stderr != want {
+					t.Errorf("rejection: stdout=%q stderr=%q exit=%v, want stderr=%q exit=1", stdout, stderr, recovered, want)
+				}
+				if opened {
+					t.Error("rejected arguments must not open the store or touch data/counters")
+				}
+				if existing {
+					if got := deferredRowIDsCLI(t, db); !reflect.DeepEqual(got, allPruneFixtureRows) {
+						t.Errorf("rejection changed rows: %v", got)
+					}
+				} else if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); !os.IsNotExist(err) {
+					t.Errorf("rejection created database: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestCmdConflictsUsageListsPrune(t *testing.T) {
 	_, stderr := captureOutput(t, printConflictsUsage)
 	if !strings.Contains(stderr, "subcommands: list, show, stats, scan, deferred, prune\n") {
@@ -237,6 +275,14 @@ func TestCmdConflictsUsageListsPrune(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "  prune      [--max-age-days N]  [--max-per-scope N]  [--dry-run]  [--apply]\n") {
 		t.Errorf("usage does not document prune flags: %q", stderr)
+	}
+	for _, line := range []string{
+		"Unknown arguments are rejected; use space-separated option values.",
+		"Potentially recoverable retry-cap relations are preserved.",
+	} {
+		if !strings.Contains(stderr, line) {
+			t.Errorf("usage missing %q: %q", line, stderr)
+		}
 	}
 	// Existing subcommands keep their documented lines.
 	if !strings.Contains(stderr, "  deferred   [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]\n") {

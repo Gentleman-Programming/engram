@@ -256,10 +256,111 @@ func TestPruneDeadRowsRejectsNonPositiveBoundsWithoutDeleting(t *testing.T) {
 	}
 }
 
+// Retry-cap relations retain their recovery window under both retention bounds.
+func TestPruneDeadRowsPreservesRecoverableRelations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts PruneDeadRowsOptions
+		want int
+	}{
+		{"age", pruneOptions(30, 1000, true), 1},
+		{"cap", pruneOptions(1000, 1, true), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, target := setupSyncApplyStore(t)
+			const project = "proj-apply"
+			const source = "future-recovery-source" // Not delivered until after pruning.
+			for i, lastErr := range []error{ErrRelationFKMissing, ErrRelationProjectMismatch} {
+				id := fmt.Sprintf("recoverable-%d", i)
+				payload := fmt.Sprintf(`{"sync_id":%q,"source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","project":%q}`, id, source, target, project)
+				if _, err := s.db.Exec(`INSERT INTO sync_apply_deferred
+					(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, last_error, first_seen_at)
+					VALUES (?, 'relation', ?, ?, ?, 'upsert', ?, ?, 'scoped', 'dead', 5, ?, datetime('now', ?))`,
+					id, payload, DefaultSyncTargetKey, id, id, project, lastErr.Error(), fmt.Sprintf("-%d days", (1-i)*400)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, age := range []int{400, 2, 1} {
+				seedAgedDeferredRow(t, s, fmt.Sprintf("terminal-%d", i), SyncEntityRelation, DefaultSyncTargetKey, project, "terminal", "dead", age)
+			}
+			before, err := s.ListDeferred(ListDeferredOptions{Limit: 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dryOpts := tc.opts
+			dryOpts.Apply = false
+			dry, err := s.PruneDeadRows(dryOpts)
+			if err != nil || dry.Applied || dry.Total != tc.want {
+				t.Fatalf("dry run: %+v err=%v, want %d", dry, err, tc.want)
+			}
+			afterDry, err := s.ListDeferred(ListDeferredOptions{Limit: 100})
+			if err != nil || !reflect.DeepEqual(before, afterDry) {
+				t.Fatalf("dry run changed rows/counters: err=%v", err)
+			}
+			applied, err := s.PruneDeadRows(tc.opts)
+			if err != nil || !applied.Applied || applied.Total != tc.want || !reflect.DeepEqual(applied.Scopes, dry.Scopes) || !reflect.DeepEqual(applied.Reasons, dry.Reasons) {
+				t.Fatalf("apply: %+v err=%v, dry=%+v", applied, err, dry)
+			}
+			after, err := s.ListDeferred(ListDeferredOptions{Limit: 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range before {
+				if !strings.HasPrefix(row.SyncID, "recoverable-") {
+					continue
+				}
+				found := false
+				for _, survivor := range after {
+					if survivor.SyncID == row.SyncID {
+						found = true
+						if !reflect.DeepEqual(row, survivor) {
+							t.Errorf("recovery state changed: before=%+v after=%+v", row, survivor)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("recoverable mutation %s was deleted", row.SyncID)
+				}
+			}
+			rearmed, err := s.RearmEligibleDeadRelationsForScope(DefaultSyncTargetKey, project)
+			if err != nil || rearmed != 0 {
+				t.Fatalf("rearm without dependency=%d err=%v, want 0", rearmed, err)
+			}
+			stillWaiting, err := s.ListDeferred(ListDeferredOptions{Limit: 100})
+			if err != nil || !reflect.DeepEqual(after, stillWaiting) {
+				t.Fatalf("unsatisfied rearm changed rows/counters: err=%v", err)
+			}
+			dependency := SyncMutation{
+				Seq: 1, Entity: SyncEntityObservation, EntityKey: source, Op: SyncOpUpsert,
+				Project: project,
+				Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"ses-apply-test","type":"decision","title":"Delayed dependency","content":"Arrives after pruning","project":%q,"scope":"project"}`, source, project),
+			}
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, dependency); err != nil {
+				t.Fatalf("deliver missing dependency: %v", err)
+			}
+			rearmed, err = s.RearmEligibleDeadRelationsForScope(DefaultSyncTargetKey, project)
+			if err != nil || rearmed != 2 {
+				t.Fatalf("rearm=%d err=%v, want 2", rearmed, err)
+			}
+			replay, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, project)
+			if err != nil || replay.Succeeded != 2 {
+				t.Fatalf("replay=%+v err=%v, want 2 successes", replay, err)
+			}
+			for i := 0; i < 2; i++ {
+				relation, err := s.GetRelation(fmt.Sprintf("recoverable-%d", i))
+				if err != nil || relation == nil {
+					t.Fatalf("recovered relation %d: %+v err=%v", i, relation, err)
+				}
+			}
+		})
+	}
+}
+
 // S9: the candidate query rides the existing indexes instead of a bare table scan.
 func TestPruneDeadRowsCandidateQueryUsesIndex(t *testing.T) {
 	s := newTestStore(t)
-	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+pruneDeadRowCandidatesSQL, "-30 days", "-30 days", 1000)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+pruneDeadRowCandidatesSQL,
+		"-30 days", ErrRelationFKMissing.Error(), ErrRelationProjectMismatch.Error(), "-30 days", 1000)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}

@@ -136,7 +136,7 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
-- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically. Dead rows are kept as evidence of discarded mutations; nothing removes them automatically, and `engram conflicts prune --apply` bounds them by age and per-scope count.
+- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` are excluded from ordinary replay. They include terminal discarded-mutation evidence and relations that exceeded the retry cap (5 attempts); cloud imports may rearm eligible retry-cap relations when their dependencies become available. `engram conflicts prune --apply` bounds the evidence eligible for pruning by age and per-scope count, preserving potentially recoverable retry-cap relations.
 
 ### SQLite Configuration
 
@@ -918,12 +918,15 @@ Inspect or replay the `sync_apply_deferred` queue.
 engram conflicts prune [--max-age-days <N>] [--max-per-scope <N>] [--dry-run] [--apply]
 ```
 
-Bound dead rows in `sync_apply_deferred` (`apply_status='dead'` only; deferred retry state is never touched). A dead row is selected when its `first_seen_at` is older than `--max-age-days` (default 30), or when it falls beyond the newest `--max-per-scope` (default 1000) dead rows of its scope (`target_key` + `project`), so one noisy peer cannot evict another scope's evidence.
+Bound prune-eligible dead evidence in `sync_apply_deferred` (`apply_status='dead'` only; deferred retry state is never touched). An eligible row is selected when its `first_seen_at` is older than `--max-age-days` (default 30), or when it falls beyond the newest `--max-per-scope` (default 1000) eligible rows of its scope (`target_key` + `project`), so one noisy peer cannot evict another scope's evidence.
+
+Potentially recoverable retry-cap relations are excluded from both age pruning and cap ranking: scoped relation upserts with a nonempty project, five retries, an FK-missing or project-mismatch error, and matching `sync_id`, `entity_key` and `payload_sync_id`. They are preserved even while dependencies are missing, so a later cloud import can rearm them. This conservative metadata check does not validate the payload; matching rows remain protected even if they ultimately cannot recover. These limits therefore do not bound the entire dead-row backlog.
 
 - `--dry-run` (default): print what would be evicted and delete nothing.
 - `--apply`: delete the selected rows in one transaction.
 - Output reports the total, per-scope counts split into `by_age` and `by_cap`, and counts by entity, `reason_code`, and age bucket (`0-6d`, `7-29d`, `30d+`, or `unknown` when `first_seen_at` does not parse as a date), so eviction is never silent.
 - `--dry-run` and `--apply` are mutually exclusive, and `--max-age-days` / `--max-per-scope` must be positive integers; invalid input exits with an error before opening the store.
+- Unknown arguments are rejected, including unsupported `--project` filters and `--option=value` syntax. Use space-separated values, such as `--max-age-days 365`. Pruning examines all scopes; it does not accept a project filter.
 
 ### Cloud CLI (opt-in)
 

@@ -21,8 +21,9 @@ import (
 //     bounds a churning peer whose rows are all fresh without letting it evict
 //     another scope's evidence.
 //
-// Deferred rows are retry state governed by ReplayDeferredForScope and are never
-// touched. Pruning runs in its own transaction, never inside pull-apply.
+// Deferred rows and potentially recoverable retry-cap dead relations are retry
+// state and are never touched or counted toward the evidence cap. Pruning runs
+// in its own transaction, never inside pull-apply.
 
 // DefaultDeadRowMaxAgeDays and DefaultDeadRowMaxPerScope are the nominated
 // retention defaults. They are a product call, kept as named constants so they
@@ -88,7 +89,13 @@ type PruneDeadRowsResult struct {
 // pruneDeadRowCandidatesSQL selects the dead rows past either limit. The date
 // arithmetic stays in SQL so callers and tests never fake a clock.
 //
-// Arguments: age modifier (e.g. "-30 days"), the same modifier, per-scope cap.
+// Preserve the metadata candidates used by RearmEligibleDeadRelationsForScope,
+// even before their endpoints become available. This conservative exclusion
+// does not decode payloads or require current endpoint availability: pruning
+// must not consume the future recovery window. Exclude them before ranking so
+// recovery state cannot displace terminal evidence from the per-scope cap.
+//
+// Arguments: age modifier, the two retryable errors, age modifier, scope cap.
 const pruneDeadRowCandidatesSQL = `
 	SELECT sync_id, target_key, project, entity, reason_code,
 		first_seen_at < datetime('now', ?) AS expired,
@@ -101,6 +108,13 @@ const pruneDeadRowCandidatesSQL = `
 			) AS scope_rank
 		FROM sync_apply_deferred
 		WHERE apply_status = 'dead'
+		  AND NOT (
+			scope_class = 'scoped' AND project <> ''
+			AND entity = 'relation' AND retry_count = 5
+			AND last_error IN (?, ?)
+			AND sync_id = payload_sync_id AND entity_key = payload_sync_id
+			AND op = 'upsert'
+		  )
 	)
 	WHERE first_seen_at < datetime('now', ?) OR scope_rank > ?
 `
@@ -164,7 +178,8 @@ func (s *Store) PruneDeadRows(opts PruneDeadRowsOptions) (PruneDeadRowsResult, e
 
 func selectPruneDeadRowCandidates(db queryer, opts PruneDeadRowsOptions) ([]pruneDeadRowCandidate, error) {
 	modifier := fmt.Sprintf("-%d days", opts.MaxAgeDays)
-	rows, err := db.Query(pruneDeadRowCandidatesSQL, modifier, modifier, opts.MaxPerScope)
+	rows, err := db.Query(pruneDeadRowCandidatesSQL, modifier,
+		ErrRelationFKMissing.Error(), ErrRelationProjectMismatch.Error(), modifier, opts.MaxPerScope)
 	if err != nil {
 		return nil, fmt.Errorf("prune dead rows: select: %w", err)
 	}
