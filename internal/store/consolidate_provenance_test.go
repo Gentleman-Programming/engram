@@ -608,3 +608,70 @@ func TestRescueNullProjectOwnershipCarriesSupersededBy(t *testing.T) {
 		}
 	}
 }
+
+// Backfill, live path: a resurrected source (live row that still carries the
+// provenance marker) must re-journal as an upsert that preserves the link
+// (issue #242 slice 2; CodeRabbit follow-up on #1811).
+func TestBackfillObservationSyncMutationsLivePathPreservesSupersededBy(t *testing.T) {
+	s, ids, syncIDs := consolidateTestStore(t)
+	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := s.ConsolidateObservations(ConsolidateParams{
+		IDs:         ids,
+		Confirm:     true,
+		Fingerprint: plan.Plan.Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	// Resurrect one source through the real apply path: a stale peer full-row
+	// upsert without the marker must restore liveness and keep the marker.
+	stale := syncObservationPayload{
+		SyncID: syncIDs[0], SessionID: "ses-cons", Type: "decision",
+		Title: "Resurrected source", Content: "Resurrected source content",
+		Project: nullableString("proj-cons"), Scope: "project",
+	}
+	tx, err := s.beginTxHook()
+	if err != nil {
+		t.Fatalf("begin resurrect: %v", err)
+	}
+	if err := s.applyObservationUpsertTx(tx, stale); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("apply resurrection: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit resurrect: %v", err)
+	}
+
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ?`, SyncEntityObservation); err != nil {
+		t.Fatalf("wipe observation mutations: %v", err)
+	}
+	tx, err = s.beginTxHook()
+	if err != nil {
+		t.Fatalf("begin backfill: %v", err)
+	}
+	if err := s.backfillObservationSyncMutationsTx(tx, "proj-cons"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("backfill: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit backfill: %v", err)
+	}
+
+	var payload string
+	if err := s.db.QueryRow(
+		`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`,
+		SyncEntityObservation, syncIDs[0], SyncOpUpsert,
+	).Scan(&payload); err != nil {
+		t.Fatalf("select backfilled live upsert for %s: %v", syncIDs[0], err)
+	}
+	var decoded syncObservationPayload
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if decoded.SupersededBySyncID == nil || *decoded.SupersededBySyncID != res.Survivor.SyncID {
+		t.Fatalf("backfilled live upsert must carry superseded_by_sync_id=%s, got %v", res.Survivor.SyncID, decoded.SupersededBySyncID)
+	}
+}
