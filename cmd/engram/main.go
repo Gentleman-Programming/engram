@@ -3859,6 +3859,13 @@ Environment:
   ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
                      Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
                      Falls back to system local time when unset or invalid.
+  ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT
+                     Total HTTP confirmation budget for Claude/Codex PreToolUse (default: 4s).
+                     Accepts a positive Go duration, e.g. 8s or 500ms; unset, blank,
+                     invalid, or nonpositive values use 4s. Increase the host hook timeout
+                     too, leaving time for process startup and verdict output.
+                     Does not change Codex prompt capture or bypass session confirmation.
+                     Mitigates slow confirmation; does not fix autosync latency.
   ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic (claude or opencode)
   ENGRAM_CLOUD_AUTOSYNC
                      Set to 1 to enable background autosync; also requires
