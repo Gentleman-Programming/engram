@@ -17,7 +17,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
 | [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
+| [MCP Tools](#mcp-tools-24-tools)                          | Detailed reference for all 24 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -1275,7 +1275,9 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (23 tools)
+<a id="mcp-tools-23-tools"></a>
+
+## MCP Tools (24 tools)
 
 
 ### mem_search
@@ -1477,6 +1479,21 @@ Parameters:
 Re-judging an existing relation overwrites it (deliberate revision). Two agents judging the same pair persist as separate rows — Phase 1 surfaces both; cross-actor reconciliation is Phase 2.
 
 Search results subsequently expose annotation lines like `supersedes: #<id> (<title>)`, `superseded_by: #<id> (<title>)`, and `conflicts: #<id> (<title>)` so the recalling agent sees relevant verdicts at-a-glance. For enrolled projects with autosync enabled, judgments propagate to other machines via the cloud mutation pipeline — the annotation appears in `mem_search` results on any machine that has pulled the relevant mutations.
+
+### mem_judge_many
+
+Apply **1..32 caller-authored judgments** in submitted order within one queued MCP write task. Deferred; available in both agent and admin profiles. Each item uses the same validation, project guards and transaction as `mem_judge`; the batch is not an all-or-nothing transaction.
+
+- **judgments** (required): array of objects with required `judgment_id` and `relation`; optional `reason`, `evidence`, `confidence` (0..1), matching `mem_judge`.
+- **session_id** (optional): shared provenance applied to every item.
+
+Returns `outcomes` in input order: each includes zero-based `index`, `judgment_id`, `status: success|error`; successes retain the existing `relation` row and expose `judgment_status`, errors include `error`. A malformed/unknown/rejected item does not stop subsequent items. Invalid array shape/count or non-string shared provenance rejects the whole request before writes. Duplicate IDs execute in order, so the last successful decision wins.
+
+Retries converge persisted verdicts but still refresh judgment timestamps and retain per-item sync enqueue behavior: each successful enrolled judgment adds its normal mutation, including identical retries. This is not exactly-once mutation delivery. Existing `mem_judge` remains supported for single decisions and restricted allowlists.
+
+```json
+{"judgments":[{"judgment_id":"<candidates[0].judgment_id>","relation":"related"},{"judgment_id":"<candidates[1].judgment_id>","relation":"compatible","confidence":0.9}],"session_id":"<registered-session-id>"}
+```
 
 ### mem_compare
 

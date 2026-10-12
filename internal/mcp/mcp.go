@@ -237,6 +237,7 @@ var ProfileAgent = map[string]bool{
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
 	"mem_list_projects":     true, // enumerate all known projects for cross-project discovery (engram#675)
+	"mem_judge_many":        true,
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
 	"mem_doctor":            true, // read-only operational diagnostics for agents
@@ -248,6 +249,7 @@ var ProfileAgent = map[string]bool{
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
 // that are NOT referenced in any agent skill or memory protocol.
 var ProfileAdmin = map[string]bool{
+	"mem_judge_many":     true,
 	"mem_delete":         true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
 	"mem_stats":          true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
 	"mem_timeline":       true, // only in OpenCode's ENGRAM_TOOLS filter, not in any agent instructions
@@ -319,7 +321,7 @@ var coreTools = []coreToolDesc{
 var deferredTools = []string{
 	"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
 	"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
-	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
+	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects", "mem_judge_many",
 }
 
 // memoryWritingTools contains every registered tool that can mutate persistent
@@ -328,7 +330,7 @@ var memoryWritingTools = []string{
 	"mem_save", "mem_update", "mem_review", "mem_delete",
 	"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
 	"mem_session_start", "mem_session_end", "mem_capture_passive",
-	"mem_merge_projects", "mem_judge", "mem_compare",
+	"mem_merge_projects", "mem_judge", "mem_judge_many", "mem_compare",
 }
 
 func hasRegisteredMemoryWriter(allowlist map[string]bool) bool {
@@ -382,13 +384,17 @@ func buildServerInstructions(allowlist map[string]bool) string {
 			"Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.\n\n")
 	}
 
-	if shouldRegister("mem_save", allowlist) && shouldRegister("mem_judge", allowlist) {
-		b.WriteString("## CONFLICT SURFACING\n\n" +
-			"After mem_save: if judgment_required, iterate candidates[] and call mem_judge\n" +
-			"once per entry using that entry's judgment_id; never reuse the top-level judgment_id.\n" +
+	if shouldRegister("mem_save", allowlist) && (shouldRegister("mem_judge", allowlist) || shouldRegister("mem_judge_many", allowlist)) {
+		b.WriteString("## CONFLICT SURFACING\n\n")
+		if shouldRegister("mem_judge_many", allowlist) {
+			b.WriteString("After mem_save: if judgment_required, prefer mem_judge_many (max 32) with candidates[].judgment_id; never reuse the top-level judgment_id.\n")
+		} else {
+			b.WriteString("After mem_save: if judgment_required, call mem_judge once per entry using that entry's judgment_id; never reuse the top-level judgment_id.\n")
+		}
+		b.WriteString(
 			"Ask conversationally when confidence < 0.7 OR (relation in\n" +
-			"{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else\n" +
-			"resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.")
+				"{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else\n" +
+				"resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.")
 	}
 
 	return strings.TrimSpace(b.String())
@@ -1103,6 +1109,23 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 			),
 			queuedWriteHandler(writeQueue, handleJudge(s, activity)),
 		)
+	}
+
+	if shouldRegister("mem_judge_many", allowlist) {
+		srv.AddTool(mcp.NewTool("mem_judge_many",
+			mcp.WithTitleAnnotation("Judge Memory Relations in Batch"),
+			mcp.WithDescription("Record 1..32 caller-authored judgments in submitted order. Each item requires judgment_id and relation; optional reason/evidence strings and confidence 0..1. Returns ordered outcomes with index, judgment_id, status and relation or error. Item errors do not stop later items. Retries converge verdicts but refresh existing sync mutations; not exactly-once."),
+			mcp.WithDeferLoading(true),
+			mcp.WithReadOnlyHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(false),
+			mcp.WithArray("judgments", mcp.Required(), mcp.Items(map[string]any{"type": "object", "properties": map[string]any{
+				"judgment_id": map[string]any{"type": "string"}, "relation": map[string]any{"type": "string"},
+				"reason": map[string]any{"type": "string"}, "evidence": map[string]any{"type": "string"}, "confidence": map[string]any{"type": "number"},
+			}, "required": []string{"judgment_id", "relation"}})),
+			mcp.WithString("session_id", mcp.Description("Optional shared session provenance, as in mem_judge")),
+		), queuedWriteHandler(writeQueue, handleJudgeMany(s, activity)))
 	}
 
 	// ─── mem_compare (profile: agent, eager) — REQ-011, Design §9 ────────
@@ -2615,6 +2638,87 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 // candidate (judgment_id is in candidates[]). Use to mark SUPERSEDES,
 // CONFLICTS_WITH, NOT_CONFLICT, RELATED, COMPATIBLE, or SCOPED.
 // Ask the user when ambiguous."
+// handleJudgeMany runs inside one queued task; each JudgeRelation retains its own transaction.
+func handleJudgeMany(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
+	judge := handleJudge(s, activity)
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		items, ok := req.GetArguments()["judgments"].([]any)
+		if !ok || len(items) < 1 || len(items) > 32 {
+			return mcp.NewToolResultError("judgments must be an array containing 1..32 items"), nil
+		}
+		session, present := req.GetArguments()["session_id"]
+		if present {
+			if _, ok := session.(string); !ok {
+				return mcp.NewToolResultError("session_id must be a string"), nil
+			}
+		}
+		outcomes := make([]map[string]any, 0, len(items))
+		for index, raw := range items {
+			out := map[string]any{"index": index, "judgment_id": nil, "status": "error"}
+			args, valid := raw.(map[string]any)
+			message := "judgment must be an object"
+			if valid {
+				if id, ok := args["judgment_id"].(string); ok {
+					out["judgment_id"] = id
+				}
+				message = ""
+				for _, key := range []string{"judgment_id", "relation", "reason", "evidence"} {
+					if value, exists := args[key]; exists {
+						if _, ok := value.(string); !ok {
+							message = key + " must be a string"
+							break
+						}
+					}
+				}
+				if value, exists := args["confidence"]; exists && message == "" {
+					v, ok := value.(float64)
+					if !ok || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+						message = "confidence must be a number between 0.0 and 1.0"
+					}
+				}
+			}
+			if message == "" {
+				itemArgs := make(map[string]any, len(args)+1)
+				for key, value := range args {
+					itemArgs[key] = value
+				}
+				itemArgs["session_id"] = session
+				itemReq := mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: itemArgs}}
+				result, err := judge(ctx, itemReq)
+				if err != nil {
+					message = err.Error()
+				} else if result == nil || len(result.Content) != 1 {
+					message = "unexpected judgment response"
+				} else if text, ok := result.Content[0].(mcp.TextContent); !ok {
+					message = "unexpected judgment response content"
+				} else if result.IsError {
+					message = text.Text
+				} else {
+					var envelope map[string]any
+					if err := json.Unmarshal([]byte(text.Text), &envelope); err != nil {
+						message = err.Error()
+					} else {
+						// Preserve all existing response fields, including future warnings.
+						for key, value := range envelope {
+							out[key] = value
+						}
+						if relation, ok := envelope["relation"].(map[string]any); ok {
+							out["judgment_status"] = relation["judgment_status"]
+						}
+						out["status"] = "success"
+					}
+				}
+			}
+			if message != "" {
+				out["error"] = message
+			}
+			outcomes = append(outcomes, out)
+		}
+		encoded, _ := jsonMarshal(map[string]any{"outcomes": outcomes})
+		return mcp.NewToolResultText(string(encoded)), nil
+	}
+}
+
 func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		judgmentID, _ := req.GetArguments()["judgment_id"].(string)

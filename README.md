@@ -161,7 +161,7 @@ Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipb
 
 | Component | What it does |
 | :--- | :--- |
-| **[MCP tools](DOCS.md#mcp-tools-23-tools)** | Save, search, timeline, session, review, and diagnosis tools for your agent |
+| **[MCP tools](DOCS.md#mcp-tools-24-tools)** | Save, search, timeline, session, review, and diagnosis tools for your agent |
 | **[HTTP API](DOCS.md#http-api-endpoints)** | The same memory over local HTTP endpoints |
 | **[Doctor](docs/DOCTOR.md)** | `engram doctor` — read-only operational diagnostics |
 | **[Conflict surfacing](docs/AGENT-SETUP.md#conflict-surfacing-automatic)** | Flags related or conflicting memories so the agent can judge them |
@@ -322,7 +322,7 @@ Tool availability can vary by MCP profile. Start with the intent, then use your 
 | Save or refine durable knowledge | `mem_save`, `mem_update`, `mem_suggest_topic_key` |
 | Preserve the user's request | `mem_save_prompt` |
 | Hand off or close a session | `mem_session_summary`, `mem_session_start`, `mem_session_end` |
-| Review stale knowledge or memory relationships | `mem_review`, `mem_judge`, `mem_compare` |
+| Review stale knowledge or memory relationships | `mem_review`, `mem_judge`, `mem_compare`; MCP batch: `mem_judge_many` |
 | Diagnose project or store state | `mem_doctor` |
 
 For parameters and the complete, current tool reference, see [the full documentation](DOCS.md).
