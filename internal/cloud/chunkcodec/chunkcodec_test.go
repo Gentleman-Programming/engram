@@ -325,3 +325,52 @@ func TestCanonicalizeForProjectAcceptsSessionDeleteMutation(t *testing.T) {
 		t.Fatalf("expected canonical session delete payload without directory, got %#v", payload)
 	}
 }
+
+// The consolidation provenance link must survive canonicalization: the
+// observation mutation payload's superseded_by_sync_id cannot be dropped when
+// normalizeMutationPayload re-encodes the body (issue #242 slice 2).
+func TestCanonicalizeForProjectPreservesSupersededByOnObservationMutation(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "session",
+				"entity_key": "sess-1",
+				"op": "upsert",
+				"project": "wrong",
+				"payload": "{\"id\":\"sess-1\",\"project\":\"wrong\",\"directory\":\"/tmp/sess-1\",\"started_at\":\"2026-10-12T12:00:00Z\"}"
+			},
+			{
+				"entity": "observation",
+				"entity_key": "obs-src",
+				"op": "delete",
+				"project": "wrong",
+				"payload": "{\"sync_id\":\"obs-src\",\"session_id\":\"sess-1\",\"type\":\"note\",\"title\":\"source\",\"content\":\"c\",\"scope\":\"project\",\"deleted\":true,\"deleted_at\":\"2026-10-12T12:05:00Z\",\"superseded_by_sync_id\":\"obs-survivor\"}"
+			}
+		]
+	}`)
+
+	normalized, err := CanonicalizeForProject(raw, "proj-a")
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	var chunk struct {
+		Mutations []store.SyncMutation `json:"mutations"`
+	}
+	if err := json.Unmarshal(normalized, &chunk); err != nil {
+		t.Fatalf("decode canonicalized chunk: %v", err)
+	}
+	var deletePayload map[string]any
+	for _, mutation := range chunk.Mutations {
+		if mutation.Entity == store.SyncEntityObservation && mutation.Op == store.SyncOpDelete {
+			if err := json.Unmarshal([]byte(mutation.Payload), &deletePayload); err != nil {
+				t.Fatalf("decode delete payload: %v", err)
+			}
+		}
+	}
+	if deletePayload == nil {
+		t.Fatal("observation delete mutation missing after canonicalization")
+	}
+	if deletePayload["superseded_by_sync_id"] != "obs-survivor" {
+		t.Fatalf("canonicalization must preserve superseded_by_sync_id, got %v", deletePayload["superseded_by_sync_id"])
+	}
+}

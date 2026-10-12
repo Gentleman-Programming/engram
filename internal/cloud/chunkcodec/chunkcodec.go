@@ -258,6 +258,9 @@ type mutationObservationPayload struct {
 	Deleted        bool            `json:"deleted,omitempty"`
 	DeletedAt      *string         `json:"deleted_at,omitempty"`
 	HardDelete     bool            `json:"hard_delete,omitempty"`
+	// SupersededBySyncID rides consolidation deletes and peer upserts so the
+	// provenance link survives canonical re-encoding (issue #242 option (c)).
+	SupersededBySyncID *string `json:"superseded_by_sync_id,omitempty"`
 }
 
 type mutationPromptPayload struct {

@@ -5974,3 +5974,45 @@ func TestCloudImportLegacyManifestStillChecksChunkOwnership(t *testing.T) {
 		t.Fatalf("a downgrade-incompatible chunk must never be marked synced")
 	}
 }
+
+// Synthesized observation mutations from a snapshot chunk must carry the
+// consolidation provenance link (issue #242 slice 2): buildImportMutations
+// synthesizing from chunk.Observations preserves superseded_by_sync_id.
+func TestBuildImportMutationsSynthesizesSupersededBy(t *testing.T) {
+	survivor := "obs-survivor-synth"
+	deletedAt := "2026-10-12 12:05:00"
+	chunk := ChunkData{
+		Sessions: []store.Session{{ID: "sess-synth", Project: "proj-a", Directory: "/tmp/proj-a"}},
+		Observations: []store.Observation{{
+			SyncID: "obs-src-synth", SessionID: "sess-synth", Type: "note",
+			Title: "source", Content: "superseded source", Scope: "project",
+			DeletedAt:          &deletedAt,
+			SupersededBySyncID: &survivor,
+		}},
+	}
+
+	mutations := buildImportMutations(chunk)
+
+	found := false
+	for _, mutation := range mutations {
+		if mutation.Entity != store.SyncEntityObservation || mutation.EntityKey != "obs-src-synth" {
+			continue
+		}
+		found = true
+		var payload struct {
+			SupersededBySyncID *string `json:"superseded_by_sync_id"`
+		}
+		if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if payload.SupersededBySyncID == nil || *payload.SupersededBySyncID != survivor {
+			t.Fatalf("synthesized observation mutation must carry superseded_by_sync_id=%s, got %v", survivor, payload.SupersededBySyncID)
+		}
+		if mutation.Op != store.SyncOpDelete {
+			t.Fatalf("deleted observation must synthesize a delete, got %s", mutation.Op)
+		}
+	}
+	if !found {
+		t.Fatal("synthesized observation mutation missing")
+	}
+}

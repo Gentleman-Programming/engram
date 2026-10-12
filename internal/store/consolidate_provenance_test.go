@@ -97,9 +97,15 @@ func TestConsolidateProvenance_DeleteJournalRidesSupersededBy(t *testing.T) {
 	surv := res.Survivor
 
 	var deletePayloads []string
+	placeholders := strings.Repeat("?,", len(syncIDs)-1) + "?"
+	args := make([]any, 0, 2+len(syncIDs))
+	args = append(args, SyncEntityObservation, SyncOpDelete)
+	for _, id := range syncIDs {
+		args = append(args, id)
+	}
 	rows, err := s.db.Query(
-		`SELECT payload FROM sync_mutations WHERE entity = ? AND op = ? AND seq > ?`,
-		SyncEntityObservation, SyncOpDelete, maxSyncMutationSeq(t, s)-3,
+		`SELECT payload FROM sync_mutations WHERE entity = ? AND op = ? AND entity_key IN (`+placeholders+`)`,
+		args...,
 	)
 	if err != nil {
 		t.Fatalf("select delete payloads: %v", err)
@@ -504,4 +510,101 @@ func (s *Store) getObservationByIDOrFatal(t *testing.T, id int64) Observation {
 		t.Fatalf("load observation %d: %v", id, err)
 	}
 	return o
+}
+
+// Backfill re-journals existing rows; the re-journalled payloads must carry
+// the provenance link for both live and deleted observations (issue #242
+// slice 2, contract point 3).
+func TestBackfillObservationSyncMutationsCarriesSupersededBy(t *testing.T) {
+	s, ids, _ := consolidateTestStore(t)
+	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := s.ConsolidateObservations(ConsolidateParams{
+		IDs:         ids,
+		Confirm:     true,
+		Fingerprint: plan.Plan.Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	// Force backfill to re-journal: drop the pending observation mutations.
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ?`, SyncEntityObservation); err != nil {
+		t.Fatalf("wipe observation mutations: %v", err)
+	}
+	tx, err := s.beginTxHook()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := s.backfillObservationSyncMutationsTx(tx, "proj-cons"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("backfill: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	for _, id := range ids {
+		src := s.getObservationByIDOrFatal(t, id)
+		var payload string
+		if err := s.db.QueryRow(
+			`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`,
+			SyncEntityObservation, src.SyncID, SyncOpDelete,
+		).Scan(&payload); err != nil {
+			t.Fatalf("select backfilled delete for %s: %v", src.SyncID, err)
+		}
+		var decoded syncObservationPayload
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if decoded.SupersededBySyncID == nil || *decoded.SupersededBySyncID != res.Survivor.SyncID {
+			t.Fatalf("backfilled delete must carry superseded_by_sync_id=%s for %s, got %v", res.Survivor.SyncID, src.SyncID, decoded.SupersededBySyncID)
+		}
+	}
+}
+
+// The project-rescue re-journal path must preserve the provenance link on
+// rescued observation mutations (issue #242 slice 2, contract point 3).
+func TestRescueNullProjectOwnershipCarriesSupersededBy(t *testing.T) {
+	s, ids, _ := consolidateTestStore(t)
+	plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := s.ConsolidateObservations(ConsolidateParams{
+		IDs:         ids,
+		Confirm:     true,
+		Fingerprint: plan.Plan.Fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ?`, SyncEntityObservation); err != nil {
+		t.Fatalf("wipe observation mutations: %v", err)
+	}
+	if _, err := s.RescueNullProjectOwnership(ProjectRescueParams{
+		TargetProject:  "proj-cons",
+		ObservationIDs: ids,
+	}); err != nil {
+		t.Fatalf("rescue: %v", err)
+	}
+
+	for _, id := range ids {
+		src := s.getObservationByIDOrFatal(t, id)
+		var payload string
+		if err := s.db.QueryRow(
+			`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`,
+			SyncEntityObservation, src.SyncID,
+		).Scan(&payload); err != nil {
+			t.Fatalf("select rescued mutation for %s: %v", src.SyncID, err)
+		}
+		var decoded syncObservationPayload
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if decoded.SupersededBySyncID == nil || *decoded.SupersededBySyncID != res.Survivor.SyncID {
+			t.Fatalf("rescued mutation must carry superseded_by_sync_id=%s for %s, got %v", res.Survivor.SyncID, src.SyncID, decoded.SupersededBySyncID)
+		}
+	}
 }

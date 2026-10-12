@@ -10442,8 +10442,8 @@ func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sess
 	}
 	for _, id := range p.ObservationIDs {
 		var payload syncObservationPayload
-		err := tx.QueryRow(`SELECT sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at FROM observations WHERE id = ? AND project = ?`, id, target).
-			Scan(&payload.SyncID, &payload.SessionID, &payload.Type, &payload.Title, &payload.Content, &payload.ToolName, &payload.Project, &payload.Scope, &payload.TopicKey, &payload.RevisionCount, &payload.DuplicateCount, &payload.LastSeenAt, &payload.CreatedAt, &payload.UpdatedAt, &payload.DeletedAt)
+		err := tx.QueryRow(`SELECT sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at, superseded_by_sync_id FROM observations WHERE id = ? AND project = ?`, id, target).
+			Scan(&payload.SyncID, &payload.SessionID, &payload.Type, &payload.Title, &payload.Content, &payload.ToolName, &payload.Project, &payload.Scope, &payload.TopicKey, &payload.RevisionCount, &payload.DuplicateCount, &payload.LastSeenAt, &payload.CreatedAt, &payload.UpdatedAt, &payload.DeletedAt, &payload.SupersededBySyncID)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -10837,7 +10837,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 	// ── Live observations ─────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
 		SELECT o.sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project, o.scope, o.topic_key,
-		       o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at
+		       o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.superseded_by_sync_id
 		FROM observations o
 		LEFT JOIN sessions s ON s.id = o.session_id
 		WHERE (
@@ -10880,6 +10880,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 			&payload.LastSeenAt,
 			&payload.CreatedAt,
 			&payload.UpdatedAt,
+			&payload.SupersededBySyncID,
 		); err != nil {
 			return closeRowsWithError(rows, err)
 		}
@@ -10901,7 +10902,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 
 	// ── Deleted observations ──────────────────────────────────────────────────
 	deletedRows, err := s.queryItHook(tx, `
-		SELECT o.sync_id, o.session_id, o.project, o.deleted_at
+		SELECT o.sync_id, o.session_id, o.project, o.deleted_at, o.superseded_by_sync_id
 		FROM observations o
 		LEFT JOIN sessions s ON s.id = o.session_id
 		WHERE (
@@ -10930,7 +10931,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 	var deletedPending []syncObservationPayload
 	for deletedRows.Next() {
 		var payload syncObservationPayload
-		if err := deletedRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
+		if err := deletedRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt, &payload.SupersededBySyncID); err != nil {
 			return closeRowsWithError(deletedRows, err)
 		}
 		payload.Deleted = true

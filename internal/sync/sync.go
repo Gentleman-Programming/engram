@@ -1930,6 +1930,11 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		if obs.ReviewAfter != nil {
 			fields["review_after"] = *obs.ReviewAfter
 		}
+		// Same legacy-absence discipline for the consolidation provenance link
+		// (issue #242 slice 2): a null must never erase a local marker.
+		if obs.SupersededBySyncID != nil {
+			fields["superseded_by_sync_id"] = *obs.SupersededBySyncID
+		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
 			continue
