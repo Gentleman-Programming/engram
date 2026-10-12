@@ -152,6 +152,60 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 		}
 	})
 
+	for _, tc := range []struct {
+		name, session  string
+		initiallyEnded bool
+	}{
+		{"live session", `{"id":"fallback-root","project":"client","directory":"/work","ownership_mode":"project_owned","ended_at":null}`, false},
+		{"ended root without project", `{"id":"fallback-root","project":"","directory":"/work","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, true},
+		{"ended root without directory", `{"id":"fallback-root","project":"client","directory":"","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, true},
+	} {
+		t.Run("uses regular end for "+tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var requests []string
+			ended := tc.initiallyEnded
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/fallback-root":
+					_, _ = io.WriteString(w, tc.session)
+				case r.Method == http.MethodPost && r.URL.Path == "/sessions/fallback-root/end":
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read end body: %v", err)
+						return
+					}
+					if string(body) != "{}" || r.Header.Get("Content-Type") != "application/json" {
+						t.Errorf("end body=%q content-type=%q, want {} and application/json", body, r.Header.Get("Content-Type"))
+						return
+					}
+					ended = true
+					_, _ = io.WriteString(w, `{"status":"ended"}`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			stdout, stderr := runHookWithStderr(t, "session-end.sh", `{"session_id":"fallback-root"}`, map[string]string{"ENGRAM_URL": srv.URL})
+			if stdout != "" || stderr != "" {
+				t.Errorf("hook stdout=%q stderr=%q, want both empty", stdout, stderr)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			want := "GET /sessions/fallback-root,POST /sessions/fallback-root/end"
+			if strings.Join(requests, ",") != want {
+				t.Errorf("requests=%v, want %s (no runtime end)", requests, want)
+			}
+			if !ended {
+				t.Error("session remains live after SessionEnd")
+			}
+		})
+	}
+
 	// Issue #1624: a resumed session keeps its ended root ID, so SessionEnd
 	// must close the live continuation through the runtime scope.
 	t.Run("ends the live continuation of an already-ended root", func(t *testing.T) {
