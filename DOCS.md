@@ -17,7 +17,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
 | [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-24-tools)                          | Detailed reference for all 24 memory tools                   |
+| [MCP Tools](#mcp-tools-25-tools)                          | Detailed reference for all 25 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -1277,7 +1277,7 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 <a id="mcp-tools-23-tools"></a>
 
-## MCP Tools (24 tools)
+## MCP Tools (25 tools)
 
 
 ### mem_search
@@ -1425,6 +1425,18 @@ Save comprehensive end-of-session summary:
 ## Relevant Files
 ```
 
+### mem_session_finalize
+
+Save a caller-authored structured summary and close an **existing exact session** in one SQLite transaction. Deferred; available in both agent and admin profiles. This is an optional MCP contract, not a change to host lifecycle hooks or the existing Memory Protocol tools.
+
+- **session_id** (required): exact previously registered session identity; never implicitly created or trimmed.
+- **summary** (required): nonempty caller-authored content using the same Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files structure as `mem_session_summary`. Stored-content redaction/truncation rules apply.
+- **project**, **project_choice_reason**, **recovery_token** (optional): validated using summary project resolution; finalization additionally requires the resolved project to match the session owner.
+
+The summary observation, session close, normal enrolled-project sync mutations and local retry journal commit together or roll back together. The legacy `sessions.summary` free-text column remains unchanged. Returns `session_id`, `state: finalized`, `summary_id`, `summary_sync_id`, `already_finalized: false` and project metadata.
+
+A successful local retry returns the original identity with `state: already_finalized` and `already_finalized: true`, with no writes, even when nonempty retry text differs. It does not revise the first summary. An independently ended session rejects with `session_already_ended` and is not backfilled. The retry journal survives local reopen but is not synced/exported; an imported ended session without that journal also rejects. Existing summary/start/end tools remain available and unchanged.
+
 ### mem_session_start
 
 Register the start of a new coding session.
@@ -1494,6 +1506,8 @@ Retries converge persisted verdicts but still refresh judgment timestamps and re
 ```json
 {"judgments":[{"judgment_id":"<candidates[0].judgment_id>","relation":"related"},{"judgment_id":"<candidates[1].judgment_id>","relation":"compatible","confidence":0.9}],"session_id":"<registered-session-id>"}
 ```
+
+After deciding the candidate relationships, an MCP client can use `mem_judge_many` followed by `mem_session_finalize` to reduce dependent tool calls. Finalize does not carry judgments and neither tool generates semantic decisions or summaries server-side.
 
 ### mem_compare
 

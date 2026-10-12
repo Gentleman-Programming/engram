@@ -212,6 +212,12 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 
 ---
 
+## MCP Tool Reference — mem_session_finalize
+
+MCP clients can finalize an existing exact session with required `session_id` and caller-authored `summary`, plus the optional summary project-resolution fields. One transaction saves a structured observation, ends the session, queues the normal enrolled-project mutations and records a local retry journal. The existing free-text session summary is preserved.
+
+Successful local retries return the same `summary_id` / `summary_sync_id` with `state: already_finalized` and no writes. A session ended separately rejects rather than silently dropping or backfilling the supplied summary. The journal is not synced/exported, so imported ended sessions without a local marker reject too. This MCP addition does not change host hooks or native Pi/HTTP tools. See [the full contract](../DOCS.md#mem_session_finalize).
+
 ## MCP Tool Reference — mem_judge_many
 
 Available in agent and admin profiles and explicit allowlists; deferred loading avoids eager schema duplication. After `mem_save` returns `judgment_required`, prefer this tool when available; otherwise call `mem_judge` for each candidate.
