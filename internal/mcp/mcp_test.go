@@ -2852,6 +2852,7 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 		"mem_pin",             // local context priority
 		"mem_unpin",           // local context priority
 		"mem_list_projects",   // engram#675: enumerate known projects for cross-project discovery
+		"mem_consolidate",     // issue #242: explicit preview/confirmation curation
 	}
 	for _, tool := range expectedTools {
 		if !result[tool] {

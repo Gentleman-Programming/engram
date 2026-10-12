@@ -1,8 +1,8 @@
 # Observation consolidation (store API)
 
 `Store.ConsolidateObservations` merges at least two live observations from one
-resolved canonical project. It is a store API, not yet an MCP tool in this slice
-of issue #242.
+resolved canonical project. `mem_consolidate` exposes it through the Go MCP
+server's agent profile with explicit preview/confirmation and owner assertion.
 
 ## Preview and confirmation
 
@@ -70,8 +70,43 @@ rules. Older clients can strip unknown fields when relaying payloads, so
 mixed-version preservation is not unconditional. Structured provenance changes
 also invalidate a previously issued consolidation preview fingerprint.
 
-This slice does not add an MCP tool, dashboard/TUI display, relation-model
-changes, automatic resurrection cleanup or a new sync engine.
+## MCP contract
+
+`mem_consolidate` is deferred/discoverable in the agent profile and uses the
+shared memory write queue. It is destructive and non-idempotent even though
+preview is the default. Required fields are `ids_to_delete`, `new_title`,
+`new_content`, and `expected_project`. IDs must be distinct positive integers
+(at least two), exactly representable in JSON, at most 9007199254740991.
+Title/content/owner are non-empty strings. Optional `type`, `topic_key` and
+`fingerprint` are strings; `confirm` is a boolean defaulting to false. Other
+arguments, including target `project`, `session_id` and `scope`, are refused.
+The survivor inherits the newest source session/scope; no session is synthesized.
+
+Preview example:
+
+```json
+{"ids_to_delete":[12,18],"new_title":"Consolidated decision","new_content":"Approved summary","expected_project":"engram"}
+```
+
+Inspect the JSON-text result's `plan.sources`, `plan.survivor`, `plan.project`
+and opaque `plan.fingerprint`. It has `status: "preview"` and changes no stored
+data or sync journal. To execute, repeat those exact input arguments and add
+`"confirm": true` and `"fingerprint": "<fingerprint from preview>"`.
+Confirmation returns `status: "consolidated"`, the persisted `survivor` and
+`soft_deleted_ids`; success means local commit, not remote visibility.
+
+Refusals set MCP `isError: true` and return JSON text with
+`error.code`/`error.message`. Codes are `invalid_arguments`, `project_mismatch`,
+`consolidation_refused`, and `fingerprint_mismatch`. A fingerprint mismatch also
+includes a fresh `plan` without writes. Inspect it and explicitly confirm its
+fingerprint; never auto-confirm a replacement or retry an uncertain write.
+Owner mismatch returns no plan. The owner assertion is checked in the core
+inside both transactions, not just by the MCP adapter.
+
+This integration is the Go MCP server only. It does not register Pi-native
+memory tools, add an HTTP consolidation route, or change OpenCode/Claude
+adapters. No dashboard/TUI display, relation-model changes, automatic
+resurrection cleanup or new sync engine is included.
 
 Regression checks:
 
@@ -79,4 +114,5 @@ Regression checks:
 go test ./internal/store -run 'Test(ConsolidateObservations|ConsolidationStructuredProvenance|Provenance)' -count=1
 go test ./internal/cloud/chunkcodec ./internal/cloud/cloudstore -run 'Test(Canonicalize.*ObservationProvenance|MaterializedObservationProvenance)' -count=1
 go test ./internal/sync -run '^TestSyncStructuredProvenance' -count=1
+go test ./internal/mcp -run '^TestConsolidateMCP' -count=1
 ```

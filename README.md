@@ -320,6 +320,7 @@ Tool availability can vary by MCP profile. Start with the intent, then use your 
 | Find prior knowledge without repeating work | `mem_search` |
 | Inspect a result in enough detail | `mem_timeline`, `mem_get_observation` |
 | Save or refine durable knowledge | `mem_save`, `mem_update`, `mem_suggest_topic_key` |
+| Consolidate observations after preview and explicit confirmation | `mem_consolidate` (Go MCP server; [contract](docs/codebase/OBSERVATION-CONSOLIDATION.md#mcp-contract)) |
 | Preserve the user's request | `mem_save_prompt` |
 | Hand off or close a session | `mem_session_summary`, `mem_session_start`, `mem_session_end` |
 | Review stale knowledge or memory relationships | `mem_review`, `mem_judge`, `mem_compare` |
