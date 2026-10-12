@@ -642,13 +642,16 @@ test("V2 context hook appends memory instructions to the last system part", asyn
   const request = { sessionID: "ses_root", system: [{ type: "text", text: "base" }], messages: [] }
   await runtime.hooks.get("session.context")(request)
   assert.equal(request.system.length, 1)
-  assert.match(request.system[0].text, /^base\n\n## Engram Persistent Memory/)
+  const heading = "# Engram Persistent Memory — Protocol"
+  assert.ok(request.system[0].text.startsWith(`base\n\n${heading}\n`))
+  assert.equal(request.system[0].text.split(heading).length - 1, 1)
 
   const empty = { sessionID: "ses_root", system: [], messages: [] }
   await runtime.hooks.get("session.context")(empty)
   assert.equal(empty.system.length, 1)
   assert.equal(empty.system[0].type, "text")
-  assert.match(empty.system[0].text, /^## Engram Persistent Memory/)
+  assert.ok(empty.system[0].text.startsWith(`${heading}\n`))
+  assert.equal(empty.system[0].text.split(heading).length - 1, 1)
 })
 
 test("V2 compaction hook injects session context and the summary instruction", async (t) => {

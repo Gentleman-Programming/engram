@@ -334,6 +334,8 @@ Pi sends eligible non-Engram tool results to Engram for passive scanning after r
 
 ### Injected memory contract
 
+The agent MUST follow this protocol without waiting for activation.
+
 The Pi-native Memory Protocol requires proactive `mem_save` for significant decisions,
 conventions, workflow/tool choices, completed non-obvious work, discoveries and
 preferences, including user confirmation or rejection and a self-check after every

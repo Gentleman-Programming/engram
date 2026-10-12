@@ -11,6 +11,8 @@ metadata:
 
 ## When to Use
 
+The agent MUST follow this protocol without waiting for activation.
+
 Use this skill when:
 - Making architecture or implementation decisions
 - Fixing bugs with non-obvious root causes

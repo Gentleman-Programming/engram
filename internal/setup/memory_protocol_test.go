@@ -2,6 +2,7 @@ package setup
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,9 +55,7 @@ func TestMemoryProtocolHostAssets(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			text := readMemoryContract(t, filepath.Join("../..", path))
 			if path == "DOCS.md" {
-				start := strings.Index(text, "## Memory Protocol\n")
-				end := strings.Index(text[start:], "\n## Project Name Normalization")
-				text = text[start : start+end]
+				text = memoryProseBlock(t, text, "## Memory Protocol\n", "\n## Project Name Normalization")
 			}
 			assertMemoryContract(t, text)
 			// Claude SKILL.md still references its own adapter names and discovery.
@@ -132,25 +131,122 @@ func assertCodexBindingContract(t *testing.T, text string) {
 }
 
 func TestMemoryProtocolClaudeVersions(t *testing.T) {
+	if err := memoryVersionsMatch(
+		[]byte(readMemoryContract(t, "../../plugin/claude-code/.claude-plugin/plugin.json")),
+		[]byte(readMemoryContract(t, "../../.claude-plugin/marketplace.json")),
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Explicit inventory: check delivered prose, not surrounding adapter code/comments.
+func TestMemoryProtocolSourceInventory(t *testing.T) {
+	for _, source := range []struct {
+		path, start, end string
+		claude           bool
+	}{
+		{"internal/setup/setup.go", "const memoryProtocolMarkdown = `", "`", false},
+		{"plugin/opencode/engram.ts", "const MEMORY_INSTRUCTIONS = `", "`;", false},
+		{"internal/setup/plugins/opencode/engram.ts", "const MEMORY_INSTRUCTIONS = `", "`;", false},
+		{"plugin/pi/index.ts", "const MEMORY_INSTRUCTIONS = `", "`;", false},
+		{"plugin/pi/README.md", "### Injected memory contract", "### Automatic user-prompt capture", false},
+		{"skills/memory-protocol/SKILL.md", "## When to Use", "", false},
+		{"plugin/claude-code/skills/memory/SKILL.md", "", "", true},
+		{"plugin/codex/skills/memory/SKILL.md", "", "", false},
+		{"plugin/claude-code/scripts/session-start.sh", "cat <<'PROTOCOL'\n", "\nPROTOCOL", true},
+		{"plugin/codex/scripts/session-start.sh", "cat <<'PROTOCOL'\n", "\nPROTOCOL", false},
+		{"DOCS.md", "## Memory Protocol\n", "\n## Project Name Normalization", false},
+	} {
+		t.Run(source.path, func(t *testing.T) {
+			text := readMemoryContract(t, filepath.Join("../..", source.path))
+			text = memoryProseBlock(t, text, source.start, source.end)
+			if !strings.Contains(text, "The agent MUST follow this protocol without waiting for activation") {
+				t.Error("protocol prose missing shared activation phrase")
+			}
+			for _, forbidden := range []string{"Core tools are loaded", "Deferred tools", "Engram will automatically extract and save these", "does not automatically intercept"} {
+				if strings.Contains(text, forbidden) {
+					t.Errorf("protocol prose contains obsolete assumption %q", forbidden)
+				}
+			}
+			if !source.claude {
+				for _, forbidden := range []string{"Use ToolSearch", "call ToolSearch", "permissions allowlist"} {
+					if strings.Contains(text, forbidden) {
+						t.Errorf("non-Claude prose imposes %q", forbidden)
+					}
+				}
+			}
+		})
+	}
+	source, err := os.ReadFile("../../plugin/opencode/engram.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded, err := os.ReadFile("plugins/opencode/engram.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(source) != string(embedded) {
+		t.Error("embedded OpenCode adapter differs from source")
+	}
+}
+
+func memoryProseBlock(t *testing.T, text, start, end string) string {
+	t.Helper()
+	if start != "" {
+		index := strings.Index(text, start)
+		if index < 0 {
+			t.Fatalf("missing prose start %q", start)
+		}
+		text = text[index+len(start):]
+	}
+	if end != "" {
+		index := strings.Index(text, end)
+		if index < 0 {
+			t.Fatalf("missing prose end %q", end)
+		}
+		text = text[:index]
+	}
+	return text
+}
+
+func TestMemoryProtocolClaudeVersionFixtures(t *testing.T) {
+	for _, fixture := range []struct {
+		name, plugin, marketplace string
+		wantError                 bool
+	}{
+		{"future synchronized bump", "9.4.2", "9.4.2", false},
+		{"mismatch", "9.4.2", "9.4.1", true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			plugin := []byte(fmt.Sprintf(`{"version":%q}`, fixture.plugin))
+			marketplace := []byte(fmt.Sprintf(`{"plugins":[{"name":"engram","version":%q}]}`, fixture.marketplace))
+			if err := memoryVersionsMatch(plugin, marketplace); (err != nil) != fixture.wantError {
+				t.Fatalf("synchronization error = %v, want error %v", err, fixture.wantError)
+			}
+		})
+	}
+}
+
+func memoryVersionsMatch(pluginData, marketplaceData []byte) error {
 	var plugin struct{ Version string }
 	var marketplace struct {
 		Plugins []struct{ Name, Version string }
 	}
-	if err := json.Unmarshal([]byte(readMemoryContract(t, "../../plugin/claude-code/.claude-plugin/plugin.json")), &plugin); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal(pluginData, &plugin); err != nil {
+		return err
 	}
-	if err := json.Unmarshal([]byte(readMemoryContract(t, "../../.claude-plugin/marketplace.json")), &marketplace); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal(marketplaceData, &marketplace); err != nil {
+		return err
 	}
-	if plugin.Version != "0.1.8" {
-		t.Errorf("Claude plugin version = %q, want 0.1.8", plugin.Version)
+	if plugin.Version == "" {
+		return fmt.Errorf("Claude plugin version is empty")
 	}
 	for _, entry := range marketplace.Plugins {
 		if entry.Name == "engram" && entry.Version == plugin.Version {
-			return
+			return nil
 		}
 	}
-	t.Fatal("marketplace lacks matching Engram version")
+	return fmt.Errorf("marketplace lacks matching Engram version")
 }
 
 func readMemoryContract(t *testing.T, path string) string {
@@ -159,7 +255,7 @@ func readMemoryContract(t *testing.T, path string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(data)
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
 }
 
 func assertMemoryContract(t *testing.T, text string) {
