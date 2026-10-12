@@ -26,6 +26,8 @@ Pi and OpenCode activity renews the local runtime lease through their existing s
 
 Pi sends `resume: true` for runtime-root registration and adopts only a valid acknowledged effective ID. The Go core selects numeric continuations; Pi persists the mapping in its session entries for reloads and uses it for attributed writes and shutdown `/end`. Legacy `:resume:<uuid>` mappings are re-registered as-is; an ended mapping falls back to root registration with `resume: true`. Reload does not end the session. Ownership conflicts and an older server's `409 session_already_ended` block writes rather than triggering client-generated identities.
 
+When resuming an ended, directory-bound host, new numeric continuations inherit its persisted project, directory, and ownership mode after registration ownership checks. After a received `409 runtime session scope conflict`, Codex looks up the ended root and makes at most one resolve/end request with its persisted directory and mode while retaining the caller's requested project: `shared` hosts still allow cross-project use, but `project_owned` hosts reject foreign projects. This rebinding is limited to that confirmed rejection; normal paths, unrelated errors, and uncertain transport failures do not trigger it. Fresh and live-host paths keep their existing registration and resolution behavior.
+
 ### Codex on Windows
 - The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
 - The adapter reads the setup-owned absolute pin and invokes its native hook command.
@@ -161,7 +163,7 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 
 **On session start** (`startup`, `resume`, `clear`, `fork`):
 1. Ensures the engram HTTP server is running
-2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration. The registration is `project_owned`, except when the ended session is a legacy `shared` root (created before Claude registered project-owned sessions): it is resumed as `shared` so the continuation stays resolvable
+2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration. The registration is `project_owned`, except when the ended session is a legacy `shared` root (created before Claude registered project-owned sessions): it is resumed as `shared` so the continuation stays resolvable. A new continuation inherits the complete persisted root scope, so a same-project resume from another non-Git directory or linked worktree does not split registration from write binding and closure.
 3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
 4. Injects previous session context into Claude's initial context
 
@@ -172,6 +174,8 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 
 **On session end**:
 The hook looks up the session first. If the original session has already ended (a resumed conversation), it ends the live continuation through `POST /runtime-sessions/end` with the session's persisted project, directory, and ownership mode; otherwise it calls `POST /sessions/{id}/end` as before. Both calls are bounded and fail open.
+
+Resume does not rewrite or skip an already-existing continuation with a conflicting scope. Those identities still fail closed; start a new host conversation if one was created with incompatible scope by an older core. Blank legacy bindings and directory-less isolated sessions are not silently converted into runtime-bound identities. Use a matching updated core for the new-continuation behavior; updating only plugin assets does not change registration semantics.
 
 **On user prompt submit**:
 The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompts/capture-decision` endpoint whether to capture a prompt. This replaces capture's former `GET /project/current` read, rather than adding another human-prompt preflight. Go skips blank prompts and prompts whose trimmed content starts with `<task-notification>` or `<agent-message`; only a valid `capture` decision with canonical project metadata permits `POST /prompts`, using the original content unchanged. Filtering affects persistence only, not ToolSearch or save reminders, and does not delete existing rows. The Windows Git Bash safe path remains builtin-only and skips all prompt persistence and API calls.

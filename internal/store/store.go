@@ -3416,6 +3416,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		// attempt may become the terminal response.
 		claimed = false
 		id = root
+		var resumeScope *Session
 		validateIsolation := func(sessionID string) error {
 			if !isolated {
 				return nil
@@ -3443,7 +3444,8 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			// Validate terminal root ownership before looking up any continuation.
 			// A compatible suffix cannot bypass the requested identity's owner.
 			var endedAt *string
-			err := tx.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, root).Scan(&endedAt)
+			var rootDirectory, rootMode string
+			err := tx.QueryRow(`SELECT ended_at, ifnull(directory, ''), ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, root).Scan(&endedAt, &rootDirectory, &rootMode)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -3457,6 +3459,12 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 						return &SessionProjectConflictError{SessionID: root, OwnerProject: owner, RequestedProject: project}
 					}
 					return err
+				}
+				// Preserve the root's binding for new continuations, but only after
+				// validating the caller's original project and ownership request.
+				// Incomplete legacy and isolated identities retain their old paths.
+				if !isolated && owner != "" && strings.TrimSpace(rootDirectory) != "" && validSessionOwnershipMode(strings.TrimSpace(rootMode)) {
+					resumeScope = &Session{Project: owner, Directory: rootDirectory, OwnershipMode: strings.TrimSpace(rootMode)}
 				}
 				if mode == SessionOwnershipProjectOwned && owner == "" {
 					_, foreignOwner, err := foreignRecordOwnerTx(tx, root, project)
@@ -3541,7 +3549,13 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			}
 			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
 		}
-		if err := s.startSessionTx(tx, id, project, directory, mode); err != nil {
+		// Never rewrite or skip an already-selected continuation. Resolve/end
+		// still reject any existing scope mismatch rather than repairing data.
+		registrationProject, registrationDirectory, registrationMode := project, directory, mode
+		if !found && resumeScope != nil {
+			registrationProject, registrationDirectory, registrationMode = resumeScope.Project, resumeScope.Directory, resumeScope.OwnershipMode
+		}
+		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
 		}
 		if !identityRepaired {

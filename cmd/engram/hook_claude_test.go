@@ -219,7 +219,7 @@ func TestCodexEndedSessionStart409DeniesWrite(t *testing.T) {
 			_, _ = w.Write([]byte(`{"context":""}`))
 			return
 		}
-		if r.URL.Path == "/runtime-sessions/resolve" || r.URL.Path == "/health" {
+		if r.URL.Path == "/runtime-sessions/resolve" || r.URL.Path == "/health" || (r.Method == http.MethodGet && r.URL.Path == "/sessions/host") {
 			production.ServeHTTP(w, r)
 			return
 		}
