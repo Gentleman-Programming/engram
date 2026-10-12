@@ -325,14 +325,4 @@ func TestJudgeManyRegistrationGuidanceAndLegacy(t *testing.T) {
 	if !failed || !reflect.DeepEqual(before, batchRelation(t, s, id)) {
 		t.Fatal(out)
 	}
-	TestMCPToolContractV1(t)
-	TestResolveToolsAgentProfile(t)
-	TestResolveToolsAdminProfile(t)
-	TestHandleJudge_HappyPath(t)
-	TestHandleJudge_OptionalFieldsStayNull(t)
-	TestHandleJudge_UnknownID_IsError(t)
-	TestHandleJudge_InvalidVerb_IsError(t)
-	TestHandleJudge_Idempotent_Overwrite(t)
-	TestHandleJudge_RequiresJudgmentID(t)
-	TestHandleJudge_RequiresRelation(t)
 }
