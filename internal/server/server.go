@@ -1409,6 +1409,10 @@ func contextBytesQuery(r *http.Request) int {
 	return clampContextBytes(budget)
 }
 
+var contextHistoryFormatter = func(s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+	return s.FormatContextWithOptions(project, scope, opts)
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -1433,9 +1437,10 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),
 		Pinned:       clampContextLimit(queryInt(r, "pinned", 0)),
 		Compact:      queryBool(r, "compact", false),
+		OlderHistory: queryBool(r, "older_history", false),
 	}
 
-	context, err := s.store.FormatContextWithOptions(resolved.Project, scope, opts)
+	context, err := contextHistoryFormatter(s.store, resolved.Project, scope, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
