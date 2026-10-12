@@ -30,9 +30,11 @@ source sync IDs in a `consolidated_from` footer.
 
 ## Atomicity and sync limits
 
-One local transaction inserts the survivor, soft-deletes the sources and applies
-the associated sync journal/lifecycle changes. Any failure rolls back all of
-those writes, including failures after survivor journaling or a source deletion.
+One local transaction inserts the survivor, sets each source's
+`superseded_by_sync_id` to the survivor's sync ID, soft-deletes the sources and
+applies the associated sync journal/lifecycle changes. Any failure rolls back
+all of those writes, including failures after survivor journaling or a source
+deletion.
 
 For enrolled projects, the survivor upsert precedes source deletes in the local
 journal; deletes are emitted in source ID order. This is **not distributed
@@ -42,4 +44,33 @@ Existing last-write-wins sync can also resurrect a source after a later peer edi
 Unenrolled projects create no cloud journal entries and supersede pending source
 mutations using the existing deletion lifecycle.
 
-Regression checks: `go test ./internal/store -run TestConsolidateObservations -count=1`.
+## Structured provenance
+
+Sources expose nullable `superseded_by_sync_id` through observation reads,
+full-row and deletion sync payloads, cloud transport, and backup export/import,
+including soft-deleted rows. It is an optional JSON field and has no foreign key:
+replication can deliver a reference before its survivor. Migration leaves old
+rows null and does not infer links from the `consolidated_from` footer.
+
+A delete received before its source retains the link in the existing delete
+tombstone lifecycle without creating a placeholder observation. Missing, null
+or empty incoming links preserve known provenance; clearing it is not supported
+in this slice. Conflicting nonempty links follow existing last-applied ordering,
+not a new timestamp conflict resolver.
+
+A later admitted upsert can restore a source while retaining its known link;
+provenance does not silently re-delete it or bypass existing tombstone admission
+rules. Older clients can strip unknown fields when relaying payloads, so
+mixed-version preservation is not unconditional. Structured provenance changes
+also invalidate a previously issued consolidation preview fingerprint.
+
+This slice does not add an MCP tool, dashboard/TUI display, relation-model
+changes, automatic resurrection cleanup or a new sync engine.
+
+Regression checks:
+
+```sh
+go test ./internal/store -run 'Test(ConsolidateObservations|ConsolidationStructuredProvenance|Provenance)' -count=1
+go test ./internal/cloud/chunkcodec ./internal/cloud/cloudstore -run 'Test(Canonicalize.*ObservationProvenance|MaterializedObservationProvenance)' -count=1
+go test ./internal/sync -run '^TestSyncStructuredProvenance' -count=1
+```
