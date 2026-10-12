@@ -26,7 +26,11 @@ func TestDoctorExplainsUnsupportedObservationSources(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			}()
 			if err := s.CreateSession("source-guidance", "engram", "/work/engram"); err != nil {
 				t.Fatal(err)
 			}
