@@ -20,7 +20,11 @@ func TestCmdProjectsRescueOwnershipClassifiesBeforeNextCLIInvocation(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer raw.Close()
+			t.Cleanup(func() {
+				if err := raw.Close(); err != nil {
+					t.Errorf("close raw SQLite connection: %v", err)
+				}
+			})
 			if _, err := raw.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, tc.id); err != nil {
 				t.Fatal(err)
 			}
