@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,6 +172,114 @@ func TestCodexPreToolUseManifestRegistersNativeBinder(t *testing.T) {
 	}
 }
 
+// Exercise the registered public command, not a private binder helper, against
+// the same host-specific promises delivered by SessionStart.
+func codexDeliveredBinderContract(t *testing.T, binary, prose string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "codex", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string
+			Hooks   []struct{ Command string }
+		}
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	entries := manifest.Hooks["PreToolUse"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 {
+		t.Fatalf("unexpected PreToolUse registration: %+v", entries)
+	}
+	entry := entries[0]
+	matcher := regexp.MustCompile("^(?:" + strings.ReplaceAll(entry.Matcher, "*", ".*") + ")$")
+	command := strings.Fields(entry.Hooks[0].Command)
+	if len(command) != 3 || command[0] != "engram" {
+		t.Fatalf("unexpected public hook command: %q", entry.Hooks[0].Command)
+	}
+	root := t.TempDir()
+	var resolutions atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
+		case "/project/current":
+			_, _ = io.WriteString(w, `{"project":"binder-probe","project_source":"config"}`)
+		case "/runtime-sessions/resolve":
+			resolutions.Add(1)
+			_, _ = io.WriteString(w, `{"id":"host:resume:2","status":"resolved","resumed_from":"host"}`)
+		default:
+			t.Errorf("unexpected binder request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer fixture.Close()
+	env := codexHandoffEnv(t, root, fixture.URL)
+	for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+		for _, tc := range []struct {
+			tool, field string
+			deny, read  bool
+		}{
+			{tool: "mem_save", field: "session_id"},
+			{tool: "mem_save_prompt", field: "session_id"},
+			{tool: "mem_session_summary", field: "session_id"},
+			{tool: "mem_capture_passive", field: "session_id"},
+			{tool: "mem_session_start", field: "id"},
+			{tool: "mem_session_end", field: "id"},
+			{tool: "mem_search", read: true},
+			{tool: "mem_save", deny: true},
+		} {
+			name := prefix + tc.tool
+			if !matcher.MatchString(name) || !strings.Contains(prose, tc.tool) {
+				t.Fatalf("delivered tool %s is not covered by registered matcher/prose", name)
+			}
+			payload := map[string]any{"session_id": "host", "cwd": root, "tool_name": name,
+				"tool_input": map[string]string{"session_id": "invented", "id": "invented", "content": "preserved"}}
+			if tc.deny {
+				delete(payload, "session_id")
+			}
+			input, _ := json.Marshal(payload)
+			before := resolutions.Load()
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			cmd := exec.CommandContext(ctx, binary, command[1:]...)
+			cmd.Env, cmd.Dir, cmd.Stdin = env, root, bytes.NewReader(input)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			cancel()
+			if err != nil || stderr.Len() != 0 {
+				t.Fatalf("binder error=%v stderr=%q", err, stderr.String())
+			}
+			var result struct {
+				HookSpecificOutput struct {
+					PermissionDecision string
+					UpdatedInput       map[string]string
+				}
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			out := result.HookSpecificOutput
+			switch {
+			case tc.read:
+				if strings.TrimSpace(stdout.String()) != "{}" || resolutions.Load() != before {
+					t.Fatal("read-only call changed or resolved host")
+				}
+			case tc.deny:
+				if out.PermissionDecision != "deny" || out.UpdatedInput != nil || resolutions.Load() != before {
+					t.Fatal("unconfirmed write was not denied without binding")
+				}
+			default:
+				if out.PermissionDecision != "allow" || out.UpdatedInput[tc.field] != "host:resume:2" || out.UpdatedInput["content"] != "preserved" || resolutions.Load() != before+1 {
+					t.Fatalf("%s violated delivered binding contract: %s", name, stdout.String())
+				}
+			}
+		}
+	}
+}
+
 func TestCodexRegisteredSessionHandoff(t *testing.T) {
 	if testing.Short() {
 		t.Skip("executes lifecycle shell hooks")
@@ -322,6 +431,9 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						}
 					}
 					if tc.registered {
+						if event == "startup" && tc.name == "confirmed" {
+							codexDeliveredBinderContract(t, binary, output)
+						}
 						if !strings.Contains(output, "ACTIVE PROTOCOL") {
 							t.Error("confirmed registration missing active protocol")
 						}
@@ -331,6 +443,10 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								"tools actually exposed by Codex", "registered MCP names",
 								"mcp__engram__mem_*", "mcp__plugin_engram_engram__mem_*",
 								"User confirms", "User rejects", "Feature implemented with non-obvious approach",
+								"Configuration change or environment setup", "### PASSIVE CAPTURE",
+								"Ordinary main-agent responses are not automatically captured",
+								"### SESSION BINDING", "Read-only tools are unchanged",
+								"mem_capture_passive(content)",
 								"If memory work fails or needs follow-up, still send the answer",
 							} {
 								if !strings.Contains(output, want) {

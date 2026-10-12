@@ -183,6 +183,7 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Pattern established (naming, structure, approach)
 - User preference or constraint learned
 - Feature implemented with non-obvious approach
+- Configuration change or environment setup done
 - User confirms your recommendation ("go with that", "sounds good", or the equivalent in the user's language)
 - User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
 - Discussion concludes with a clear direction chosen
@@ -199,7 +200,15 @@ Memory operations are internal bookkeeping, never the user-facing answer. Comple
 - User's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
 ### SESSION CLOSE — before saying "done":
-Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
+Call `mem_session_summary` with: Goal, Instructions, Discoveries, Accomplished, Next Steps, Relevant Files.
+Summary persistence does not end the session; Claude's SessionEnd hook owns lifecycle closure.
+
+### PASSIVE CAPTURE — adapter-specific safety net
+Include a "## Key Learnings:" section with numbered items when completing a task or subtask.
+Claude's SubagentStop hook forwards eligible delegated/subagent output for server-side extraction.
+Ordinary main-agent responses are not automatically captured; the section alone does not guarantee storage.
+Use `mem_save` as the primary path for significant, verified knowledge. Explicit
+`mem_capture_passive(content)` extraction is a safety net, not a replacement for `mem_save`.
 PROTOCOL
 fi
 
