@@ -8774,6 +8774,10 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 
 		// Plan settled — only now does anything change.
 		for _, sessionID := range plan.claim {
+			// The ownership stamp also assigns the project and counts the session.
+			if plan.stampOwnershipMode[sessionID] {
+				continue
+			}
 			if _, err := s.execHook(tx, rescueSessionQuery.updateProject, target, sessionID); err != nil {
 				return err
 			}
@@ -8839,8 +8843,8 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 type rescuePlan struct {
 	// claim lists unowned sessions that will be moved to the target.
 	claim []string
-	// stampOwnershipMode identifies target-owned sessions whose blank ownership
-	// mode can be deterministically classified from their session ID.
+	// stampOwnershipMode identifies sessions owned by the target after rescue
+	// whose blank mode can be deterministically classified from their session ID.
 	stampOwnershipMode map[string]bool
 	// willOwn reports, for every session in scope, whether it belongs to the
 	// target once the plan is applied.
@@ -8894,6 +8898,9 @@ func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, r
 			}
 			plan.claim = append(plan.claim, sessionID)
 			plan.willOwn[sessionID] = true
+			if mode == "" {
+				plan.stampOwnershipMode[sessionID] = true
+			}
 		}
 	}
 	return plan, nil
