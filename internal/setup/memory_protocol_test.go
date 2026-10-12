@@ -155,6 +155,8 @@ func TestMemoryProtocolSourceInventory(t *testing.T) {
 		{"plugin/codex/skills/memory/SKILL.md", "", "", false},
 		{"plugin/claude-code/scripts/session-start.sh", "cat <<'PROTOCOL'\n", "\nPROTOCOL", true},
 		{"plugin/codex/scripts/session-start.sh", "cat <<'PROTOCOL'\n", "\nPROTOCOL", false},
+		{"plugin/claude-code/scripts/post-compaction.sh", "cat <<'PROTOCOL'\n", "\nPROTOCOL", true},
+		{"plugin/codex/scripts/post-compaction.sh", "cat <<'PROTOCOL'\n", "\nPROTOCOL", false},
 		{"DOCS.md", "## Memory Protocol\n", "\n## Project Name Normalization", false},
 	} {
 		t.Run(source.path, func(t *testing.T) {
@@ -169,7 +171,7 @@ func TestMemoryProtocolSourceInventory(t *testing.T) {
 				}
 			}
 			if !source.claude {
-				for _, forbidden := range []string{"Use ToolSearch", "call ToolSearch", "permissions allowlist"} {
+				for _, forbidden := range []string{"Use ToolSearch", "call ToolSearch", "permissions allowlist", "### CORE TOOLS — always available"} {
 					if strings.Contains(text, forbidden) {
 						t.Errorf("non-Claude prose imposes %q", forbidden)
 					}

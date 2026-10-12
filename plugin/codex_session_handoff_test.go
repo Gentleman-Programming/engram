@@ -431,13 +431,13 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						}
 					}
 					if tc.registered {
-						if event == "startup" && tc.name == "confirmed" {
+						if (event == "startup" || event == "compact") && tc.name == "confirmed" {
 							codexDeliveredBinderContract(t, binary, output)
 						}
 						if !strings.Contains(output, "ACTIVE PROTOCOL") {
 							t.Error("confirmed registration missing active protocol")
 						}
-						if event != "compact" {
+						{
 							for _, want := range []string{
 								"The agent MUST follow this protocol without waiting for activation",
 								"tools actually exposed by Codex", "registered MCP names",
