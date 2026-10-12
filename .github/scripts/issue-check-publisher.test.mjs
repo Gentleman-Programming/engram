@@ -86,6 +86,22 @@ test('capability denial propagates and never seeks other credentials or APIs', a
   assert.equal(journal.length, 1);
 });
 
+for (const rejection of ['API denied', null, undefined]) {
+  test(`non-Error rejection ${String(rejection)} retains its diagnostic and stops publication`, async () => {
+    const { github, journal } = fake(() => { throw rejection; });
+    await assert.rejects(publish(github, repo, [evaluation(), evaluation()]), (error) => {
+      assert.equal(error.message, `Issue-check publisher blocker: Checks create failed (Non-Error rejection: ${String(rejection)}); do not broaden credentials`);
+      assert.ok(Object.hasOwn(error, 'cause'));
+      assert.equal(error.cause, rejection);
+      return true;
+    });
+    assert.deepEqual(journal, [{
+      ...repo, name: names[0], head_sha: headSha, status: 'completed',
+      conclusion: 'success', output: { title: names[0], summary: 'Closes #1802' },
+    }]);
+  });
+}
+
 test('missing Checks capability is explicit and makes no writes', async () => {
   await assert.rejects(publish({ rest: {} }, repo, [evaluation()]), /blocker/i);
 });

@@ -52,7 +52,8 @@ export async function publishIssueChecks(github, repo, evaluations) {
     try {
       response = await github.rest.checks.create(request);
     } catch (error) {
-      throw new Error(`Issue-check publisher blocker: Checks create failed (${error.message}); do not broaden credentials`, { cause: error });
+      const detail = error instanceof Error ? error.message : `Non-Error rejection: ${String(error)}`;
+      throw new Error(`Issue-check publisher blocker: Checks create failed (${detail}); do not broaden credentials`, { cause: error });
     }
     const run = response?.data;
     if (run?.app?.id !== 15368 || run.head_sha !== request.head_sha

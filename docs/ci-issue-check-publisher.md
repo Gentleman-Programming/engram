@@ -39,6 +39,8 @@ head SHA, exact name, completed status and requested conclusion.
 
 Missing Checks capability, API denial, other API errors or invalid response
 binding throw an explicit blocker and stop remaining publication.
+API rejection blockers retain an `Error`'s message or identify a non-Error
+rejection with its string representation, preserving the original `cause`.
 There is no retry, credential fallback, legacy-run update, cancellation,
 rollback, or deletion. If a later write fails, earlier check runs may remain.
 Repeated calls create new evidence rather than rewriting a legacy job's run.
