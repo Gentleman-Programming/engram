@@ -122,7 +122,11 @@ func TestFinalizeSessionHappyAndReopenRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened store: %v", err)
+		}
+	})
 	before := captureFinalizeState(t, reopened)
 	reopened.hooks.exec = func(execer, string, ...any) (sql.Result, error) { return nil, errors.New("retry wrote") }
 	p.Summary = "Different retry text"
