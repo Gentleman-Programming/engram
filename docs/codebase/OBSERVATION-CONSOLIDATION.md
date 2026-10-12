@@ -15,6 +15,12 @@ of issue #242.
    `ErrConsolidateFingerprintMismatch` and a fresh plan without writing. Inspect
    that replacement preview and explicitly confirm its fingerprint to proceed.
 
+Core callers may optionally set `ExpectedProject` to an explicit owner assertion.
+A nil assertion preserves the existing API. A supplied assertion is validated and
+compared with the resolved canonical source project inside both the preview and
+confirmation transactions, before any writes or fresh-plan disclosure. This is
+an assertion, not a target-project override.
+
 The versioned fingerprint covers complete source snapshots, including resolved
 project ownership and pinned state, and the resolved survivor. Revision counters
 alone are insufficient: project migration and diagnostic title repair can change
