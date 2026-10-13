@@ -35,7 +35,11 @@ func TestCmdDoctorRepairEmptyCLIContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			})
 			data, err := s.Export()
 			if err != nil {
 				t.Fatal(err)
