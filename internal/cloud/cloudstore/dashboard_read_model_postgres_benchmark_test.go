@@ -94,12 +94,13 @@ func dashboardPGOpen(tb testing.TB, axis string, history int) *dashboardPGFixtur
 	})
 	f := &dashboardPGFixture{cs: cs, db: db}
 	f.write(tb, dashboardPGChunk)
-	if axis == "chunks" {
+	switch axis {
+	case "chunks":
 		// Empty valid chunks change history/counter, not current entity contents.
 		for i := 0; i < history; i++ {
 			f.write(tb, fmt.Sprintf(`{"sessions":[],"observations":[],"prompts":[],"fixture_nonce":%d}`, i))
 		}
-	} else if axis == "mutations" {
+	case "mutations":
 		entries := make([]MutationEntry, history)
 		for i := range entries {
 			entries[i] = MutationEntry{Project: "bench", Entity: "session", EntityKey: "s", Op: "upsert", Payload: []byte(dashboardPGSession), CreatedBy: "synthetic"}
@@ -108,7 +109,7 @@ func dashboardPGOpen(tb testing.TB, axis string, history int) *dashboardPGFixtur
 		if err != nil || len(seqs) != history {
 			tb.Fatalf("seed mutation batch accepted=%d, want %d: %v", len(seqs), history, err)
 		}
-	} else {
+	default:
 		tb.Fatalf("unknown history axis %q", axis)
 	}
 	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
