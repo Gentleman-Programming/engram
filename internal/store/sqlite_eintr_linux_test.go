@@ -30,7 +30,7 @@ func TestSQLiteLibcSleepEINTR(t *testing.T) {
 	if testing.Short() {
 		t.Skip("isolated signal-delivery subprocess regression")
 	}
-	for _, mode := range []string{"relative-null-remainder", "absolute-deadline"} {
+	for _, mode := range []string{"relative-null-remainder", "absolute-deadline", "relative-null-remainder-delayed-injector", "absolute-deadline-delayed-injector"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -53,12 +53,14 @@ func TestSQLiteLibcSleepEINTR(t *testing.T) {
 }
 
 func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
-	mode := os.Getenv(sqliteSleepChildEnv)
-	if mode == "" {
+	scenario := os.Getenv(sqliteSleepChildEnv)
+	if scenario == "" {
 		t.Skip("helper requires parent subprocess guard")
 	}
+	mode := strings.TrimSuffix(scenario, "-delayed-injector")
+	delayedInjector := scenario != mode
 	if mode != "relative-null-remainder" && mode != "absolute-deadline" {
-		t.Fatalf("invalid child mode %q", mode)
+		t.Fatalf("invalid child mode %q", scenario)
 	}
 	// Lock the goroutine making the libc call, not its parent or a t.Run caller.
 	runtime.LockOSThread()
@@ -67,7 +69,10 @@ func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
 	tls := libc.NewTLS()
 	defer tls.Close()
 
-	const duration = 300 * time.Millisecond
+	// Leave room for all 12 injections even when their scheduler is delayed.
+	// Keep the +200ms upper bound: restarting the full sleep after the last
+	// injection (~240ms, or later in the delayed cases) must still fail.
+	const duration = 800 * time.Millisecond
 	req := libctime.Timespec{Ftv_nsec: int64(duration)}
 	if mode == "absolute-deadline" {
 		if rc := libc.Xclock_gettime(tls, libctime.CLOCK_MONOTONIC, uintptr(unsafe.Pointer(&req))); rc != 0 {
@@ -99,6 +104,7 @@ func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
 		defer ticker.Stop()
 		timeout := time.NewTimer(time.Second)
 		defer timeout.Stop()
+		var firstSleep time.Time
 		for result.sent < 12 {
 			select {
 			case <-stop:
@@ -121,6 +127,16 @@ func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
 			number, err := strconv.Atoi(fields[0])
 			if err != nil || (number != syscall.SYS_NANOSLEEP && number != syscall.SYS_CLOCK_NANOSLEEP) {
 				continue // The runtime may briefly run between interrupted calls.
+			}
+			// Reproduce scheduler delay only after observing the intended sleep,
+			// so a late start of the sleeper cannot hide the injection shortfall.
+			if delayedInjector {
+				if firstSleep.IsZero() {
+					firstSleep = time.Now()
+				}
+				if time.Since(firstSleep) < 100*time.Millisecond {
+					continue
+				}
 			}
 			if err := syscall.Tgkill(os.Getpid(), tid, syscall.SIGURG); err != nil {
 				result.err = fmt.Errorf("tgkill sleeper: %w", err)
@@ -163,9 +179,9 @@ func TestSQLiteLibcSleepEINTRChild(t *testing.T) {
 	}
 	// Absolute setup precedes start slightly; allow 10ms for that setup. The
 	// upper bound also rejects restarting a full duration after the last signal
-	// (~240ms), rather than retaining the original absolute deadline (~300ms).
+	// (~240ms), rather than retaining the original absolute deadline (~800ms).
 	if elapsed < duration-10*time.Millisecond || elapsed > duration+200*time.Millisecond {
 		t.Fatalf("deadline not preserved: elapsed=%s want=[%s,%s] signals=%d", elapsed, duration-10*time.Millisecond, duration+200*time.Millisecond, result.sent)
 	}
-	fmt.Printf("sleep-contract-ok %s\n", mode)
+	fmt.Printf("sleep-contract-ok %s\n", scenario)
 }
