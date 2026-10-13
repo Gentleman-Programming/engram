@@ -238,17 +238,18 @@ func TestProvenanceSequenceReEnrollmentOfResurrectedSource(t *testing.T) {
 		if payload.SyncID != mutation.EntityKey || payload.Project == nil || *payload.Project != provenanceSequenceProject {
 			t.Fatalf("backfill payload identity/ownership = %s", mutation.Payload)
 		}
-		if mutation.Op == store.SyncOpUpsert {
+		switch mutation.Op {
+		case store.SyncOpUpsert:
 			upserts++
 			if payload.DeletedAt != nil || (mutation.EntityKey != source.SyncID && mutation.EntityKey != result.Survivor.SyncID) {
 				t.Fatalf("unexpected live backfill: %+v", mutation)
 			}
-		} else if mutation.Op == store.SyncOpDelete {
+		case store.SyncOpDelete:
 			deletes++
 			if payload.DeletedAt == nil || mutation.EntityKey == source.SyncID || mutation.EntityKey == result.Survivor.SyncID {
 				t.Fatalf("unexpected deleted backfill: %+v", mutation)
 			}
-		} else {
+		default:
 			t.Fatalf("unexpected mutation operation: %+v", mutation)
 		}
 		if mutation.EntityKey != result.Survivor.SyncID {
