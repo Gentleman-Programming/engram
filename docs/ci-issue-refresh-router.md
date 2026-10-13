@@ -16,7 +16,8 @@ public `request` client, `{owner, repo}`, an affected open PR snapshot, and the
 caller's immutable trusted upstream policy SHA. The caller must establish the
 closing-reference match and trusted provenance; the helper never parses bodies
 or discovers issue events. PR number/state/body/head SHA/ref/fork repository and
-base ref/repository must be present and match two authoritative PR GETs.
+base ref/repository must be present and match two authoritative PR GETs. Both
+head and base repository IDs must also be present and remain unchanged.
 
 Reads use the upstream repository's REST endpoints: PR GET, workflow GET for
 `issue-policy.yml`, paginated workflow runs filtered by event/branch/head SHA,
@@ -26,15 +27,21 @@ trusted revisions. Admission requires `.github/workflows/issue-policy.yml`,
 `Check Issue Reference` and `Check Issue Has status:approved`. Job heads must
 match. Both jobs must expose a successful completed step named exactly
 `Load trusted issue policy (<40 lowercase hex SHA>)` with the same resolved SHA.
+Both the listed run and its authoritative GET must expose exactly one
+`run.pull_requests` entry matching the intended PR number, head SHA/ref/repository
+ID and base ref/repository ID. Empty, missing or ambiguous associations block
+with `Issue refresh blocked: native run PR/event binding unavailable`; no ownership
+is inferred from shared fork/head/SHA or current PR reads. Even if GitHub omits
+this association, the helper must not rerun a potentially different original event.
 The attempt-specific jobs endpoint supplies attempt binding; no undocumented
-job attempt field, check-suite workflow association or `run.pull_requests`
-membership is required (that array can legitimately be empty).
+job attempt field or check-suite workflow association is used.
 
 The source must be an upstream ancestor of `trustedSha`. Contents/blob bindings
 must match at both revisions for `issue-policy.yml`, `issue-native-policy.mjs`
 and `issue-validation.mjs` under their workflow/scripts directories. Unrelated
 main changes are not frozen. The newest matching run is admitted or blocked;
-there is no older-policy fallback. Only completed runs under 30 days old with
+there is no older-policy or older-run fallback when the newest run cannot prove
+its target PR/event identity, including shared-head PRs targeting different bases. Only completed runs under 30 days old with
 fewer than 50 attempts are admitted. API rejection remains explicit, with no retry.
 
 The only write is one `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun`.
@@ -57,7 +64,8 @@ live recovery is claimed.
 Run `node --test .github/scripts/issue-refresh-router.test.mjs` and
 `node --check .github/scripts/issue-refresh-router.mjs`.
 Public SDK mocks assert exact request parameters, both PR reads, one allowed POST
-and zero other writes, including fork/empty associations, binding drift, missing
+and zero other writes, including valid fork associations, rejected empty/ambiguous
+or other-PR/base associations, authoritative run drift, binding drift, missing
 runs, checkout/source/job shape, stale policy and API errors. These tests never
 use real tokens or network. Provider identity, duplicate selection, live approval
 and revocation, queue compatibility and token capability need later rollout proof.

@@ -13,17 +13,23 @@ function requireEvidence(condition, message) {
 function binding(pull, upstream) {
   requireEvidence(positive(pull?.number) && pull.state === 'open'
     && (pull.body === null || typeof pull.body === 'string') && shaValid(pull.head?.sha)
-    && text(pull.head?.ref) && text(pull.head?.repo?.full_name)
-    && text(pull.base?.ref) && pull.base?.repo?.full_name === upstream,
+    && text(pull.head?.ref) && text(pull.head?.repo?.full_name) && positive(pull.head.repo.id)
+    && text(pull.base?.ref) && pull.base?.repo?.full_name === upstream && positive(pull.base.repo.id),
   'open PR binding is missing or malformed');
   return JSON.stringify([pull.number, pull.state, pull.body, pull.head.sha, pull.head.ref,
-    pull.head.repo.full_name, pull.base.ref, pull.base.repo.full_name]);
+    pull.head.repo.full_name, pull.head.repo.id, pull.base.ref, pull.base.repo.full_name, pull.base.repo.id]);
 }
 function runMatches(run, pull, upstream, workflow) {
   return positive(run?.id) && run.workflow_id === workflow && run.path === workflowPath
     && run.event === 'pull_request_target' && run.head_sha === pull.head.sha
     && run.head_branch === pull.head.ref && run.repository?.full_name === upstream
     && run.head_repository?.full_name === pull.head.repo.full_name;
+}
+function runTargetMatches(run, pull) {
+  const target = Array.isArray(run.pull_requests) && run.pull_requests.length === 1 && run.pull_requests[0];
+  return target?.number === pull.number && target.base?.ref === pull.base.ref
+    && target.base?.repo?.id === pull.base.repo.id && target.head?.sha === pull.head.sha
+    && target.head?.ref === pull.head.ref && target.head?.repo?.id === pull.head.repo.id;
 }
 function policyBlob(file) {
   requireEvidence(file?.type === 'file' && file.encoding === 'base64' && shaValid(file.sha)
@@ -74,9 +80,11 @@ export async function rerunNativeIssuePolicy(github, repo, pullRequest, trustedS
     // Never fall back to an older source/job shape when the newest matching run fails admission.
     const selected = candidates.filter((run) => runMatches(run, pull, upstream, workflow.id)).sort((a, b) => b.id - a.id)[0];
     requireEvidence(selected, 'no eligible native metadata run');
+    requireEvidence(runTargetMatches(selected, pull), 'native run PR/event binding unavailable');
     const run = await request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', { run_id: selected.id });
     requireEvidence(runMatches(run, pull, upstream, workflow.id) && run.id === selected.id
       && positive(run.run_attempt) && run.run_attempt < 50 && run.status === 'completed', 'native run binding/attempt unavailable');
+    requireEvidence(runTargetMatches(run, pull), 'native run PR/event binding unavailable');
     const age = Date.now() - Date.parse(run.created_at);
     requireEvidence(Number.isFinite(age) && age >= 0 && age < 30 * 86400000, 'native run outside rerun horizon');
     const listing = await request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs', {

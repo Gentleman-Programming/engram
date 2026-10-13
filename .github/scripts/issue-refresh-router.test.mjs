@@ -6,10 +6,10 @@ const repo = { owner: 'upstream', repo: 'project' };
 const head = 'a'.repeat(40), source = 'b'.repeat(40), trusted = 'c'.repeat(40);
 const names = ['Check Issue Reference', 'Check Issue Has status:approved'];
 const paths = ['.github/workflows/issue-policy.yml', '.github/scripts/issue-native-policy.mjs', '.github/scripts/issue-validation.mjs'];
-const pull = { number: 7, state: 'open', body: 'Closes #8', head: { sha: head, ref: 'topic', repo: { full_name: 'fork/project' } }, base: { ref: 'main', repo: { full_name: 'upstream/project' } } };
+const pull = { number: 7, state: 'open', body: 'Closes #8', head: { sha: head, ref: 'topic', repo: { id: 17, full_name: 'fork/project' } }, base: { ref: 'main', repo: { id: 18, full_name: 'upstream/project' } } };
 const clone = (value) => structuredClone(value);
 function fixture(change = () => {}) {
-  const run = { id: 90, workflow_id: 12, path: paths[0], event: 'pull_request_target', head_sha: head, head_branch: 'topic', repository: { full_name: 'upstream/project' }, head_repository: { full_name: 'fork/project' }, run_attempt: 2, status: 'completed', created_at: new Date().toISOString(), pull_requests: [] };
+  const run = { id: 90, workflow_id: 12, path: paths[0], event: 'pull_request_target', head_sha: head, head_branch: 'topic', repository: { full_name: 'upstream/project' }, head_repository: { full_name: 'fork/project' }, run_attempt: 2, status: 'completed', created_at: new Date().toISOString(), pull_requests: [{ number: pull.number, head: clone(pull.head), base: clone(pull.base) }] };
   const jobs = names.map((name, i) => ({ id: i + 1, name, head_sha: head, run_id: 90, status: 'completed', steps: [{ name: `Load trusted issue policy (${source})`, status: 'completed', conclusion: 'success' }] }));
   const state = { run, jobs, current: clone(pull), final: clone(pull), compare: { status: 'ahead', merge_base_commit: { sha: source } }, workflow: { id: 12, path: paths[0], state: 'active' }, calls: [], reads: 0 };
   change(state);
@@ -19,7 +19,7 @@ function fixture(change = () => {}) {
     switch (route) {
       case 'GET /repos/{owner}/{repo}/pulls/{pull_number}': return { data: clone(++state.reads === 1 ? state.current : state.final) };
       case 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}': return { data: state.workflow };
-      case 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs': return { data: { workflow_runs: state.noRuns ? [] : [state.run], total_count: state.count ?? (state.noRuns ? 0 : 1) } };
+      case 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs': return { data: { workflow_runs: state.noRuns ? [] : (state.runs ?? [state.run]), total_count: state.count ?? (state.noRuns ? 0 : (state.runs?.length ?? 1)) } };
       case 'GET /repos/{owner}/{repo}/actions/runs/{run_id}': return { data: state.freshRun ?? state.run };
       case 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs': return { data: { jobs: state.jobs, total_count: state.jobs.length } };
       case 'GET /repos/{owner}/{repo}/compare/{basehead}': return { data: state.compare };
@@ -37,7 +37,7 @@ function fixture(change = () => {}) {
 const load = async () => (await import('./issue-refresh-router.mjs')).rerunNativeIssuePolicy;
 const writes = (state) => state.calls.filter(({ route }) => !route.startsWith('GET '));
 
-test('fresh fork head with empty run.pull_requests requests exactly one metadata rerun', async () => {
+test('fresh fork head with unambiguous run PR identity requests exactly one metadata rerun', async () => {
   const { github, state } = fixture();
   assert.deepEqual(await (await load())(github, repo, pull, trusted), { status: 'requested', runId: 90, headSha: head, sourceSha: source, trustedSha: trusted, attempt: 2 });
   assert.deepEqual(writes(state), [{ route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 90 } }]);
@@ -55,7 +55,36 @@ test('fresh fork head with empty run.pull_requests requests exactly one metadata
   assert.deepEqual(state.calls.filter(({ route }) => route.startsWith('GET ')).map(({ route, params }) => [route, params]), expected);
 });
 
+test('same fork/head/SHA PRs targeting different bases never rerun the other PR or fall back', async () => {
+  const { github, state } = fixture((s) => {
+    const intended = clone(s.run);
+    s.run.id = 91;
+    s.run.pull_requests[0].number = 8;
+    s.run.pull_requests[0].base.ref = 'release';
+    s.runs = [intended, s.run];
+    s.jobs.forEach((job) => { job.run_id = 91; });
+  });
+  const before = clone(state.runs);
+  await assert.rejects((await load())(github, repo, pull, trusted), /^Error: Issue refresh blocked: native run PR\/event binding unavailable$/);
+  assert.deepEqual(writes(state), []);
+  assert.deepEqual(state.runs, before);
+  assert.equal(state.reads, 1);
+});
+
 const guards = {
+  'missing head repo id': (s) => { delete s.current.head.repo.id; },
+  'final base repo id drift': (s) => { s.final.base.repo.id = 19; },
+  'empty run PR association': (s) => { s.run.pull_requests = []; },
+  'missing run PR association': (s) => { delete s.run.pull_requests; },
+  'malformed run PR association': (s) => { s.run.pull_requests = {}; },
+  'ambiguous run PR association': (s) => { s.run.pull_requests.push(clone(s.run.pull_requests[0])); },
+  'other run PR number': (s) => { s.run.pull_requests[0].number = 8; },
+  'other run PR base branch': (s) => { s.run.pull_requests[0].base.ref = 'release'; },
+  'other run PR base repository': (s) => { s.run.pull_requests[0].base.repo.id = 19; },
+  'other run PR head repository': (s) => { s.run.pull_requests[0].head.repo.id = 19; },
+  'other run PR head ref': (s) => { s.run.pull_requests[0].head.ref = 'other'; },
+  'other run PR head SHA': (s) => { s.run.pull_requests[0].head.sha = trusted; },
+  'fresh run PR identity drift': (s) => { s.freshRun = clone(s.run); s.freshRun.pull_requests = []; },
   'initial body drift': (s) => { s.current.body = 'Closes #9'; },
   'final head drift': (s) => { s.final.head.sha = trusted; },
   'closed final target': (s) => { s.final.state = 'closed'; },
