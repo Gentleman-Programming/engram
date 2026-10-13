@@ -34,7 +34,8 @@
     "extension"
   ],
   "engram": {
-    "startupPolicy": 1
+    "startupPolicy": 1,
+    "sessionOwned": 1
   },
   "pi": {
     "image": "https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/pi/assets/engram-logo-only.png",

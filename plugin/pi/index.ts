@@ -8,7 +8,7 @@
 
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync, writeSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -23,7 +23,20 @@ function optionalEnvironmentValue(value: string | undefined): string | undefined
 
 const ENGRAM_PORT = Number.parseInt(optionalEnvironmentValue(process.env.ENGRAM_PORT) ?? "7437", 10);
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL);
-const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
+const SERVER_MODE = process.env.ENGRAM_SERVER_MODE;
+const SESSION_OWNED = SERVER_MODE === "session-owned";
+let ENGRAM_URL = SESSION_OWNED ? "" : CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
+let ownedToken = "";
+let ownedChild: ChildProcess | undefined;
+let ownedStop: Promise<void> | undefined;
+const ownedRoots = new Set<object>();
+
+function transportHeaders(json = false): Record<string, string> | undefined {
+  if (SERVER_MODE !== undefined && !SESSION_OWNED) throw new DeterministicStartupError("Invalid ENGRAM_SERVER_MODE; unset it for shared mode or use literal session-owned.");
+  if (SESSION_OWNED && (!ownedToken || !ENGRAM_URL)) throw new EngramUnavailableError();
+  if (!SESSION_OWNED) return json ? { "Content-Type": "application/json" } : undefined;
+  return { ...(json ? { "Content-Type": "application/json" } : {}), Authorization: `Bearer ${ownedToken}` };
+}
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram";
 // Only absence preserves standalone behavior; every supplied value except literal
 // "allow" fails closed, including empty or whitespace values. Never execute notice text.
@@ -416,7 +429,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
         method,
-        headers: opts.body ? { "Content-Type": "application/json" } : undefined,
+        headers: transportHeaders(!!opts.body),
         body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
         signal: opts.signal
           ? AbortSignal.any([AbortSignal.timeout(policy.timeoutMs), opts.signal])
@@ -524,6 +537,8 @@ function isAmbiguousObservationSaveReplayStatus(status: number): boolean {
 // the first dispatch, so recovery cannot pick up a changed server configuration or payload.
 async function postObservationWithReplayRecovery<TResponse>(body: Record<string, unknown>, signal?: AbortSignal): Promise<EngramFetchResult<TResponse>> {
   const operationID = randomUUID();
+  const writeHeaders = transportHeaders(true);
+  const lookupHeaders = transportHeaders();
   const destination = `${ENGRAM_URL}/observations`;
   const lookupDestination = `${ENGRAM_URL}/observations/save-result?${new URLSearchParams({ operation_id: operationID })}`;
   const serialized = JSON.stringify({ ...(redactValue(body) as Record<string, unknown>), operation_id: operationID });
@@ -560,7 +575,7 @@ async function postObservationWithReplayRecovery<TResponse>(body: Record<string,
       const exchange = (async () => {
         const response = await fetch(method === "POST" ? destination : lookupDestination, {
           method,
-          headers: method === "POST" ? { "Content-Type": "application/json" } : undefined,
+          headers: method === "POST" ? writeHeaders : lookupHeaders,
           body: method === "POST" ? serialized : undefined,
           signal: controller.signal,
         });
@@ -834,6 +849,7 @@ async function probeEngramHealth(expectedID = ""): Promise<EngramHealthResult> {
   const result: EngramHealthResult = { status: "indeterminate", localInstanceID: expectedID || "unknown", remoteInstanceID: "unknown", remoteVersion: "unknown" };
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
+      headers: transportHeaders(),
       signal: AbortSignal.timeout(500),
     });
     if (!res.ok) return result;
@@ -1108,10 +1124,121 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
   });
 }
 
+function ownedModeConfiguration(): void {
+  if (SERVER_MODE !== undefined && !SESSION_OWNED) throw new DeterministicStartupError("Invalid ENGRAM_SERVER_MODE; unset it for shared mode or use literal session-owned.");
+  if (!SESSION_OWNED) return;
+  for (const key of ["ENGRAM_URL", "ENGRAM_PORT", "ENGRAM_SOCKET"]) {
+    if (process.env[key] !== undefined) throw new DeterministicStartupError(`Session-owned Engram conflicts with ${key}; unset it before restarting Pi.`);
+  }
+}
+
+// Only the retained ChildProcess is signalled; never locate an owner by port or store.
+function closeOwnedTransport(): Promise<void> {
+  if (ownedStop) return ownedStop;
+  const child = ownedChild;
+  if (!child) return Promise.resolve();
+  ownedStop = (async () => {
+    child.stdin?.end();
+    async function waitExit(ms: number): Promise<boolean> {
+      if (!child!.pid || child!.exitCode !== null || child!.signalCode !== null) return true;
+      return new Promise(resolve => {
+        const finish = (exited: boolean) => {
+          clearTimeout(timer);
+          child!.removeListener("exit", onExit);
+          resolve(exited);
+        };
+        const onExit = () => finish(true);
+        const timer = setTimeout(() => finish(false), ms);
+        child!.once("exit", onExit);
+      });
+    }
+    if (!await waitExit(6000)) {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      if (!await waitExit(1000) && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await waitExit(1000);
+    }
+    if (ownedChild === child) {
+      ownedChild = undefined;
+      ownedToken = "";
+      ENGRAM_URL = "";
+      initialization = undefined;
+      clearStartupRetryWindow();
+    }
+  })().finally(() => { ownedStop = undefined; });
+  return ownedStop;
+}
+
+async function startOwnedTransport(): Promise<void> {
+  if (ownedStop) await ownedStop;
+  if (ownedChild && ownedChild.exitCode === null && ownedChild.signalCode === null && ENGRAM_URL) return;
+  const token = randomBytes(32).toString("hex");
+  const child = spawn(ENGRAM_BIN, ["serve", "--session-owned"], {
+    env: { ...process.env, ENGRAM_TOKEN: token, ENGRAM_CLOUD_AUTOSYNC: "1" },
+    windowsHide: true, detached: false, stdio: ["pipe", "pipe", "ignore"],
+  });
+  ownedChild = child;
+  // EPIPE is a normal failed-start cleanup outcome, not a process-wide exception.
+  child.stdin?.on("error", () => {});
+  child.on("error", () => {});
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let bytes = Buffer.alloc(0);
+      let settled = false;
+      const fail = () => finish(new DeterministicStartupError("Engram session-owned startup failed or returned unsupported readiness. Use a core supporting serve --session-owned and engram-session-owned-v1; update the bundled core through Shell's supported upgrade path, then restart Pi. No shared server was adopted or terminated."));
+      const onExit = () => fail();
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.removeListener("error", fail);
+        child.removeListener("exit", onExit);
+        child.stdout?.removeListener("data", onData);
+        if (error) reject(error); else resolve();
+      };
+      const onData = (chunk: Buffer) => {
+        bytes = Buffer.concat([bytes, chunk]);
+        if (bytes.length > 1024) {
+          fail();
+          return;
+        }
+        if (!bytes.includes(10)) return;
+        try {
+          if (bytes.indexOf(10) !== bytes.length - 1) throw new Error();
+          const ready = JSON.parse(bytes.toString("utf8"));
+          if (!ready || Object.keys(ready).sort().join(",") !== "endpoint,instance_id,pid,protocol"
+            || ready.protocol !== "engram-session-owned-v1" || ready.pid !== child.pid
+            || typeof ready.instance_id !== "string" || !/^[a-f0-9]{32}$/.test(ready.instance_id)
+            || typeof ready.endpoint !== "string" || !/^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/.test(ready.endpoint)) throw new Error();
+          const port = Number(ready.endpoint.split(":").at(-1));
+          if (port < 1 || port > 65535) throw new Error();
+          ENGRAM_URL = ready.endpoint;
+          ownedToken = token;
+          localEngramInstanceID = ready.instance_id;
+          finish();
+        } catch { fail(); }
+      };
+      const timer = setTimeout(fail, ENGRAM_STARTUP_TIMEOUT_MS);
+      child.once("error", fail);
+      child.once("exit", onExit);
+      child.stdout?.on("data", onData);
+    });
+    // Keep draining, but do not treat any subsequent stdout as a new endpoint.
+    child.stdout?.resume();
+  } catch (error) {
+    await closeOwnedTransport();
+    throw error;
+  }
+}
+
 async function initializeEngramServer(): Promise<void> {
   // Defense in depth: a future caller must not bypass policy via an explicit URL
   // or reach the potentially state-writing instance-id command.
   if (!ENGRAM_STARTUP_ALLOWED) throw new Error(ENGRAM_DISABLED_NOTICE);
+  ownedModeConfiguration();
+  if (SESSION_OWNED) {
+    await startOwnedTransport();
+    return;
+  }
   if (CONFIGURED_ENGRAM_URL !== undefined) return;
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
   const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
@@ -2554,6 +2681,7 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     pendingInput.delete(ctx.sessionManager);
     removeBridgeResponders(ctx);
+    if (SESSION_OWNED) ownedRoots.add(ctx.sessionManager);
     const sessionId = observeRuntimeSessionID(ctx);
     traceLifecycle("session_start", sessionId);
     if (sessionId) {
@@ -2571,6 +2699,7 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event: { reason?: string }, ctx: SessionContext) => {
+    try {
     pendingInput.delete(ctx.sessionManager);
     removeBridgeResponders(ctx);
     // Pi reload replaces the extension runner but keeps its runtime session ID alive.
@@ -2629,6 +2758,12 @@ export default function registerEngram(pi: ExtensionAPI) {
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
     forgetSelfHealContext(runtimeID);
+    } finally {
+      if (SESSION_OWNED) {
+        ownedRoots.delete(ctx.sessionManager);
+        if (ownedRoots.size === 0) await closeOwnedTransport();
+      }
+    }
   });
 
   pi.on("session_compact", async (event: unknown) => {

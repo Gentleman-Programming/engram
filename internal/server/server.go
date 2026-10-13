@@ -92,8 +92,10 @@ type Server struct {
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
 	// version is reported by GET /health and defaults to "dev" for local builds.
-	version    string
-	instanceID string
+	version           string
+	instanceID        string
+	sessionOwnedToken string
+	onReady           func(net.Addr) error
 }
 
 func New(s *store.Store, port int) *Server {
@@ -107,6 +109,15 @@ func New(s *store.Store, port int) *Server {
 	srv.routes()
 	return srv
 }
+
+// SetSessionOwnedToken enables authentication on the entire handler, including health.
+// Configure before Start; the private token is immutable for this child's lifetime.
+func (s *Server) SetSessionOwnedToken(token string) { s.sessionOwnedToken = token }
+
+// SetOnReady publishes the bound listener before serving, never before bind succeeds.
+func (s *Server) SetOnReady(fn func(net.Addr) error) { s.onReady = fn }
+
+type ownedAuthKey struct{}
 
 // SetOnWrite configures a callback invoked after every successful local write.
 // This is used to notify autosync.Manager via NotifyDirty().
@@ -162,6 +173,10 @@ func (s *Server) notifyWrite() {
 // does not need to restart when the variable changes.
 func requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Value(ownedAuthKey{}) == true {
+			h(w, r)
+			return
+		}
 		token := os.Getenv("ENGRAM_HTTP_TOKEN")
 		if token == "" {
 			// No token configured → open access (zero-config default).
@@ -223,6 +238,10 @@ func writeOwnershipError(w http.ResponseWriter, sessionID string, err error) boo
 // the same work locally without any server token.
 func requireConfiguredAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Value(ownedAuthKey{}) == true {
+			h(w, r)
+			return
+		}
 		if os.Getenv("ENGRAM_HTTP_TOKEN") == "" {
 			jsonError(w, http.StatusServiceUnavailable, "server authorization is not configured")
 			return
@@ -271,7 +290,7 @@ func (s *Server) Start() error {
 		ln, err = listenFn(network, addr)
 	}
 	if err != nil {
-		if socketPath == "" && isAddressInUse(err) {
+		if s.sessionOwnedToken == "" && socketPath == "" && isAddressInUse(err) {
 			if s.instanceOwnsPort() {
 				log.Printf("[engram] HTTP server did not bind on %s: an existing instance owns the port", addr)
 				return nil
@@ -294,6 +313,11 @@ func (s *Server) Start() error {
 	s.closeMu.Unlock()
 	defer s.Close()
 
+	if s.onReady != nil {
+		if err := s.onReady(ln.Addr()); err != nil {
+			return err
+		}
+	}
 	log.Printf("[engram] HTTP server listening on %s", addr)
 	err = serveFn(ln, s.Handler())
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed) {
@@ -438,6 +462,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.sessionOwnedToken != "" {
+			if !hmac.Equal([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.sessionOwnedToken)) {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="engram"`)
+				jsonError(w, http.StatusUnauthorized, "authorization required")
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), ownedAuthKey{}, true))
+		}
 		if timing := beginHTTPWriteTiming(r); timing != nil {
 			writer := &timedResponseWriter{ResponseWriter: w}
 			r = r.WithContext(context.WithValue(r.Context(), httpWriteTimingKey{}, timing))

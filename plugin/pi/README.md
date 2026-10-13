@@ -19,6 +19,58 @@ Pi is great at doing the work in front of it. The problem is everything around t
 
 Engram is persistent memory for AI coding agents. `gentle-engram` connects Pi to that memory so your agent can save the useful parts of a session and retrieve them later — without stuffing raw tool output back into the prompt.
 
+## Opt-in session-owned HTTP transport
+
+Unset `ENGRAM_SERVER_MODE` to retain the existing shared-daemon behavior. To use
+an EOF-bound private child with supporting published core and companion releases:
+
+```sh
+env -u ENGRAM_URL -u ENGRAM_PORT -u ENGRAM_SOCKET ENGRAM_SERVER_MODE=session-owned pi
+```
+
+Only literal `session-owned` is accepted when the variable is present; empty,
+whitespace and other values fail closed. Explicit URL, port or socket environment
+variables (even empty ones) conflict with owned mode. Managed external URLs and
+shared daemons remain unchanged when the mode is absent; they are never stopped
+on companion shutdown.
+
+The companion spawns `engram serve --session-owned` non-detached, retains its
+stdin pipe, and supplies a fresh random 256-bit hex `ENGRAM_TOKEN` to that child.
+The CLI rejects conflicting transport configuration and missing/invalid tokens
+before opening the store. It binds only `127.0.0.1:0`, then emits one newline-ended
+JSON record on stdout (at most 1024 bytes):
+
+```json
+{"protocol":"engram-session-owned-v1","endpoint":"http://127.0.0.1:49152","pid":1234,"instance_id":"00000000000000000000000000000000"}
+```
+
+The record contains runtime identity, **not credentials**. No extra fields,
+nonliteral loopback URLs, invalid ports or mismatched child PIDs are accepted.
+All HTTP routes, including health, reads, writes and recovery lookups, require
+`Authorization: Bearer <ENGRAM_TOKEN>`. The token stays private to the child and
+companion; do not log it or place it in the readiness record.
+
+Closing the owning pipe or losing the parent also cancels startup waits for the
+instance-identity and migration locks, before identity publication or opening
+SQLite. Startup remains synchronous; no store work is abandoned in a goroutine.
+After startup, EOF stops the server through normal background-work cleanup and
+HTTP drain. Shared/default startup retains its existing lock-wait behavior. Companion shutdown allows six seconds
+for EOF cleanup, then signals only the exact retained live child (SIGTERM, then
+SIGKILL after a further second). Reload closes the transport without ending the
+conversation. Multiple hosted roots sharing this module retain the child until
+the last owner shuts down, including roots without a valid session ID.
+
+The package advertises `engram.sessionOwned: 1` alongside `engram.startupPolicy: 1`.
+Bundled launchers must require this capability and the actual CLI/readiness protocol,
+not schema equality, a guessed release version or store identity. The previously
+published companion 0.4.2 does not advertise this new capability; the source metadata
+is not a claim that a supporting release has already been published.
+An older core that rejects the flag or returns unsupported readiness disables
+memory with upgrade guidance; there is no fallback to shared-port adoption.
+This source change does not publish a release or provide a new Shell migration
+command. Use Shell's supported bundled upgrade path when it is available; never
+repair an admission failure by deleting the store or killing a process by port.
+
 ## Local bridge ownership protocol
 
 Native Engram exposes a session-scoped responder on the local `pi.events` bus after

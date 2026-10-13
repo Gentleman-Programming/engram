@@ -44,6 +44,25 @@ function extractClassDefinition(name) {
   throw new Error(`${name} class body not found`);
 }
 
+// Shared mode (ENGRAM_SERVER_MODE unset), evaluated with the production helpers.
+// The session-owned branches are unreachable here; startup-lifecycle covers them.
+function sharedModeTransportSource() {
+  return `
+    const SERVER_MODE = undefined;
+    const SESSION_OWNED = false;
+    const ownedToken = "";
+    function transportHeaders(json = false) {
+      ${extractFunctionBody("transportHeaders", "{\n  if (SERVER_MODE")}
+    }
+    function ownedModeConfiguration() {
+      ${extractFunctionBody("ownedModeConfiguration", "{\n  if (SERVER_MODE")}
+    }
+    async function startOwnedTransport() {
+      throw new Error("shared-mode fixture must not start an owned transport");
+    }
+  `;
+}
+
 function buildOptionalEnvironmentValueForTest() {
   const body = extractFunctionBody("optionalEnvironmentValue", "{\n  return");
   return new Function(`
@@ -140,6 +159,7 @@ function buildEngramFetchForTest({
       }
     }
     ${extractClassDefinition("EngramUnavailableError")}
+    ${sharedModeTransportSource()}
     function isTimeoutError(error) {
       ${extractFunctionBody("isTimeoutError", "{\n  return error instanceof Error")}
     }
@@ -254,6 +274,7 @@ function buildInitializeEngramServerForTest({
     const localEngramVersion = () => "unknown";
     const missingInstanceIdentityMessage = () => "missing identity";
     const localInstanceID = resolveInstanceID;
+    ${sharedModeTransportSource()}
     async function initializeEngramServer() {
       ${body}
     }
@@ -350,6 +371,7 @@ function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
     "AbortSignal",
     `
     let engramServerVersion = "unknown";
+    ${sharedModeTransportSource()}
     function hasConnectionRefusedCode(value, depth = 0) {
       ${refusedBody}
     }
@@ -1576,7 +1598,8 @@ test("Pi cancellation aborts a held native HTTP request before it can return a l
 
   try {
     const pending = engramFetch("/held", { signal: controller.signal });
-    await requestStarted;
+    // A request that fails before dispatch must fail this test, not hang the file.
+    await Promise.race([requestStarted, pending]);
     controller.abort();
     await assert.rejects(pending, (error) => error?.name === "AbortError");
     await requestAborted;

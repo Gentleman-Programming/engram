@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -769,6 +770,12 @@ func main() {
 		return
 	}
 
+	if os.Args[1] == "serve" {
+		if _, err := validateSessionOwned(os.Args[2:]); err != nil {
+			fatal(err)
+			return
+		}
+	}
 	cfg, cfgErr := storeDefaultConfig()
 	if cfgErr != nil {
 		// Fallback: try to resolve home directory from environment variables
@@ -799,7 +806,10 @@ func main() {
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
-	migrateOrphanedDatabase(cfg.DataDir)
+	owned, _ := validateSessionOwned(os.Args[2:])
+	if os.Args[1] != "serve" || !owned {
+		migrateOrphanedDatabase(cfg.DataDir)
+	}
 
 	switch os.Args[1] {
 	case "serve":
@@ -913,13 +923,41 @@ func cmdServe(cfg store.Config) error {
 		return err
 	}
 
-	s, err := storeNew(cfg)
+	// Owned EOF cancels startup lock waits as well as serving. Construction
+	// stays synchronous so cleanup cannot race abandoned live store work.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var parentEOF <-chan struct{}
+	var s *store.Store
+	if options.sessionOwned {
+		parentEOF = watchOwnedParent(os.Stdin, cancel)
+		s, err = store.NewWithContext(ctx, cfg)
+	} else {
+		s, err = storeNew(cfg)
+	}
 	if err != nil {
+		if options.sessionOwned && errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
 	defer s.Close()
+	if options.sessionOwned && ctx.Err() != nil {
+		return nil
+	}
 
 	srv := newHTTPServer(s, options.port)
+	if options.sessionOwned {
+		srv.SetSessionOwnedToken(os.Getenv("ENGRAM_TOKEN"))
+		srv.SetOnReady(func(addr net.Addr) error {
+			select {
+			case <-parentEOF:
+				return fmt.Errorf("session-owned parent closed before readiness")
+			default:
+			}
+			return emitOwnedReadiness(addr, s.InstanceID())
+		})
+	}
 	srv.SetSocketPath(options.socketPath)
 	srv.SetVersion(version)
 
@@ -929,10 +967,6 @@ func cmdServe(cfg store.Config) error {
 	srv.SetPromptBuilder(func(a, b store.ObservationSnippet) string {
 		return llmBuildPrompt(a, b)
 	})
-
-	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
 	// BW7: tryStartAutosync returns (status provider, stop func) so the signal
@@ -968,6 +1002,8 @@ func cmdServe(cfg store.Config) error {
 	select {
 	case <-serveGenerationInvalidated(srv):
 		terminal = store.ErrDatabaseGenerationChanged
+	case <-parentEOF:
+		log.Println("[engram] session owner disconnected; shutting down...")
 	case <-sigCh:
 		log.Println("[engram] shutting down...")
 	case serveErr = <-serveResult:
@@ -1001,11 +1037,19 @@ func cmdServe(cfg store.Config) error {
 }
 
 type serveOptions struct {
-	port       int
-	socketPath string
+	sessionOwned bool
+	port         int
+	socketPath   string
 }
 
 func resolveServeOptions(args []string) (serveOptions, error) {
+	owned, err := validateSessionOwned(args)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	if owned {
+		return serveOptions{sessionOwned: true, port: 0}, nil
+	}
 	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
 	portExplicit := false
 	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
@@ -3826,6 +3870,7 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
+  serve --session-owned  Private ephemeral HTTP server; requires ENGRAM_TOKEN, stops on stdin EOF
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
                         Profiles: agent (%d tools), admin (%d tools), all (default, %d)

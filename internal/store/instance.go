@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -16,14 +17,23 @@ func EnsureInstanceID(dataDir string) (string, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return "", fmt.Errorf("engram: create data dir: %w", err)
 	}
-	path := filepath.Join(dataDir, ".instance-id")
 	unlock, err := acquireMigrationLock(filepath.Join(dataDir, ".instance-id.lock"))
 	if err != nil {
 		return "", fmt.Errorf("engram: acquire instance identity lock: %w", err)
 	}
 	defer unlock()
+	return ensureInstanceIDLocked(context.Background(), dataDir)
+}
 
+// The caller holds .instance-id.lock; owned startup also holds .migrate.lock
+// before publishing identity or opening SQLite. Shared callers retain their
+// original lock acquisition and lifetime through EnsureInstanceID.
+func ensureInstanceIDLocked(ctx context.Context, dataDir string) (string, error) {
+	path := filepath.Join(dataDir, ".instance-id")
 	for attempt := 0; attempt < 20; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if data, err := os.ReadFile(path); err == nil {
 			if id := strings.TrimSpace(string(data)); isValidInstanceID(id) {
 				return id, nil
@@ -73,7 +83,13 @@ func EnsureInstanceID(dataDir string) (string, error) {
 		} else if !os.IsNotExist(readErr) {
 			return "", fmt.Errorf("engram: read instance identity after publication race: %w", readErr)
 		}
-		time.Sleep(5 * time.Millisecond)
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return "", fmt.Errorf("engram: read instance identity: concurrent initialization did not complete")
 }

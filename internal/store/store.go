@@ -1061,12 +1061,27 @@ func New(cfg Config) (*Store, error) {
 	return newStore(cfg)
 }
 
+// NewWithContext opts into cancellable startup lock acquisition. Both startup
+// locks are acquired before identity publication or opening SQLite. Construction
+// remains synchronous; cancellation never leaves live store work behind.
+// New preserves the existing shared/default startup ordering and lock lifetime.
+func NewWithContext(ctx context.Context, cfg Config) (*Store, error) {
+	return newStoreWithStartupContext(ctx, cfg, true)
+}
+
 // newWithoutRepair is retained as a test helper alias for New.
 func newWithoutRepair(cfg Config) (*Store, error) {
 	return newStore(cfg)
 }
 
 func newStore(cfg Config) (*Store, error) {
+	return newStoreWithStartupContext(context.Background(), cfg, false)
+}
+
+func newStoreWithStartupContext(ctx context.Context, cfg Config, ownedStartup bool) (*Store, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
@@ -1076,8 +1091,27 @@ func newStore(cfg Config) (*Store, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
-	instanceID, err := EnsureInstanceID(cfg.DataDir)
+	var instanceID string
+	var err error
+	if ownedStartup {
+		unlockInstance, lockErr := acquireMigrationLockContext(ctx, filepath.Join(cfg.DataDir, ".instance-id.lock"))
+		if lockErr != nil {
+			return nil, fmt.Errorf("engram: acquire instance identity lock: %w", lockErr)
+		}
+		defer unlockInstance()
+		unlockMigration, lockErr := acquireMigrationLockContext(ctx, filepath.Join(cfg.DataDir, ".migrate.lock"))
+		if lockErr != nil {
+			return nil, fmt.Errorf("engram: acquire migration lock: %w", lockErr)
+		}
+		defer unlockMigration()
+		instanceID, err = ensureInstanceIDLocked(ctx, cfg.DataDir)
+	} else {
+		instanceID, err = EnsureInstanceID(cfg.DataDir)
+	}
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -1101,12 +1135,23 @@ func newStore(cfg Config) (*Store, error) {
 		}
 	}()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := primeConnection(db); err != nil {
 		return nil, err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, hooks: defaultStoreHooks()}
-	if err := s.runStartupMigrations(); err != nil {
+	if ownedStartup {
+		err = s.runStartupMigrationsWithLock(true)
+	} else {
+		err = s.runStartupMigrations()
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -1116,6 +1161,9 @@ func newStore(cfg Config) (*Store, error) {
 			return nil, fmt.Errorf("engram: runtime identity: %w", err)
 		}
 		s.compatibilityRuntimeID = hex.EncodeToString(runtimeID[:])
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	succeeded = true
 	return s, nil
@@ -1205,6 +1253,10 @@ var acquireStartupMigrationLock = acquireMigrationLock
 // runStartupMigrations serializes migrations and the every-open repair. It
 // never writes a database with a schema version newer than this binary.
 func (s *Store) runStartupMigrations() error {
+	return s.runStartupMigrationsWithLock(false)
+}
+
+func (s *Store) runStartupMigrationsWithLock(startupLockHeld bool) error {
 	return s.generation.withStartupChecks(func() error {
 		current, err := s.readUserVersion()
 		if err != nil {
@@ -1213,11 +1265,13 @@ func (s *Store) runStartupMigrations() error {
 		if isFutureSchemaVersion(current) {
 			return nil
 		}
-		unlock, err := acquireStartupMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
-		if err != nil {
-			return fmt.Errorf("engram: acquire migration lock: %w", err)
+		if !startupLockHeld {
+			unlock, err := acquireStartupMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
+			if err != nil {
+				return fmt.Errorf("engram: acquire migration lock: %w", err)
+			}
+			defer unlock()
 		}
-		defer unlock()
 		if err := s.generation.check(); err != nil {
 			return fmt.Errorf("engram: check database generation after migration lock: %w", err)
 		}

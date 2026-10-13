@@ -20,8 +20,8 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const mcpTemplate = JSON.parse(readFileSync(new URL("../mcp-template.json", import.meta.url), "utf8"));
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 
-test("package advertises startup policy wire contract v1", () => {
-	assert.deepEqual(pkg.engram, { startupPolicy: 1 });
+test("package advertises startup policy and session-owned wire contracts v1", () => {
+	assert.deepEqual(pkg.engram, { startupPolicy: 1, sessionOwned: 1 });
 });
 
 const PI_TUI = "@earendil-works/pi-tui";
