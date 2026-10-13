@@ -68,7 +68,7 @@ func TestStartupCancellationOwnedLockEOF(t *testing.T) {
 				}
 			case <-time.After(3 * time.Second):
 				_ = child.Process.Kill()
-				_ = <-done
+				<-done
 				t.Fatalf("owned startup remained alive with %s held after EOF; stdout=%s stderr=%s", name, stdout.String(), stderr.String())
 			}
 			t.Logf("EOF exit while %s remains held: %s; stdout=%q stderr=%q", name, time.Since(closedAt), stdout.String(), stderr.String())
@@ -82,7 +82,7 @@ func TestStartupCancellationOwnedLockEOF(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer probe.Close()
+			defer func() { _ = probe.Close() }()
 			acquired, err := tryLockMigrationFile(probe)
 			if acquired {
 				_ = unlockMigrationFile(probe)

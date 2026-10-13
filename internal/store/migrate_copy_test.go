@@ -160,7 +160,7 @@ func TestMigrateCopyPreservesCompleteDirectory(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	var v string
 	if e = s.db.QueryRow(`SELECT last_error FROM sync_state WHERE target_key='copy-proof'`).Scan(&v); e != nil || v != "not-exported" {
 		t.Fatalf("state: %s %v", v, e)
@@ -197,7 +197,7 @@ func TestMigrateCopyHistoricalCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer migrated.Close()
+	defer func() { _ = migrated.Close() }()
 	if _, err = migrated.db.Exec(`SELECT superseded_by_sync_id FROM observations; SELECT superseded_by_sync_id FROM sync_delete_tombstones; SELECT * FROM session_finalizations`); err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestMigrateCopyLogicalWAL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer copied.Close()
+			defer func() { _ = copied.Close() }()
 			var v string
 			if err = copied.db.QueryRow(`SELECT last_error FROM sync_state WHERE target_key='wal-only'`).Scan(&v); err != nil || v != "preserved" {
 				t.Fatalf("WAL data lost: %q %v", v, err)
@@ -371,5 +371,16 @@ func TestMigrateCopyRejects(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMigrateCopyReadOnlyDSNUsesPlainPathsOnWindows(t *testing.T) {
+	if got, want := migrateCopyReadOnlyDSN("/data/out/engram.db", '/'), "file:///data/out/engram.db?mode=ro"; got != want {
+		t.Fatalf("POSIX DSN = %q, want %q", got, want)
+	}
+	// A file URI built from a drive path puts "C:" in the authority, which SQLite
+	// rejects; Windows paths must stay plain, as storeDSN already does.
+	if got, want := migrateCopyReadOnlyDSN(`C:\data\out\engram.db`, '\\'), `C:\data\out\engram.db?mode=ro`; got != want {
+		t.Fatalf("Windows DSN = %q, want %q", got, want)
 	}
 }

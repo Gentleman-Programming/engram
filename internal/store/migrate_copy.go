@@ -107,7 +107,7 @@ func MigrateCopy(source, output string, confirmed bool) (result *MigrateCopyResu
 	}
 	// Read-only database access occurs ONLY on the copy. Without immutable=1,
 	// SQLite reads the copied WAL and rebuilds SHM in the destination.
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(output, "engram.db")}).String()+"?mode=ro")
+	db, err := sql.Open("sqlite", migrateCopyReadOnlyDSN(filepath.Join(output, "engram.db"), filepath.Separator))
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func copyIntegrity(db *sql.DB) error {
 	if e != nil {
 		return e
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	count := 0
 	for rows.Next() {
 		var v string
@@ -339,7 +339,7 @@ func copyCatalog(db *sql.DB) (map[string]copyCatalogObject, error) {
 	if e != nil {
 		return nil, e
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := map[string]copyCatalogObject{}
 	for rows.Next() {
 		var name string
@@ -496,4 +496,14 @@ func copyNormalizeDDL(ddl string) string {
 	parts = append(parts, strings.TrimSpace(body[last:]))
 	sort.Strings(parts)
 	return ddl[:start+1] + strings.Join(parts, ",") + ",)"
+}
+
+// migrateCopyReadOnlyDSN opens the copied database read-only. Like storeDSN,
+// it uses a file URI only on POSIX: a Windows drive path would become the URI
+// authority, which SQLite rejects.
+func migrateCopyReadOnlyDSN(dbPath string, separator rune) string {
+	if separator == '/' {
+		return (&url.URL{Scheme: "file", Path: dbPath}).String() + "?mode=ro"
+	}
+	return dbPath + "?mode=ro"
 }

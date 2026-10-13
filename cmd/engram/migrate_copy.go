@@ -14,9 +14,9 @@ const migrateCopyUsage = "Usage: engram migrate-copy --data-dir <absolute-source
 
 // Parse all flags before reading any source or resolving default configuration.
 func runMigrateCopy(args []string, stdout, stderr io.Writer) int {
-	fail := func(code int, e error) int { fmt.Fprintf(stderr, "engram migrate-copy: %v\n", e); return code }
+	fail := func(code int, e error) int { _, _ = fmt.Fprintf(stderr, "engram migrate-copy: %v\n", e); return code }
 	if len(args) == 1 && args[0] == "--help" {
-		fmt.Fprint(stdout, migrateCopyUsage)
+		_, _ = fmt.Fprint(stdout, migrateCopyUsage)
 		return 0
 	}
 	seen := map[string]bool{}

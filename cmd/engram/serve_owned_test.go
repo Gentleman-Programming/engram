@@ -19,7 +19,7 @@ func TestServeOwnedChild(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		child := exec.Command(os.Args[0], "-test.run=^TestServeOwnedChild$", "--", "--session-owned")
 		for _, e := range os.Environ() {
 			if !strings.HasPrefix(e, "ENGRAM_OWNED_TEST_CHILD=") {

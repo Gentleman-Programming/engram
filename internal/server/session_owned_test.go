@@ -15,7 +15,7 @@ func TestSessionOwnedFullHandlerAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	srv := New(s, 0)
 	owned, ok := any(srv).(interface{ SetSessionOwnedToken(string) })
 	if !ok {
@@ -45,7 +45,7 @@ func TestSessionOwnedSharedHealthUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	t.Setenv("ENGRAM_HTTP_TOKEN", "shared")
 	w := httptest.NewRecorder()
 	New(s, 0).Handler().ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
