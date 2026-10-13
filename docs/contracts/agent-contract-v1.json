@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "5fcbb18aace147961a45260902e1ddb044777deae46b4b36e134cad31fb1873a",
+  "digest": "7423f4a1fa2c4f7dc50018451403c18256f8aff648d2563844a5144cb4f15fc7",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -421,6 +421,72 @@
         "session_policy": "optional session_id is provenance, not proof of host authority"
       }
     },
+    "mem_judge_many": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Judge Memory Relations in Batch"
+      },
+      "description": "Record 1..32 caller-authored judgments in submitted order. Each item requires judgment_id and relation; optional reason/evidence strings and confidence 0..1. Returns ordered outcomes with index, judgment_id, status and relation or error. Item errors do not stop later items. Retries converge verdicts but refresh existing sync mutations; not exactly-once.",
+      "input_schema": {
+        "properties": {
+          "judgments": {
+            "items": {
+              "properties": {
+                "confidence": {
+                  "type": "number"
+                },
+                "evidence": {
+                  "type": "string"
+                },
+                "judgment_id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "relation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "judgment_id",
+                "relation"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "description": "Optional shared session provenance, as in mem_judge",
+            "type": "string"
+          }
+        },
+        "required": [
+          "judgments"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-relations",
+        "error_effects": "invalid batch shape or shared session_id type is rejected before item writes; item failures do not roll back successful items; a later error or lost acknowledgement does not prove rollback",
+        "guarantees": [
+          "require an array of 1..32 caller-authored judgments before processing any item",
+          "each item requires judgment_id and relation; supplied reason/evidence must be strings and confidence must be finite and between 0 and 1",
+          "process items in submitted order and return ordered outcomes with index, judgment_id, status and relation or error",
+          "item errors do not stop later items",
+          "retries converge verdicts but refresh existing sync mutations; not exactly-once"
+        ],
+        "pi_differences": [
+          "mem_judge_many is Go/MCP-only; Pi has no recipe or dispatch for this operation"
+        ],
+        "project_policy": "Go resolves and validates each identified judgment; not a current-project lookup or batch destination override",
+        "risk": "persistent-write",
+        "session_policy": "optional shared session_id is provenance for every item, not proof of host authority; item-level session_id is not used"
+      }
+    },
     "mem_list_projects": {
       "annotations": {
         "destructiveHint": false,
@@ -784,6 +850,63 @@
         "project_policy": "MCP resolves response context but ends the named session; invalid repository binding/configuration remains an error",
         "risk": "persistent-write",
         "session_policy": "MCP id selects a session; Pi restricts it to the current host identity and maps it to the acknowledged effective session"
+      }
+    },
+    "mem_session_finalize": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Finalize Session"
+      },
+      "description": "Atomically save a caller-authored structured summary and end an existing exact session. Use Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files in summary. Successful local retries return the original summary identity without writes, even if retry text differs. Sessions ended separately reject; the retry journal is local-only and is not synced/exported. Preserves the legacy free-text session summary.",
+      "input_schema": {
+        "properties": {
+          "project": {
+            "description": "Optional explicit project, validated using summary project resolution and exact session ownership.",
+            "type": "string"
+          },
+          "project_choice_reason": {
+            "description": "user_selected_after_ambiguous_project only after explicit user choice.",
+            "type": "string"
+          },
+          "recovery_token": {
+            "description": "Short-lived ambiguous-project recovery token bound to this session/context/choice.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Exact existing session ID; never implicitly created.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Caller-authored structured summary; nonempty.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-summary-and-end-session",
+        "error_effects": "validation and ownership refusals do not finalize the session; finalization transaction failures roll back its local writes; a lost acknowledgement is not proof of rollback and retry identity depends on the local journal",
+        "guarantees": [
+          "nonempty session_id and summary strings are required",
+          "Go atomically saves a session_summary observation, ends the session, queues normal sync mutations, and records a local retry journal",
+          "preserve the legacy free-text session summary",
+          "successful local retries return the original summary_id and summary_sync_id without writes even if valid retry text differs",
+          "sessions ended separately or imported already ended without the local finalization journal reject",
+          "the retry journal is local-only and is not synced or exported; local atomicity does not guarantee remote visibility"
+        ],
+        "pi_differences": [
+          "mem_session_finalize is Go/MCP-only; Pi has no recipe or dispatch for this operation; existing Pi session summary and end behavior is unchanged"
+        ],
+        "project_policy": "optional explicit project is validated through summary project resolution and must match the exact existing session owner; ambiguous-project recovery cannot create a session",
+        "risk": "persistent-write",
+        "session_policy": "required session_id selects an existing exact identity; never trimmed, implicitly created, or mapped from a host continuation"
       }
     },
     "mem_session_start": {

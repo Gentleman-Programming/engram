@@ -127,6 +127,22 @@ const (
 // annotations are taken from ProfileAgent and the existing Go registrations.
 // Pi differences describe observed adapters, not compatibility permissions.
 var agentContractSemantics = map[string]agentOperationSemantics{
+	"mem_judge_many": {
+		Effect: "write-relations", Risk: "persistent-write",
+		ProjectPolicy: "Go resolves and validates each identified judgment; not a current-project lookup or batch destination override",
+		SessionPolicy: "optional shared session_id is provenance for every item, not proof of host authority; item-level session_id is not used",
+		Guarantees: []string{"require an array of 1..32 caller-authored judgments before processing any item", "each item requires judgment_id and relation; supplied reason/evidence must be strings and confidence must be finite and between 0 and 1", "process items in submitted order and return ordered outcomes with index, judgment_id, status and relation or error", "item errors do not stop later items", "retries converge verdicts but refresh existing sync mutations; not exactly-once"},
+		ErrorEffects: "invalid batch shape or shared session_id type is rejected before item writes; item failures do not roll back successful items; a later error or lost acknowledgement does not prove rollback",
+		PiDifferences: []string{"mem_judge_many is Go/MCP-only; Pi has no recipe or dispatch for this operation"},
+	},
+	"mem_session_finalize": {
+		Effect: "write-summary-and-end-session", Risk: "persistent-write",
+		ProjectPolicy: "optional explicit project is validated through summary project resolution and must match the exact existing session owner; ambiguous-project recovery cannot create a session",
+		SessionPolicy: "required session_id selects an existing exact identity; never trimmed, implicitly created, or mapped from a host continuation",
+		Guarantees: []string{"nonempty session_id and summary strings are required", "Go atomically saves a session_summary observation, ends the session, queues normal sync mutations, and records a local retry journal", "preserve the legacy free-text session summary", "successful local retries return the original summary_id and summary_sync_id without writes even if valid retry text differs", "sessions ended separately or imported already ended without the local finalization journal reject", "the retry journal is local-only and is not synced or exported; local atomicity does not guarantee remote visibility"},
+		ErrorEffects: "validation and ownership refusals do not finalize the session; finalization transaction failures roll back its local writes; a lost acknowledgement is not proof of rollback and retry identity depends on the local journal",
+		PiDifferences: []string{"mem_session_finalize is Go/MCP-only; Pi has no recipe or dispatch for this operation; existing Pi session summary and end behavior is unchanged"},
+	},
 	"mem_consolidate": {
 		Effect: "consolidate-observations", Risk: "persistent-write",
 		ProjectPolicy: "expected_project explicitly asserts the existing canonical owner of every source; it is not a destination override",

@@ -1,7 +1,7 @@
 # Generate the Go-owned agent contract foundation
 
 The checked-in [agent contract](contracts/agent-contract-v1.json) describes the
-current 20-tool MCP `agent` profile and its semantic/projection metadata. Its
+current 22-tool MCP `agent` profile and its semantic/projection metadata. Its
 status is **`mcp-foundation`**, not a claim that Pi already implements the same
 contract. Runtime negotiation and Pi alignment are not enabled by this artifact.
 
@@ -76,7 +76,7 @@ mutations, and lost write acknowledgements can leave outcomes unknown.
 
 ## Compatibility and review boundary
 
-The existing 24-tool MCP `all` behavior and the historical
+The existing 26-tool MCP `all` behavior and the historical
 `internal/mcp/testdata/tool-contract-v1.json` compatibility ratchet remain intact.
 `TestAgentContractArtifactCurrent` checks this new current artifact separately.
 The generator tests exercise its public binary against isolated filesystem state.
@@ -85,6 +85,22 @@ The current baseline includes upstream `mem_consolidate`. Metadata registration
 preserves its required schema, destructive annotations, preview/confirmation
 rules, and existing runtime queue; it does not invoke the handler or open a store.
 This operation remains Go/MCP-only: no Pi recipe or dispatch is added.
+
+The agent and admin profiles share exactly `mem_judge_many` and
+`mem_session_finalize`. The four admin-only tools (`mem_delete`, `mem_stats`,
+`mem_timeline`, and `mem_merge_projects`) remain excluded from this artifact.
+The two shared operations are also Go/MCP-only; this foundation adds no Pi
+recipes or dispatch and does not change existing Pi summary/end behavior.
+
+`mem_judge_many` processes 1..32 caller-authored judgments in submitted order.
+Per-item failures do not stop later items or roll back successful items; retries
+can refresh sync mutations and are not exactly-once. `mem_session_finalize`
+atomically saves a structured summary and ends an existing exact session while
+preserving its legacy free-text summary. Successful local retries retain the
+original summary identity without writes, even when valid retry text differs.
+Its retry journal is not synced/exported; separately ended or imported ended
+sessions without that journal reject. Neither operation promises remote
+visibility or treats a lost acknowledgement as proof of rollback.
 
 Review the small registration seam and Go metadata first, then the tests and
 generated JSON. No Pi tool inventory or HTTP route is changed. Follow-up work is

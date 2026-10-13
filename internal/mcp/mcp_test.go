@@ -2845,14 +2845,16 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update",          // skills explicitly say "use mem_update when you have an exact ID to correct"
 		"mem_current_project", // added REQ-313: discovery tool recommended first call
-		"mem_judge",           // REQ-003: conflict verdict tool (Phase D)
-		"mem_compare",         // REQ-011: persist agent-judged semantic verdict (Phase G)
-		"mem_doctor",          // read-only operational diagnostics
-		"mem_review",          // lifecycle review list/maintenance
-		"mem_pin",             // local context priority
-		"mem_unpin",           // local context priority
-		"mem_list_projects",   // engram#675: enumerate known projects for cross-project discovery
-		"mem_consolidate",     // issue #242: explicit preview/confirmation curation
+		"mem_judge_many", "mem_session_finalize",
+		"mem_judge",         // REQ-003: conflict verdict tool (Phase D)
+		"mem_compare",       // REQ-011: persist agent-judged semantic verdict (Phase G)
+		"mem_doctor",        // read-only operational diagnostics
+		"mem_review",        // lifecycle review list/maintenance
+		"mem_pin",           // local context priority
+		"mem_unpin",         // local context priority
+		"mem_list_projects", // engram#675: enumerate known projects for cross-project discovery
+		"mem_consolidate",   // explicit preview/confirmation curation
+
 	}
 	for _, tool := range expectedTools {
 		if !result[tool] {
@@ -2879,7 +2881,7 @@ func TestResolveToolsAdminProfile(t *testing.T) {
 		t.Fatal("expected non-nil allowlist for 'admin'")
 	}
 
-	expectedTools := []string{"mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects"}
+	expectedTools := []string{"mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects", "mem_judge_many", "mem_session_finalize"}
 	for _, tool := range expectedTools {
 		if !result[tool] {
 			t.Errorf("admin profile missing tool: %s", tool)
@@ -3582,9 +3584,9 @@ func TestMemDoctorUnknownProjectReturnsStructuredError(t *testing.T) {
 }
 
 func TestProfileConsistency(t *testing.T) {
-	// Verify no overlap between profiles
+	// Batch judgment is intentionally shared by agents and manual curators.
 	for tool := range ProfileAgent {
-		if ProfileAdmin[tool] {
+		if ProfileAdmin[tool] && tool != "mem_judge_many" && tool != "mem_session_finalize" {
 			t.Errorf("tool %q appears in both agent and admin profiles", tool)
 		}
 	}

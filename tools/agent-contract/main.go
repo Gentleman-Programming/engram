@@ -23,7 +23,7 @@ func main() {
 func run(args []string, stderr io.Writer) int {
 	flags := flag.NewFlagSet("agent-contract", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.Usage = func() { fmt.Fprint(stderr, help) }
+	flags.Usage = func() { _, _ = fmt.Fprint(stderr, help) }
 	output := flags.String("output", "docs/contracts/agent-contract-v1.json", "artifact path")
 	check := flags.Bool("check", false, "compare without writing")
 	if err := flags.Parse(args); err != nil {
@@ -33,32 +33,32 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "unexpected positional arguments")
+		_, _ = fmt.Fprintln(stderr, "unexpected positional arguments")
 		return 2
 	}
 	if strings.TrimSpace(*output) == "" {
-		fmt.Fprintln(stderr, "output path must not be blank")
+		_, _ = fmt.Fprintln(stderr, "output path must not be blank")
 		return 2
 	}
 	generated, err := engrammcp.AgentContractJSON()
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	if *check {
 		current, err := os.ReadFile(*output)
 		if err != nil {
-			fmt.Fprintf(stderr, "read agent contract: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "read agent contract: %v\n", err)
 			return 1
 		}
 		if !bytes.Equal(current, generated) {
-			fmt.Fprintf(stderr, "agent contract is stale: %s; regenerate with go generate ./internal/mcp\n", *output)
+			_, _ = fmt.Fprintf(stderr, "agent contract is stale: %s; regenerate with go generate ./internal/mcp\n", *output)
 			return 1
 		}
 		return 0
 	}
 	if err := os.MkdirAll(filepath.Dir(*output), 0755); err != nil {
-		fmt.Fprintf(stderr, "create contract directory: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "create contract directory: %v\n", err)
 		return 1
 	}
 	if err := os.WriteFile(*output, generated, 0644); err != nil {
