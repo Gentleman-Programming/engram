@@ -38,6 +38,49 @@ func TestAgentContractArtifactCurrent(t *testing.T) {
 	}
 }
 
+func TestAgentContractRejectsInconsistentSemanticInventory(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replaceKey bool
+		wantError  string
+	}{
+		{"missing entry", false, "agent contract: profile, registration, and semantic metadata inventories differ"},
+		{"unknown entry with matching count", true, "agent contract: missing or inconsistent declaration for mem_pin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// These tests mutate package metadata and must remain non-parallel.
+			before, err := AgentContractJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, ok := agentContractSemantics["mem_pin"]
+			if !ok {
+				t.Fatal("missing baseline mem_pin semantics")
+			}
+			const unknown = "unknown_test_operation"
+			if _, exists := agentContractSemantics[unknown]; exists {
+				t.Fatal("test operation already declared")
+			}
+			t.Cleanup(func() {
+				delete(agentContractSemantics, unknown)
+				agentContractSemantics["mem_pin"] = saved
+				after, err := AgentContractJSON()
+				if err != nil || !bytes.Equal(after, before) {
+					t.Errorf("cleanup changed contract metadata or digest: %v", err)
+				}
+			})
+			delete(agentContractSemantics, "mem_pin")
+			if tc.replaceKey {
+				agentContractSemantics[unknown] = saved
+			}
+			out, err := AgentContractJSON()
+			if err == nil || err.Error() != tc.wantError || out != nil {
+				t.Fatalf("inventory refusal: output=%q error=%v, want nil output and %q", out, err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestAgentContractInventoryAndMCPParity(t *testing.T) {
 	document, _ := readAgentContract(t)
 	if document["contract_id"] != "engram.agent-contract/v1" || document["revision"] != json.Number("1") || document["status"] != "mcp-foundation" {

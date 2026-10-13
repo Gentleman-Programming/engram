@@ -13,17 +13,22 @@ import (
 	engrammcp "github.com/Gentleman-Programming/engram/v3/internal/mcp"
 )
 
-func buildGenerator(t *testing.T) string {
+func TestMain(m *testing.M) {
+	// Child processes execute the same CLI entry point without a second build.
+	if os.Getenv("ENGRAM_AGENT_CONTRACT_TEST_MAIN") == "1" {
+		os.Exit(run(os.Args[1:], os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
+func generatorExecutable(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("generator integration tests build and execute an external Go binary")
+		t.Skip("generator integration tests execute an external process")
 	}
-	binary := filepath.Join(t.TempDir(), "agent-contract.exe")
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "go", "build", "-o", binary, ".").CombinedOutput()
+	binary, err := os.Executable()
 	if err != nil {
-		t.Fatalf("build generator: %v\n%s", err, output)
+		t.Fatalf("locate generator test executable: %v", err)
 	}
 	return binary
 }
@@ -34,7 +39,10 @@ func runGenerator(t *testing.T, binary, root string, args ...string) (int, strin
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Dir = root
-	command.Env = append(os.Environ(), "ENGRAM_DATA_DIR="+filepath.Join(root, "must-not-open-a-store"))
+	command.Env = append(os.Environ(),
+		"ENGRAM_DATA_DIR="+filepath.Join(root, "must-not-open-a-store"),
+		"ENGRAM_AGENT_CONTRACT_TEST_MAIN=1",
+	)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
@@ -51,8 +59,29 @@ func runGenerator(t *testing.T, binary, root string, args ...string) (int, strin
 	return -1, stdout.String(), stderr.String()
 }
 
+func TestGeneratorUsesCurrentExecutableWithoutGoToolchain(t *testing.T) {
+	want, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+	binary := generatorExecutable(t)
+	if binary != want {
+		t.Fatalf("generator subprocess must reuse the test executable: got %q, want %q", binary, want)
+	}
+	root := t.TempDir()
+	code, stdout, stderr := runGenerator(t, binary, root, "-h")
+	if code != 0 || stdout != "" || stderr != help {
+		t.Fatalf("help without Go toolchain: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("help created files or data: %v, %v", entries, err)
+	}
+}
+
 func TestGeneratorWritesChecksAndPreservesStaleArtifact(t *testing.T) {
-	binary, root := buildGenerator(t), t.TempDir()
+	binary, root := generatorExecutable(t), t.TempDir()
 	path := filepath.Join(root, "contract.json")
 	code, stdout, stderr := runGenerator(t, binary, root, "-output", path)
 	if code != 0 || stdout != "" || stderr != "" {
@@ -96,7 +125,7 @@ func TestGeneratorWritesChecksAndPreservesStaleArtifact(t *testing.T) {
 }
 
 func TestGeneratorHelpAndRejectedArgumentsHaveNoEffects(t *testing.T) {
-	binary, root := buildGenerator(t), t.TempDir()
+	binary, root := generatorExecutable(t), t.TempDir()
 	code, stdout, stderr := runGenerator(t, binary, root, "-h")
 	wantHelp := "Usage: agent-contract [-output path] [-check]\n\nGenerate the Go-owned MCP agent-contract foundation without opening a store.\n  -output path  Artifact path (default docs/contracts/agent-contract-v1.json).\n  -check        Compare without writing; exit 1 for a missing or stale artifact.\n"
 	if code != 0 || stdout != "" || stderr != wantHelp {
