@@ -72,6 +72,7 @@ The sentence that organizes the whole repo:
 | Review CI issue-approval metadata | `.github/scripts/issue-validation.mjs` | [Read-only linked-issue validation](ci-issue-validation.md) |
 | Review bounded issue-check publication | `.github/scripts/issue-check-publisher.mjs` | [Inactive issue-check publisher](ci-issue-check-publisher.md) |
 | Bootstrap trusted issue-refresh rollout | `.github/workflows/issue-validation.yml` | [Rollout, consistency windows and trusted recovery](ci-issue-refresh-rollout.md) |
+| Review inactive native metadata rerun admission | `.github/scripts/issue-refresh-router.mjs` | [Caller binding and rerun limits](ci-issue-refresh-router.md) |
 | Review candidate native issue-gating foundation | `.github/workflows/issue-policy.yml`, `.github/scripts/issue-native-policy.mjs` (not yet trusted-main/live proof) | [Native-policy permission and rollout boundary](ci-issue-native-policy.md) |
 
 ## Full technical reference stays in DOCS.md
