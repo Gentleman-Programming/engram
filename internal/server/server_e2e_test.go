@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
@@ -35,6 +36,48 @@ func newE2EServer(t *testing.T) (*store.Store, *httptest.Server) {
 	})
 
 	return s, httpServer
+}
+
+func TestContextHistoryE2E(t *testing.T) {
+	st, ts := newE2EServer(t)
+	if err := st.CreateSession("history", "engram", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 35; i++ {
+		title := "History é " + strconv.Itoa(i)
+		if _, err := st.AddObservation(store.AddObservationParams{SessionID: "history", Project: "engram", Scope: "project", Type: "note", Title: title, Content: title}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(query string) string {
+		t.Helper()
+		resp, err := ts.Client().Get(ts.URL + "/context?project=engram&scope=project" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("context status: %d", resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+	legacy := get("")
+	if disabled := get("&older_history=false"); disabled != legacy {
+		t.Fatal("explicit false changed default output")
+	}
+	if strings.Contains(legacy, "### Older History") {
+		t.Fatal("default context included older history")
+	}
+	enabled := get("&older_history=true&max_bytes=4096")
+	if !strings.Contains(enabled, "### Older History") || len(enabled) > 4096 {
+		t.Fatalf("enabled context: %s", enabled)
+	}
+	for _, n := range []int{1, 32, 128} {
+		text := get("&older_history=true&max_bytes=" + strconv.Itoa(n))
+		if len(text) > n || !utf8.ValidString(text) {
+			t.Fatalf("invalid context at budget %d: %q", n, text)
+		}
+	}
 }
 
 func postJSON(t *testing.T, client *http.Client, url string, body any) *http.Response {

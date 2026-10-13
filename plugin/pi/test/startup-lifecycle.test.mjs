@@ -2,6 +2,7 @@
 // process, so these tests exercise the actual spawn/readiness/failure lifecycle instead of
 // re-implementing it with stubs.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer, get } from "node:http";
 import { createServer } from "node:net";
@@ -39,7 +40,12 @@ const { appendFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
-appendFileSync(${JSON.stringify(spawnLog)}, "invoke=" + JSON.stringify(process.argv.slice(2)) + "\\n");
+// A preloaded fake sees the synthetic command in argv[1], not its own script path.
+const invocationArgs = process.argv.slice(process.argv[1] === __filename ? 2 : 1);
+const syntheticCommand = ["instance-id", "version", "serve", "sync"]
+  .find((name) => invocationArgs[0] === resolve(name));
+if (syntheticCommand) invocationArgs[0] = syntheticCommand;
+appendFileSync(${JSON.stringify(spawnLog)}, "invoke=" + JSON.stringify(invocationArgs) + "\\n");
 const syntheticServePath = resolve("serve");
 const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
 if (process.argv.includes("sync") || process.argv.includes("--import")) { appendFileSync(${JSON.stringify(spawnLog)}, "sync --import\\n"); process.exit(0); }
@@ -93,6 +99,46 @@ setTimeout(() => {
     ? { engramBin: process.execPath, nodeOptions: `--require "${binPath.replaceAll("\\", "\\\\")}"` }
     : { engramBin: binPath };
 }
+
+test("fake CLI logs logical argv for direct and preload launches", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "engram-pi-cli argv fixture-"));
+  try {
+    const spawnLog = join(dir, "spawns.log");
+    await writeFakeEngramBin(dir, {
+      spawnLog, port: 0, readyAfterMs: 0, cliVersion: "2.0.0-fixture",
+    });
+    const scriptPath = join(dir, "fake-engram.cjs");
+    for (const mode of ["direct", "preload"]) {
+      await t.test(mode, async () => {
+        for (const { args, stdout, extraLog = "" } of [
+          { args: ["instance-id"], stdout: "00000000000000000000000000000000\n" },
+          { args: ["version"], stdout: "2.0.0-fixture\n" },
+          { args: ["sync", "--import"], stdout: "", extraLog: "sync --import\n" },
+        ]) {
+          await writeFile(spawnLog, "", "utf8");
+          const child = spawnSync(process.execPath, mode === "direct" ? [scriptPath, ...args] : args, {
+            cwd: dir,
+            env: {
+              ...process.env,
+              NODE_OPTIONS: mode === "preload" ? `--require "${scriptPath.replaceAll("\\", "\\\\")}"` : "",
+            },
+            encoding: "utf8",
+            timeout: 5000,
+          });
+          assert.equal(child.error, undefined, `${mode}: ${args.join(" ")}`);
+          assert.equal(child.status, 0, child.stderr);
+          assert.equal(child.signal, null);
+          assert.equal(child.stdout, stdout);
+          assert.equal(child.stderr, "");
+          assert.equal(await readFile(spawnLog, "utf8"),
+            `invoke=${JSON.stringify(args)}\n${extraLog}`);
+        }
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 async function loadPlugin({ engramBin, port, cwd, sandbox, explicitUrl }) {
   if (explicitUrl) process.env.ENGRAM_URL = `http://127.0.0.1:${port}`;

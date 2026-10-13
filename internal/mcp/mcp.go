@@ -757,6 +757,9 @@ Examples:
 				mcp.WithNumber("max_bytes",
 					mcp.Description("Total context budget in bytes. Default 16384; values above 65536 are clamped to 65536."),
 				),
+				mcp.WithBoolean("older_history",
+					mcp.Description("Include a bounded Older History overview with counts and sampled titles outside the recent window."),
+				),
 				mcp.WithBoolean("compact",
 					mcp.Description("Drop the inline content preview from observation bullets to save tokens."),
 				),
@@ -2096,11 +2099,16 @@ func truncateMemContextUTF8(s string, maxBytes int) string {
 	return s[:maxBytes]
 }
 
+var contextHistoryFormatter = func(s *store.Store, project, scope string, opts store.ContextOptions) (string, error) {
+	return s.FormatContextWithOptions(project, scope, opts)
+}
+
 func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		compact, _ := req.GetArguments()["compact"].(bool)
+		olderHistory, _ := req.GetArguments()["older_history"].(bool)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -2145,10 +2153,11 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		if contextBudget < 1 {
 			contextBudget = 1
 		}
-		contextResult, err := s.FormatContextWithOptions(contextProject, scope, store.ContextOptions{
-			MaxBytes: contextBudget,
-			Pinned:   memContextMaxPinned,
-			Compact:  compact,
+		contextResult, err := contextHistoryFormatter(s, contextProject, scope, store.ContextOptions{
+			MaxBytes:     contextBudget,
+			Pinned:       memContextMaxPinned,
+			Compact:      compact,
+			OlderHistory: olderHistory,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil

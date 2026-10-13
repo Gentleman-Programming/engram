@@ -895,14 +895,16 @@ func (s *Store) DataDir() string {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	compatibilityClosed    atomic.Bool
-	compatibilityReady     bool
-	compatibilityRuntimeID string
-	db                     *sql.DB
-	cfg                    Config
-	instanceID             string
-	generation             *databaseGeneration
-	hooks                  storeHooks
+	contextHistoryNow       func() time.Time // Optional per-store clock for deterministic calendar tests.
+	contextHistoryAfterRead func(string)     // Optional per-store barrier for snapshot regression tests.
+	compatibilityClosed     atomic.Bool
+	compatibilityReady      bool
+	compatibilityRuntimeID  string
+	db                      *sql.DB
+	cfg                     Config
+	instanceID              string
+	generation              *databaseGeneration
+	hooks                   storeHooks
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -6165,6 +6167,9 @@ SELECT 1 FROM (
 // reproduces FormatContext's output byte-for-byte. See issue #163
 // (bounded-size injection).
 type ContextOptions struct {
+	// OlderHistory opts into a bounded overview outside the recent window.
+	OlderHistory bool
+
 	// MaxBytes caps the complete rendered context in bytes. Zero preserves the
 	// unbounded legacy output; a positive value returns at most that many bytes.
 	MaxBytes int
@@ -6227,7 +6232,20 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		}
 	}
 
-	if opts.Observations >= 0 {
+	var olderGroups []historyGroup
+	if opts.OlderHistory {
+		now := time.Now().UTC()
+		if s.contextHistoryNow != nil {
+			now = s.contextHistoryNow().UTC()
+		}
+		observations, olderGroups, err = s.contextHistory(project, scope, opts.Observations, now)
+		if err != nil {
+			return "", err
+		}
+		if opts.Observations < 0 {
+			observations = nil
+		}
+	} else if opts.Observations >= 0 {
 		limit := opts.Observations
 		if limit == 0 {
 			limit = s.cfg.MaxContextResults
@@ -6247,7 +6265,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		}
 	}
 
-	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
+	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 && len(olderGroups) == 0 {
 		return "", nil
 	}
 
@@ -6291,6 +6309,16 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		b.WriteString("\n")
 	}
 
+	if opts.OlderHistory {
+		budget := 2048
+		if opts.MaxBytes > 0 {
+			budget = min(budget, opts.MaxBytes/4)
+		}
+		older := renderContextHistory(olderGroups, budget)
+		if older != "" {
+			return limitContextBytes(b.String(), positiveContextRemainder(opts.MaxBytes, len(older))) + older, nil
+		}
+	}
 	return limitContextBytes(b.String(), opts.MaxBytes), nil
 }
 

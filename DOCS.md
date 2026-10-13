@@ -185,7 +185,7 @@ engram delete prompt <id>     Delete a prompt permanently
 engram delete project <name> [--hard]
                               Remove prompts; soft-delete observations by default; --hard deletes observations and only unreferenced sessions
 engram timeline <obs_id>      Chronological context [--project P|--all]
-engram context [project]      Recent context [--project P|--all]
+engram context [project]      Recent context [--project P|--all] [--older-history]
 engram stats                  Memory statistics [--project P|--all]
 engram export [file]          Export memories to JSON [--project P|--all]
 engram import <file>          Import memories from JSON
@@ -405,7 +405,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Context
 
-- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global&observations=N&prompts=N&sessions=N&pinned=N&compact=BOOL&max_bytes=N`
+- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global&observations=N&prompts=N&sessions=N&pinned=N&compact=BOOL&max_bytes=N&older_history=BOOL`
   - `observations`/`prompts`/`sessions`/`pinned`: `0` (or omitted/invalid) uses that section's legacy default, `>0` caps it (silently clamped to a `500` ceiling), `<0` omits the section and its `### ...` header entirely
   - `compact=true` drops the inline content preview from `Pinned`/`Recent Observations` bullets, keeping just `- [type] **title**`
   - `max_bytes`: `0`, omitted, invalid, or negative preserves the unbounded legacy output; a positive value caps the complete rendered context at that many bytes (silently clamped to `65536`). Truncation is UTF-8-safe and appends a `[truncated]` marker when it fits within the requested budget.
@@ -1395,6 +1395,12 @@ When `project` is omitted, context is scoped to the resolved current project (pr
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
 MCP `mem_context` uses a 16 KiB default budget for the complete tool result and caps `max_bytes` at 64 KiB. `max_bytes` must be a positive integral number; absent, mistyped, non-positive, `NaN`, and fractional values fall back to the 16 KiB default. It includes at most 20 pinned observations by default. When the complete result exceeds its budget, truncation is UTF-8-safe and appends a visible `[truncated]` marker when the marker fits. `compact=true` removes inline content previews from pinned and recent-observation bullets, retaining their type and title. These MCP rules are distinct from the HTTP `GET /context` behavior documented above.
+
+Use MCP `mem_context` with `older_history: true`, HTTP `GET /context?project=X&older_history=true`, or `engram context --project X --older-history` to opt into `### Older History`. Omitted or false options preserve existing output. This is a calendar overview of observations outside the SQL recent window, excluding pinned and deleted observations and respecting project/scope filters—not a summary of byte-truncated recent output.
+
+The overview uses UTC: weeks within the current month (Monday starts, explicit partial-week ranges), earlier months in the current quarter, earlier quarters in the current year, and previous years. Weekly titles are explicitly labeled samples and include observation IDs (up to three for the current week and one per earlier week); older periods show counts, with type counts for monthly groups. Retrieve an ID with `mem_get_observation` to read its full content.
+
+The section is capped at the smaller of 2 KiB and one quarter of the available context byte budget, after MCP reserves its stats/nudge suffix. With unbounded HTTP/CLI context, only this section remains capped at 2 KiB. Only complete UTF-8 lines fit; omitted groups are indicated when space permits, and the section is omitted when no useful complete section fits. No model-generated or persisted summaries are created.
 
 ### mem_stats
 
