@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -14,13 +15,21 @@ import (
 
 func batchCall(t *testing.T, srv *server.MCPServer, name string, args map[string]any) (map[string]any, bool) {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+	out, failed, err := batchCallResult(srv, name, args)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return out, failed
+}
+
+func batchCallResult(srv *server.MCPServer, name string, args map[string]any) (map[string]any, bool, error) {
+	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+	if err != nil {
+		return nil, false, err
+	}
 	encoded, err := json.Marshal(srv.HandleMessage(context.Background(), raw))
 	if err != nil {
-		t.Fatal(err)
+		return nil, false, err
 	}
 	var wire struct {
 		Error  any `json:"error"`
@@ -32,20 +41,20 @@ func batchCall(t *testing.T, srv *server.MCPServer, name string, args map[string
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(encoded, &wire); err != nil {
-		t.Fatal(err)
+		return nil, false, err
 	}
 	if wire.Error != nil || len(wire.Result.Content) != 1 {
-		t.Fatalf("unexpected response %s", encoded)
+		return nil, false, fmt.Errorf("unexpected response %s", encoded)
 	}
 	text := wire.Result.Content[0].Text
 	if wire.Result.IsError {
-		return map[string]any{"error": text}, true
+		return map[string]any{"error": text}, true, nil
 	}
 	var out map[string]any
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
-		t.Fatal(err)
+		return nil, false, err
 	}
-	return out, false
+	return out, false, nil
 }
 
 func batchFixture(t *testing.T) (*store.Store, *server.MCPServer, string, string) {
@@ -237,8 +246,17 @@ func TestJudgeManyInvalidInputNoMutation(t *testing.T) {
 			entries[i] = batchItem(id, "scoped")
 		}
 		out, failed := batchCall(t, srv, "mem_judge_many", map[string]any{"judgments": entries})
-		if failed || len(batchOutcomes(t, out)) != count {
+		if failed {
 			t.Fatal(out)
+		}
+		outcomes := batchOutcomes(t, out)
+		if len(outcomes) != count {
+			t.Fatal(out)
+		}
+		for _, raw := range outcomes {
+			if raw.(map[string]any)["status"] != "success" {
+				t.Fatal(raw)
+			}
 		}
 	}
 }
@@ -249,7 +267,7 @@ func TestJudgeManyQueuedSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := make(chan struct{})
-	results := make(chan bool, 2)
+	results := make(chan error, 2)
 	var ready sync.WaitGroup
 	ready.Add(2)
 	for _, reason := range []string{"batch-a", "batch-b"} {
@@ -262,15 +280,21 @@ func TestJudgeManyQueuedSerialization(t *testing.T) {
 			}
 			ready.Done()
 			<-start
-			out, failed := batchCall(t, srv, "mem_judge_many", map[string]any{"judgments": items})
-			results <- (!failed && len(batchOutcomes(t, out)) == 16)
+			out, failed, err := batchCallResult(srv, "mem_judge_many", map[string]any{"judgments": items})
+			if err == nil {
+				outcomes, ok := out["outcomes"].([]any)
+				if failed || !ok || len(outcomes) != 16 {
+					err = fmt.Errorf("unexpected batch outcomes: %#v", out)
+				}
+			}
+			results <- err
 		}(reason)
 	}
 	ready.Wait()
 	close(start)
 	for range 2 {
-		if !<-results {
-			t.Fatal("concurrent batch failed")
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent batch failed: %v", err)
 		}
 	}
 	reasons := []string{}
