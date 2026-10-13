@@ -47,6 +47,60 @@ schemas, annotations, semantics, status, and revision. Only `digest` itself is
 omitted. No build timestamps, machine paths, release versions, or caller facts
 are added. The checked-in representation is indented JSON with one final newline.
 
+### Reproduce the existing Go encoding
+
+This foundation uses **Go `encoding/json`, not RFC 8785/JCS**. Reproducing
+its digest requires the same bytes, not merely an equivalent decoded JSON value:
+
+1. Omit only the root `digest` field. Sort every object's decoded string keys
+   lexicographically by their UTF-8 bytes (not locale collation or JavaScript's
+   default UTF-16 ordering). Preserve array order and do not normalize Unicode.
+2. Preserve the original valid JSON number tokens with `json.Number`, including
+   exponent spelling, negative zero, and integers beyond JavaScript's exact
+   range. Do not round-trip them through floating-point numbers: `1e+02`, `100`,
+   and `100.0` are equivalent values but different digest inputs.
+3. Encode strings with Go's default escaping: quote and backslash become `\"`
+   and `\\`; backspace, form feed, newline, carriage return, and tab use `\b`,
+   `\f`, `\n`, `\r`, and `\t`. Other U+0000–U+001F controls use lowercase
+   `\u00xx`. `<`, `>`, `&`, U+2028, and U+2029 become `\u003c`, `\u003e`,
+   `\u0026`, `\u2028`, and `\u2029`. Slash and other valid Unicode remain
+   unescaped. Go replaces invalid UTF-8 in strings and unpaired surrogate
+   escapes during decoding with U+FFFD; consumers must match Go's handling.
+4. Hash the compact unsigned UTF-8 bytes with SHA-256: no BOM, indentation,
+   extra spaces, or trailing newline. Encode the result as lowercase hex.
+   The pretty artifact's final newline is not part of this hash input.
+
+Plain `JSON.stringify`, even with sorted keys, does not implement these rules.
+Disabling HTML escaping alone would neither implement JCS nor preserve this
+contract's current digest. This clarification changes no encoder, revision,
+artifact, or runtime compatibility policy.
+
+### Cross-language test vectors
+
+[The versioned vectors](../internal/mcp/testdata/agent-contract-canonical-v1.json)
+pin input JSON, exact unsigned `canonical_utf8` text, and its SHA-256. The Go
+unit test checks both vectors against the existing encoder. The string vector
+covers HTML/line-separator escaping, all C0 controls, non-ASCII keys whose UTF-8
+and UTF-16 order differs, and deliberately unsorted arrays. The number vector
+pins `1e+02`, `-0`, and `9007199254740993` without converting them to floats.
+These synthetic documents test encoding; they are not live MCP inventories.
+
+From the repository root, verify with existing Go and Node installations:
+
+```sh
+go test ./internal/mcp -run TestAgentContractCanonicalEncodingVectors -count=1
+node --test tools/agent-contract/canonical-vector.test.mjs
+```
+
+The Node **test-only** reference reconstructs the string vector and the current
+checked-in artifact's digest without executing Go. Its reconstruction domain is
+valid Unicode and canonical decimal safe-integer tokens, as used by the current
+artifact. It rejects unsafe/non-integer numeric values and negative zero; it is
+not a general lossless JSON parser. For the number vector it verifies SHA-256
+from the supplied exact canonical UTF-8 text, not by reserializing `JSON.parse`
+output. A general non-Go verifier would also need lossless number-token handling.
+No Node/Pi runtime verifier, parity assertion, or negotiation is introduced.
+
 Change the revision deliberately when the semantic contract changes, regenerate,
 and review the diff. The generation-drift test does not automatically grant
 compatibility to a different revision/digest.

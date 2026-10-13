@@ -246,6 +246,49 @@ func TestAgentContractConsolidationPreservesUpstreamRegistration(t *testing.T) {
 	}
 }
 
+func TestAgentContractCanonicalEncodingVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/agent-contract-canonical-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Format  string `json:"format"`
+		Vectors []struct {
+			Name      string `json:"name"`
+			InputJSON string `json:"input_json"`
+			Canonical string `json:"canonical_utf8"`
+			SHA256    string `json:"sha256"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.Format != "engram.agent-contract/go-json-vectors/v1" || len(fixture.Vectors) != 2 {
+		t.Fatal("unexpected canonical encoding vector inventory")
+	}
+	for _, vector := range fixture.Vectors {
+		t.Run(vector.Name, func(t *testing.T) {
+			var document agentContractDocument
+			if err := json.Unmarshal([]byte(vector.InputJSON), &document); err != nil {
+				t.Fatal(err)
+			}
+			// AgentContractJSON hashes the unsigned document, not its digest field.
+			document.Digest = ""
+			got, err := canonicalContractJSON(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != vector.Canonical {
+				t.Fatalf("Go canonical bytes differ from vector: got %q, want %q", got, vector.Canonical)
+			}
+			sum := sha256.Sum256(got)
+			if hex.EncodeToString(sum[:]) != vector.SHA256 {
+				t.Fatalf("canonical vector SHA-256 mismatch: %x", sum)
+			}
+		})
+	}
+}
+
 func TestAgentContractDeterministicDigestAndFreshSnapshots(t *testing.T) {
 	document, raw := readAgentContract(t)
 	_, second := readAgentContract(t)
