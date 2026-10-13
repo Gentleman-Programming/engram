@@ -1,0 +1,6 @@
+Isolated issue-refresh live probe for #1802.
+Fixture issue: #1826.
+NO MERGE / NO ENQUEUE.
+This non-executable marker exists only for the authorized fork-PR metadata probe.
+No workflow, helper, required check, credential, or repository setting is changed.
+Cleanup requires a separate human decision.
