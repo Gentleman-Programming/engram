@@ -81,11 +81,20 @@ by rerunning an eligible **Issue Validation Refresh** metadata-only run, not
 original PR Validation or broad CI; verify current-head results afterwards.
 
 **Approved native-gating amendment:** #1802 now permits `actions: write` only
-on a future selective issue-label router job, never globally. Native metadata
-jobs remain read-only. The #1834 candidate defines two independent native jobs
-and an original-PR-head-bound adapter, not yet trusted-main or live gate evidence;
-issue-label routing is not implemented by this foundation. Publication is not
-required-gate proof, and legacy retirement remains unauthorized. See the
+on the selective issue-label router job, never globally. Native metadata
+jobs remain read-only. #1834 / PR #1838 integrated the native jobs and head-bound
+adapter; PR #1843 integrated the inactive guarded rerun helper on trusted main.
+PR #1850 integrated #1844's inactive dispatcher on verified main at `f14fc4f3`.
+The #1835 branch candidate adds approval-label issue routing, not yet available
+on trusted main. Its dispatcher prerequisite is integrated; workflow delivery
+and activation remain separate from local preparation. Repository Actions
+capability is constrained by trusted code, not workflow-granular permissions.
+Missing native-run PR association or token capability blocks refresh explicitly.
+Partial target failures can leave earlier reruns requested; this is not atomic
+reconciliation. Local tests are not live required-gate proof. Legacy writers,
+the queue, six contexts and App15368 remain intact. #1802 stays open and #1810
+retirement stays blocked: fresh T4 probe consent and live evidence are required
+before rollout claims or retirement. See the
 [native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
 
 All required checks must pass before a PR can be merged.

@@ -1,23 +1,26 @@
-# Native issue-policy gating — candidate foundation
+# Native issue-policy gating — integrated foundation, candidate routing
 
 ## Status
 
 The maintainer approved the [#1802 scope amendment](https://github.com/Gentleman-Programming/engram/issues/1802#issuecomment-6135740826); the issue body records the decision. [#1834](https://github.com/Gentleman-Programming/engram/issues/1834) owns native metadata jobs and [#1835](https://github.com/Gentleman-Programming/engram/issues/1835) owns the selective router.
 
-The #1834 candidate defines `.github/workflows/issue-policy.yml` and the read-only
-`evaluateNativeIssuePolicy(github, context, policy)` adapter. It is not yet integrated
-on trusted `main`; opening this PR does not activate its workflow. Automatic
-issue-label routing is still future work, not provided by this foundation. The existing API-created publisher is transitional. Publication success did not demonstrate approval revocation blocking in the controlled fork probe; no required-gate or queue acceptance is claimed.
+#1834 / PR #1838 integrated `.github/workflows/issue-policy.yml` and the read-only
+`evaluateNativeIssuePolicy(github, context, policy)` adapter on trusted main.
+PR #1843 integrated the inactive guarded rerun helper at `fc438498`.
+PR #1850 integrated #1844's inactive dispatcher on verified main at `f14fc4f3`.
+The #1835 branch prepares issue-label routing, not yet available on trusted main.
+The dispatcher prerequisite is integrated, but workflow delivery and activation
+remain pending. Opening the workflow PR cannot activate it. The existing API-created publisher is transitional. Publication success did not demonstrate approval revocation blocking in the controlled fork probe; no required-gate or queue acceptance is claimed.
 
 ## Permission boundary
 
 The approved replacement uses trusted `pull_request_target` metadata jobs with the existing **Check Issue Reference** and **Check Issue Has status:approved** names. Native job conclusions determine policy results, bound to the original run's PR head and current authoritative metadata. These jobs request only policy/metadata read permissions.
 
-Only the future issue-label router job may request `actions: write`, never globally. The token capability covers repository Actions; trusted code must restrict usage to an eligible allowlisted metadata workflow, matching current PR head and trusted policy revision. Missing evidence or token capability is an explicit blocker, not permission for broad CI or an old-publisher fallback.
+Only the candidate issue-label router job requests `actions: write`, never globally. The token capability covers repository Actions; trusted code must restrict usage to an eligible allowlisted metadata workflow, matching current PR head and trusted policy revision. Missing evidence or token capability is an explicit blocker, not permission for broad CI or an old-publisher fallback.
 
 No fork/PR-head code, PAT, new app/service, issue/PR approval, settings changes, new required contexts or automatic merging is authorized.
 
-## Candidate contract and local verification
+## Native contract and local verification
 
 The two independent native jobs select `reference` and `approved` verdicts from
 current PR/issue metadata. All six PR actions are covered. Both check out only
@@ -52,6 +55,6 @@ Keep legacy writers, all six required contexts, integration `15368` and native m
 
 [#1810](https://github.com/Gentleman-Programming/engram/issues/1810) retirement remains blocked until live blocking, recovery, duplicate selection and queue compatibility are observed. #1802 stays open and its acceptance criteria stay unchecked until their evidence exists.
 
-Refresh is eventual: event delivery, scheduling, API availability, metadata races and already evaluated merge groups leave documented windows. There is no fixed delay, atomic invalidation or strict no-stale-success guarantee.
+Refresh is eventual: event delivery, scheduling, API availability, metadata races and already evaluated merge groups leave documented windows. There is no fixed delay, atomic invalidation or strict no-stale-success guarantee. Discovery completes before dispatch, but per-target reruns are not transactional: an explicit later failure does not undo earlier requests. Missing eligible native-run PR association or GITHUB_TOKEN capability blocks refresh; no broader credentials or fallback is allowed.
 
-The earlier #1828 probe allowances are exhausted. Another probe mutation or fixture cleanup requires separate authorization. See the [existing bootstrap and recovery guide](ci-issue-refresh-rollout.md) for historical publication evidence and its limitations; do not treat local mocks as live compatibility proof.
+T4 live evidence requires fresh probe consent; local tests and integration are not live capability, duplicate-selection or queue proof. The earlier #1828 probe allowances are exhausted. Another probe mutation or fixture cleanup requires separate authorization. See the [existing bootstrap and recovery guide](ci-issue-refresh-rollout.md) for historical publication evidence and its limitations; do not treat local mocks as live compatibility proof.
