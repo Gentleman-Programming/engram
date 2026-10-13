@@ -1168,7 +1168,16 @@ function closeOwnedTransport(): Promise<void> {
   return ownedStop;
 }
 
-async function startOwnedTransport(): Promise<void> {
+// Shared initialization and implicit recovery can both start the transport.
+// They share one in-flight start: ENGRAM_URL is set only after readiness, so a
+// second spawn would replace a still-starting child and orphan it.
+let ownedStart: Promise<void> | undefined;
+function startOwnedTransport(): Promise<void> {
+  ownedStart ??= startOwnedTransportOnce().finally(() => { ownedStart = undefined; });
+  return ownedStart;
+}
+
+async function startOwnedTransportOnce(): Promise<void> {
   if (ownedStop) await ownedStop;
   if (ownedChild && ownedChild.exitCode === null && ownedChild.signalCode === null && ENGRAM_URL) return;
   const token = randomBytes(32).toString("hex");

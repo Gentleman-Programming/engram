@@ -2350,3 +2350,27 @@ test("background diagnostics remain safe when formatting or delivery fails", () 
   assert.doesNotThrow(() => warn("/prompts", "failure", { hasUI: true, ui: {} }));
   assert.equal(stderr.length, 0);
 });
+
+test("concurrent owned startups share one in-flight start so no child is orphaned", async () => {
+  const body = extractFunctionBody("startOwnedTransport", "{\n  ownedStart");
+  let starts = 0;
+  let release;
+  const startOwnedTransport = new Function("startOwnedTransportOnce", `
+    let ownedStart;
+    return function startOwnedTransport() {
+      ${body}
+    };
+  `)(() => {
+    starts += 1;
+    return new Promise((resolve) => { release = resolve; });
+  });
+  const first = startOwnedTransport();
+  const second = startOwnedTransport();
+  assert.equal(starts, 1, "a second caller during startup must not spawn another child");
+  release();
+  await Promise.all([first, second]);
+  const restart = startOwnedTransport();
+  assert.equal(starts, 2, "a finished start does not block a later restart");
+  release();
+  await restart;
+});
