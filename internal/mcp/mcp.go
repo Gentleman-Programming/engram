@@ -230,6 +230,7 @@ var ProfileAgent = map[string]bool{
 	"mem_session_summary":   true, // end-of-session summary — referenced 16 times
 	"mem_session_start":     true, // register session start
 	"mem_session_end":       true, // mark session completed
+	"mem_consolidate":       true, // explicit preview/confirmation for atomic curation
 	"mem_get_observation":   true, // full observation content after search — referenced 4 times
 	"mem_suggest_topic_key": true, // stable topic key for upserts — referenced 3 times
 	"mem_capture_passive":   true, // extract learnings from text — referenced in Gemini/Codex protocol
@@ -323,7 +324,7 @@ var coreTools = []coreToolDesc{
 var deferredTools = []string{
 	"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
 	"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
-	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects", "mem_judge_many", "mem_session_finalize",
+	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects", "mem_judge_many", "mem_session_finalize", "mem_consolidate",
 }
 
 // memoryWritingTools contains every registered tool that can mutate persistent
@@ -332,7 +333,7 @@ var memoryWritingTools = []string{
 	"mem_save", "mem_update", "mem_review", "mem_delete",
 	"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
 	"mem_session_start", "mem_session_end", "mem_capture_passive",
-	"mem_merge_projects", "mem_judge", "mem_judge_many", "mem_compare", "mem_session_finalize",
+	"mem_merge_projects", "mem_judge", "mem_judge_many", "mem_compare", "mem_session_finalize", "mem_consolidate",
 }
 
 func hasRegisteredMemoryWriter(allowlist map[string]bool) bool {
@@ -446,6 +447,7 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 // registerTools registers all enabled MCP tools on the given server.
 func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	writeQueue := newWriteQueue(defaultMCPWriteQueueSize)
+	registerConsolidate(srv, s, allowlist, writeQueue)
 
 	// ─── mem_search (profile: agent, core — always in context) ─────────
 	if shouldRegister("mem_search", allowlist) {

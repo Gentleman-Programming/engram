@@ -41,12 +41,15 @@ fi
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
-You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
+You have Engram memory tools. The agent MUST follow this protocol without waiting for activation.
 
-### CORE TOOLS — always available, no ToolSearch needed
+### AVAILABLE TOOLS
+Use the Engram tools actually exposed by Codex, with their registered MCP names
+(`mcp__engram__mem_*` or `mcp__plugin_engram_engram__mem_*`). The names below are
+logical names; availability and discovery follow Codex's host-specific interface.
+
 mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
-
-Use ToolSearch for other tools: mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
+mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:
@@ -58,8 +61,12 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Pattern established (naming, structure, approach)
 - User preference or constraint learned
 - Feature implemented with non-obvious approach
+- Configuration change or environment setup done
+- User confirms your recommendation
+- User rejects an approach or expresses a preference
+- Discussion concludes with a clear direction chosen
 
-**Self-check after EVERY task**: "Did I just make a decision, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+**Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
 ### DELIVERY GUARANTEE
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
@@ -70,7 +77,22 @@ Memory operations are internal bookkeeping, never the user-facing answer. Comple
 - User mentions a topic you have no context on
 
 ### SESSION CLOSE — before saying "done":
-Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
+Call `mem_session_summary` with: Goal, Instructions, Discoveries, Accomplished, Next Steps, Relevant Files.
+Summary persistence does not end the session; Codex's SessionEnd hook owns lifecycle closure.
+
+### PASSIVE CAPTURE — adapter-specific safety net
+Codex's SubagentStop hook forwards eligible delegated/subagent output for server-side extraction.
+Ordinary main-agent responses are not automatically captured; a numbered "## Key Learnings:" section alone does not guarantee storage.
+Use `mem_save` as the primary path for significant, verified knowledge. Explicit
+`mem_capture_passive(content)` extraction is a safety net, not a replacement for `mem_save`.
+
+### SESSION BINDING
+Codex's PreToolUse command `engram hook codex-pre-tool-use` matches
+`mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. Supported mutating
+Engram calls resolve the authoritative host session before binding `session_id`
+for writes and `id` for session start/end. Never invent or override this identity.
+Read-only tools are unchanged; malformed input or unconfirmed host resolution denies mutating calls.
+For direct/nonintercepted clients, reuse the confirmed lifecycle identity supplied above.
 
 ---
 

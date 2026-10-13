@@ -1425,12 +1425,53 @@ test("compaction resolves an unobserved child and registers only its root", asyn
   assert.match(output.context.at(-1), /FIRST ACTION REQUIRED/)
 })
 
-test("post-compaction protocol relies on injected session-only context", () => {
-	const afterCompaction = source.match(/### AFTER COMPACTION[\s\S]*?Do not skip step 1\.[\s\S]*?memory\./)?.[0]
-  assert.ok(afterCompaction, "AFTER COMPACTION protocol must exist")
+test("post-compaction protocol relies on injected session-only context", async (t) => {
+  const runtime = await createRuntime(t)
+  const output = { system: [] }
+  await runtime.transform({ sessionID: "runtime" }, output)
+  const instructions = output.system[0]
+  assert.equal((instructions.match(/## AFTER COMPACTION/g) ?? []).length, 1)
+  assert.equal((instructions.match(/If you see a message about compaction/g) ?? []).length, 1,
+    "the public prompt must contain only one recovery rule")
+  const afterCompaction = instructions.split("## AFTER COMPACTION")[1].split("## OpenCode plugin binding")[0]
   assert.match(afterCompaction, /session-only compaction context has already been injected/)
   assert.match(afterCompaction, /use it only when explicitly requested/)
   assert.doesNotMatch(afterCompaction, /\d\.\s+(?:Then )?call `mem_context`/)
+  assert.match(afterCompaction, /IMMEDIATELY call `mem_session_summary`/)
+  assert.equal(runtime.requests.some(({ path }) => path === "/context"), false)
+})
+
+for (const system of [[], ["base prompt"], ["base prompt", "host override"]]) {
+  test(`memory protocol transform preserves system ordering (${system.length} entries)`, async (t) => {
+    const runtime = await createRuntime(t)
+    const output = { system: [...system] }
+    await runtime.transform({ sessionID: "runtime" }, output)
+    assert.equal(output.system.length, Math.max(1, system.length))
+    assert.deepEqual(output.system.slice(0, -1), system.slice(0, -1))
+    if (system.length) assert.ok(output.system.at(-1).startsWith(system.at(-1) + "\n\n"))
+    const instructions = output.system.at(-1)
+    assert.equal((instructions.match(/# Engram Persistent Memory — Protocol/g) ?? []).length, 1)
+    assert.equal((instructions.match(/## OpenCode plugin binding/g) ?? []).length, 1)
+    assert.match(instructions, /The agent MUST follow this protocol without waiting for activation/)
+    assert.match(instructions, /engram_mem_save/)
+    assert.doesNotMatch(instructions, /ToolSearch|Deferred tools|mcp__engram__|permissions allowlist/)
+    assert.match(instructions, /User confirms/)
+    assert.match(instructions, /User rejects/)
+    assert.match(instructions, /Summary persistence does not end the session/)
+    assert.match(instructions, /If memory work fails or needs follow-up, still send the answer/)
+  })
+}
+
+test("memory protocol passive prose describes eligible output rather than universal extraction", async (t) => {
+  const runtime = await createRuntime(t)
+  const output = { system: [] }
+  await runtime.transform({ sessionID: "runtime" }, output)
+  const passive = output.system[0].split("## PASSIVE CAPTURE")[1].split("## AFTER COMPACTION")[0]
+  assert.match(passive, /adapter-specific/)
+  assert.match(passive, /delegated task\/subagent tool outputs/)
+  assert.match(passive, /ordinary responses/i)
+  assert.match(passive, /mem_save.*primary/)
+  assert.doesNotMatch(passive, /Engram will automatically extract and save these/)
 })
 
 test("compaction skips invalid or missing sessions and still injects recovery context", async (t) => {

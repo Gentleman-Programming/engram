@@ -97,6 +97,7 @@ const ENGRAM_TOOL_NAMES = new Set<string>(ENGRAM_TOOLS);
 const MEMORY_INSTRUCTIONS = `## Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
+The agent MUST follow this protocol without waiting for activation.
 These instructions are injected by gentle-engram, the Pi-native memory provider. Use the memory tools named in this section as the authoritative Pi memory contract. Do not infer alternative Engram tool names from other integrations unless the user explicitly asks you to use them.
 
 ### CANONICAL TOPIC WORKFLOW (mandatory — not optional)
@@ -117,6 +118,23 @@ Save when one of these happens:
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+- Feature implemented with a non-obvious approach
+- Notion/Jira/GitHub artifact created or updated with significant content
+- Team convention documented or established
+- Workflow change agreed upon
+- Tool or library choice made with tradeoffs
+- Gotcha, edge case, or unexpected behavior found
+- User confirms or rejects a recommendation or approach
+- User expresses a preference or makes a decision after presented options
+- Discussion concludes with a clear direction chosen
+
+For completed bug fixes, include the root cause in the persisted content.
+After EVERY task, self-check: "Did I or the user make a decision, confirm or reject
+an approach, express a preference, fix a bug, learn something non-obvious, or
+establish a convention?" If yes, follow the canonical topic workflow now:
+update an existing topic, save a genuinely new topic, or write nothing if covered.
+Save verified, significant conclusions rather than routine progress, source dumps,
+or speculation. Never save secrets, credentials, private content, or personal data.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
@@ -134,6 +152,23 @@ Format for \`mem_update\`:
 - **expected_project**: project that owns the observation
 - **topic_key**: keep the existing key unless the topic itself changed
 - **content**: full rewritten content including every still-valid fact, with changed or superseded facts recorded as history
+
+### NATIVE SESSION ATTRIBUTION
+
+Native \`mem_save\`, \`mem_save_prompt\`, \`mem_session_summary\`, and \`mem_capture_passive\`
+derive attribution from the current Pi host session and confirmed Engram registration.
+Do not invent or override \`session_id\`; gentle-engram owns the effective persisted
+identity, including resumed continuations and explicit cross-project targets.
+\`mem_session_end\` accepts only the current Pi host session ID; the extension
+resolves the effective persisted ID. Ordinary task completion does not end it.
+
+### PASSIVE CAPTURE
+
+Pi automatically scans eligible non-Engram tool outputs after redaction; only
+recognized structured learnings are persisted, not arbitrary output.
+Final assistant responses are not automatically captured. For significant learnings
+in a response, follow the canonical topic workflow before replying;
+a final \`## Key Learnings:\` section alone is not a persistence guarantee.
 
 ### DELIVERY GUARANTEE
 

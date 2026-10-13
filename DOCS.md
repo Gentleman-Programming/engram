@@ -17,7 +17,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
 | [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-25-tools)                          | Detailed reference for all 25 memory tools                   |
+| [MCP Tools](#mcp-tools-26-tools)                          | Detailed reference for all 26 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -66,7 +66,7 @@ Code and tests beat docs: `internal/mcp` owns agent-facing tool schemas, `intern
 
 ### Reading and updating the memory protocol
 
-For readers, [Memory Protocol](#memory-protocol-full-text) is the canonical living agent-facing prose contract. The table above names related surfaces to check when that behavior changes; "must change together" means review for behavioral alignment, not copy identical text into every host.
+For readers, [Memory Protocol](#memory-protocol-full-text) is the canonical living agent-facing prose contract. The table above names related surfaces to check when that behavior changes; "MUST change together" means review for behavioral alignment, not copy identical text into every host.
 
 For maintainers, distinguish these ownership paths:
 
@@ -346,7 +346,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - Use a stable client-generated `operation_id` for one logical save and preserve the original request while recovering an uncertain acknowledgement.
   - Replay identity is the Store's normalized request fingerprint, including the requested project before session ownership resolution; a later ownership change does not change an exact replay result.
   - The local operation ledger retains receipts indefinitely. Sync, logical export, and logical import do not carry those receipts to another database history.
-  - Unknown fingerprint versions fail closed with `410`; clients must not replace an expired or uncertain operation ID with a new save automatically.
+  - Unknown fingerprint versions fail closed with `410`; clients MUST NOT replace an expired or uncertain operation ID with a new save automatically.
   - An absent lookup result is intentionally not evidence that an operation never committed or cannot commit later; the ledger has no pending state.
   - A soft-deleted observation retains its ledger binding but has no lookup result. Its exact replay returns `410`; a changed payload returns `409`.
   - A hard delete retains a ledger tombstone with the same exact-replay and changed-payload responses as a soft deletion.
@@ -394,7 +394,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Prompts
 
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
-- `POST /prompts/capture-decision` — Read-only Claude capture decision. Body: `{source:"claude-code", cwd:<nonblank string>, content:<string>}`. Returns `200 {decision:"skip"}` for trimmed blank content or content starting with `<task-notification>` or `<agent-message`; otherwise returns `200 {decision:"capture", ...}` with the current-project metadata schema, resolved by inspection only (unlike `GET /project/current`, this route never establishes Git bindings). An unbound Git repository returns `project_source:"unbound_git"`, which capture adapters must not treat as established canonical identity; normal SessionStart/project resolution may first need to establish that binding. Conflicting or ambiguous history fails closed through existing project error responses. Do not add a second, writing project GET to the capture decision path. Malformed, missing, wrong-type, unsupported-source, unknown-field, or trailing JSON requests return `400`; project resolution errors use existing project error responses. No prompts, counters, or database state are changed. Claude capture-enabled hooks use this instead of their capture project GET, then persist original human content once through `POST /prompts`. Updating the server is required for automatic Claude capture: unsupported endpoints or invalid/error responses skip persistence without a local prefix fallback. Reminder reads and other hooks are unchanged; the builtin-only Windows Git Bash path makes no API calls.
+- `POST /prompts/capture-decision` — Read-only Claude capture decision. Body: `{source:"claude-code", cwd:<nonblank string>, content:<string>}`. Returns `200 {decision:"skip"}` for trimmed blank content or content starting with `<task-notification>` or `<agent-message`; otherwise returns `200 {decision:"capture", ...}` with the current-project metadata schema, resolved by inspection only (unlike `GET /project/current`, this route never establishes Git bindings). An unbound Git repository returns `project_source:"unbound_git"`, which capture adapters MUST NOT treat as established canonical identity; normal SessionStart/project resolution may first need to establish that binding. Conflicting or ambiguous history fails closed through existing project error responses. Do not add a second, writing project GET to the capture decision path. Malformed, missing, wrong-type, unsupported-source, unknown-field, or trailing JSON requests return `400`; project resolution errors use existing project error responses. No prompts, counters, or database state are changed. Claude capture-enabled hooks use this instead of their capture project GET, then persist original human content once through `POST /prompts`. Updating the server is required for automatic Claude capture: unsupported endpoints or invalid/error responses skip persistence without a local prefix fallback. Reminder reads and other hooks are unchanged; the builtin-only Windows Git Bash path makes no API calls.
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
   - No-result responses from both prompt collection endpoints return `200` with `[]` (never `null`)
@@ -727,7 +727,7 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 | `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
-| `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
+| `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation MUST NOT establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
@@ -1292,8 +1292,9 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 ---
 
 <a id="mcp-tools-23-tools"></a>
+<a id="mcp-tools-25-tools"></a>
 
-## MCP Tools (25 tools)
+## MCP Tools (26 tools)
 
 
 ### mem_search
@@ -1508,6 +1509,12 @@ Re-judging an existing relation overwrites it (deliberate revision). Two agents 
 
 Search results subsequently expose annotation lines like `supersedes: #<id> (<title>)`, `superseded_by: #<id> (<title>)`, and `conflicts: #<id> (<title>)` so the recalling agent sees relevant verdicts at-a-glance. For enrolled projects with autosync enabled, judgments propagate to other machines via the cloud mutation pipeline — the annotation appears in `mem_search` results on any machine that has pulled the relevant mutations.
 
+### mem_consolidate
+
+Deferred Go MCP agent-profile tool for explicit observation consolidation, using the shared memory write queue. Required arguments are `ids_to_delete`, `new_title`, `new_content`, and `expected_project`; the survivor inherits source session/scope rather than accepting overrides. Preview is the default and writes nothing. Inspect the returned plan, then repeat the exact arguments with `confirm: true` and its opaque `fingerprint` to commit locally.
+
+Owner mismatch returns no plan; fingerprint drift returns a fresh preview without writes. Never auto-confirm a replacement plan or retry an uncertain consolidation write. This destructive, non-idempotent operation does not guarantee remote visibility or add Pi-native/HTTP tools. See the [complete consolidation contract and examples](docs/codebase/OBSERVATION-CONSOLIDATION.md#mcp-contract).
+
 ### mem_judge_many
 
 Apply **1..32 caller-authored judgments** in submitted order within one queued MCP write task. Deferred; available in both agent and admin profiles. Each item uses the same validation, project guards and transaction as `mem_judge`; the batch is not an all-or-nothing transaction.
@@ -1555,16 +1562,40 @@ Behavior:
 
 The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
 
+The agent MUST follow this protocol without waiting for activation.
+
+### AVAILABLE TOOLS
+
+Use the Engram tools actually exposed by the host, with their registered names.
+Names such as `mem_save` below are logical names; OpenCode uses qualified names
+such as `engram_mem_save`. Claude Code's core/deferred tools and ToolSearch
+conventions are Claude-specific, not a bootstrap requirement for other hosts.
+If tools are unavailable, use `engram setup <agent>` with the supported host name
+and restart that host. Setup repairs host-specific registration; do not assume
+Claude MCP names or permission allowlists on every host.
+
 ### WHEN TO SAVE (mandatory)
 
-Call `mem_save` IMMEDIATELY after any of these:
+Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 
-- Bug fix completed
+- Bug fix completed (include root cause)
 - Architecture or design decision made
-- Non-obvious discovery about the codebase
+- Team convention documented or established
+- Workflow change agreed upon
+- Tool or library choice made with tradeoffs
+- Feature implemented with non-obvious approach
+- Notion/Jira/GitHub artifact created or updated with significant content
+- Non-obvious discovery about the codebase, gotcha, or edge case found
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+- User confirms a recommendation ("go with that", "sounds good", "agreed", or the equivalent in the user's language)
+- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
+- User makes a decision after presented tradeoffs or options
+- A discussion concludes with a clear direction chosen, even if the agent proposed it
+
+After every task, ask whether a decision, confirmation, preference, bug fix,
+discovery, or convention needs saving; if so, call `mem_save` now.
 
 Format for `mem_save`:
 
@@ -1583,7 +1614,7 @@ Format for `mem_save`:
 
 ### Topic update rules (mandatory)
 
-- Different topics must not overwrite each other (e.g. architecture vs bugfix)
+- Different topics MUST NOT overwrite each other (e.g. architecture vs bugfix)
 - Reuse the same `topic_key` to update an evolving topic instead of creating new observations
 - If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
 - Use `mem_update` when you have an exact observation ID to correct
@@ -1629,11 +1660,34 @@ Before ending a session or saying "done" / "listo" / "that's it", you MUST call 
 - path/to/file — [what it does or what changed]
 ```
 
-This is NOT optional. If you skip this, the next session starts blind.
+This is NOT OPTIONAL. If you skip this, the next session starts blind.
+Summary persistence does not end the session. Follow the host-specific lifecycle
+contract: Claude/Codex SessionEnd hooks and the OpenCode adapter own closure;
+Pi uses its explicit closure contract; Gemini additionally requires
+`mem_session_end` after `mem_session_summary` succeeds.
+
+Codex registers the native PreToolUse command `engram hook codex-pre-tool-use`
+for `mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. It resolves the
+authoritative Codex host session to the server-confirmed Engram identity before
+binding supported write/session arguments: `session_id` for writes and `id` for
+session start/end. `mem_session_end` uses `id`, not `session_id`. Read-only tools
+are unchanged; malformed inputs or unconfirmed host resolution deny mutating calls.
+For direct/nonintercepted clients, reuse this exact identity supplied by the
+lifecycle hook as `session_id` for attributed writes and as `id` for session end.
+Never invent IDs or reconstruct resume suffixes. OpenCode binds attributed writes
+to the server-confirmed authoritative root session; Claude binds write/session
+tools through its host hook. Generic/direct MCP clients retain their
+explicit-session contract.
 
 ### PASSIVE CAPTURE
 
-When completing a task, include a `## Key Learnings:` section at the end of your response with numbered items. Engram will automatically extract and save these as observations.
+When completing a task or subtask, include a `## Key Learnings:` section with
+numbered items. Automatic capture is adapter-specific: Claude/Codex SubagentStop
+hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
+output for server-side extraction. Other adapters may support eligible tool
+outputs through their own contracts. Ordinary responses are not universally
+captured; a learning section alone does not guarantee storage. Use `mem_save`
+as the primary path for significant, verified knowledge.
 
 Example:
 
@@ -1644,11 +1698,18 @@ Example:
 2. JWT refresh tokens need atomic rotation to prevent race conditions
 ```
 
-You can also call `mem_capture_passive(content)` directly with any text that contains a learning section.
+You can also call `mem_capture_passive(content)` directly, when available, with
+text containing a learning section. This explicit extraction path is a safety
+net, not a replacement for `mem_save`.
 
 ### AFTER COMPACTION
 
-If you see a message about compaction or context reset:
+Follow the host-specific recovery contract when supplied. In OpenCode, persist
+the compacted summary with `mem_session_summary`, then continue using the already
+injected session-only context. Do not automatically call project-scoped
+`mem_context`; use it only when explicitly requested.
+
+Otherwise, if you see compaction, context reset, or "FIRST ACTION REQUIRED":
 
 1. IMMEDIATELY call `mem_session_summary` with the compacted summary content
 2. Then call `mem_context` to recover additional context from previous sessions
