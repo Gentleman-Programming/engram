@@ -1926,7 +1926,7 @@ func cmdContext(cfg store.Config) {
 	if err != nil {
 		fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
 	if resolveErr != nil {
 		fatal(resolveErr)
