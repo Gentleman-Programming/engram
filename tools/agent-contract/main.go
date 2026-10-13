@@ -62,7 +62,7 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	if err := os.WriteFile(*output, generated, 0644); err != nil {
-		fmt.Fprintf(stderr, "write agent contract: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "write agent contract: %v\n", err)
 		return 1
 	}
 	return 0
