@@ -707,6 +707,12 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate-copy" {
+		if code := runMigrateCopy(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			exitFunc(code)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "compatibility" {
 		if code := runCompatibility(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
 			exitFunc(code)
@@ -3832,6 +3838,8 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
+  migrate-copy --data-dir <absolute-source> --output-dir <new-absolute-destination> --confirm-quiescent --json
+                     Copy a stopped store completely and migrate only the copy; see docs/bundled-upgrade.md
   compatibility --data-dir <absolute-directory> --json
                      Read-only offline store observation (JSON). It never opens, migrates or repairs
                      the store, and never authorizes automatic opening; see README
