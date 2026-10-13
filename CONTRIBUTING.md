@@ -60,6 +60,26 @@ Changes to labels on a linked issue do not themselves trigger PR Validation;
 the approval check fetches issue labels when the workflow runs. PR label events
 and linked-issue label events are distinct.
 
+**Issue-refresh bootstrap (not yet live proof):** the candidate **Issue Validation
+Refresh** workflow adds trusted metadata-only publication for approval-label
+addition/removal and the same PR events via `pull_request_target`, not merge-group
+events. Native PR Validation merge-group jobs and their resolver remain unchanged
+and must remain intact even in later PR-writer retirement. It becomes
+available only after integration on the trusted branch; do not assume this
+introducing PR can run it. Original PR Validation and its issue jobs remain
+unchanged until live provider/required-gate compatibility is observed.
+See the [rollout and trusted manual recovery guide](docs/ci-issue-refresh-rollout.md)
+before relying on refresh or retiring legacy writers. The publisher uses only
+`checks: write`, PR/issues read access and contents read access for trusted helpers;
+it never executes PR-head code or changes approvals, settings or required gates.
+Its issue/default and PR-target/base triggers establish trusted provenance;
+`workflow_sha` alone is not a universal trust marker.
+Refresh is eventual, not atomic: scheduling/API delays, metadata changes after
+reads, concurrent or late legacy writes and already evaluated merge groups leave
+consistency windows. Existing visible checks may remain after an error. Recover
+by rerunning an eligible **Issue Validation Refresh** metadata-only run, not
+original PR Validation or broad CI; verify current-head results afterwards.
+
 All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.

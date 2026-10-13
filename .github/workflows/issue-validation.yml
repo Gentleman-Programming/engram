@@ -1,0 +1,40 @@
+name: Issue Validation Refresh
+
+on:
+  pull_request_target:
+    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
+  issues:
+    types: [labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  refresh-issue-checks:
+    name: Refresh Issue Policy Metadata
+    if: github.event_name != 'issues' || (github.event.issue.pull_request == null && github.event.label.name == 'status:approved')
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: read
+      issues: read
+      contents: read
+    steps:
+      - name: Check out trusted workflow revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Evaluate current metadata and publish issue checks
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              const { evaluateIssueValidation } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-validation.mjs`);
+              const { publishIssueChecks } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-check-publisher.mjs`);
+              const evaluations = await evaluateIssueValidation(github, context);
+              await publishIssueChecks(github, context.repo, evaluations);
+            } catch (error) {
+              core.setFailed(error.message);
+            }

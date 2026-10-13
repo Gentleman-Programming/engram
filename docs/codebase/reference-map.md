@@ -27,6 +27,7 @@
 | `docs/CODEBASE-GUIDE.md` | Codebase guide landing page and reading path. |
 | `docs/ci-issue-validation.md` | Inactive issue-policy evaluator, API contract, regressions and evidence limits. |
 | `docs/ci-issue-check-publisher.md` | Inactive bounded Checks publisher, response binding, failures and evidence limits. |
+| `docs/ci-issue-refresh-rollout.md` | Trusted workflow bootstrap, manual recovery, live evidence checklist and legacy/queue windows. |
 | `docs/codebase/*.md` | Split codebase guide pages by topic. |
 
 ## Main source files

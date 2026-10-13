@@ -100,6 +100,9 @@ type ConsolidateParams struct {
 	Overrides   ConsolidateOverrides
 	Confirm     bool
 	Fingerprint string
+	// ExpectedProject optionally asserts source ownership. Nil preserves the
+	// existing unscoped API; an explicit assertion must be valid and match.
+	ExpectedProject *string
 }
 
 // ConsolidateResult carries the plan and, after a confirmed execution, the
@@ -117,6 +120,14 @@ type ConsolidateResult struct {
 // sync journal row per state change — is a single transaction, so a failed
 // insert can never leave the deletes applied.
 func (s *Store) ConsolidateObservations(p ConsolidateParams) (*ConsolidateResult, error) {
+	var expected *string
+	if p.ExpectedProject != nil {
+		owner, err := ValidateExpectedProject(*p.ExpectedProject)
+		if err != nil {
+			return nil, err
+		}
+		expected = &owner
+	}
 	if len(p.IDs) < 2 {
 		return nil, ErrConsolidateNeedTwoSources
 	}
@@ -138,6 +149,9 @@ func (s *Store) ConsolidateObservations(p ConsolidateParams) (*ConsolidateResult
 		if err != nil {
 			return nil, err
 		}
+		if expected != nil && plan.Project != *expected {
+			return nil, ErrObservationProjectMismatch
+		}
 		return &ConsolidateResult{Plan: plan}, nil
 	}
 
@@ -147,6 +161,9 @@ func (s *Store) ConsolidateObservations(p ConsolidateParams) (*ConsolidateResult
 		plan, err := s.buildConsolidationPlanTx(tx, p.IDs, p.Overrides)
 		if err != nil {
 			return err
+		}
+		if expected != nil && plan.Project != *expected {
+			return ErrObservationProjectMismatch
 		}
 		if plan.Fingerprint != p.Fingerprint {
 			out = &ConsolidateResult{Plan: plan}

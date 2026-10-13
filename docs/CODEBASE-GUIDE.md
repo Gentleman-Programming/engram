@@ -71,6 +71,7 @@ The sentence that organizes the whole repo:
 | Change agent setup | `internal/setup/registry.go`, `internal/setup/agents.go`, `internal/setup/setup.go` | [Integrations](codebase/integrations.md), `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
 | Review CI issue-approval metadata | `.github/scripts/issue-validation.mjs` | [Read-only linked-issue validation](ci-issue-validation.md) |
 | Review bounded issue-check publication | `.github/scripts/issue-check-publisher.mjs` | [Inactive issue-check publisher](ci-issue-check-publisher.md) |
+| Bootstrap trusted issue-refresh rollout | `.github/workflows/issue-validation.yml` | [Rollout, consistency windows and trusted recovery](ci-issue-refresh-rollout.md) |
 
 ## Full technical reference stays in DOCS.md
 
