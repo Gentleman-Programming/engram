@@ -6,6 +6,16 @@ refresh is not available. Keep the original PR Validation jobs unchanged in
 this slice. Local fake-API and structural tests do not prove token capability,
 App15368 identity, required-gate selection, fork execution or queue compatibility.
 
+## Native replacement candidate
+
+The [native-policy foundation](ci-issue-native-policy.md) now defines the #1834
+read-only jobs and head-bound adapter, but is not yet integrated on trusted main.
+The earlier controlled fork probe published failures without proving required-gate
+revocation blocking. Keep this bootstrap and legacy/queue validation unchanged;
+native job definitions and local mocks do not repair or prove live gate selection.
+The selective router is future work. #1802 remains open, #1810 remains blocked,
+and fresh probe/cleanup admission is required; no new live budget is granted.
+
 ## Quick path for maintainers
 
 1. Evaluator #1807 / PR #1812 is integrated on verified `main` (`871f99e3`).

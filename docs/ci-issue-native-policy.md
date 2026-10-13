@@ -1,10 +1,13 @@
-# Native issue-policy gating — approved scope
+# Native issue-policy gating — candidate foundation
 
 ## Status
 
 The maintainer approved the [#1802 scope amendment](https://github.com/Gentleman-Programming/engram/issues/1802#issuecomment-6135740826); the issue body records the decision. [#1834](https://github.com/Gentleman-Programming/engram/issues/1834) owns native metadata jobs and [#1835](https://github.com/Gentleman-Programming/engram/issues/1835) owns the selective router.
 
-This page records authorization, not implemented native gating or automatic rerun capability. The existing API-created publisher is transitional. Publication success did not demonstrate approval revocation blocking in the controlled fork probe; no required-gate or queue acceptance is claimed.
+The #1834 candidate defines `.github/workflows/issue-policy.yml` and the read-only
+`evaluateNativeIssuePolicy(github, context, policy)` adapter. It is not yet integrated
+on trusted `main`; opening this PR does not activate its workflow. Automatic
+issue-label routing is still future work, not provided by this foundation. The existing API-created publisher is transitional. Publication success did not demonstrate approval revocation blocking in the controlled fork probe; no required-gate or queue acceptance is claimed.
 
 ## Permission boundary
 
@@ -13,6 +16,35 @@ The approved replacement uses trusted `pull_request_target` metadata jobs with t
 Only the future issue-label router job may request `actions: write`, never globally. The token capability covers repository Actions; trusted code must restrict usage to an eligible allowlisted metadata workflow, matching current PR head and trusted policy revision. Missing evidence or token capability is an explicit blocker, not permission for broad CI or an old-publisher fallback.
 
 No fork/PR-head code, PAT, new app/service, issue/PR approval, settings changes, new required contexts or automatic merging is authorized.
+
+## Candidate contract and local verification
+
+The two independent native jobs select `reference` and `approved` verdicts from
+current PR/issue metadata. All six PR actions are covered. Both check out only
+`github.workflow_sha`, without persisted credentials; the exact checkout step
+name exposes that source SHA for later router admission. No retries, dependency
+skipping, merge-group subscription or API-created checks are used. A failed
+verdict or metadata/target error calls `core.setFailed` in the actual job wrapper.
+
+The original payload PR head must equal the evaluator target; neither
+`context.sha` nor a base SHA substitutes for it. Missing/ambiguous targets and
+head drift fail closed. Current body and every closing-reference issue label
+are read, with a final metadata recheck. The additive `closingIssueNumbers`
+export preserves the original regex, duplicates, case and whitespace behavior;
+`evaluateIssueValidation` retains its existing output and fetched-head contract.
+For example, `FIXES\n#9; resolves #10` requires both issues approved, while
+`closes#9` is not a closing reference. Reference success is independent of
+approval failure; no failed prerequisite silently skips the approval job.
+
+```bash
+node --test .github/scripts/issue-native-policy.test.mjs .github/scripts/issue-native-workflow.test.mjs .github/scripts/issue-validation.test.mjs
+node --check .github/scripts/issue-native-policy.mjs
+node --check .github/scripts/issue-validation.mjs
+```
+
+These are SDK-mock and composed actual-script-body tests, not live token,
+provider, fork, duplicate-selection or required-gate evidence. The bootstrap
+publisher and original PR/queue validation remain unchanged.
 
 ## Rollout boundary
 

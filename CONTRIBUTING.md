@@ -82,8 +82,10 @@ original PR Validation or broad CI; verify current-head results afterwards.
 
 **Approved native-gating amendment:** #1802 now permits `actions: write` only
 on a future selective issue-label router job, never globally. Native metadata
-jobs remain read-only; publication is not required-gate proof. This approval
-does not activate the replacement or authorize legacy retirement. See the
+jobs remain read-only. The #1834 candidate defines two independent native jobs
+and an original-PR-head-bound adapter, not yet trusted-main or live gate evidence;
+issue-label routing is not implemented by this foundation. Publication is not
+required-gate proof, and legacy retirement remains unauthorized. See the
 [native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
 
 All required checks must pass before a PR can be merged.

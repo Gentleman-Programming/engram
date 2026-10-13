@@ -28,7 +28,7 @@
 | `docs/ci-issue-validation.md` | Inactive issue-policy evaluator, API contract, regressions and evidence limits. |
 | `docs/ci-issue-check-publisher.md` | Inactive bounded Checks publisher, response binding, failures and evidence limits. |
 | `docs/ci-issue-refresh-rollout.md` | Trusted workflow bootstrap, manual recovery, live evidence checklist and legacy/queue windows. |
-| `docs/ci-issue-native-policy.md` | Approved native-gating/router scope, narrow token usage and unproven rollout boundary. |
+| `docs/ci-issue-native-policy.md` | Candidate native jobs/head-bound adapter, future router scope, local verification and unproven rollout boundary. |
 | `docs/codebase/*.md` | Split codebase guide pages by topic. |
 
 ## Main source files
