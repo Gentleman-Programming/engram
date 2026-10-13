@@ -34,6 +34,7 @@ For other docs:
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart path, branding, and reference links                            |
 | [Agent Setup](docs/AGENT-SETUP.md)          | Per-agent configuration + compaction survival                                                 |
 | [Codebase Guide](docs/CODEBASE-GUIDE.md)    | Definitive guide to repository structure, package ownership, flows, and maintainer guardrails |
+| [Agent Contract](docs/AGENT-CONTRACT.md)    | Go-owned MCP agent-contract foundation, generation, digest, and explicit Pi parity gaps |
 | [Architecture](docs/ARCHITECTURE.md)        | How it works, session lifecycle, CLI reference, project structure                             |
 | [Plugins](docs/PLUGINS.md)                  | OpenCode & Claude Code plugin details                                                         |
 | [Team Usage](docs/TEAM-USAGE.md)            | Scope conventions, language strategy, and sync behavior for collaborative teams               |
@@ -55,6 +56,7 @@ Reader and status guide:
 | -------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | MCP tool inventory                     | DOCS.md "MCP Tools"                 | `internal/mcp/mcp.go` registrations + `ProfileAgent`/`ProfileAdmin`          | `docs/ARCHITECTURE.md` tool table; `docs/AGENT-SETUP.md` setup claims; `docs/PLUGINS.md` comparison table; README.md intent table (subset) |
 | Tool input schemas                     | DOCS.md per-tool sections           | `internal/mcp/mcp.go` (live schemas); `internal/mcp/testdata/tool-contract-v1.json` (test-enforced v1 compatibility baseline; change only when intentionally changed) | (none)                                                                                                                                     |
+| Agent contract foundation              | docs/AGENT-CONTRACT.md              | `internal/mcp/agent_contract.go` plus the existing Go MCP registrations/profile | `docs/contracts/agent-contract-v1.json` (generated; Pi/runtime parity is not yet implemented) |
 | SQLite schema                          | DOCS.md "Database Schema"           | `internal/store/store.go` `Store.migrate`                                    | (none)                                                                                                                                     |
 | Memory Protocol                        | `DOCS.md#memory-protocol-full-text` | (none; prose contract)                                                       | `skills/memory-protocol/SKILL.md`; `memoryProtocolMarkdown` embedded in `internal/setup`; `plugin/*/skills/memory/SKILL.md`                |
 | Setup instructions and per-agent paths | docs/AGENT-SETUP.md                 | `internal/setup/agents.go` + `setup.go`                                      | README.md setup table                                                                                                                      |
@@ -76,7 +78,7 @@ For maintainers, distinguish these ownership paths:
 
 ### Documentation surface catalog
 
-This catalog covers the 60 tracked Markdown files. **Owner `GP`** means CODEOWNERS review routing to `@Gentleman-Programming`, not an individual author or content owner. **Canonical** identifies a contract named in the matrix above; **guide** explains or operates alongside contracts; **instruction** directs agents; **policy/template** governs contribution or reuse. **Living** means maintained against current behavior, not a guarantee that every described optional feature is enabled. Beta material describes experimental paths, not universally shipped behavior.
+This catalog covers the tracked Markdown documentation surfaces. **Owner `GP`** means CODEOWNERS review routing to `@Gentleman-Programming`, not an individual author or content owner. **Canonical** identifies a contract named in the matrix above; **guide** explains or operates alongside contracts; **instruction** directs agents; **policy/template** governs contribution or reuse. **Living** means maintained against current behavior, not a guarantee that every described optional feature is enabled. Beta material describes experimental paths, not universally shipped behavior.
 
 | Surface | Audience | Authority | Status | Owner |
 | --- | --- | --- | --- | --- |
@@ -88,6 +90,7 @@ This catalog covers the 60 tracked Markdown files. **Owner `GP`** means CODEOWNE
 | [AGENTS.md](AGENTS.md) | Repository agents | Instruction: skill index | Living | GP |
 | [CHANGELOG.md](CHANGELOG.md) | Upgraders | Guide: release record | Historical | GP |
 | [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) | Contributors | Template: PR review | Living | GP |
+| [docs/AGENT-CONTRACT.md](docs/AGENT-CONTRACT.md) | Maintainers | Canonical: MCP agent-contract foundation | Living | GP |
 | [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) | Agent users | Canonical: setup paths | Living | GP |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Maintainers | Guide: architecture | Living | GP |
 | [docs/BETA_TESTING.md](docs/BETA_TESTING.md) | Beta testers | Guide: testing | Beta | GP |

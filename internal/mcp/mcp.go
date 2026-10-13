@@ -438,7 +438,12 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 
 // registerTools registers all enabled MCP tools on the given server.
 func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
-	writeQueue := newWriteQueue(defaultMCPWriteQueueSize)
+	registerToolsWithQueue(srv, s, cfg, allowlist, activity, newWriteQueue(defaultMCPWriteQueueSize))
+}
+
+// registerToolsWithQueue also supports metadata-only registration. In that path
+// the handlers are never exposed or invoked, and no write worker is started.
+func registerToolsWithQueue(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity, writeQueue *writeQueue) {
 	registerConsolidate(srv, s, allowlist, writeQueue)
 
 	// ─── mem_search (profile: agent, core — always in context) ─────────
