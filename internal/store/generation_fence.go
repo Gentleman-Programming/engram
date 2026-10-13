@@ -337,6 +337,26 @@ func (c generationConn) FileControlPersistWAL(dbName string, mode int) (int, err
 	return result, nil
 }
 
+// FileControlDataVersion forwards modernc's data version query while rejecting
+// results from a database generation that changed before or during the call.
+func (c generationConn) FileControlDataVersion(dbName string) (uint32, error) {
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	fc, ok := c.Conn.(sqlite.FileControl)
+	if !ok {
+		return 0, errors.New("database connection does not implement sqlite.FileControl")
+	}
+	result, err := fc.FileControlDataVersion(dbName)
+	if err != nil {
+		return 0, err
+	}
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	return result, nil
+}
+
 type generationStmt struct {
 	driver.Stmt
 	generation *databaseGeneration

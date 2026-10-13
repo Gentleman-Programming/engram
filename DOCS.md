@@ -2015,10 +2015,14 @@ Register-ScheduledTask `
 | Package                              | Version | Purpose                        |
 | ------------------------------------ | ------- | ------------------------------ |
 | `github.com/mark3labs/mcp-go`        | v0.44.0 | MCP protocol implementation    |
-| `modernc.org/sqlite`                 | v1.45.0 | Pure Go SQLite driver (no CGO) |
+| `modernc.org/sqlite`                 | v1.58.0 | Pure Go SQLite driver (no CGO) |
 | `github.com/charmbracelet/bubbletea` | v1.3.10 | Terminal UI framework          |
 | `github.com/charmbracelet/lipgloss`  | v1.1.0  | Terminal styling               |
 | `github.com/charmbracelet/bubbles`   | v1.0.0  | TUI components                 |
+
+The SQLite driver is paired with `modernc.org/libc` v1.75.6 in `go.mod`;
+update these together rather than overriding libc independently. The module
+retains Go 1.25.10.
 
 ### OpenCode Plugin
 
