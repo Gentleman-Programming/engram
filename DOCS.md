@@ -17,7 +17,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Documentation surface catalog](#documentation-surface-catalog) | Audience, authority, status, and review routing for tracked Markdown |
 | [CLI Reference](#cli-reference)                           | General command inventory and detailed CLI links             |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
+| [MCP Tools](#mcp-tools-26-tools)                          | Detailed reference for all 26 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -126,6 +126,7 @@ The memory protocol's canonical prose is [Memory Protocol](#memory-protocol-full
 The live schema is created and incrementally migrated by `Store.migrate` in [`internal/store/store.go`](internal/store/store.go); treat that migration as the source of authority when this summary and the database differ.
 
 - **sessions** — `id` (TEXT PK), `project`, `ownership_mode`, `directory`, `started_at`, `ended_at`, `summary`, `runtime_lease_expires_at` (local-only runtime liveness; never synced or exported)
+- **session_finalizations** — local-only retry journal: `session_id` (PK/FK, cascades on session deletion), `summary_id`, `summary_sync_id`. Written atomically by `Store.FinalizeSession`; never synced or exported. It distinguishes successful local retries from sessions ended separately, without inferring finalization from arbitrary observations.
 - **observations** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `scope`, `topic_key`, `normalized_hash`, `revision_count`, `duplicate_count`, `last_seen_at`, `pinned`, `review_after`, `expires_at`, `embedding`, `embedding_model`, `embedding_created_at`, `created_at`, `updated_at`, `deleted_at`
 - **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`, `topic_key`)
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `content`, `project`, `created_at`; **prompt_tombstones** records deleted prompt `sync_id`, `session_id`, `project`, and `deleted_at`
@@ -1290,7 +1291,10 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (23 tools)
+<a id="mcp-tools-23-tools"></a>
+<a id="mcp-tools-25-tools"></a>
+
+## MCP Tools (26 tools)
 
 
 ### mem_search
@@ -1444,6 +1448,18 @@ Save comprehensive end-of-session summary:
 ## Relevant Files
 ```
 
+### mem_session_finalize
+
+Save a caller-authored structured summary and close an **existing exact session** in one SQLite transaction. Deferred; available in both agent and admin profiles. This is an optional MCP contract, not a change to host lifecycle hooks or the existing Memory Protocol tools.
+
+- **session_id** (required): exact previously registered session identity; never implicitly created or trimmed.
+- **summary** (required): nonempty caller-authored content using the same Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files structure as `mem_session_summary`. Stored-content redaction/truncation rules apply.
+- **project**, **project_choice_reason**, **recovery_token** (optional): validated using summary project resolution; finalization additionally requires the resolved project to match the session owner.
+
+The summary observation, session close, normal enrolled-project sync mutations and local retry journal commit together or roll back together. The legacy `sessions.summary` free-text column remains unchanged. Returns `session_id`, `state: finalized`, `summary_id`, `summary_sync_id`, `already_finalized: false` and project metadata.
+
+A successful local retry returns the original identity with `state: already_finalized` and `already_finalized: true`, with no writes, even when nonempty retry text differs. It does not revise the first summary. An independently ended session rejects with `session_already_ended` and is not backfilled. The retry journal survives local reopen but is not synced/exported; an imported ended session without that journal also rejects. Existing summary/start/end tools remain available and unchanged.
+
 ### mem_session_start
 
 Register the start of a new coding session.
@@ -1498,6 +1514,29 @@ Parameters:
 Re-judging an existing relation overwrites it (deliberate revision). Two agents judging the same pair persist as separate rows — Phase 1 surfaces both; cross-actor reconciliation is Phase 2.
 
 Search results subsequently expose annotation lines like `supersedes: #<id> (<title>)`, `superseded_by: #<id> (<title>)`, and `conflicts: #<id> (<title>)` so the recalling agent sees relevant verdicts at-a-glance. For enrolled projects with autosync enabled, judgments propagate to other machines via the cloud mutation pipeline — the annotation appears in `mem_search` results on any machine that has pulled the relevant mutations.
+
+### mem_consolidate
+
+Deferred Go MCP agent-profile tool for explicit observation consolidation, using the shared memory write queue. Required arguments are `ids_to_delete`, `new_title`, `new_content`, and `expected_project`; the survivor inherits source session/scope rather than accepting overrides. Preview is the default and writes nothing. Inspect the returned plan, then repeat the exact arguments with `confirm: true` and its opaque `fingerprint` to commit locally.
+
+Owner mismatch returns no plan; fingerprint drift returns a fresh preview without writes. Never auto-confirm a replacement plan or retry an uncertain consolidation write. This destructive, non-idempotent operation does not guarantee remote visibility or add Pi-native/HTTP tools. See the [complete consolidation contract and examples](docs/codebase/OBSERVATION-CONSOLIDATION.md#mcp-contract).
+
+### mem_judge_many
+
+Apply **1..32 caller-authored judgments** in submitted order within one queued MCP write task. Deferred; available in both agent and admin profiles. Each item uses the same validation, project guards and transaction as `mem_judge`; the batch is not an all-or-nothing transaction.
+
+- **judgments** (required): array of objects with required `judgment_id` and `relation`; optional `reason`, `evidence`, `confidence` (0..1), matching `mem_judge`.
+- **session_id** (optional): shared provenance applied to every item.
+
+Returns `outcomes` in input order: each includes zero-based `index`, `judgment_id`, `status: success|error`; successes retain the existing `relation` row and expose `judgment_status`, errors include `error`. A malformed/unknown/rejected item does not stop subsequent items. Invalid array shape/count or non-string shared provenance rejects the whole request before writes. Duplicate IDs execute in order, so the last successful decision wins.
+
+Retries converge persisted verdicts but still refresh judgment timestamps and retain per-item sync enqueue behavior: each successful enrolled judgment adds its normal mutation, including identical retries. This is not exactly-once mutation delivery. Existing `mem_judge` remains supported for single decisions and restricted allowlists.
+
+```json
+{"judgments":[{"judgment_id":"<candidates[0].judgment_id>","relation":"related"},{"judgment_id":"<candidates[1].judgment_id>","relation":"compatible","confidence":0.9}],"session_id":"<registered-session-id>"}
+```
+
+After deciding the candidate relationships, an MCP client can use `mem_judge_many` followed by `mem_session_finalize` to reduce dependent tool calls. Finalize does not carry judgments and neither tool generates semantic decisions or summaries server-side.
 
 ### mem_compare
 
