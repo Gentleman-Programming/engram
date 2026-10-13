@@ -80,6 +80,14 @@ consistency windows. Existing visible checks may remain after an error. Recover
 by rerunning an eligible **Issue Validation Refresh** metadata-only run, not
 original PR Validation or broad CI; verify current-head results afterwards.
 
+**Approved native-gating amendment:** #1802 now permits `actions: write` only
+on a future selective issue-label router job, never globally. Native metadata
+jobs remain read-only. The #1834 candidate defines two independent native jobs
+and an original-PR-head-bound adapter, not yet trusted-main or live gate evidence;
+issue-label routing is not implemented by this foundation. Publication is not
+required-gate proof, and legacy retirement remains unauthorized. See the
+[native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
+
 All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.

@@ -2,6 +2,7 @@ const pullActions = new Set(['opened', 'edited', 'labeled', 'unlabeled', 'synchr
 const numberValid = (number) => Number.isSafeInteger(number) && number > 0;
 const shaValid = (sha) => typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha);
 const references = (body) => [...(body || '').matchAll(/(?:closes|fixes|resolves)\s+#(\d+)/gi)].map((match) => Number(match[1]));
+export { references as closingIssueNumbers };
 const result = (errors) => ({ conclusion: errors.length ? 'failure' : 'success', summary: errors.length ? errors.join('\n') : 'Validation passed.' });
 const failure = (headSha, message) => ({ headSha, reference: result([message]), approved: result([message]) });
 
