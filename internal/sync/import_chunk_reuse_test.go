@@ -305,6 +305,9 @@ func TestLocalImportLegacyManifestStillChecksChunkOwnership(t *testing.T) {
 	if synced["chunk-legacy-owned"] {
 		t.Fatalf("a downgrade-incompatible chunk must never be marked synced")
 	}
+	if _, err := s.GetSession("sess-legacy-owned"); err == nil {
+		t.Fatalf("a downgrade-incompatible chunk must not persist its session")
+	}
 }
 
 func TestLocalImportRecoversMissingSessionFromReusedChunk(t *testing.T) {
