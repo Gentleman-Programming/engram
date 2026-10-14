@@ -450,6 +450,29 @@ test("Pi native saves persist under separate host sessions and stop on failed re
       const append = (customType, data) => entries.push({ type: "custom", customType, data });
       const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, append);
       const save = registeredTools.get("mem_save");
+      const suggest = registeredTools.get("mem_suggest_topic_key");
+      for (const params of [
+        { type: "architecture", title: "Auth model" },
+        { type: "bugfix", title: "Fix café / Unicode" },
+        { type: "decision", content: "Use SQLite for local state" },
+        { title: "X".repeat(120) },
+      ]) {
+        const direct = await fetch(`${url}/topic-keys/suggest`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params),
+        });
+        assert.equal(direct.status, 200);
+        const expected = await direct.json();
+        const result = await suggest.execute("real-suggest", params, undefined, undefined, runtimeContext("pi-host-alpha"));
+        assert.notEqual(result.isError, true, result.content?.[0]?.text);
+        assert.deepEqual(result.details.data, expected);
+        if (params.title === "Auth model") assert.equal(expected.topic_key, "architecture/auth-model");
+      }
+      const rejected = await suggest.execute("empty-suggest", {}, undefined, undefined, runtimeContext("pi-host-alpha"));
+      assert.equal(rejected.isError, true);
+      assert.equal(rejected.details.http_status, 400);
+      const beforeSaves = await fetch(`${url}/observations?all_projects=true&limit=20`);
+      assert.equal(beforeSaves.status, 200);
+      assert.deepEqual(await beforeSaves.json(), [], "suggestions and rejected input must not create observations");
       const ids = ["pi-host-alpha", "pi-host-beta"];
       for (const [index, host] of [ids[0], ids[1], ids[0], ids[1]].entries()) {
         const result = await save.execute(`real-${index}`, {
@@ -1114,7 +1137,7 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
   }
 });
 
-test("Pi doctor forwards its resolved project while preserving global review and stats contracts", async () => {
+test("Pi doctor forwards its resolved project while preserving global review contracts", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -1126,7 +1149,6 @@ test("Pi doctor forwards its resolved project while preserving global review and
     { method: "GET", path: "/review", body: { observations: [] } },
     { method: "GET", path: "/review", body: { observations: [] } },
     { method: "POST", path: "/review/mark_reviewed", body: { state: "active" } },
-    { method: "GET", path: "/stats", body: { total_observations: 2 } },
   ]);
   globalThis.fetch = fetchStub;
 
@@ -1143,13 +1165,11 @@ test("Pi doctor forwards its resolved project while preserving global review and
       await registeredTools.get("mem_review").execute("review", { action: "list" }, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("review-filtered", { action: "list", project: "override-project" }, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("mark-reviewed", { action: "mark_reviewed", observation_id: 42 }, undefined, undefined, ctx);
-      await registeredTools.get("mem_stats").execute("stats", {}, undefined, undefined, ctx);
 
       const search = calls.find((call) => call.path.startsWith("/search"));
       const doctor = calls.find((call) => call.path.startsWith("/doctor"));
       const reviews = calls.filter((call) => call.method === "GET" && call.path.startsWith("/review"));
       const markReviewed = calls.find((call) => call.method === "POST" && call.path.startsWith("/review/mark_reviewed"));
-      const stats = calls.find((call) => call.path.startsWith("/stats"));
       assert.match(search.path, /project=override-project/);
       assert.match(doctor.path, /project=override-project/);
       assert.equal(reviews.length, 2);
@@ -1160,7 +1180,6 @@ test("Pi doctor forwards its resolved project while preserving global review and
       assert.equal(filteredReviewQuery.get("project"), "override-project");
       assert.equal(filteredReviewQuery.has("all_projects"), false);
       assert.equal(new URL(`http://test${markReviewed.path}`).searchParams.get("project"), "override-project");
-      assert.equal(new URL(`http://test${stats.path}`).searchParams.get("all_projects"), "true");
     });
   } finally {
     globalThis.fetch = originalFetch;

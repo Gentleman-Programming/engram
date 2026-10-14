@@ -337,6 +337,24 @@ Standalone MCP client -> engram mcp -> SQLite (deliberate, separate setup)
 
 Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, lifecycle review, conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_review`, `mem_judge`, and `mem_compare`, cross-project discovery through `mem_list_projects`, and local pin curation through `mem_pin`/`mem_unpin`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP is not registered by Pi setup. An existing Pi MCP entry remains active until you manually remove it and restart/reload Pi; native-only agent writes are not guaranteed while it remains.
 
+## Default agent profile
+
+Pi registers exactly the 22 tools in Go's current `ProfileAgent`. Administrative tools (`mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects`) are not model-callable through this default native profile. Use a deliberate standalone `engram mcp --tools=admin` client or the applicable CLI/TUI administrative workflow instead; Pi does not provide an administrative opt-in profile. Reload or restart Pi after updating the extension to replace the previous registered inventory.
+
+Tool chrome is presentation metadata only: a rendering label or legacy renderer does not grant registration or administrative access.
+
+`mem_suggest_topic_key` sends `type`, `title`, and `content` to Go's `POST /topic-keys/suggest` endpoint and returns its suggestion unchanged. Go owns normalization, family prefixes, and validation; Pi no longer computes a local slug or silently supplies a fallback for invalid input. See the [field projection audit](../../docs/PI-TOOL-PROJECTIONS.md) for intentional transport/runtime differences and outstanding semantic gaps.
+
+### Compound agent workflows
+
+The Go server must provide the [compound HTTP workflow routes](../../docs/HTTP-AGENT-WORKFLOWS.md); older servers may refuse these calls. In shared mode, Pi reads `ENGRAM_HTTP_TOKEN` when the extension loads and sends it as a Bearer credential to its configured Engram endpoint. An absent or empty token preserves zero-config behavior. Restart/reload the extension after changing the shared token. Session-owned mode continues using only its private runtime token, never this shared credential; Go's authorization checks are unchanged. Tokens are not included in tool arguments or results.
+
+- `mem_consolidate` forwards the exact source IDs, owner assertion and survivor fields to Go. Omitted `confirm` previews without writes. Inspect that plan and repeat the same arguments with `confirm=true` and its opaque `fingerprint`; a drift refusal exposes Go's replacement plan but never confirms it automatically. No client hashing or source/session/scope reassignment occurs.
+- `mem_judge_many` sends 1–32 judgments in one POST with optional shared provenance. Results stay ordered; item errors do not roll back successful items or trigger individual fallback requests. Unlike legacy `mem_judge`, omitted shared provenance is omitted, not replaced by the host ID. The batch is not exactly-once.
+- `mem_session_finalize` takes a caller-authored structured `summary`, plus optional matching `project`/`cwd` assertions. Pi injects only the confirmed current host's effective session and owner, including an acknowledged resumed continuation whose pending marker tracks cleanup; it refuses model session-ID overrides and never registers an unknown session just to finalize. Go atomically saves the summary, ends the session and journals its original summary identity for explicit local retries. The legacy free-text session summary remains unchanged.
+
+None of these POSTs is automatically replayed after uncertain delivery. Unknown finalization pins its acknowledged identity and blocks subsequent session-bound saves/captures or lifecycle reopening; shutdown cannot substitute legacy session end. Retry finalization only explicitly with that same host identity. A rejected retry does not resolve an earlier unknown outcome or reopen session-bound writes. Only a definitive first-attempt rejection with no prior unknown or confirmed finalization may reopen writes. Successful finalization also suppresses redundant shutdown end. Legacy `mem_session_summary` remains a separate observation-save operation, not atomic finalization. Ordinary task completion does not require finalizing a session.
+
 ## Observation history
 
 `mem_get_observation` accepts optional `include_history` (boolean) and
