@@ -11,6 +11,15 @@ body:
 
         This issue starts with `status:needs-review`. Wait for a maintainer to replace it with `status:approved` before opening a PR.
 
+  - type: checkboxes
+    id: existing-issue-search
+    attributes:
+      label: Existing Issue Search
+      description: Search for a canonical root-cause tracker. Add a new occurrence there; maintainers decide whether roots match.
+      options:
+        - label: I searched existing issues and will add evidence to a canonical tracker when applicable.
+          required: true
+
   - type: textarea
     id: question
     attributes:
@@ -43,6 +52,14 @@ body:
         - Documentation
         - Project workflow or policy
         - Other
+    validations:
+      required: true
+
+  - type: input
+    id: release-context
+    attributes:
+      label: Release Context
+      placeholder: e.g. 0.3.1, main branch, or not release-specific
     validations:
       required: true
 

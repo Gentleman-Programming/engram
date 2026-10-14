@@ -16,6 +16,15 @@ body:
         >
         > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.
 
+  - type: checkboxes
+    id: existing-issue-search
+    attributes:
+      label: Existing Issue Search
+      description: Search for a canonical root-cause tracker. Add a new occurrence there; maintainers decide whether roots match.
+      options:
+        - label: I searched existing issues and will add evidence to a canonical tracker when applicable.
+          required: true
+
   - type: input
     id: doc_reference
     attributes:
@@ -47,25 +56,30 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: "🔍 What's Wrong or Missing?"
-      description: What is incorrect, unclear, or absent? Include the specific section if possible.
+      label: "🔍 Observed Consequence"
+      description: Describe what is incorrect, unclear, or absent; do not prescribe the implementation.
       placeholder: |
         The section "X" in docs/AGENT-SETUP.md says "..." but this is incorrect because...
         The README is missing an example for...
     validations:
       required: true
 
+  - type: input
+    id: release-context
+    attributes:
+      label: Release Context
+      placeholder: e.g. 0.3.1, main branch, or not release-specific
+    validations:
+      required: true
+
   - type: textarea
     id: suggestion
     attributes:
-      label: "💡 Suggested Improvement"
-      description: What should it say instead? Draft the correct content if you can.
+      label: "💡 Desired Outcome"
+      description: Describe what readers need to be able to do or understand.
       placeholder: |
-        It should say...
-        Example:
-        ```bash
-        engram <corrected-command>
-        ```
+        Readers need to be able to...
+        The documentation should make clear...
     validations:
       required: false
 

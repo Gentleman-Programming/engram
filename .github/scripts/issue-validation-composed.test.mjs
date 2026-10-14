@@ -11,7 +11,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 async function execute({ action = 'labeled', approved = true, body = 'Closes #9', pr = false,
   unrelated = false, changed = false, fault = '', secondApproved = true,
-  approvalState, beforeCreate } = {}) {
+  assignees = [{ login: 'owner-not-author' }], approvalState, beforeCreate } = {}) {
   const reads = [], attempts = [], stored = [], failures = [];
   let pullReads = 0;
   const pull = { number: 1, state: 'open', body, head: { sha, repo: { full_name: 'untrusted/fork' } } };
@@ -28,7 +28,7 @@ async function execute({ action = 'labeled', approved = true, body = 'Closes #9'
       reads.push(['issue', request]);
       if (fault === 'issue') throw new Error('Issue unavailable');
       const allowed = request.issue_number === 9 ? (approvalState?.approved ?? approved) : secondApproved;
-      return { data: { labels: allowed ? [{ name: 'status:approved' }] : [] } };
+      return { data: { labels: allowed ? [{ name: 'status:approved' }] : [], assignees } };
     } },
     checks: { create: async (request) => {
       if (beforeCreate) await beforeCreate(structuredClone(request));
@@ -91,7 +91,8 @@ test('a paused legacy success can publish after a current native failure without
     } },
     issues: { get: async (request) => {
       nativeReads.push(['issue', request]);
-      return { data: { labels: approvalState.approved ? [{ name: 'status:approved' }] : [] } };
+      return { data: { labels: approvalState.approved ? [{ name: 'status:approved' }] : [],
+        assignees: [{ login: 'owner-not-author' }] } };
     } },
     checks: { create: async (request) => {
       nativeWrites.push(request); assert.fail('Native evaluation must remain read-only');
@@ -131,6 +132,14 @@ test('a paused legacy success can publish after a current native failure without
     head: { sha, repo: { full_name: 'untrusted/fork' } } });
 });
 
+test('composed refresh publishes assignment failure on the fetched head', async () => {
+  const state = await execute({ assignees: [] });
+  const expected = requests(['success', 'failure'], ['Validation passed.', 'PR #1: issue #9 has no assignee. Assign an owner before merge.']);
+  assert.deepEqual(state.attempts, expected);
+  assert.deepEqual(state.stored, expected.map((run) => ({ ...run, app: { id: 15368 } })));
+  assert.deepEqual(state.failures, []);
+  assert.deepEqual(state.reads.map(([method]) => method), ['list', 'pull', 'issue', 'pull']);
+});
 test('unrelated labels and unmatched references publish nothing', async () => {
   const irrelevant = await execute({ unrelated: true });
   assert.deepEqual(irrelevant, { reads: [], attempts: [], stored: [], failures: [] });

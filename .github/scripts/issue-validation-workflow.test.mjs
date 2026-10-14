@@ -47,9 +47,9 @@ test('static trusted helpers evaluate before publishing and exceptions fail work
   assert.match(source, /catch \(error\) \{\s+core.setFailed\(error.message\);/);
 });
 
-test('bootstrap preserves original PR validation byte for byte', () => {
+test('bootstrap preserves original PR validation except the approved readiness guards', () => {
   // Git's blob hash normalizes checkout line endings on Windows.
-  const bytes = Buffer.from(read('pr-check.yml').replaceAll('\r\n', '\n'));
+  const bytes = Buffer.from(read('pr-check.yml').replaceAll('\r\n', '\n').replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, ''));
   const header = Buffer.from(`blob ${bytes.length}\0`);
   assert.equal(createHash('sha1').update(header).update(bytes).digest('hex'), '6950705008e73ef42e86788cf2b479e1592d1327');
 });

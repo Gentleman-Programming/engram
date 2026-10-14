@@ -38,11 +38,11 @@ verdict or metadata/target error calls `core.setFailed` in the actual job wrappe
 
 The original payload PR head must equal the evaluator target; neither
 `context.sha` nor a base SHA substitutes for it. Missing/ambiguous targets and
-head drift fail closed. Current body and every closing-reference issue label
-are read, with a final metadata recheck. The additive `closingIssueNumbers`
+head drift fail closed. Current body and every closing-reference issue's labels
+and assignees are read, with a final metadata recheck. The additive `closingIssueNumbers`
 export preserves the original regex, duplicates, case and whitespace behavior;
 `evaluateIssueValidation` retains its existing output and fetched-head contract.
-For example, `FIXES\n#9; resolves #10` requires both issues approved, while
+For example, `FIXES\n#9; resolves #10` requires both issues approved and assigned, while
 `closes#9` is not a closing reference. Reference success is independent of
 approval failure; no failed prerequisite silently skips the approval job.
 
@@ -54,7 +54,8 @@ node --check .github/scripts/issue-validation.mjs
 
 These are SDK-mock and composed actual-script-body tests, not live token,
 provider, fork, duplicate-selection or required-gate evidence. The bootstrap
-publisher and original PR/queue validation remain unchanged.
+publisher and original PR/queue validation mechanics remain unchanged; readiness
+requires approval plus assignment as described in [CONTRIBUTING](../CONTRIBUTING.md).
 
 ## Rollout boundary
 

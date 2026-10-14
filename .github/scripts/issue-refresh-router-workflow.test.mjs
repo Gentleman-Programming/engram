@@ -45,9 +45,9 @@ test('trusted checkout and static dispatcher call use exact existing pins', () =
   assert.doesNotMatch(yaml, /github\.event\.(?:issue|pull_request)\.(?:body|title|head)|github\.sha/);
 });
 
-test('legacy/bootstrap baselines remain unchanged; native identity emission is pinned without Git history', () => {
-  // Integrated fc438498 legacy baselines; native adds only the original-event steps.
-  // Normalize to LF for shallow checkouts, archives and Windows.
+test('workflow baselines retain readiness guards and pin original-event identity emission', () => {
+  // Integrated fc438498 legacy baselines except the approved readiness guards;
+  // native adds only the original-event steps. Normalize to LF for Windows and archives.
   const baseline = {
     '.github/workflows/pr-check.yml': '6c7825060b18790183f584d659778b3649516b7481de934f0b29c02ee3d784a1',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
@@ -55,6 +55,7 @@ test('legacy/bootstrap baselines remain unchanged; native identity emission is p
     '.github/workflows/ci.yml': '9edcc7afba74a6b1554ddc29836d07060ff788e92cd545d0efba2074db0ec8f2',
   };
   for (const [path, expected] of Object.entries(baseline)) {
-    assert.equal(createHash('sha256').update(read(path)).digest('hex'), expected, path);
+    const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
+    assert.equal(createHash('sha256').update(source).digest('hex'), expected, path);
   }
 });

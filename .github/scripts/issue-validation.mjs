@@ -28,11 +28,16 @@ async function validateIssues(github, repo, pull) {
       if (!numberValid(issue_number)) throw new Error('issue number is malformed');
       const issue = (await github.rest.issues.get({ ...repo, issue_number })).data;
       if (!issue || !Array.isArray(issue.labels)
-          || issue.labels.some((label) => typeof label?.name !== 'string')) {
+          || issue.labels.some((label) => typeof label?.name !== 'string')
+          || !Array.isArray(issue.assignees)
+          || issue.assignees.some((owner) => typeof owner?.login !== 'string' || owner.login.length === 0)) {
         throw new Error('issue metadata is malformed');
       }
       if (!issue.labels.some((label) => label.name === 'status:approved')) {
         approvedErrors.push(`PR #${pull.number}: issue #${issue_number} lacks status:approved`);
+      }
+      if (issue.assignees.length === 0) {
+        approvedErrors.push(`PR #${pull.number}: issue #${issue_number} has no assignee. Assign an owner before merge.`);
       }
     } catch (error) {
       approvedErrors.push(`PR #${pull.number}: issue #${issue_number} unavailable (${error.message})`);

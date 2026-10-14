@@ -16,11 +16,20 @@ body:
         >
         > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.
 
+  - type: checkboxes
+    id: existing-issue-search
+    attributes:
+      label: Existing Issue Search
+      description: Search for a canonical root-cause tracker. Add a new occurrence there; maintainers decide whether roots match.
+      options:
+        - label: I searched existing issues and will add evidence to a canonical tracker when applicable.
+          required: true
+
   - type: textarea
     id: problem
     attributes:
-      label: "🔍 Problem Description"
-      description: What problem does this feature solve? Focus on the pain point, not the solution.
+      label: "🔍 Observed Consequence"
+      description: Describe the user problem and impact; do not propose an implementation.
       placeholder: |
         I'm always frustrated when...
         It's currently not possible to...
@@ -31,20 +40,11 @@ body:
   - type: textarea
     id: solution
     attributes:
-      label: "💡 Proposed Solution"
-      description: Describe the solution you'd like. How should it work from the user's perspective?
+      label: "💡 Desired Outcome"
+      description: Describe the outcome from the user's perspective, not an implementation.
       placeholder: |
-        I'd like engram to...
-
-        Example usage:
-        ```bash
-        engram <new-command> --flag
-        ```
-
-        Expected output:
-        ```
-        ...
-        ```
+        This would let me...
+        A successful outcome would mean...
     validations:
       required: true
 
@@ -65,14 +65,22 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: release-context
+    attributes:
+      label: Release Context
+      placeholder: e.g. 0.3.1, main branch, or not release-specific
+    validations:
+      required: true
+
   - type: textarea
     id: alternatives
     attributes:
-      label: "🔄 Alternatives Considered"
-      description: Have you considered any alternative approaches or workarounds?
+      label: "🔄 Workarounds and Constraints"
+      description: Describe workarounds you tried or constraints you observed; do not propose implementation alternatives.
       placeholder: |
-        I also considered...
-        Currently I work around this by...
+        I currently work around this by...
+        A constraint I observed is...
     validations:
       required: false
 
