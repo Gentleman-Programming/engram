@@ -46,7 +46,10 @@ func sourcePackage(root string) (map[string]packageFile, any, error) {
 		Files []string `json:"files"`
 	}
 	var document any
-	if json.Unmarshal(data, &manifest) != nil || json.Unmarshal(data, &document) != nil || len(manifest.Files) == 0 || len(manifest.Files) > maxPackageFiles {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	// The typed Unmarshal also retains whole-document JSON validation.
+	if json.Unmarshal(data, &manifest) != nil || decoder.Decode(&document) != nil || len(manifest.Files) == 0 || len(manifest.Files) > maxPackageFiles {
 		return nil, nil, errPackageRejected
 	}
 	expected := map[string]packageFile{}
@@ -214,7 +217,10 @@ func validatePackage(root, version, filename string) (int, error) {
 				Version string `json:"version"`
 			}
 			var document any
-			if json.Unmarshal(data, &packed) != nil || packed.Name != "gentle-engram" || packed.Version != version || json.Unmarshal(data, &document) != nil || !reflect.DeepEqual(document, manifest) {
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.UseNumber()
+			// Keep whole-document validation before comparing exact JSON numbers.
+			if json.Unmarshal(data, &packed) != nil || packed.Name != "gentle-engram" || packed.Version != version || decoder.Decode(&document) != nil || !reflect.DeepEqual(document, manifest) {
 				return 0, errPackageRejected
 			}
 		} else {

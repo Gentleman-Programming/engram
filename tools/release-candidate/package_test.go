@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,11 +66,17 @@ func packageArchive(t *testing.T, entries []packedEntry) []byte {
 }
 
 func TestPiPackageTarballCLI(t *testing.T) {
-	cases := []string{"valid", "legacy regular file type", "empty tarball argument", "wrong name", "wrong version", "changed manifest", "missing asset", "changed asset", "extra file", "duplicate", "traversal", "absolute", "symlink", "hardlink", "malformed gzip", "truncated gzip", "truncated tar", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers", "gzip checksum", "trailing data", "source changed", "missing tarball", "unsupported allowlist", "missing declared source", "missing runtime declaration"}
+	cases := []string{"valid", "matching large manifest integer", "changed large manifest integer", "legacy regular file type", "empty tarball argument", "wrong name", "wrong version", "changed manifest", "missing asset", "changed asset", "extra file", "duplicate", "traversal", "absolute", "symlink", "hardlink", "malformed gzip", "truncated gzip", "truncated tar", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers", "gzip checksum", "trailing data", "source changed", "missing tarball", "unsupported allowlist", "missing declared source", "missing runtime declaration"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root, entries := packageFixture(t)
 			switch name {
+			case "matching large manifest integer", "changed large manifest integer":
+				entries[0].body = strings.TrimSuffix(entries[0].body, "}") + `,"numericMetadata":9007199254740992}`
+				candidateWrite(t, root, "plugin/pi/package.json", entries[0].body)
+				if name == "changed large manifest integer" {
+					entries[0].body = strings.Replace(entries[0].body, "9007199254740992", "9007199254740993", 1)
+				}
 			case "wrong name":
 				entries[0].body = `{"name":"other","version":"1.2.3"}`
 			case "wrong version":
@@ -178,7 +185,7 @@ func TestPiPackageTarballCLI(t *testing.T) {
 			}
 			args := append(candidateRefs("1.2.3"), "-pi-tarball", tarball)
 			out, diagnostic, code := candidateRun(t, root, args...)
-			if name == "valid" || name == "legacy regular file type" {
+			if name == "valid" || name == "legacy regular file type" || name == "matching large manifest integer" {
 				if code != 0 || diagnostic != "" {
 					t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, diagnostic)
 				}

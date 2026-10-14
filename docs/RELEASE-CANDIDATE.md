@@ -71,7 +71,9 @@ allowlists are unsupported and reject. Unknown, duplicate, missing or changed
 archive entries, links, unsafe paths, malformed/truncated streams and invalid
 gzip trailers reject. Tar termination requires both 512-byte zero end blocks;
 physical EOF alone (even after a zero-filled final file) is not a valid terminator.
-Limits are 4096 files and 64 MiB of source/decompressed content. Manifest JSON formatting may differ; decoded metadata may not.
+Limits are 4096 files and 64 MiB of source/decompressed content. Manifest JSON
+formatting may differ; decoded metadata may not. Numbers compare as exact JSON
+tokens without float64 rounding: `1` and `1.0`, for example, differ.
 
 The Go helper also accepts an already packed local archive:
 
