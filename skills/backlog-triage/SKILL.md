@@ -86,7 +86,7 @@ For every issue, answer:
 2. Assign an investigator; for bugs, reproduce against exact current remote `main` and record SHA
 3. For bugs, identify the first violated repository-owned invariant; cluster only same-root/contract reports
 4. Accept scope/checks for trivial changes; reproduction/root/regression plan for bugs; approved design/non-goals and independent review plan for high-risk changes
-5. Is it vague, a question, or a discussion? → REJECT ISSUE (redirect to Discussions)
+5. Is it vague, a general question, or a discussion? → REJECT ISSUE (redirect general questions and support to Discussions; retain tracked questions requiring maintainer investigation, a repository change, or a durable decision)
 6. Does it break zero-config / local-first / single-binary? → REJECT ISSUE
 7. Confirmed duplicate? Move useful evidence to canonical, then close not planned with `status:wontfix` + `resolution:duplicate`
 ```
