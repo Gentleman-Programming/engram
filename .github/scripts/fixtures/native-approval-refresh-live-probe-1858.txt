@@ -1,0 +1,6 @@
+Engram fresh native approval-refresh live probe.
+Parent issue: #1802; fixture issue: #1858.
+NO MERGE / NO ENQUEUE.
+Scope: one approval revocation/restoration and at most one eligible metadata-router rerun.
+No code, workflow, settings, credentials, required gates or legacy-writer changes.
+Resource closure, branch deletion and other cleanup require separate human consent.
