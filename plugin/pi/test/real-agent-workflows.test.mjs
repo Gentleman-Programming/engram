@@ -1,0 +1,178 @@
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { randomBytes } from "node:crypto";
+import { createInterface } from "node:readline";
+import { join } from "node:path";
+import { test } from "node:test";
+import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
+
+const project = "integration-1348";
+
+async function fixture(run) {
+  await withPluginSandbox("engram-real-workflows-", async ({ dir, sandbox }) => {
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "ENGRAM_HTTP_TOKEN", "ENGRAM_DATA_DIR", "ENGRAM_CLOUD_AUTOSYNC", "HOME"];
+    const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+    const token = randomBytes(32).toString("hex");
+    const executable = process.env.ENGRAM_PI_TEST_SERVER_BINARY ?? join(dir, process.platform === "win32" ? "server.exe" : "server");
+    if (!process.env.ENGRAM_PI_TEST_SERVER_BINARY) {
+      const build = spawnSync("go", ["build", "-o", executable, "./plugin/pi/test/support/real-server"],
+        { cwd: join(PLUGIN_ROOT, "../.."), env: process.env, encoding: "utf8", timeout: 60000 });
+      assert.ifError(build.error);
+      assert.equal(build.status, 0, build.stderr);
+    }
+    const env = { ...process.env, HOME: dir, ENGRAM_PROJECT: project, ENGRAM_HTTP_TOKEN: token,
+      ENGRAM_DATA_DIR: join(dir, "data"), ENGRAM_CLOUD_AUTOSYNC: "0" };
+    const child = spawn(executable, [join(dir, "store")], { env, stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", value => { stderr += value; });
+    const lines = createInterface({ input: child.stdout });
+    try {
+      const url = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => finish(new Error(`server readiness timed out: ${stderr}`)), 5000);
+        const onLine = value => finish(undefined, value);
+        const onError = error => finish(error);
+        const onExit = code => finish(new Error(`server exited ${code}: ${stderr}`));
+        const finish = (error, value) => {
+          clearTimeout(timer); lines.off("line", onLine); child.off("error", onError); child.off("exit", onExit);
+          if (error) reject(error); else resolve(value);
+        };
+        lines.once("line", onLine); child.once("error", onError); child.once("exit", onExit);
+      });
+      Object.assign(process.env, env, { ENGRAM_URL: url });
+      const tools = new Map(), events = new Map(), entries = [];
+      const register = await importPluginFromSandbox(sandbox);
+      register({ registerTool(tool) { tools.set(tool.name, tool); }, on(name, callback) { events.set(name, callback); },
+        appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); } });
+      const ctx = { cwd: sandbox, sessionManager: { getSessionId: () => "real-host", getBranch: () => entries }, ui: { setStatus() {} } };
+      const tool = async (name, params) => {
+        assert.ok(tools.has(name), `${name} is registered`);
+        return tools.get(name).execute("real-workflow", params, undefined, undefined, ctx);
+      };
+      const request = async (path, body, authorized = true) => {
+        const response = await fetch(url + path, { method: body === undefined ? "GET" : "POST",
+          headers: { "Content-Type": "application/json", ...(authorized ? { Authorization: `Bearer ${token}` } : {}) },
+          body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
+        return { status: response.status, data: await response.json() };
+      };
+      const rows = async () => {
+        const result = await request("/observations?all_projects=true&limit=100");
+        assert.equal(result.status, 200); return result.data;
+      };
+      await run({ tool, request, rows, events, ctx });
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      lines.close();
+      if (child.exitCode === null && child.signalCode === null) {
+        const exit = once(child, "exit");
+        const timer = setTimeout(() => child.kill(), 5000);
+        child.stdin.end();
+        try { await exit; } finally { clearTimeout(timer); }
+      }
+      assert.equal(child.exitCode, 0, stderr);
+    }
+  });
+}
+
+async function save(tool, title, content) {
+  const result = await tool("mem_save", { title, content, project });
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  assert.ok(Number.isSafeInteger(result.details.data.id));
+  return result.details.data.id;
+}
+
+test("real Pi topic vectors match Go without registering sessions or creating observations", async () => {
+  await fixture(async ({ tool, request, rows }) => {
+    for (const params of [{ type: "architecture", title: "Auth model" }, { type: "bugfix", title: "Fix café / Unicode" },
+      { type: "decision", content: "Use SQLite for local state" }, { title: "X".repeat(120) }]) {
+      const expected = await request("/topic-keys/suggest", params);
+      assert.equal(expected.status, 200);
+      const actual = await tool("mem_suggest_topic_key", params);
+      assert.notEqual(actual.isError, true, JSON.stringify(actual));
+      assert.deepEqual(actual.details.data, expected.data);
+      if (params.title === "Auth model") assert.equal(expected.data.topic_key, "architecture/auth-model");
+    }
+    const invalid = await tool("mem_suggest_topic_key", {});
+    assert.equal(invalid.isError, true); assert.equal(invalid.details.http_status, 400);
+    assert.equal(invalid.content[0].text, "provide title or content to suggest a topic_key");
+    assert.deepEqual(await rows(), []);
+    assert.equal((await request("/sessions/real-host")).status, 404);
+  });
+});
+
+test("real Pi consolidation previews without mutation and confirms the exact Go plan", async () => {
+  await fixture(async ({ tool, request, rows }) => {
+    const ids = [await save(tool, "First design", "First independent source record."),
+      await save(tool, "Second design", "Second independent source record.")];
+    const params = { ids_to_delete: ids, new_title: "Combined design", new_content: "Consolidated public summary", expected_project: project };
+    const before = await rows();
+    const unauthorized = await request("/observations/consolidate", params, false);
+    assert.equal(unauthorized.status, 401); assert.deepEqual(await rows(), before);
+    const preview = await tool("mem_consolidate", params);
+    assert.notEqual(preview.isError, true, JSON.stringify(preview));
+    assert.equal(preview.details.data.status, "preview");
+    assert.ok(preview.details.data.plan.fingerprint);
+    assert.deepEqual(await rows(), before);
+    const confirmed = await tool("mem_consolidate", { ...params, confirm: true, fingerprint: preview.details.data.plan.fingerprint });
+    assert.notEqual(confirmed.isError, true, JSON.stringify(confirmed));
+    assert.equal(confirmed.details.data.status, "consolidated");
+    const after = await rows(); assert.equal(after.length, 1);
+    assert.equal(after[0].title, params.new_title); assert.match(after[0].content, /Consolidated public summary/);
+    assert.deepEqual([...confirmed.details.data.soft_deleted_ids].sort(), [...ids].sort());
+  });
+});
+
+test("real Pi batch envelopes and ordered item errors leave public state unchanged", async () => {
+  await fixture(async ({ tool, request, rows }) => {
+    await save(tool, "Batch source", "Existing observation must remain unchanged.");
+    const before = await rows();
+    const conflicts = await request(`/conflicts?project=${project}`); assert.equal(conflicts.status, 200);
+    const invalid = await tool("mem_judge_many", { judgments: [] });
+    assert.equal(invalid.isError, true); assert.equal(invalid.details.http_status, 400);
+    const judgments = [{ judgment_id: "missing-first", relation: "compatible", confidence: 0 },
+      { judgment_id: "missing-second", relation: "related" }];
+    const unauthorized = await request("/conflicts/judge-many", { judgments }, false);
+    assert.equal(unauthorized.status, 401);
+    const result = await tool("mem_judge_many", { judgments });
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    const outcomes = result.details.data.outcomes;
+    assert.equal(outcomes.length, 2);
+    assert.deepEqual(outcomes.map(value => [value.index, value.judgment_id, value.status]),
+      [[0, "missing-first", "error"], [1, "missing-second", "error"]]);
+    assert.ok(outcomes.every(value => typeof value.error === "string" && value.error.length));
+    assert.deepEqual(await rows(), before);
+    assert.deepEqual(await request(`/conflicts?project=${project}`), conflicts);
+    // No public pending-relation seed is established here; this does not prove a successful batch judgment write.
+  });
+});
+
+test("real Pi finalization returns Go's original summary receipt and leaves the session ended", async () => {
+  await fixture(async ({ tool, request, rows, events, ctx }) => {
+    const unregistered = await tool("mem_session_finalize", { summary: "No session yet" });
+    assert.equal(unregistered.isError, true); assert.deepEqual(await rows(), []);
+    assert.equal((await request("/sessions/real-host")).status, 404);
+    await save(tool, "Before finalization", "Owned source record.");
+    const unauthorized = await request("/sessions/real-host/finalize", { project, summary: "Unauthorized" }, false);
+    assert.equal(unauthorized.status, 401);
+    const before = await rows();
+    const finalized = await tool("mem_session_finalize", { summary: "Goal: completed real HTTP proof" });
+    assert.notEqual(finalized.isError, true, JSON.stringify(finalized));
+    assert.equal(finalized.details.data.state, "finalized"); assert.equal(finalized.details.data.session_id, "real-host");
+    const retry = await tool("mem_session_finalize", { summary: "Different retry text" });
+    assert.notEqual(retry.isError, true, JSON.stringify(retry));
+    assert.equal(retry.details.data.state, "already_finalized");
+    assert.equal(retry.details.data.summary_id, finalized.details.data.summary_id);
+    assert.equal(retry.details.data.summary_sync_id, finalized.details.data.summary_sync_id);
+    const session = await request("/sessions/real-host"); assert.equal(session.status, 200); assert.ok(session.data.ended_at);
+    const after = await rows(); assert.equal(after.length, before.length + 1);
+    const summary = after.find(value => value.id === finalized.details.data.summary_id);
+    assert.equal(summary.type, "session_summary"); assert.equal(summary.session_id, "real-host");
+    assert.equal(summary.content, "Goal: completed real HTTP proof");
+    assert.equal((await tool("mem_save", { title: "Late", content: "Must not save" })).isError, true);
+    await events.get("session_shutdown")({}, ctx);
+    assert.deepEqual(await rows(), after);
+    assert.deepEqual(await request("/sessions/real-host"), session);
+  });
+});
