@@ -28,6 +28,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Gentleman-Programming/engram/v3/internal/agentops"
 	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
@@ -2651,39 +2652,18 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 func handleJudgeMany(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
 	judge := handleJudge(s, activity)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		items, ok := req.GetArguments()["judgments"].([]any)
-		if !ok || len(items) < 1 || len(items) > 32 {
-			return mcp.NewToolResultError("judgments must be an array containing 1..32 items"), nil
-		}
-		session, present := req.GetArguments()["session_id"]
-		if present {
-			if _, ok := session.(string); !ok {
-				return mcp.NewToolResultError("session_id must be a string"), nil
-			}
+		items, session, batchErr := agentops.JudgmentBatch(req.GetArguments())
+		if batchErr != nil {
+			return mcp.NewToolResultError(batchErr.Error()), nil
 		}
 		outcomes := make([]map[string]any, 0, len(items))
 		for index, raw := range items {
 			out := map[string]any{"index": index, "judgment_id": nil, "status": "error"}
 			args, valid := raw.(map[string]any)
-			message := "judgment must be an object"
+			message := agentops.JudgmentItemError(raw)
 			if valid {
 				if id, ok := args["judgment_id"].(string); ok {
 					out["judgment_id"] = id
-				}
-				message = ""
-				for _, key := range []string{"judgment_id", "relation", "reason", "evidence"} {
-					if value, exists := args[key]; exists {
-						if _, ok := value.(string); !ok {
-							message = key + " must be a string"
-							break
-						}
-					}
-				}
-				if value, exists := args["confidence"]; exists && message == "" {
-					v, ok := value.(float64)
-					if !ok || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
-						message = "confidence must be a number between 0.0 and 1.0"
-					}
 				}
 			}
 			if message == "" {
@@ -2730,51 +2710,11 @@ func handleJudgeMany(s *store.Store, activity *SessionActivity) server.ToolHandl
 
 func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		judgmentID, _ := req.GetArguments()["judgment_id"].(string)
-		relation, _ := req.GetArguments()["relation"].(string)
-
-		if judgmentID == "" {
-			return mcp.NewToolResultError("judgment_id is required"), nil
+		params, err := agentops.JudgeParams(req.GetArguments())
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
-		if relation == "" {
-			return mcp.NewToolResultError("relation is required"), nil
-		}
-
-		// Collect optional fields.
-		var reason *string
-		if v, ok := req.GetArguments()["reason"].(string); ok && v != "" {
-			reason = &v
-		}
-		var evidence *string
-		if v, ok := req.GetArguments()["evidence"].(string); ok && v != "" {
-			evidence = &v
-		}
-		var confidence *float64
-		if v, ok := req.GetArguments()["confidence"].(float64); ok {
-			if v < 0 || v > 1 {
-				return mcp.NewToolResultError("confidence must be between 0.0 and 1.0"), nil
-			}
-			confidence = &v
-		}
-
-		// Session context for provenance.
-		sessionID, _ := req.GetArguments()["session_id"].(string)
-		// Actor defaults to "agent" kind for MCP tool calls.
-		markedByActor := "agent"
-		markedByKind := "agent"
-		markedByModel := "" // No model ID available at MCP layer without explicit param.
-
-		result, err := s.JudgeRelation(store.JudgeRelationParams{
-			JudgmentID:    judgmentID,
-			Relation:      relation,
-			Reason:        reason,
-			Evidence:      evidence,
-			Confidence:    confidence,
-			MarkedByActor: markedByActor,
-			MarkedByKind:  markedByKind,
-			MarkedByModel: markedByModel,
-			SessionID:     sessionID,
-		})
+		result, err := s.JudgeRelation(params)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
