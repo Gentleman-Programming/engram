@@ -106,6 +106,7 @@ test("an eligible standard tool result is redacted and submitted for passive sca
         content: "General command output that is long enough to be scanned but is not an observation. [REDACTED]",
         project: "fixture-project",
         source: "Bash",
+        project_provenance: { source: "unknown", directory: ctx.cwd },
       },
     }]);
   });

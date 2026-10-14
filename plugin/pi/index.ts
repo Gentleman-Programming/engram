@@ -270,7 +270,26 @@ function engramFetchPolicy(path: string, method: string): EngramFetchPolicy {
   return { operation: "write", timeoutMs: ENGRAM_WRITE_TIMEOUT_MS, maxAttempts: 1, replaySafe: false };
 }
 
+interface ProjectProvenance {
+  source: string;
+  directory?: string;
+  raw_project?: string;
+}
+
+// Evidence only: neither the selected project nor session ownership proves designation.
+let detectedProjectEvidence: CurrentProjectResponse | undefined;
+
+function captureProjectProvenance(cwd: string, target: string, detected = detectedProjectEvidence): ProjectProvenance {
+  return {
+    source: detected?.project?.trim() === target ? detected.project_source || "unknown" : "unknown",
+    directory: cwd,
+    ...(detected?.project?.trim() === target && detected.raw_project !== undefined
+      ? { raw_project: detected.raw_project } : {}),
+  };
+}
+
 interface SessionBody {
+  project_provenance?: ProjectProvenance;
   id: string;
   project: string;
   directory: string;
@@ -278,12 +297,14 @@ interface SessionBody {
 }
 
 interface PromptBody {
+  project_provenance?: ProjectProvenance;
   session_id: string;
   content: string;
   project: string;
 }
 
 interface PassiveCaptureBody {
+  project_provenance?: ProjectProvenance;
   session_id: string;
   content: string;
   project: string;
@@ -293,6 +314,7 @@ interface PassiveCaptureBody {
 interface CurrentProjectResponse {
   project?: string;
   project_source?: string;
+  raw_project?: string;
   project_path?: string;
   cwd?: string;
   available_projects?: string[] | null;
@@ -687,6 +709,7 @@ function detectLocalConfigProject(cwd: string): CurrentProjectResponse | undefin
           return {
             project: projectName,
             project_source: "config",
+            raw_project: parsed.project_name as string,
             project_path: current,
             cwd,
             warning: `Engram server at ${ENGRAM_URL} does not support /project/current; using ${configPath}. Upgrade or restart Engram for canonical project detection.`,
@@ -1523,7 +1546,8 @@ async function registerEffectiveSession(ctx: SessionContext, sessionProject: str
         let acknowledgement: { id?: unknown; status?: unknown } | null;
         let health: unknown;
         let resumeSupport: boolean | undefined;
-        const body = { id, project: sessionProject, directory, ownership_mode: "project_owned", resume };
+        const body = { id, project: sessionProject, directory, ownership_mode: "project_owned", resume,
+          project_provenance: captureProjectProvenance(ctx.cwd, sessionProject) };
         const validateCapability = resume ? async () => {
           // Missing/unreadable health is not support evidence, but fresh registration
           // without resume remains safe. Registration itself retains transport errors.
@@ -1694,7 +1718,9 @@ async function endSatelliteSessions(runtimeID: string, ctx: SessionContext): Pro
   const satellites = satelliteSessions.get(runtimeID);
   satelliteSessions.delete(runtimeID);
   for (const satelliteID of satellites || []) {
-    await bestEffortEngramFetch(`/sessions/${encodeURIComponent(satelliteID)}/end`, { method: "POST", body: { summary: "" } }, ctx);
+    await bestEffortEngramFetch(`/sessions/${encodeURIComponent(satelliteID)}/end`, { method: "POST", body: {
+      summary: "", project_provenance: captureProjectProvenance(ctx.cwd, registeredSessionProjects.get(satelliteID) || "unknown"),
+    } }, ctx);
     forgetKnownSession(satelliteID);
   }
 }
@@ -1711,7 +1737,8 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
   if (existingRegistration) { await existingRegistration; return; }
 
   const registration = (async () => {
-    const body: SessionBody = { id: sessionId, project: sessionProject, directory, ownership_mode: "project_owned" };
+    const body: SessionBody = { id: sessionId, project: sessionProject, directory, ownership_mode: "project_owned",
+      project_provenance: captureProjectProvenance(directory, sessionProject) };
     let acknowledgement: unknown;
     try {
       acknowledgement = await fetch("/sessions", { method: "POST", body });
@@ -1766,6 +1793,7 @@ function isSafeDetectedProject(detected: CurrentProjectResponse): string | undef
 }
 
 function applyDetectedProject(detected: CurrentProjectResponse | undefined): boolean {
+  detectedProjectEvidence = detected;
   if (!detected) {
     project = "unknown";
     projectDetectionPending = true;
@@ -1793,7 +1821,7 @@ const WRITE_TARGET_TOOLS = new Set(["mem_save", "mem_save_prompt", "mem_session_
 
 // Resolves an explicit `cwd` write target through the same server detection as /project/current.
 // It never guesses: unresolved or ambiguous detection and a disagreeing `project` both fail.
-async function resolveExplicitWriteTarget(params: Record<string, unknown>, fetch: EngramFetcher): Promise<{ project: string } | undefined> {
+async function resolveExplicitWriteTarget(params: Record<string, unknown>, fetch: EngramFetcher): Promise<{ project: string; evidence: CurrentProjectResponse } | undefined> {
   const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
   if (!cwd) return undefined;
   let detected: CurrentProjectResponse | null;
@@ -1812,7 +1840,7 @@ async function resolveExplicitWriteTarget(params: Record<string, unknown>, fetch
   if (requested && requested.toLowerCase() !== resolved.toLowerCase()) {
     throw new Error(`Explicit project ${requested} does not match project ${resolved} resolved from cwd ${cwd}. Pass only one of project or cwd, or make them agree.`);
   }
-  return { project: resolved };
+  return { project: resolved, evidence: detected! };
 }
 
 async function refreshProjectDetection(cwd: string, fetch: EngramFetcher = engramFetch, signal?: AbortSignal): Promise<void> {
@@ -2105,6 +2133,7 @@ async function archiveCompactionSummary(sessionId: string, summary: string, runt
         project,
         scope: "project",
         topic_key: "session/compaction-recovery",
+        project_provenance: captureProjectProvenance(ctx?.cwd || directory, project),
       },
     });
     return result.transportFailure?.outcome === "unknown" ? ArchiveOutcome.Unknown : ArchiveOutcome.Confirmed;
@@ -2210,6 +2239,16 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   const writeTarget = WRITE_TARGET_TOOLS.has(toolName) ? await resolveExplicitWriteTarget(params, fetch) : undefined;
   const requestedProject = writeTarget?.project || (typeof params.project === "string" && params.project ? params.project : undefined);
   const activeProject = requestedProject || project;
+  const provenance = WRITE_TARGET_TOOLS.has(toolName) && typeof params.project === "string" && params.project
+    ? { source: "explicit_override", directory: ctx.cwd, raw_project: params.project }
+    : captureProjectProvenance(ctx.cwd, activeProject, writeTarget?.evidence);
+  // Decorate only fresh captures, including registrations performed for this call.
+  // Freeze evidence with the call; transport/replay and attribution remain unchanged.
+  const originalFetch = fetch;
+  fetch = (path, opts = {}) => originalFetch(path, opts.method === "POST" && opts.body
+    && ["/sessions", "/observations", "/prompts", "/observations/passive"].includes(path)
+    ? { ...opts, body: Object.assign(opts.body as Record<string, unknown>, { project_provenance: provenance }) }
+    : opts);
   // Only an explicit target may route to a satellite; implicit writes keep the runtime session.
   const registeredSessionForWrite = async (sessionProject: string) => {
     const owner = requestedProject ? runtimeSessionOwner(ctx, requireRuntimeSessionID(ctx)) : undefined;
@@ -2362,7 +2401,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       const end = async () => {
         const result = await fetch(`/sessions/${encodeURIComponent(endedSessionID)}/end`, {
           method: "POST",
-          body: { summary: params.summary || "" },
+          body: { summary: params.summary || "", project_provenance: captureProjectProvenance(ctx.cwd, registeredSessionProjects.get(endedSessionID) || activeProject) },
         });
         if (persistedPending && !transportFailure?.()) appendEntry!(EFFECTIVE_SESSION_ENTRY, {
           runtimeID: sessionId, effectiveID: endedSessionID, pending: false, project: owner,
@@ -2747,7 +2786,7 @@ export default function registerEngram(pi: ExtensionAPI) {
         await sharedShutdown(ctx.sessionManager, sessionId, async () => {
           const ended = await endRegisteredSessionOnce(sessionId, () => bestEffortEngramFetch(
             `/sessions/${encodeURIComponent(sessionId)}/end`,
-            { method: "POST", body: { summary: "" } },
+            { method: "POST", body: { summary: "", project_provenance: captureProjectProvenance(ctx.cwd, owner || project) } },
             ctx,
           ), persistedPending);
           if (ended !== null && ended !== undefined) {
@@ -2860,6 +2899,7 @@ export default function registerEngram(pi: ExtensionAPI) {
       catch (error) { if (error instanceof SessionProjectConflictError) warnSessionProjectConflictOnce(error, ctx); else warnEngramFailure("/sessions", error, ctx); return result; }
       if (knownSessions.has(`\u0000closing:${effectiveID}`)) return result;
       const body: PromptBody = {
+        project_provenance: captureProjectProvenance(ctx.cwd, project),
         session_id: effectiveID,
         // Redact before truncating: a <private> block straddling the limit
         // would otherwise lose its closing tag and leak.
@@ -2920,6 +2960,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (!content || content.length <= 50 || knownSessions.has(`\u0000closing:${effectiveID}`)) return;
 
     const body: PassiveCaptureBody = {
+      project_provenance: captureProjectProvenance(ctx.cwd, project),
       session_id: effectiveID,
       content: stripPrivateTags(content),
       project,

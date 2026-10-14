@@ -34,6 +34,7 @@ For other docs:
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart path, branding, and reference links                            |
 | [Agent Setup](docs/AGENT-SETUP.md)          | Per-agent configuration + compaction survival                                                 |
 | [Codebase Guide](docs/CODEBASE-GUIDE.md)    | Definitive guide to repository structure, package ownership, flows, and maintainer guardrails |
+| [Capture Project Provenance](docs/CAPTURE-PROJECT-PROVENANCE.md) | Optional local capture evidence, compatibility and limits |
 | [Agent Contract](docs/AGENT-CONTRACT.md)    | Go-owned MCP agent-contract foundation, generation, digest, and explicit Pi parity gaps |
 | [Architecture](docs/ARCHITECTURE.md)        | How it works, session lifecycle, CLI reference, project structure                             |
 | [Plugins](docs/PLUGINS.md)                  | OpenCode & Claude Code plugin details                                                         |

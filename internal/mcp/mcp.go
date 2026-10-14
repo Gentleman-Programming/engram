@@ -195,8 +195,27 @@ var currentWorkingDirectory = func() string {
 	return cwd
 }
 
-func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
-	return s.CreateSession(sessionID, project, currentWorkingDirectory())
+func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string, evidence ...*store.ProjectProvenance) error {
+	return s.CreateSessionWithOwnershipMode(sessionID, project, currentWorkingDirectory(), store.SessionOwnershipShared, evidence...)
+}
+
+func captureProjectEvidence(s *store.Store, res projectpkg.DetectionResult, sessionID, rawProject, defaultProject string) *store.ProjectProvenance {
+	p := &store.ProjectProvenance{Source: res.Source, Directory: currentWorkingDirectory()}
+	if res.Source == projectpkg.SourceSessionProject {
+		if inherited, err := s.CaptureProjectProvenance("session", sessionID); err == nil && inherited != nil {
+			p.Source = inherited.Source
+			p.RawProject = inherited.RawProject
+			return p
+		}
+		p.Source = "unknown"
+	} else if res.Source == projectpkg.SourceExplicitOverride || res.Source == projectpkg.SourceUserSelectedAfterAmbiguousProject {
+		p.RawProject = rawProject
+	} else if res.Source == projectpkg.SourceProcessOverride {
+		if raw, ok := projectpkg.ProcessOverride(defaultProject); ok {
+			p.RawProject = raw
+		}
+	}
+	return p
 }
 
 // runtimeSessionDirectory derives the worktree-specific key for omitted
@@ -1575,7 +1594,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID, err = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 			}
@@ -1603,8 +1622,8 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			}
 		}
 
-		// Ensure the implicit MCP session exists with the current working directory.
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+		provenance := captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject)
+		_ = ensureImplicitSessionWithCWD(s, sessionID, project, provenance)
 
 		truncation := s.ContentTruncation(content)
 
@@ -1613,13 +1632,14 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			saveStarted = time.Now()
 		}
 		savedID, err := s.AddObservation(store.AddObservationParams{
-			SessionID: sessionID,
-			Type:      typ,
-			Title:     title,
-			Content:   content,
-			Project:   project,
-			Scope:     scope,
-			TopicKey:  topicKey,
+			ProjectProvenance: provenance,
+			SessionID:         sessionID,
+			Type:              typ,
+			Title:             title,
+			Content:           content,
+			Project:           project,
+			Scope:             scope,
+			TopicKey:          topicKey,
 		})
 		if timing != nil {
 			timing.save = time.Since(saveStarted)
@@ -1635,9 +1655,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			currentPrompt, _ = activity.CurrentPrompt(sessionID, project)
 		}
 		if promptErr := capturePromptForSave(s, capturePrompt, store.AddPromptParams{
-			SessionID: sessionID,
-			Content:   currentPrompt,
-			Project:   project,
+			ProjectProvenance: provenance,
+			SessionID:         sessionID,
+			Content:           currentPrompt,
+			Project:           project,
 		}); promptErr != nil {
 			fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
 		}
@@ -1980,20 +2001,22 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID, err = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save prompt: " + err.Error()), nil
 			}
 		}
 
-		// Ensure the implicit MCP session exists with the current working directory.
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+		// Capture before registration so a newly created implicit session retains evidence.
+		provenance := captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject)
+		_ = ensureImplicitSessionWithCWD(s, sessionID, project, provenance)
 
 		truncation := s.ContentTruncation(content)
 		_, err = s.AddPrompt(store.AddPromptParams{
-			SessionID: sessionID,
-			Content:   content,
-			Project:   project,
+			ProjectProvenance: provenance,
+			SessionID:         sessionID,
+			Content:           content,
+			Project:           project,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save prompt: " + err.Error()), nil
@@ -2485,21 +2508,22 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
-			sessionID, err = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
 			}
 		}
 
-		// Ensure the implicit MCP session exists with the current working directory.
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+		// Preserve evidence atomically when the implicit session is first created.
+		_ = ensureImplicitSessionWithCWD(s, sessionID, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 
 		savedID, err := s.AddObservation(store.AddObservationParams{
-			SessionID: sessionID,
-			Type:      "session_summary",
-			Title:     fmt.Sprintf("Session summary: %s", project),
-			Content:   content,
-			Project:   project,
+			ProjectProvenance: captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject),
+			SessionID:         sessionID,
+			Type:              "session_summary",
+			Title:             fmt.Sprintf("Session summary: %s", project),
+			Content:           content,
+			Project:           project,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
@@ -2540,7 +2564,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		activity.RecordToolCall(defaultSessionID(project))
 		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
-		if err := s.StartSession(id, project, resolvedDirectory); err != nil {
+		if _, err := s.RegisterSessionWithProjectProvenance(id, project, resolvedDirectory, store.SessionOwnershipShared, false, false, captureProjectEvidence(s, detRes, id, "", cfg.DefaultProject), nil); err != nil {
 			if errors.Is(err, store.ErrSessionAlreadyEnded) {
 				result := errorWithMeta(
 					"session_already_ended",
@@ -2622,11 +2646,11 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		if sessionID == "" {
-			sessionID, err = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, "", cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Passive capture failed: " + err.Error()), nil
 			}
-			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+			_ = ensureImplicitSessionWithCWD(s, sessionID, project, captureProjectEvidence(s, detRes, sessionID, "", cfg.DefaultProject))
 		}
 
 		if source == "" {
@@ -2634,10 +2658,11 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		result, err := s.PassiveCapture(store.PassiveCaptureParams{
-			SessionID: sessionID,
-			Content:   content,
-			Project:   project,
-			Source:    source,
+			ProjectProvenance: captureProjectEvidence(s, detRes, sessionID, "", cfg.DefaultProject),
+			SessionID:         sessionID,
+			Content:           content,
+			Project:           project,
+			Source:            source,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Passive capture failed: " + err.Error()), nil
@@ -3178,7 +3203,7 @@ func resolveSaveWriteProjectForSession(s *store.Store, projectChoice string, exp
 			if normalizeErr != nil {
 				return res, normalizeErr
 			}
-			if err := s.StartSessionWithOwnershipMode(trimmedSessionID, project, res.Path, store.SessionOwnershipProjectOwned); err != nil {
+			if _, err := s.RegisterSessionWithProjectProvenance(trimmedSessionID, project, res.Path, store.SessionOwnershipProjectOwned, false, false, captureProjectEvidence(s, res, trimmedSessionID, projectChoice, ""), nil); err != nil {
 				return res, err
 			}
 			return res, nil
@@ -3820,13 +3845,13 @@ func defaultSessionID(project string) string {
 // resolveFallbackSessionID resolves an omitted session_id without guessing
 // between concurrent runtime sessions. The working directory only narrows
 // candidates; a persisted session ID remains the sole identity.
-func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
+func resolveFallbackSessionID(s *store.Store, project string, evidence ...*store.ProjectProvenance) (string, error) {
 	if s != nil {
 		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(""))
 		if err == nil {
 			switch len(ids) {
 			case 0:
-				return s.ResolveManualSession(project, currentWorkingDirectory())
+				return s.ResolveManualSession(project, currentWorkingDirectory(), evidence...)
 			case 1:
 				return ids[0], nil
 			default:
@@ -3835,7 +3860,7 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 		}
 	}
 	if s != nil {
-		return s.ResolveManualSession(project, currentWorkingDirectory())
+		return s.ResolveManualSession(project, currentWorkingDirectory(), evidence...)
 	}
 	return defaultSessionID(project), nil
 }

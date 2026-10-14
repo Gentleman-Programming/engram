@@ -521,7 +521,12 @@ function buildEnsureSessionForTest(engramFetch) {
   const body = extractFunctionBody("ensureSession", "{\n  const key")
     .replace("const body: SessionBody", "const body")
     .replace("let acknowledgement: unknown;", "let acknowledgement;");
+  const provenanceBody = extractFunctionBody("captureProjectProvenance", "{\n  return {");
   const factory = new Function("knownSessions", "registeredSessionProjects", "sessionRegistrationsInFlight", "sessionRegistrationProjects", "sessionProjectConflict", "sessionProjectConflictFromResponse", "engramFetch", "project", "directory", `
+    let detectedProjectEvidence;
+    function captureProjectProvenance(cwd, target, detected = detectedProjectEvidence) {
+      ${provenanceBody}
+    }
     return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch, renew = false) {
       ${body}
     };
@@ -542,11 +547,12 @@ function buildEnsureSessionForTest(engramFetch) {
 
 function buildProjectDetectionBoundaryForTest() {
   const safeProjectBody = extractFunctionBody("isSafeDetectedProject", "{\n  const candidate");
-  const applyBody = extractFunctionBody("applyDetectedProject", "{\n  if (!detected)");
+  const applyBody = extractFunctionBody("applyDetectedProject", "{\n  detectedProjectEvidence = detected;");
   const messageBody = extractFunctionBody("projectResolutionMessage", "{\n  const choices");
   const requireBody = extractFunctionBody("requireResolvedProject", "{\n  if (projectResolutionError)");
   const factory = new Function(`
     let project = "fallback-project";
+    let detectedProjectEvidence;
     let projectResolutionError;
     let projectDetectionPending = false;
     function isSafeDetectedProject(detected) {

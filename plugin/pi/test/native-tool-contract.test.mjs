@@ -392,6 +392,7 @@ for (const scenario of [
         const writes = calls.filter(({ method, path }) => method === "POST" && path === "/prompts");
         assert.deepEqual(writes.map(({ body }) => body), scenario.capture ? [{
           session_id: sessionId, content: prompt, project: "engram",
+          project_provenance: { source: "unknown", directory: ctx.cwd },
         }] : [], "only human-authored prompts may be persisted, exactly once");
       });
     } finally {
@@ -1565,7 +1566,7 @@ test("an opaque runtime session ID stays byte-identical through registration, co
       assert.equal(compactionSummary.session_id, runtimeSessionId, "compaction must attribute the summary to the exact identity");
 
       await eventHandlers.get("session_shutdown")({}, ctx);
-      assert.deepEqual(sessionEndBodies, [{ summary: "" }], "shutdown must end the exact registered runtime session");
+      assert.deepEqual(sessionEndBodies, [{ summary: "", project_provenance: { source: "dir_basename", directory: ctx.cwd } }], "shutdown must end the exact registered runtime session");
       assert.deepEqual(sessionEndMethods, ["POST"], "shutdown must use the session-end POST contract");
       await eventHandlers.get("session_shutdown")({}, ctx);
       assert.equal(sessionEndBodies.length, 1, "repeated shutdown must not end an already discarded session twice");
@@ -3622,7 +3623,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
       endGate.resolve();
       const [, explicitEndResult] = await Promise.all([firstShutdown, explicitEnd, secondShutdown]);
       assert.equal(explicitEndResult.isError, undefined, "an explicit end must join shutdown delivery");
-      assert.deepEqual(endCalls, [{ method: "POST", body: { summary: "" } }], "concurrent shutdown and explicit end must send one POST");
+      assert.deepEqual(endCalls, [{ method: "POST", body: { summary: "", project_provenance: { source: "unknown", directory: ctx.cwd } } }], "concurrent shutdown and explicit end must send one POST");
 
       await eventHandlers.get("session_start")({}, runtimeContext(undefined));
       await eventHandlers.get("session_shutdown")({}, runtimeContext(undefined));
@@ -3656,7 +3657,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
       const shutdown = eventHandlers.get("session_shutdown")({}, ctx);
       registrationGate.resolve();
       await Promise.all([write, shutdown]);
-      assert.deepEqual(raceEndCalls, [{ method: "POST", body: { summary: "" } }], "shutdown must end a registration that was already in flight");
+      assert.deepEqual(raceEndCalls, [{ method: "POST", body: { summary: "", project_provenance: { source: "unknown", directory: ctx.cwd } } }], "shutdown must end a registration that was already in flight");
     });
 
     const uncertainRegistration = deferred();

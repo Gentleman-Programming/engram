@@ -607,6 +607,28 @@ MCP tool calls still use Engram core's canonical project resolver at call time. 
 }
 ```
 
+### Capture project evidence
+
+New session, observation, prompt, passive and compaction captures include additive
+`project_provenance` metadata: `{ source, directory, raw_project? }`. The directory
+is the capturing Pi context's cwd, not the HTTP server's working directory; it
+never changes a satellite's stored directory or the selected project/session.
+Explicit per-call project values retain `explicit_override` and their raw input.
+Derived targets carry the existing `/project/current` detection source (for example
+`config`, `git_root`, `git_remote`, or `dir_basename`), not an inferred designation.
+The older-server local config fallback preserves its original `project_name`.
+
+When detection supplies no source, Pi sends `unknown`; a project name or
+`project_owned` session is not proof of explicit designation. Raw names are omitted
+unless supplied as reliable evidence: the current detection endpoint reports the
+resolved project, not its pre-normalization original, so Pi does not reconstruct it.
+This optional JSON requires no new capability handshake. Older records without
+metadata remain unchanged. Evidence is local metadata only, not Cloud permission,
+enrollment, imported ownership proof, or inbox routing; current delivery and
+attribution behavior remain unchanged. Session-end requests also carry context
+metadata, but core ignores it: closing a session does not persist or relabel
+provenance on its existing history.
+
 ### Cross-project saves
 
 Each Pi runtime session is registered `project_owned` and keeps exactly one owning project: the project detected for Pi's working directory (or, when detection is unresolved, the first explicit project that registers it). Saving into another repository or worktree is explicit only:

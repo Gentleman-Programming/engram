@@ -299,16 +299,17 @@ type SearchOptions struct {
 }
 
 type AddObservationParams struct {
-	SessionID   string        `json:"session_id"`
-	Type        string        `json:"type"`
-	Title       string        `json:"title"`
-	Content     string        `json:"content"`
-	ToolName    string        `json:"tool_name,omitempty"`
-	Project     string        `json:"project,omitempty"`
-	Scope       string        `json:"scope,omitempty"`
-	TopicKey    string        `json:"topic_key,omitempty"`
-	OperationID string        `json:"operation_id,omitempty"`
-	Timings     *WriteTimings `json:"-"`
+	ProjectProvenance *ProjectProvenance `json:"project_provenance,omitempty"`
+	SessionID         string             `json:"session_id"`
+	Type              string             `json:"type"`
+	Title             string             `json:"title"`
+	Content           string             `json:"content"`
+	ToolName          string             `json:"tool_name,omitempty"`
+	Project           string             `json:"project,omitempty"`
+	Scope             string             `json:"scope,omitempty"`
+	TopicKey          string             `json:"topic_key,omitempty"`
+	OperationID       string             `json:"operation_id,omitempty"`
+	Timings           *WriteTimings      `json:"-"`
 }
 
 // WriteTimings collects one write operation's local database stages. It holds
@@ -349,10 +350,11 @@ type Prompt struct {
 }
 
 type AddPromptParams struct {
-	SessionID     string `json:"session_id"`
-	Content       string `json:"content"`
-	Project       string `json:"project,omitempty"`
-	SourceInboxID string `json:"source_inbox_id,omitempty"`
+	ProjectProvenance *ProjectProvenance `json:"project_provenance,omitempty"`
+	SessionID         string             `json:"session_id"`
+	Content           string             `json:"content"`
+	Project           string             `json:"project,omitempty"`
+	SourceInboxID     string             `json:"source_inbox_id,omitempty"`
 }
 
 // TruncationMetadata describes storage content processing after private-tag redaction.
@@ -1413,7 +1415,15 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 
 		-- Local-only retry journal; deliberately absent from export and sync payloads.
-		CREATE TABLE IF NOT EXISTS session_finalizations (
+		CREATE TABLE IF NOT EXISTS capture_project_provenance (
+ entity_kind TEXT NOT NULL,
+ entity_id TEXT NOT NULL,
+ source TEXT NOT NULL,
+ directory TEXT NOT NULL DEFAULT '',
+ raw_project TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY (entity_kind, entity_id)
+ );
+ CREATE TABLE IF NOT EXISTS session_finalizations (
 			session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
 			summary_id INTEGER NOT NULL,
 			summary_sync_id TEXT NOT NULL
@@ -3322,7 +3332,14 @@ func (s *Store) CreateSession(id, project, directory string) error {
 // CreateSessionWithOwnershipMode creates a session with an explicit persisted
 // ownership policy. CreateSession remains the compatibility wrapper for shared
 // runtime sessions.
-func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode string) error {
+func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode string, evidence ...*ProjectProvenance) error {
+	var provenance *ProjectProvenance
+	if len(evidence) != 0 {
+		provenance = evidence[0]
+	}
+	if err := provenance.Validate(); err != nil {
+		return err
+	}
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
@@ -3351,6 +3368,11 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 		if err := s.createSessionTx(tx, id, project, directory, mode); err != nil {
 			return err
 		}
+		if !found {
+			if err := captureProjectProvenanceTx(tx, "session", id, provenance); err != nil {
+				return err
+			}
+		}
 		var persisted Session
 		// sessions.project is read through ifnull() because a database upgraded from
 		// the schema where the column was nullable still carries rows that identify no
@@ -3376,10 +3398,10 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 // Keep the legacy ID when possible, but never claim a session owned by another
 // project. A separate deterministic namespace avoids interpreting the hash as
 // a legacy manual-save project suffix in diagnostics and ownership backfills.
-func (s *Store) ResolveManualSession(project, directory string) (string, error) {
+func (s *Store) ResolveManualSession(project, directory string, evidence ...*ProjectProvenance) (string, error) {
 	project, _ = NormalizeProject(project)
 	id := manualSessionIDPrefix + project
-	err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned)
+	err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned, evidence...)
 	if err == nil {
 		return id, nil
 	}
@@ -3389,7 +3411,7 @@ func (s *Store) ResolveManualSession(project, directory string) (string, error) 
 	}
 	digest := sha256.Sum256([]byte(project))
 	id = "manual-fallback-" + hex.EncodeToString(digest[:])
-	if err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned); err != nil {
+	if err := s.CreateSessionWithOwnershipMode(id, project, directory, SessionOwnershipProjectOwned, evidence...); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -3516,7 +3538,14 @@ func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
 	return prefix + max.Add(max, big.NewInt(1)).String(), nil
 }
 
-func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings) error {
+func (s *Store) startSessionRegistration(id, project, directory, mode string, resume bool, effective *string, isolated bool, timings *WriteTimings, evidence ...*ProjectProvenance) error {
+	var provenance *ProjectProvenance
+	if len(evidence) != 0 {
+		provenance = evidence[0]
+	}
+	if err := provenance.Validate(); err != nil {
+		return err
+	}
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
@@ -3676,6 +3705,11 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 		}
 		if err := s.startSessionTx(tx, id, registrationProject, registrationDirectory, registrationMode); err != nil {
 			return err
+		}
+		if !found {
+			if err := captureProjectProvenanceTx(tx, "session", id, provenance); err != nil {
+				return err
+			}
 		}
 		if !identityRepaired {
 			return nil
@@ -4202,6 +4236,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 // AddObservationWithResult persists an observation or returns an exact replay
 // outcome from the operation ledger in the same transaction.
 func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservationResult, error) {
+	if err := p.ProjectProvenance.Validate(); err != nil {
+		return AddObservationResult{}, err
+	}
 	// Normalize project name (lowercase + trim) before any persistence
 	p.Project, _ = NormalizeProject(p.Project)
 
@@ -4367,6 +4404,9 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 
 		observationID, err = s.insertObservationTx(tx, p, title, content, scope, topicKey, normHash)
 		if err != nil {
+			return err
+		}
+		if err := captureProjectProvenanceTx(tx, "observation", strconv.FormatInt(observationID, 10), p.ProjectProvenance); err != nil {
 			return err
 		}
 
@@ -4653,6 +4693,9 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 
 // AddPromptWithResult reports whether a prompt was inserted rather than replayed.
 func (s *Store) AddPromptWithResult(p AddPromptParams) (int64, bool, error) {
+	if err := p.ProjectProvenance.Validate(); err != nil {
+		return 0, false, err
+	}
 	p.Project, _ = NormalizeProject(p.Project)
 
 	content, _ := s.prepareStoredContent(p.Content)
@@ -4711,6 +4754,9 @@ func (s *Store) AddPromptWithResult(p AddPromptParams) (int64, bool, error) {
 			return err
 		}
 		inserted = true
+		if err := captureProjectProvenanceTx(tx, "prompt", strconv.FormatInt(promptID, 10), p.ProjectProvenance); err != nil {
+			return err
+		}
 		var createdAt string
 		if err := tx.QueryRow(`SELECT created_at FROM user_prompts WHERE id = ?`, promptID).Scan(&createdAt); err != nil {
 			return err
@@ -4827,6 +4873,9 @@ func (s *Store) LocalPromptCreationIdentity(syncID string) (session, inbox, proj
 }
 
 func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {
+	if err := p.ProjectProvenance.Validate(); err != nil {
+		return 0, false, err
+	}
 	p.Project, _ = NormalizeProject(p.Project)
 	content, _ := s.prepareStoredContent(p.Content)
 	if content == "" {
@@ -4876,6 +4925,9 @@ func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {
 			return err
 		}
 		inserted = true
+		if err := captureProjectProvenanceTx(tx, "prompt", strconv.FormatInt(promptID, 10), p.ProjectProvenance); err != nil {
+			return err
+		}
 		return s.enqueueSyncMutationTx(tx, SyncEntityPrompt, syncID, SyncOpUpsert, syncPromptPayload{
 			SyncID:    syncID,
 			SessionID: p.SessionID,
@@ -13458,11 +13510,12 @@ func sanitizeFTS(query string) string {
 
 // PassiveCaptureParams holds the input for passive memory capture.
 type PassiveCaptureParams struct {
-	SessionID string        `json:"session_id"`
-	Content   string        `json:"content"`
-	Project   string        `json:"project,omitempty"`
-	Source    string        `json:"source,omitempty"` // e.g. "subagent-stop", "session-end"
-	Timings   *WriteTimings `json:"-"`
+	ProjectProvenance *ProjectProvenance `json:"project_provenance,omitempty"`
+	SessionID         string             `json:"session_id"`
+	Content           string             `json:"content"`
+	Project           string             `json:"project,omitempty"`
+	Source            string             `json:"source,omitempty"` // e.g. "subagent-stop", "session-end"
+	Timings           *WriteTimings      `json:"-"`
 }
 
 // PassiveCaptureResult holds the output of passive memory capture.
@@ -13545,6 +13598,9 @@ func cleanMarkdown(text string) string {
 // PassiveCapture extracts learnings from text and saves them as observations.
 // It deduplicates against existing observations using content hash matching.
 func (s *Store) PassiveCapture(p PassiveCaptureParams) (*PassiveCaptureResult, error) {
+	if err := p.ProjectProvenance.Validate(); err != nil {
+		return nil, err
+	}
 	// Normalize project name before storing
 	p.Project, _ = NormalizeProject(p.Project)
 
@@ -13583,14 +13639,15 @@ func (s *Store) PassiveCapture(p PassiveCaptureParams) (*PassiveCaptureResult, e
 		}
 
 		_, err = s.AddObservation(AddObservationParams{
-			SessionID: p.SessionID,
-			Type:      "passive",
-			Title:     title,
-			Content:   learning,
-			Project:   p.Project,
-			Scope:     "project",
-			ToolName:  p.Source,
-			Timings:   p.Timings,
+			ProjectProvenance: p.ProjectProvenance,
+			SessionID:         p.SessionID,
+			Type:              "passive",
+			Title:             title,
+			Content:           learning,
+			Project:           p.Project,
+			Scope:             "project",
+			ToolName:          p.Source,
+			Timings:           p.Timings,
 		})
 		if err != nil {
 			return result, fmt.Errorf("passive capture save: %w", err)

@@ -1584,20 +1584,27 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	sessionID, err := s.ResolveManualSession(projectName, cwd)
+	provenance := &store.ProjectProvenance{Source: resolved.Source, Directory: cwd}
+	if strings.TrimSpace(args.projectName) != "" {
+		provenance.RawProject = args.projectName
+	} else if override, ok := project.ProcessOverride(""); ok {
+		provenance.RawProject = override
+	}
+	sessionID, err := s.ResolveManualSession(projectName, cwd, provenance)
 	if err != nil {
 		fatal(err)
 		return
 	}
 	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{
-		SessionID: sessionID,
-		Type:      typ,
-		Title:     title,
-		Content:   content,
-		Project:   projectName,
-		Scope:     scope,
-		TopicKey:  topicKey,
+		ProjectProvenance: provenance,
+		SessionID:         sessionID,
+		Type:              typ,
+		Title:             title,
+		Content:           content,
+		Project:           projectName,
+		Scope:             scope,
+		TopicKey:          topicKey,
 	})
 	if err != nil {
 		fatal(err)
