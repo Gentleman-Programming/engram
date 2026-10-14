@@ -9,7 +9,7 @@ const workspace = new URL('../../', import.meta.url).href.replace(/\/$/, '');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 async function execute({ action = 'labeled', approved = true, body = 'Closes #9', pr = false,
-  unrelated = false, changed = false, fault = '', secondApproved = true } = {}) {
+  unrelated = false, changed = false, fault = '', secondApproved = true, assignees = [{ login: 'owner-not-author' }] } = {}) {
   const reads = [], attempts = [], stored = [], failures = [];
   let pullReads = 0;
   const pull = { number: 1, state: 'open', body, head: { sha, repo: { full_name: 'untrusted/fork' } } };
@@ -26,7 +26,7 @@ async function execute({ action = 'labeled', approved = true, body = 'Closes #9'
       reads.push(['issue', request]);
       if (fault === 'issue') throw new Error('Issue unavailable');
       const allowed = request.issue_number === 9 ? approved : secondApproved;
-      return { data: { labels: allowed ? [{ name: 'status:approved' }] : [] } };
+      return { data: { labels: allowed ? [{ name: 'status:approved' }] : [], assignees } };
     } },
     checks: { create: async (request) => {
       attempts.push(structuredClone(request));
@@ -66,6 +66,14 @@ for (const [action, approved] of [['labeled', true], ['unlabeled', false], ['lab
   });
 }
 
+test('composed refresh publishes assignment failure on the fetched head', async () => {
+  const state = await execute({ assignees: [] });
+  const expected = requests(['success', 'failure'], ['Validation passed.', 'PR #1: issue #9 has no assignee. Assign an owner before merge.']);
+  assert.deepEqual(state.attempts, expected);
+  assert.deepEqual(state.stored, expected.map((run) => ({ ...run, app: { id: 15368 } })));
+  assert.deepEqual(state.failures, []);
+  assert.deepEqual(state.reads.map(([method]) => method), ['list', 'pull', 'issue', 'pull']);
+});
 test('unrelated labels and unmatched references publish nothing', async () => {
   const irrelevant = await execute({ unrelated: true });
   assert.deepEqual(irrelevant, { reads: [], attempts: [], stored: [], failures: [] });

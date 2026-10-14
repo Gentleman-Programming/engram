@@ -215,6 +215,36 @@ test('exposes migration as an idempotent dry-run CLI', () => {
   });
 });
 
+test('aligns proportional evidence and per-merge migration across contribution surfaces', () => {
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+  for (const phrase of [
+    'Trivial change', 'first violated repository-owned invariant',
+    'High-risk change', 'no separate design document is required by default',
+    'Activation does not wait for the whole backlog',
+    'Every PR, including existing PRs, must comply before merge',
+    '23 open PRs', 'the PR author need not match', 'Issue API errors fail closed',
+  ]) assert.ok(contributing.includes(phrase), phrase);
+  const labels = fs.readFileSync('.github/labels.yml', 'utf8');
+  assert.match(labels, /Proportional evidence accepted; bugs require current-main reproduction and root-cause evidence/);
+  for (const name of ['bug_report', 'feature_request', 'docs_improvement', 'tracked_question']) {
+    const source = fs.readFileSync(`.github/ISSUE_TEMPLATE/${name}.yml`, 'utf8');
+    const start = source.indexOf('id: existing-issue-search');
+    assert.ok(start >= 0, name);
+    const field = source.slice(start, source.indexOf('\n  - ', start));
+    assert.match(field, /Search for a canonical root-cause tracker/);
+    assert.match(field, /required: true/);
+  }
+  const template = fs.readFileSync('.github/PULL_REQUEST_TEMPLATE.md', 'utf8');
+  assert.match(template, /Every linked issue is approved and has a real assignee/);
+  assert.match(template, /backlog-wide migration is not an activation prerequisite/);
+  for (const name of ['branch-pr', 'issue-creation', 'backlog-triage']) {
+    const skill = fs.readFileSync(`skills/${name}/SKILL.md`, 'utf8');
+    assert.match(skill, /proportional evidence/i, name);
+    assert.match(skill, /before merge/, name);
+    assert.match(skill, /no separate design document/i, name);
+  }
+});
+
 test('documents singleton-safe duplicate status transitions', () => {
   const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
   const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');

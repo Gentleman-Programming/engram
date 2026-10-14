@@ -7,7 +7,7 @@ Thanks for contributing. Engram enforces a strict **issue-first workflow** — e
 ## Contribution Workflow
 
 ```
-Open Issue → Get status:approved → Open PR → Add type:* label → Review & Merge
+Search canonical issue → Investigate proportionally → Approve → Implement → Review & Merge
 ```
 
 ### Step 1: Open an Issue
@@ -21,15 +21,23 @@ Use the correct template:
 > ⚠️ Blank issues are disabled. You must use a template.
 > General questions and support belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions).
 
-Fill in all required fields. Your issue will automatically receive the `status:needs-review` label.
+Search existing issues for a canonical tracker before opening a new one. Fill in all required fields; report symptoms, impact, release context, and logs without having to diagnose the root cause. Your issue receives `status:needs-review`.
 
-If useful for alignment, search existing issues before opening a new one.
+### Step 2: Investigation and Proportional Approval
 
-### Step 2: Wait for Approval
+A maintainer triages the report and assigns a real investigator/owner. Keep evidence on the canonical issue; cluster duplicates only when their root cause and affected contract match, not just their symptoms. Move useful occurrence evidence there before duplicate closure.
 
-A maintainer will review the issue and replace `status:needs-review` with `status:approved` if it's accepted for implementation.
+Use the smallest evidence set that establishes correctness:
 
-**Do not open a PR until the issue is approved.** Automated checks will block PRs that reference unapproved issues.
+| Change | Evidence before approval |
+|--------|--------------------------|
+| Trivial change | Clear scope and an applicable check |
+| Bug | Reproduction against exact current remote `main` SHA, first violated repository-owned invariant (root cause), and a regression test plan |
+| High-risk change (data, security, or shared contracts) | Applicable bug evidence, approved design, non-goals, and an independent review plan |
+
+A short explanation in the issue is sufficient; no separate design document is required by default. Maintainers assess the reasoning, not CI. Replace the current `status:*` label with `status:approved` only after accepting the evidence appropriate to the change. For behavior changes, verify the regression tests before merge; for high-risk changes, complete independent review before merge.
+
+**New work requires an approved issue and a real assignee before implementation.** Any issue assignee satisfies ownership; the PR author need not match. CI checks approval and assignment, not the quality of prose, and cannot prevent opening a noncompliant PR.
 
 ### Step 3: Open a Pull Request
 
@@ -47,7 +55,7 @@ The active required contexts run automatically on every PR and merge queue group
 | Check | What it verifies |
 |-------|-----------------|
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
-| **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
+| **Check Issue Has status:approved** | Every linked issue has `status:approved` and at least one assignee |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
 | **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
@@ -57,7 +65,7 @@ PR Validation runs on PR opening, edits, label addition/removal, synchronization
 and reopening. Reopening requests a fresh **Check Issue Reference** and
 **Check Issue Has status:approved** evaluation under the existing rules.
 Changes to labels on a linked issue do not themselves trigger PR Validation;
-the approval check fetches issue labels when the workflow runs. PR label events
+the approval check fetches current issue labels and assignees when the workflow runs. PR label events
 and linked-issue label events are distinct.
 
 **Issue-refresh bootstrap (not yet live proof):** the candidate **Issue Validation
@@ -97,7 +105,13 @@ retirement stays blocked: fresh T4 probe consent and live evidence are required
 before rollout claims or retirement. See the
 [native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
 
-All required checks must pass before a PR can be merged.
+All required checks must pass before a PR can be merged. Issue API errors fail closed.
+
+### Existing PR Transition
+
+The original #1293 audit found 23 open PRs needing migration; that is a historical snapshot, not a permanent count. Activation does not wait for the whole backlog to be remediated. Review existing PRs when they become active again or before merge: confirm proportional evidence, replace outdated approval where needed, and assign a real owner. Close obsolete work through normal maintainer review. Do not assign a placeholder solely to turn CI green.
+
+**Every PR, including existing PRs, must comply before merge.** There is no date cutoff, silent grandfathering, or automatic assignment. Re-run native PR validation after issue approval/assignment changes before merging; an old green check is not current readiness evidence.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
@@ -341,7 +355,7 @@ with `HEAD~`.
 | Label | Meaning |
 |-------|---------|
 | `status:needs-review` | Awaiting maintainer review (auto-applied to new issues) |
-| `status:approved` | Approved for implementation — PRs can now be opened |
+| `status:approved` | Maintainer accepted proportional evidence; bugs include current-main reproduction and root cause |
 | `status:in-progress` | Actively being worked on — auto-exempt from stale bot |
 | `status:blocked` | Blocked by another issue or external dependency |
 | `status:stale` | No activity for 30 days — auto-applied by stale bot |

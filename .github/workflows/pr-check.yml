@@ -117,11 +117,20 @@ jobs:
                     repo: context.repo.repo,
                     issue_number: issueNumber,
                   })).data;
+                  if (!Array.isArray(issue.labels) || issue.labels.some((label) => typeof label?.name !== 'string')) {
+                    throw new Error('issue labels are malformed');
+                  }
                   const labels = issue.labels.map((label) => label.name);
                   if (!labels.includes('status:approved')) {
                     errors.push(`issue #${issueNumber} ("${issue.title}") does not have the \`status:approved\` label.`);
                   } else {
                     core.info(`✅ PR #${pull.number} issue #${issueNumber} has status:approved`);
+                  }
+                  if (!Array.isArray(issue.assignees) || issue.assignees.some((owner) => typeof owner?.login !== 'string' || owner.login.length === 0)) {
+                    throw new Error('issue assignees are malformed');
+                  }
+                  if (issue.assignees.length === 0) {
+                    errors.push(`issue #${issueNumber} ("${issue.title}") has no assignee. Assign an owner before merge.`);
                   }
                 } catch (err) {
                   errors.push(`issue #${issueNumber}: could not be fetched (${err.message})`);

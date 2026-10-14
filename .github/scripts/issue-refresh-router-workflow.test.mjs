@@ -45,7 +45,7 @@ test('trusted checkout and static dispatcher call use exact existing pins', () =
   assert.doesNotMatch(yaml, /github\.event\.(?:issue|pull_request)\.(?:body|title|head)|github\.sha/);
 });
 
-test('legacy, bootstrap and native workflows retain normalized baseline bytes without Git history', () => {
+test('workflow baselines are retained except the approved legacy readiness guards', () => {
   // Integrated fc438498 baseline, normalized to LF; usable in shallow checkouts and archives.
   const baseline = {
     '.github/workflows/pr-check.yml': '6c7825060b18790183f584d659778b3649516b7481de934f0b29c02ee3d784a1',
@@ -54,6 +54,7 @@ test('legacy, bootstrap and native workflows retain normalized baseline bytes wi
     '.github/workflows/ci.yml': '9edcc7afba74a6b1554ddc29836d07060ff788e92cd545d0efba2074db0ec8f2',
   };
   for (const [path, expected] of Object.entries(baseline)) {
-    assert.equal(createHash('sha256').update(read(path)).digest('hex'), expected, path);
+    const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
+    assert.equal(createHash('sha256').update(source).digest('hex'), expected, path);
   }
 });

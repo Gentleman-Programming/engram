@@ -40,7 +40,7 @@ for (const [index, policy] of ['reference', 'approved'].entries()) {
           if (scenario === 'null-error') throw null;
           return { data: { number: 1, state: 'open', body: scenario === 'missing' ? '' : 'Closes #9', head: { sha: scenario === 'drift' ? 'b'.repeat(40) : sha } } };
         } },
-        issues: { get: async (params) => { requests.push(['issues.get', params]); return { data: { labels: scenario === 'revoked' ? [] : [{ name: 'status:approved' }] } }; } },
+        issues: { get: async (params) => { requests.push(['issues.get', params]); return { data: { labels: scenario === 'revoked' ? [] : [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] } }; } },
         checks: { create: () => assert.fail('prohibited publication') },
       } };
       let exitCode = 0;

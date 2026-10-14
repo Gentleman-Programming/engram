@@ -17,6 +17,13 @@
 
 Closes #
 
+## Lifecycle Evidence
+
+- [ ] Every linked issue is approved and has a real assignee (not necessarily the PR author).
+- [ ] Evidence is proportional: trivial changes have scope/checks; bugs have current remote `main` SHA, reproduction, root cause, and regression tests; high-risk changes have approved design, non-goals, and completed independent review.
+- [ ] Evidence may live in the issue; no separate design document is required by default.
+- [ ] Existing PRs also comply before merge; backlog-wide migration is not an activation prerequisite.
+
 ---
 
 ## 🏷️ PR Type
@@ -67,7 +74,7 @@ After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applica
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
 | **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
-| **Check Issue Has status:approved** | Linked issue has `status:approved` label | ⏳ |
+| **Check Issue Has status:approved** | Every linked issue is approved and assigned | ⏳ |
 | **Check PR Has type:* Label** | Canonical labels, applicability, and cardinality | ⏳ |
 | **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
