@@ -19,7 +19,8 @@ test("package advertises the implemented session-owned protocol to bundled launc
 });
 
 async function withOwnedFixture(options, run) {
-  const dir = await mkdtemp(join(tmpdir(), "engram-owned-pi-"));
+  const dir = await mkdtemp(join(tmpdir(), "engram-owned-pi fixture-"));
+  const originalNodeOptions = process.env.NODE_OPTIONS;
   const saved = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")));
   for (const key of Object.keys(saved)) delete process.env[key];
   let hooks, ctx;
@@ -33,9 +34,18 @@ async function withOwnedFixture(options, run) {
     await writeFile(bin, `#!/usr/bin/env node
 const {createServer}=require('node:http');
 const {appendFileSync}=require('node:fs');
+const {resolve}=require('node:path');
 const log=(v)=>appendFileSync(${JSON.stringify(log)},JSON.stringify(v)+'\\n');
-log({args:process.argv.slice(2),tokenShape:/^[a-f0-9]{64}$/.test(process.env.ENGRAM_TOKEN||'')});
-if (!process.argv.includes('--session-owned')) process.exit(3);
+// A Node preload sees the synthetic command in argv[1], not its own script path.
+const syntheticServePath=resolve('serve');
+const invocationArgs=process.argv.slice(process.argv[1]===__filename?2:1);
+if (invocationArgs[0]===syntheticServePath) invocationArgs[0]='serve';
+log({args:invocationArgs,tokenShape:/^[a-f0-9]{64}$/.test(process.env.ENGRAM_TOKEN||'')});
+if (!invocationArgs.includes('--session-owned')) process.exit(3);
+if (process.argv[1]!==__filename && invocationArgs[0]==='serve') process.once('uncaughtException',(error)=>{
+ if (error?.code==='MODULE_NOT_FOUND' && error.message.includes("Cannot find module '"+syntheticServePath+"'")) return;
+ throw error;
+});
 const server=createServer(async(req,res)=>{
  log({path:req.url,authorized:req.headers.authorization==='Bearer '+process.env.ENGRAM_TOKEN});
  let body='';for await(const c of req)body+=c;
@@ -54,7 +64,14 @@ process.stdin.resume();process.stdin.on('end',()=>{log({eof:true});server.close(
 setTimeout(()=>process.exit(9),15000).unref();
 `);
     await chmod(bin, 0o755);
-    process.env.ENGRAM_BIN = bin;
+    // Windows cannot directly execute a shebang .cjs file. Preload the real fake
+    // child through Node without changing the production spawn arguments.
+    if (options.preload ?? process.platform === "win32") {
+      process.env.ENGRAM_BIN = process.execPath;
+      process.env.NODE_OPTIONS = `--require "${bin.replaceAll("\\", "\\\\")}"`;
+    } else {
+      process.env.ENGRAM_BIN = bin;
+    }
     const sandbox = await createPluginSandbox(dir);
     const register = await importPluginFromSandbox(sandbox);
     const tools = new Map(); hooks = new Map();
@@ -66,9 +83,48 @@ setTimeout(()=>process.exit(9),15000).unref();
     if (hooks && ctx) await hooks.get("session_shutdown")?.({reason:"reload"},ctx);
     for (const key of Object.keys(process.env)) if (key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")) delete process.env[key];
     Object.assign(process.env,saved);
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
     await rm(dir,{recursive:true,force:true});
   }
 }
+
+test("owned preload launches a real child with actual argv and restores Node options", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--no-warnings";
+  try {
+    await withOwnedFixture({ preload: true }, async ({ hooks, ctx, events, statuses }) => {
+      assert.equal(process.env.ENGRAM_BIN, process.execPath);
+      assert.equal(process.env.NODE_OPTIONS,
+        `--require "${join(ctx.cwd, "owned.cjs").replaceAll("\\", "\\\\")}"`);
+      await hooks.get("session_start")({}, ctx);
+      assert.ok(statuses.some(value => value?.includes("ready")));
+      const records = await events();
+      assert.deepEqual(records[0].args, ["serve", "--session-owned"]);
+      assert.equal(records[0].tokenShape, true);
+      await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+      assert.ok((await events()).some(record => record.eof));
+    });
+    assert.equal(process.env.NODE_OPTIONS, "--no-warnings");
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+});
+
+test("owned preload restores Node options after a fixture callback rejects", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--no-warnings";
+  try {
+    await assert.rejects(withOwnedFixture({ preload: true }, async () => {
+      throw new Error("fixture callback rejected");
+    }), { message: "fixture callback rejected" });
+    assert.equal(process.env.NODE_OPTIONS, "--no-warnings");
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+});
 
 test("owned child authenticates every path and reload closes transport without ending conversation", async()=> {
  await withOwnedFixture({},async({hooks,ctx,tools,events,statuses})=>{
