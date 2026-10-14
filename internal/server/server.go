@@ -567,6 +567,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /conflicts/deferred", s.handleListDeferred)
 	s.mux.HandleFunc("POST /conflicts/scan", s.handleScanConflicts)
 	s.mux.HandleFunc("POST /conflicts/judge", s.handleJudgeConflict)
+	// Compound agent mutations retain the optional configured-token policy.
+	s.mux.HandleFunc("POST /observations/consolidate", requireAuth(s.handleConsolidateObservations))
+	s.mux.HandleFunc("POST /conflicts/judge-many", requireAuth(s.handleJudgeMany))
+	s.mux.HandleFunc("POST /sessions/{id}/finalize", requireAuth(s.handleFinalizeSession))
 	s.mux.HandleFunc("POST /conflicts/compare", s.handleCompareMemories)
 	s.mux.HandleFunc("POST /conflicts/deferred/replay", s.handleReplayDeferred)
 	s.mux.HandleFunc("GET /conflicts/{relation_id}", s.handleGetConflict)
