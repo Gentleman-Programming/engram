@@ -45,12 +45,13 @@ test('trusted checkout and static dispatcher call use exact existing pins', () =
   assert.doesNotMatch(yaml, /github\.event\.(?:issue|pull_request)\.(?:body|title|head)|github\.sha/);
 });
 
-test('legacy, bootstrap and native workflows retain normalized baseline bytes without Git history', () => {
-  // Integrated fc438498 baseline, normalized to LF; usable in shallow checkouts and archives.
+test('legacy/bootstrap baselines remain unchanged; native identity emission is pinned without Git history', () => {
+  // Integrated fc438498 legacy baselines; native adds only the original-event steps.
+  // Normalize to LF for shallow checkouts, archives and Windows.
   const baseline = {
     '.github/workflows/pr-check.yml': '6c7825060b18790183f584d659778b3649516b7481de934f0b29c02ee3d784a1',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
-    '.github/workflows/issue-policy.yml': '1aae9af2a6dbc222749f4b30a3a5dc174b98d7b48161c85c18fe409200896b67',
+    '.github/workflows/issue-policy.yml': '1a3091c88771ecc5b51059aad6987d31c97177b48f4522bfdb8963d0c4bc952c',
     '.github/workflows/ci.yml': '9edcc7afba74a6b1554ddc29836d07060ff788e92cd545d0efba2074db0ec8f2',
   };
   for (const [path, expected] of Object.entries(baseline)) {

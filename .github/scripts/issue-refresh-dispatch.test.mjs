@@ -20,12 +20,12 @@ function fixture() {
       return { data: clone(count > 1 && state.drift ? state.drift : state.pulls.get(params.pull_number)) };
     }
     const target = state.pulls.get(state.activeNumber ?? 7);
-    const run = { id: 90, workflow_id: 12, path: '.github/workflows/issue-policy.yml', event: 'pull_request_target', head_sha: head, head_branch: 'topic', repository: { full_name: 'upstream/project' }, head_repository: { full_name: 'fork/project' }, run_attempt: 2, status: 'completed', created_at: new Date().toISOString(), pull_requests: [{ number: target.number, head: target.head, base: target.base }] };
+    const run = { id: 90, workflow_id: 12, path: '.github/workflows/issue-policy.yml', event: 'pull_request_target', head_sha: head, head_branch: 'topic', repository: { full_name: 'upstream/project' }, head_repository: { full_name: 'fork/project' }, run_attempt: 2, status: 'completed', created_at: new Date().toISOString(), pull_requests: state.emptyAssociation ? [] : [{ number: target.number, head: target.head, base: target.base }] };
     switch (route) {
       case 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}': return { data: { id: 12, path: run.path, state: 'active' } };
       case 'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs': return { data: { total_count: state.noRuns ? 0 : 1, workflow_runs: state.noRuns ? [] : [run] } };
       case 'GET /repos/{owner}/{repo}/actions/runs/{run_id}': return { data: run };
-      case 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs': return { data: { total_count: 2, jobs: ['Check Issue Reference', 'Check Issue Has status:approved'].map((name) => ({ name, run_id: 90, head_sha: head, status: 'completed', steps: [{ name: `Load trusted issue policy (${source})`, status: 'completed', conclusion: 'success' }] })) } };
+      case 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs': return { data: { total_count: 2, jobs: ['Check Issue Reference', 'Check Issue Has status:approved'].map((name) => ({ name, run_id: 90, head_sha: head, status: 'completed', steps: [{ name: `Load trusted issue policy (${source})`, status: 'completed', conclusion: 'success' }, ...(state.noMarker ? [] : [{ name: 'Original issue event v1 ' + JSON.stringify(['pull_request_target', 'opened', target.base.repo.id, run.id, run.run_attempt, target.number, target.head.repo.id, target.head.sha, target.head.ref, target.base.repo.id, target.base.ref]), status: 'completed', conclusion: 'success' }])] })) } };
       case 'GET /repos/{owner}/{repo}/compare/{basehead}': return { data: { status: 'ahead', merge_base_commit: { sha: source } } };
       case 'GET /repos/{owner}/{repo}/contents/{path}': {
         const bytes = Buffer.from('trusted policy');
@@ -48,6 +48,17 @@ for (const action of ['labeled', 'unlabeled']) test(`${action} requests the real
     { route: 'GET /repos/{owner}/{repo}/pulls/{pull_number}', params: { ...repo, pull_number: 7 } },
   ]);
   assert.equal(state.reads.get(7), 3);
+});
+test('approval event dispatch admits marker-backed empty native fork association only', async () => {
+  const { github, state } = fixture(); state.emptyAssociation = true;
+  assert.equal((await (await load())(github, context(), trusted)).length, 1);
+  assert.deepEqual(writes(state), [{ route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 90 } }]);
+  const blocked = fixture(); blocked.state.emptyAssociation = true; blocked.state.noMarker = true;
+  await assert.rejects((await load())(blocked.github, context(), trusted), (error) => {
+    assert.match(error.failures[0].error.message, /^Issue refresh blocked: native original PR\/event binding unavailable$/);
+    return true;
+  });
+  assert.deepEqual(writes(blocked.state), []);
 });
 for (const change of [
   (c) => { c.eventName = 'pull_request_target'; },
