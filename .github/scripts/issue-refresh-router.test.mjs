@@ -60,6 +60,44 @@ test('fresh fork head with unambiguous run PR identity requests exactly one meta
   assert.deepEqual(state.calls.filter(({ route }) => route.startsWith('GET ')).map(({ route, params }) => [route, params]), expected);
 });
 
+test('multiple admissible native runs select only the newest ID from an unordered listing', async () => {
+  const { github, state } = fixture((s) => {
+    s.run.id = 92;
+    s.jobs.forEach((job) => { job.run_id = 92; job.steps[1] = eventStep(s.run); });
+    s.runs = [91, 92, 90].map((id) => ({ ...clone(s.run), id }));
+  });
+  const runs = new Map(state.runs.map((run) => [run.id, run]));
+  const jobs = new Map(state.runs.map((run) => [run.id, state.jobs.map((job, index) => ({
+    ...clone(job), id: run.id * 10 + index, run_id: run.id,
+    steps: [clone(job.steps[0]), eventStep(run)],
+  }))]));
+  const before = clone([state.runs, state.jobs, [...jobs], state.current, state.final]);
+  const request = github.request;
+  github.request = async (route, params) => {
+    const response = await request(route, params);
+    if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') {
+      return { data: clone(runs.get(params.run_id)) };
+    }
+    if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs') {
+      const selected = jobs.get(params.run_id);
+      return { data: { jobs: clone(selected), total_count: selected.length } };
+    }
+    return response;
+  };
+  assert.deepEqual(await (await load())(github, repo, pull, trusted),
+    { status: 'requested', runId: 92, headSha: head, sourceSha: source, trustedSha: trusted, attempt: 2 });
+  assert.deepEqual(writes(state), [
+    { route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 92 } },
+  ]);
+  assert.deepEqual(state.calls.filter(({ route }) => route.endsWith('/runs/{run_id}')),
+    [{ route: 'GET /repos/{owner}/{repo}/actions/runs/{run_id}', params: { ...repo, run_id: 92 } }]);
+  assert.deepEqual(state.calls.filter(({ route }) => route.endsWith('/attempts/{attempt_number}/jobs')),
+    [{ route: 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
+      params: { ...repo, run_id: 92, attempt_number: 2, per_page: 100, page: 1 } }]);
+  assert.equal(state.reads, 2);
+  assert.deepEqual([state.runs, state.jobs, [...jobs], state.current, state.final], before);
+});
+
 test('same fork/head/SHA PRs targeting different bases never rerun the other PR or fall back', async () => {
   const { github, state } = fixture((s) => {
     const intended = clone(s.run);
