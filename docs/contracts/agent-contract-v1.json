@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "7423f4a1fa2c4f7dc50018451403c18256f8aff648d2563844a5144cb4f15fc7",
+  "digest": "ac4628922da29ccde963d5092d4e646d867fb36ab03e3c968fe490820552d1ec",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -800,9 +800,8 @@
           "default limit is 10"
         ],
         "pi_differences": [
-          "Pi omits response_format=compact",
           "Pi sends its resolved project to HTTP, while MCP clears the project filter for implicit personal scope",
-          "MCP uses bounded previews; HTTP/Pi uses search result rows"
+          "MCP uses bounded previews by default; HTTP/Pi uses full search result rows unless response_format=compact"
         ],
         "project_policy": "explicit known project, then process override or detected current project; resolution errors stay explicit",
         "risk": "read-only",
