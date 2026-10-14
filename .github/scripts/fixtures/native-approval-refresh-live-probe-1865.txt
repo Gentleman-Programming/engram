@@ -1,0 +1,6 @@
+Native original-event live probe fixture
+Issue: #1865
+Parent rollout: #1802; retirement: #1810
+Trusted baseline: 11f8f1a58eff8e238148967b32cdc413bd54c90d
+NO MERGE / NO ENQUEUE
+Retain until separately authorized cleanup.
