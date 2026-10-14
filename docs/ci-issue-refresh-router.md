@@ -1,11 +1,12 @@
-# Native issue-policy refresh router — activation candidate
+# Native issue-policy refresh router
 
 PR #1838 integrated the native workflow/adapter at `2dfdca97`; PR #1843
 integrated the inactive guarded rerun helper at `fc438498`. PR #1850 integrated
 #1844's [inactive dispatcher](ci-issue-refresh-dispatch.md) on verified main at
-`f14fc4f3`. The #1835 branch prepares workflow activation, not yet available on
-trusted main. Its dispatcher prerequisite is integrated; opening the workflow
-PR cannot activate issue events. Integration and local tests are not live required-gate proof;
+`f14fc4f3`. PR #1855 integrated #1835's issue-event activation at `47911e25`.
+The original-event identity correction below still requires delivery to trusted
+code and a new covered PR event before it can provide live evidence.
+Integration and local tests are not live required-gate proof;
 #1802 stays open and #1810 retirement remains blocked.
 Public runtime evidence: **pending fresh consented live acceptance**.
 
@@ -27,14 +28,34 @@ trusted revisions. Admission requires `.github/workflows/issue-policy.yml`,
 `Check Issue Reference` and `Check Issue Has status:approved`. Job heads must
 match. Both jobs must expose a successful completed step named exactly
 `Load trusted issue policy (<40 lowercase hex SHA>)` with the same resolved SHA.
-Both the listed run and its authoritative GET must expose exactly one
-`run.pull_requests` entry matching the intended PR number, head SHA/ref/repository
-ID and base ref/repository ID. Empty, missing or ambiguous associations block
-with `Issue refresh blocked: native run PR/event binding unavailable`; no ownership
-is inferred from shared fork/head/SHA or current PR reads. Even if GitHub omits
-this association, the helper must not rerun a potentially different original event.
-The attempt-specific jobs endpoint supplies attempt binding; no undocumented
-job attempt field or check-suite workflow association is used.
+Both jobs must also expose exactly one successful, completed step named
+`Original issue event v1 <JSON array>`, before policy evaluation so a failed
+approval verdict does not suppress the identity proof. The ordered tuple is:
+
+```text
+[event, action, repositoryId, runId, attempt, prNumber,
+ headRepositoryId, headSha, headRef, baseRepositoryId, baseRef]
+```
+
+IDs, PR number and attempt are JSON numbers; the remaining fields are strings.
+Trusted workflow expressions read the original `github.event` and runner
+context, using `toJSON` for string escaping. The step executes only a constant
+no-op, not event data. Both markers must agree and match the intended current
+PR, repository IDs and authoritative run/attempt; only the workflow's six PR
+actions are accepted. Missing, malformed, duplicated, unsuccessful or mismatched
+markers block with `Issue refresh blocked: native original PR/event binding unavailable`.
+The protected workflow/source checks below are mandatory before any rerun; a
+matching JSON string alone is not trusted provenance.
+
+Both the listed run and authoritative GET must have a `pull_requests` array.
+An empty array is permitted only with the independent original-event proof
+above. A nonempty array must still contain exactly one matching PR number,
+head SHA/ref/repository ID and base ref/repository ID; contradictory, malformed
+or ambiguous associations block with
+`Issue refresh blocked: native run PR/event binding unavailable`.
+No ownership is inferred from shared fork/head/SHA, current PR reads, titles,
+check suites or raw logs. The attempt-specific jobs endpoint and tuple bind the
+attempt; no undocumented job attempt field or artifact download is used.
 
 The source must be an upstream ancestor of `trustedSha`. Contents/blob bindings
 must match at both revisions for `issue-policy.yml`, `issue-native-policy.mjs`
@@ -79,14 +100,20 @@ check, broader credentials, cancellation or automatic retry (`retries: 0`).
 The wrapper reports any error with `core.setFailed`; partial target success
 cannot turn aggregate failure into workflow success or roll back earlier requests.
 
-After activation, an eligible **Issue Approval Refresh Router** run can be
+An eligible **Issue Approval Refresh Router** run can be
 rerun from the Actions UI to rediscover currently affected PRs. Verify its
 original trusted revision contains the dispatcher/helper and the admitted native
 run targets each current PR. Inspect both exact native policy job results on the
 current head afterwards; a queued rerun is not completed evaluation. A router
 rerun keeps its original revision and cannot upgrade missing helpers or capability.
-No eligible original native-run PR association or token capability means stop and
-report, never broad PR Validation/CI, an older run or bootstrap-publisher fallback.
+Runs created before the trusted workflow emitted the identity marker are
+ineligible, even with a populated API association; rerunning them cannot add
+new workflow code or retroactively reconstruct original-event proof. Wait for
+a new normal covered event after the correction reaches trusted code, with
+separate authorization for any live probe. The stopped #1859 fixture is not
+reopened by this correction. No eligible original-event proof or token
+capability means stop and report, never broad PR Validation/CI, an older run
+or bootstrap-publisher fallback.
 There is no manual dispatch trigger. Newly opened PRs, late legacy completion,
 metadata races and already evaluated queue groups remain reconciliation windows;
 no fixed delay or atomic invalidation is promised. See the
@@ -104,8 +131,9 @@ Structural tests pin event/permission/trusted-call boundaries and normalized
 integrated baseline hashes without requiring Git history; they run in shallow
 checkouts or archives. They neither execute Actions nor establish live capability.
 Public SDK mocks assert exact request parameters, both PR reads, one allowed POST
-and zero other writes, including valid fork associations, rejected empty/ambiguous
-or other-PR/base associations, authoritative run drift, binding drift, missing
+and zero other writes, including marker-backed empty fork associations,
+rejected missing/ambiguous or other-PR/base associations, malformed or mismatched
+original-event tuples, legacy marker absence, authoritative run drift, binding drift, missing
 runs, checkout/source/job shape, stale policy and API errors. These tests never
 use real tokens or network. Provider identity, duplicate selection, live approval
 and revocation, queue compatibility and token capability need later rollout proof.

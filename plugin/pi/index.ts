@@ -1972,6 +1972,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     limit: optionalNumber("Max results"),
     all_projects: optionalBoolean("Search across every project; when true project is ignored"),
     match_mode: optionalString("Match mode: all (default) or any for broader recall"),
+    response_format: optionalString("Response format: compact for previews and metadata; omit for the existing full response"),
   }),
   mem_save: Type.Object({
     title: Type.String({ description: "Short, searchable title" }),
@@ -2229,6 +2230,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         limit: params.limit,
         match_mode: params.match_mode,
         all_projects: params.all_projects,
+        response_format: params.response_format,
       })}`);
     case "mem_context":
       if (!params.project) requireResolvedProject();

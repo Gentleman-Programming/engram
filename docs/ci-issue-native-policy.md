@@ -8,9 +8,9 @@ The maintainer approved the [#1802 scope amendment](https://github.com/Gentleman
 `evaluateNativeIssuePolicy(github, context, policy)` adapter on trusted main.
 PR #1843 integrated the inactive guarded rerun helper at `fc438498`.
 PR #1850 integrated #1844's inactive dispatcher on verified main at `f14fc4f3`.
-The #1835 branch prepares issue-label routing, not yet available on trusted main.
-The dispatcher prerequisite is integrated, but workflow delivery and activation
-remain pending. Opening the workflow PR cannot activate it. The existing API-created publisher is transitional. Publication success did not demonstrate approval revocation blocking in the controlled fork probe; no required-gate or queue acceptance is claimed.
+PR #1855 integrated #1835's issue-label routing at `47911e25`.
+The original-event marker correction requires delivery to trusted code and a
+new covered PR event; opening its introducing PR cannot activate that correction. The existing API-created publisher is transitional. Publication success did not demonstrate approval revocation blocking in the controlled fork probe; no required-gate or queue acceptance is claimed.
 
 ## Permission boundary
 
@@ -25,7 +25,14 @@ No fork/PR-head code, PAT, new app/service, issue/PR approval, settings changes,
 The two independent native jobs select `reference` and `approved` verdicts from
 current PR/issue metadata. All six PR actions are covered. Both check out only
 `github.workflow_sha`, without persisted credentials; the exact checkout step
-name exposes that source SHA for later router admission. No retries, dependency
+name exposes that source SHA for later router admission. Before evaluation,
+each job also emits a successful constant no-op step named `Original issue event v1`
+plus a typed JSON tuple from the original event and run/attempt context.
+The [router contract](ci-issue-refresh-router.md) defines its exact fields and
+required trusted-source validation. String fields use `toJSON` only in step
+metadata, never shell or script source. Empty API PR associations cannot replace
+this proof, and legacy runs without markers remain ineligible.
+No retries, dependency
 skipping, merge-group subscription or API-created checks are used. A failed
 verdict or metadata/target error calls `core.setFailed` in the actual job wrapper.
 
@@ -56,6 +63,6 @@ Keep legacy writers, all six required contexts, integration `15368` and native m
 
 [#1810](https://github.com/Gentleman-Programming/engram/issues/1810) retirement remains blocked until live blocking, recovery, duplicate selection and queue compatibility are observed. #1802 stays open and its acceptance criteria stay unchecked until their evidence exists.
 
-Refresh is eventual: event delivery, scheduling, API availability, metadata races and already evaluated merge groups leave documented windows. There is no fixed delay, atomic invalidation or strict no-stale-success guarantee. Discovery completes before dispatch, but per-target reruns are not transactional: an explicit later failure does not undo earlier requests. Missing eligible native-run PR association or GITHUB_TOKEN capability blocks refresh; no broader credentials or fallback is allowed.
+Refresh is eventual: event delivery, scheduling, API availability, metadata races and already evaluated merge groups leave documented windows. There is no fixed delay, atomic invalidation or strict no-stale-success guarantee. Discovery completes before dispatch, but per-target reruns are not transactional: an explicit later failure does not undo earlier requests. Missing eligible original-event identity proof or GITHUB_TOKEN capability blocks refresh; no broader credentials or fallback is allowed.
 
 T4 live evidence requires fresh probe consent; local tests and integration are not live capability, duplicate-selection or queue proof. The earlier #1828 probe allowances are exhausted. Another probe mutation or fixture cleanup requires separate authorization. See the [existing bootstrap and recovery guide](ci-issue-refresh-rollout.md) for historical publication evidence and its limitations; do not treat local mocks as live compatibility proof.

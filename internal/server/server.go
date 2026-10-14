@@ -865,6 +865,11 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
+	responseFormat := params.Get("response_format")
+	if responseFormat != "" && responseFormat != "compact" {
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid response_format %q: must be \"compact\"", responseFormat))
+		return
+	}
 	query := params.Get("q")
 	if query == "" {
 		jsonError(w, http.StatusBadRequest, "q parameter is required")
@@ -883,13 +888,32 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.Search(query, store.SearchOptions{
+	opts := store.SearchOptions{
 		Type:      params.Get("type"),
 		Project:   resolved.Project,
 		Scope:     params.Get("scope"),
 		Limit:     queryInt(r, "limit", 10),
 		MatchMode: matchMode,
-	})
+	}
+	if responseFormat == "compact" {
+		previews, searchErr := s.store.SearchPreviewsContext(r.Context(), query, opts)
+		if searchErr != nil {
+			jsonError(w, http.StatusInternalServerError, searchErr.Error())
+			return
+		}
+		relations, relationErr := s.store.SearchPreviewRelationsContext(r.Context(), previews)
+		if relationErr != nil {
+			jsonError(w, http.StatusInternalServerError, relationErr.Error())
+			return
+		}
+		summary := fmt.Sprintf("Found %d memories.", len(previews))
+		if len(previews) == 0 {
+			summary = fmt.Sprintf("No memories found for: %q", query)
+		}
+		jsonResponse(w, http.StatusOK, map[string]any{"result": summary, "results": store.CompactSearchProjection(previews, relations)})
+		return
+	}
+	results, err := s.store.Search(query, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

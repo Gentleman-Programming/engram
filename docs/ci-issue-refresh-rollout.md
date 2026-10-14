@@ -1,11 +1,12 @@
 # Roll out trusted issue-check refresh
 
-**Status: integrated bootstrap/native foundations; native router activation candidate,
-not live rollout proof.** PR #1823 integrated the bootstrap, #1838 the native
+**Status: integrated bootstrap/native foundations and issue-label router;
+original-event binding correction awaits trusted delivery and live evidence.** PR #1823 integrated the bootstrap, #1838 the native
 jobs/adapter, and #1843 the inactive guarded rerun helper. PR #1850 integrated
-#1844's inactive dispatcher on verified main at `f14fc4f3`; the #1835 workflow
-remains an activation candidate. Native issue-label
-routing is not yet available on trusted main; an introducing PR cannot activate it.
+#1844's inactive dispatcher on verified main at `f14fc4f3`; PR #1855 integrated #1835's issue-label router at `47911e25`.
+That integration did not establish live required-gate recovery. The identity
+marker correction needs trusted delivery and a new covered PR event; its
+introducing PR cannot supply a marker from untrusted candidate code.
 Keep original PR Validation unchanged. Local tests and integration do not prove
 token capability, App15368 identity, gate selection, forks or queue compatibility.
 
@@ -16,7 +17,8 @@ integrated read-only jobs and head-bound adapter; their presence is not live pro
 The earlier controlled fork probe published failures without proving required-gate
 revocation blocking. Keep this bootstrap and legacy/queue validation unchanged;
 native job definitions and local mocks do not repair or prove live gate selection.
-The selective router is an activation candidate. #1802 remains open, #1810 remains blocked,
+The selective router is integrated, but original-event admission blocked the
+stopped #1859 fork probe because its native API PR associations were empty. #1802 remains open, #1810 remains blocked,
 and fresh probe/cleanup admission is required; no new live budget is granted.
 
 ## Quick path for maintainers
@@ -27,7 +29,7 @@ and fresh probe/cleanup admission is required; no new live budget is granted.
 3. Bootstrap #1809 / PR #1823 and native #1834 / PR #1838 are integrated.
    PR #1843's helper remains inactive without the issue-event caller. PR #1850
    integrated #1844's inactive dispatcher on verified main at `f14fc4f3`.
-   The #1835 workflow still needs separate delivery and activation.
+   PR #1855 integrated #1835's workflow at `47911e25`; live acceptance is pending.
    Retain legacy issue jobs, six contexts/App15368 and the native queue.
 4. Obtain fresh probe consent and collect the evidence below under #1802 before
    #1810 writer retirement. Implementation/CI does not close live acceptance;
@@ -84,12 +86,17 @@ are authorized. Complete discovery precedes dispatch; aggregate target errors
 fail explicitly even when earlier native reruns were requested. No retries,
 older-run fallback, check publication or broad CI reruns occur in this path.
 
-After activation, rerun an eligible **Issue Approval Refresh Router** run to
+Rerun an eligible **Issue Approval Refresh Router** run to
 rediscover affected current PRs. Its original trusted revision must contain all
 helpers; every native target still needs original PR/run/source admission.
 Inspect both exact native policy jobs on each current head after completion.
-A requested rerun is not success, recovery or gate proof. Missing native PR
-association/capability blocks recovery: stop and report, never substitute the
+A requested rerun is not success, recovery or gate proof. Both native jobs must
+carry the matching typed original-event tuple defined by the router contract,
+with verified trusted source. API `pull_requests: []` is admissible only with
+that proof; contradictory or ambiguous associations still block. Pre-correction
+runs without markers cannot gain them by rerunning old code. A new covered
+PR event after trusted delivery is needed; this is not consent to mutate #1859
+or create another fixture. Missing original-event proof/capability blocks recovery: stop and report, never substitute the
 bootstrap publisher, an older run or larger credentials. A rerun does not upgrade
 workflow code; no `workflow_dispatch` entry point exists. These are recovery
 instructions, not authorization to mutate another probe or the retained fixture.

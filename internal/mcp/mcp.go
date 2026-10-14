@@ -1336,21 +1336,18 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			return respondWithProject(detRes, fmt.Sprintf("No memories found for: %q", query), nil), nil
 		}
 
-		// Batch-load relations for all results (REQ-002). Avoids N+1.
-		syncIDs := make([]string, 0, len(results))
-		for _, r := range results {
-			if r.SyncID != "" {
-				syncIDs = append(syncIDs, r.SyncID)
-			}
+		// Batch-load optional annotations; cancellation must not become success.
+		relationsMap, relErr := s.SearchPreviewRelationsContext(ctx, results)
+		if relErr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", relErr)), nil
 		}
-		relationsMap := map[string]store.ObservationRelations{}
-		if len(syncIDs) > 0 {
-			if rm, relErr := s.GetRelationsForObservationsContext(ctx, syncIDs); relErr == nil {
-				relationsMap = rm
-			} else if errors.Is(relErr, context.Canceled) || errors.Is(relErr, context.DeadlineExceeded) {
-				return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", relErr)), nil
+
+		if compact {
+			resultText := fmt.Sprintf("Found %d memories.", len(results))
+			if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
+				resultText += nudge
 			}
-			// Errors from relation loading are swallowed — search must not fail.
+			return respondWithProject(detRes, resultText, map[string]any{"results": store.CompactSearchProjection(results, relationsMap)}), nil
 		}
 
 		var b strings.Builder
@@ -1397,10 +1394,6 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
 			}
-			if compact {
-				entry["preview"] = r.Preview
-				entry["truncated"] = r.Truncated
-			}
 			structuredResults = append(structuredResults, entry)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
@@ -1415,9 +1408,6 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// observation's title; "(deleted)" when the observation is missing or soft-deleted.
 			// Prefixes (supersedes:, superseded_by:, conflicts:) are stable across Phase 3.
 			if rels, ok := relationsMap[r.SyncID]; ok {
-				if compact {
-					entry["relations"] = map[string]any{"as_source": rels.AsSource, "as_target": rels.AsTarget}
-				}
 				if !compact {
 					for _, rel := range rels.AsSource {
 						switch {
@@ -1462,9 +1452,6 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		resultText := b.String()
-		if compact {
-			resultText = fmt.Sprintf("Found %d memories.", len(results))
-		}
 		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
 			resultText += nudge
 		}

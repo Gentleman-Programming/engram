@@ -386,9 +386,13 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Search
 
-- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N`
-  - `200` with a JSON array of search results
-  - No-result example: `GET /search?q=definitely-no-hit` returns `200` with `[]` (never `null`)
+- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N&match_mode=all&response_format=compact`
+  - With `response_format` omitted or empty: `200` with the existing JSON array of full search results.
+  - No-result example: `GET /search?q=definitely-no-hit` returns `200` with `[]` (never `null`).
+  - Opt in with `response_format=compact`: `200` with `{"result":"Found N memories.","results":[...]}`. Each entry has `id`, `sync_id`, `title`, `type`, `state`, `scope`, `pinned`, `preview`, and `truncated`; `project`, nonempty `topic_key`, and `review_after` are conditional. Optional `relations` contains `as_source` and `as_target` annotations, matching MCP compact search semantics.
+  - Compact previews are bounded to 300 Unicode characters and do not include full `content`. Fetch `GET /observations/{id}` to read the full observation. HTTP adds neither an outer project envelope nor a session nudge.
+  - Empty compact searches return `{"result":"No memories found for: \"QUERY\"","results":[]}`. Other nonempty `response_format` values return `400` before project resolution or database work.
+  - Existing project/scope, `all_projects=true`, type, limit, and `match_mode=all|any` selection rules are unchanged; `project` and `all_projects=true` cannot be combined.
 
 ### Timeline
 
