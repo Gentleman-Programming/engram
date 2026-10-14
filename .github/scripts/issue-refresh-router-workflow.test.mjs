@@ -47,12 +47,14 @@ test('trusted checkout and static dispatcher call use exact existing pins', () =
 
 test('workflow baselines retain readiness guards and pin original-event identity emission', () => {
   // Integrated fc438498 legacy baselines except the approved readiness guards;
-  // native adds only the original-event steps. Normalize to LF for Windows and archives.
+  // native adds only the original-event steps. CI includes the independently/native-approved
+  // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b.
+  // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '6c7825060b18790183f584d659778b3649516b7481de934f0b29c02ee3d784a1',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '1a3091c88771ecc5b51059aad6987d31c97177b48f4522bfdb8963d0c4bc952c',
-    '.github/workflows/ci.yml': '9edcc7afba74a6b1554ddc29836d07060ff788e92cd545d0efba2074db0ec8f2',
+    '.github/workflows/ci.yml': 'fb9737560203dc812f750b757fc5ccc84ec297fa1db92a9a4ab547b2b104be15',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
