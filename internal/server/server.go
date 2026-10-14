@@ -492,67 +492,42 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /compatibility", requireAuth(s.handleCompatibility))
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	// Pi runtime declarations and these route bindings share one Go authority.
+	s.registerRuntimeRoutes()
 
 	// Sessions
-	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
-	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
 	s.mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
-	s.mux.HandleFunc("POST /runtime-sessions/resolve", s.handleRuntimeSession)
-	s.mux.HandleFunc("POST /runtime-sessions/end", s.handleRuntimeSession)
 	s.mux.HandleFunc("DELETE /sessions/{id}", requireAuth(s.handleDeleteSession))
 
 	// Observations
-	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
-	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
-	// Committed-result lookup for replay-safe observation saves.
-	s.mux.HandleFunc("GET /observations/save-result", s.handleGetObservationSaveResult)
-	// Pin state is local-only metadata and remains open with ENGRAM_HTTP_TOKEN like other non-destructive local HTTP writes.
-	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
-	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
-	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
-	s.mux.HandleFunc("DELETE /observations/{id}", requireAuth(s.handleDeleteObservation))
+	// Runtime registry preserves save-result, pin, update and delete auth policy.
 	// Topic-key suggestion is read-only and remains open under the local HTTP policy.
 	s.mux.HandleFunc("POST /topic-keys/suggest", s.handleSuggestTopicKey)
 
 	// Search
-	s.mux.HandleFunc("GET /search", s.handleSearch)
 
 	// Timeline
-	s.mux.HandleFunc("GET /timeline", s.handleTimeline)
-	s.mux.HandleFunc("GET /observations/{id}", s.handleGetObservation)
 
 	// Lifecycle review
-	s.mux.HandleFunc("GET /review", s.handleReviewList)
-	s.mux.HandleFunc("POST /review/mark_reviewed", s.handleReviewMarkReviewed)
 
 	// Prompts
-	s.mux.HandleFunc("POST /prompts", s.handleAddPrompt)
-	s.mux.HandleFunc("POST /prompts/capture-decision", s.handlePromptCaptureDecision)
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
 	s.mux.HandleFunc("GET /prompts/search", s.handleSearchPrompts)
 	s.mux.HandleFunc("DELETE /prompts/{id}", requireAuth(s.handleDeletePrompt))
 
 	// Context
-	s.mux.HandleFunc("GET /context", s.handleContext)
-	s.mux.HandleFunc("GET /context/compaction", s.handleCompactionContext)
 
 	// Export / Import — sensitive: full data read and bulk mutation.
 	s.mux.HandleFunc("GET /export", requireAuth(s.handleExport))
 	s.mux.HandleFunc("POST /import", requireAuth(s.handleImport))
 
 	// Stats / diagnostics
-	s.mux.HandleFunc("GET /stats", s.handleStats)
-	// Project listing is read-only and mirrors the MCP mem_list_projects tool and
-	// `engram projects list`, all backed by the same ListProjectsWithStats store query.
-	s.mux.HandleFunc("GET /projects", s.handleListProjects)
-	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
-	s.mux.HandleFunc("POST /doctor/caller-binding", s.handleCallerBinding)
+	// Runtime registry binds stats, project listing and diagnostics unchanged.
 
 	// Project detection / ownership rescue
-	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
 	s.mux.HandleFunc("POST /projects/rescue-ownership", requireConfiguredAuth(s.handleRescueProjectOwnership))
 	// Deprecated compatibility alias for older clients.
 	s.mux.HandleFunc("POST /projects/migrate", requireConfiguredAuth(s.handleRescueProjectOwnership))
@@ -565,8 +540,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /conflicts/stats", s.handleConflictsStats)
 	s.mux.HandleFunc("GET /conflicts/deferred", s.handleListDeferred)
 	s.mux.HandleFunc("POST /conflicts/scan", s.handleScanConflicts)
-	s.mux.HandleFunc("POST /conflicts/judge", s.handleJudgeConflict)
-	s.mux.HandleFunc("POST /conflicts/compare", s.handleCompareMemories)
 	s.mux.HandleFunc("POST /conflicts/deferred/replay", s.handleReplayDeferred)
 	s.mux.HandleFunc("GET /conflicts/{relation_id}", s.handleGetConflict)
 }
