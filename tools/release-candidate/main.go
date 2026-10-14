@@ -25,10 +25,14 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -core-ref  Required full core tag ref with strict SemVer.
 -pi-ref    Required full Pi tag ref with the exact same version.
 -root      Candidate metadata directory (default: current directory).
+-pi-tarball Optional local .tgz to validate against candidate package contents.
 -h, --help Show this help.
 
 Reads plugin/pi/package.json and internal/setup/setup.go without writes.
 Emits one JSON object containing version and the live Go-owned contract.
+With -pi-tarball emits version, validation=local-package-only, and file count.
+Only literal package file/directory allowlists are supported, up to 4096 files
+and 64 MiB. No archive extraction; links and unexpected/missing content reject.
 Export/validator success is not Pi parity or release approval.
 No publication, version selection, or bypass flags are supported.
 `
@@ -49,6 +53,7 @@ func run(args []string, output io.Writer) error {
 	coreRef := flags.String("core-ref", "", "full core tag ref")
 	piRef := flags.String("pi-ref", "", "full Pi tag ref")
 	root := flags.String("root", ".", "candidate metadata directory")
+	tarball := flags.String("pi-tarball", "", "optional local Pi package tarball")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, err = io.WriteString(output, helpText)
@@ -74,6 +79,28 @@ func run(args []string, output io.Writer) error {
 		return errors.New("core and Pi versions must match exactly")
 	}
 	if err := validateMetadata(*root, version); err != nil {
+		return err
+	}
+	tarballProvided := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "pi-tarball" {
+			tarballProvided = true
+		}
+	})
+	if tarballProvided {
+		count, err := validatePackage(*root, version, *tarball)
+		if err != nil {
+			return err
+		}
+		result, err := json.Marshal(struct {
+			Version    string `json:"version"`
+			Validation string `json:"validation"`
+			Files      int    `json:"files"`
+		}{version, "local-package-only", count})
+		if err != nil {
+			return err
+		}
+		_, err = output.Write(append(result, '\n'))
 		return err
 	}
 	contract, err := mcp.AgentContractJSON()

@@ -24,6 +24,10 @@ test("package advertises startup policy and session-owned wire contracts v1", ()
 	assert.deepEqual(pkg.engram, { startupPolicy: 1, sessionOwned: 1 });
 });
 
+test("package test runner serializes files without dropping any public tests", () => {
+	assert.equal(pkg.scripts.test, "node --test --test-concurrency=1 test/*.test.mjs");
+});
+
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
 test("next Pi package release is 0.4.2", () => {
