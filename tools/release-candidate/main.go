@@ -41,7 +41,11 @@ var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		message := err.Error()
+		if errors.Is(err, errPackageRejected) {
+			message = "Pi package tarball validation failed"
+		}
+		fmt.Fprintln(os.Stderr, message)
 		os.Exit(1)
 	}
 }

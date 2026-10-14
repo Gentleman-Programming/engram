@@ -20,7 +20,7 @@ import (
 const maxPackageBytes int64 = 64 << 20
 const maxPackageFiles = 4096
 
-var packageRejected = errors.New("Pi package tarball validation failed")
+var errPackageRejected = errors.New("pi package tarball validation failed")
 
 var packageRuntimeFiles = []string{
 	"package.json", "README.md", "cli.js", "index.ts", "compaction-recovery.js",
@@ -40,45 +40,45 @@ func sourcePackage(root string) (map[string]packageFile, any, error) {
 	base := filepath.Join(root, "plugin", "pi")
 	data, err := os.ReadFile(filepath.Join(base, "package.json"))
 	if err != nil {
-		return nil, nil, packageRejected
+		return nil, nil, errPackageRejected
 	}
 	var manifest struct {
 		Files []string `json:"files"`
 	}
 	var document any
 	if json.Unmarshal(data, &manifest) != nil || json.Unmarshal(data, &document) != nil || len(manifest.Files) == 0 || len(manifest.Files) > maxPackageFiles {
-		return nil, nil, packageRejected
+		return nil, nil, errPackageRejected
 	}
 	expected := map[string]packageFile{}
 	var total int64
 	add := func(filename string, info os.FileInfo) error {
 		if !info.Mode().IsRegular() || info.Size() > maxPackageBytes || len(expected) >= maxPackageFiles {
-			return packageRejected
+			return errPackageRejected
 		}
 		rel, err := filepath.Rel(base, filename)
 		if err != nil {
-			return packageRejected
+			return errPackageRejected
 		}
 		name := filepath.ToSlash(rel)
 		if !packagePath(name) {
-			return packageRejected
+			return errPackageRejected
 		}
 		if _, exists := expected[name]; exists {
 			return nil
 		}
 		total += info.Size()
 		if total > maxPackageBytes {
-			return packageRejected
+			return errPackageRejected
 		}
 		file, err := os.Open(filename)
 		if err != nil {
-			return packageRejected
+			return errPackageRejected
 		}
 		hash := sha256.New()
 		n, copyErr := io.Copy(hash, io.LimitReader(file, maxPackageBytes+1))
 		closeErr := file.Close()
 		if copyErr != nil || closeErr != nil || n != info.Size() {
-			return packageRejected
+			return errPackageRejected
 		}
 		var sum [32]byte
 		copy(sum[:], hash.Sum(nil))
@@ -88,7 +88,7 @@ func sourcePackage(root string) (map[string]packageFile, any, error) {
 	for _, declared := range manifest.Files {
 		name := strings.TrimSuffix(declared, "/")
 		if !packagePath(name) {
-			return nil, nil, packageRejected
+			return nil, nil, errPackageRejected
 		}
 		// Refuse symlinks in every component, including explicit nested file entries.
 		current := base
@@ -96,32 +96,32 @@ func sourcePackage(root string) (map[string]packageFile, any, error) {
 			current = filepath.Join(current, part)
 			info, err := os.Lstat(current)
 			if err != nil || info.Mode()&os.ModeSymlink != 0 {
-				return nil, nil, packageRejected
+				return nil, nil, errPackageRejected
 			}
 		}
 		err := filepath.WalkDir(current, func(filename string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				return packageRejected
+				return errPackageRejected
 			}
 			if entry.Type()&os.ModeSymlink != 0 {
-				return packageRejected
+				return errPackageRejected
 			}
 			if entry.IsDir() {
 				return nil
 			}
 			info, err := entry.Info()
 			if err != nil {
-				return packageRejected
+				return errPackageRejected
 			}
 			return add(filename, info)
 		})
 		if err != nil {
-			return nil, nil, packageRejected
+			return nil, nil, errPackageRejected
 		}
 	}
 	for _, required := range packageRuntimeFiles {
 		if _, ok := expected[required]; !ok {
-			return nil, nil, packageRejected
+			return nil, nil, errPackageRejected
 		}
 	}
 	return expected, document, nil
@@ -152,22 +152,24 @@ func (r *packageTarFraming) Read(p []byte) (int, error) {
 func validatePackage(root, version, filename string) (int, error) {
 	expected, manifest, err := sourcePackage(root)
 	if err != nil {
-		return 0, packageRejected
+		return 0, errPackageRejected
 	}
 	info, err := os.Lstat(filename)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageBytes {
-		return 0, packageRejected
+		return 0, errPackageRejected
 	}
 	file, err := os.Open(filename)
 	if err != nil {
-		return 0, packageRejected
+		return 0, errPackageRejected
 	}
-	defer file.Close()
+	// This descriptor is read-only; validation checks all content reads below.
+	defer func() { _ = file.Close() }()
 	gz, err := gzip.NewReader(file)
 	if err != nil {
-		return 0, packageRejected
+		return 0, errPackageRejected
 	}
-	defer gz.Close()
+	// Close does not validate gzip integrity; exhausting the reader below does.
+	defer func() { _ = gz.Close() }()
 	bounded := &io.LimitedReader{R: gz, N: maxPackageBytes + 1}
 	framing := &packageTarFraming{Reader: bounded}
 	reader := tar.NewReader(framing)
@@ -179,32 +181,33 @@ func validatePackage(root, version, filename string) (int, error) {
 			// Next may consume the final file's zero padding first, but that is
 			// shorter than one block. Require both 512-byte zero end blocks.
 			if framing.bytes < 1024 || framing.nonzero {
-				return 0, packageRejected
+				return 0, errPackageRejected
 			}
 			break
 		}
 		if err != nil {
-			return 0, packageRejected
+			return 0, errPackageRejected
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
-			return 0, packageRejected
+		// archive/tar normalizes the legacy NUL flag to TypeReg.
+		if header.Typeflag != tar.TypeReg {
+			return 0, errPackageRejected
 		}
 		if !strings.HasPrefix(header.Name, "package/") {
-			return 0, packageRejected
+			return 0, errPackageRejected
 		}
 		name := strings.TrimPrefix(header.Name, "package/")
 		if !packagePath(name) || seen[name] {
-			return 0, packageRejected
+			return 0, errPackageRejected
 		}
 		source, ok := expected[name]
 		if !ok || header.Size < 0 || header.Size > maxPackageBytes {
-			return 0, packageRejected
+			return 0, errPackageRejected
 		}
 		if name == "package.json" {
 			// npm may normalize JSON formatting, but not the candidate's metadata.
 			data, err := io.ReadAll(io.LimitReader(reader, maxPackageBytes+1))
 			if err != nil || int64(len(data)) > maxPackageBytes {
-				return 0, packageRejected
+				return 0, errPackageRejected
 			}
 			var packed struct {
 				Name    string `json:"name"`
@@ -212,16 +215,16 @@ func validatePackage(root, version, filename string) (int, error) {
 			}
 			var document any
 			if json.Unmarshal(data, &packed) != nil || packed.Name != "gentle-engram" || packed.Version != version || json.Unmarshal(data, &document) != nil || !reflect.DeepEqual(document, manifest) {
-				return 0, packageRejected
+				return 0, errPackageRejected
 			}
 		} else {
 			if header.Size != source.size {
-				return 0, packageRejected
+				return 0, errPackageRejected
 			}
 			hash := sha256.New()
 			n, err := io.Copy(hash, reader)
 			if err != nil || n != source.size || !bytes.Equal(hash.Sum(nil), source.sum[:]) {
-				return 0, packageRejected
+				return 0, errPackageRejected
 			}
 		}
 		seen[name] = true
@@ -233,18 +236,18 @@ func validatePackage(root, version, filename string) (int, error) {
 		n, err := bounded.Read(tail)
 		for _, b := range tail[:n] {
 			if b != 0 {
-				return 0, packageRejected
+				return 0, errPackageRejected
 			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return 0, packageRejected
+			return 0, errPackageRejected
 		}
 	}
 	if bounded.N == 0 || len(seen) != len(expected) {
-		return 0, packageRejected
+		return 0, errPackageRejected
 	}
 	return len(seen), nil
 }

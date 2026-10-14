@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -64,7 +65,7 @@ func packageArchive(t *testing.T, entries []packedEntry) []byte {
 }
 
 func TestPiPackageTarballCLI(t *testing.T) {
-	cases := []string{"valid", "empty tarball argument", "wrong name", "wrong version", "changed manifest", "missing asset", "changed asset", "extra file", "duplicate", "traversal", "absolute", "symlink", "hardlink", "malformed gzip", "truncated gzip", "truncated tar", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers", "gzip checksum", "trailing data", "source changed", "missing tarball", "unsupported allowlist", "missing declared source", "missing runtime declaration"}
+	cases := []string{"valid", "legacy regular file type", "empty tarball argument", "wrong name", "wrong version", "changed manifest", "missing asset", "changed asset", "extra file", "duplicate", "traversal", "absolute", "symlink", "hardlink", "malformed gzip", "truncated gzip", "truncated tar", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers", "gzip checksum", "trailing data", "source changed", "missing tarball", "unsupported allowlist", "missing declared source", "missing runtime declaration"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root, entries := packageFixture(t)
@@ -124,7 +125,7 @@ func TestPiPackageTarballCLI(t *testing.T) {
 				_, _ = gz.Write([]byte("short tar"))
 				_ = gz.Close()
 				archive = b.Bytes()
-			case "missing tar end markers", "one tar end block", "zero-filled file without tar end markers":
+			case "legacy regular file type", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers":
 				gz, err := gzip.NewReader(bytes.NewReader(archive))
 				if err != nil {
 					t.Fatal(err)
@@ -136,13 +137,25 @@ func TestPiPackageTarballCLI(t *testing.T) {
 				if err := gz.Close(); err != nil {
 					t.Fatal(err)
 				}
-				missing := 1024
-				if name == "one tar end block" {
-					missing = 512
+				if name == "legacy regular file type" {
+					// Exercise the actual legacy NUL flag, not Writer's normalized output.
+					data[156] = 0
+					copy(data[148:156], "        ")
+					checksum := 0
+					for _, b := range data[:512] {
+						checksum += int(b)
+					}
+					copy(data[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+				} else {
+					missing := 1024
+					if name == "one tar end block" {
+						missing = 512
+					}
+					data = data[:len(data)-missing]
 				}
 				var b bytes.Buffer
 				writer := gzip.NewWriter(&b)
-				if _, err := writer.Write(data[:len(data)-missing]); err != nil {
+				if _, err := writer.Write(data); err != nil {
 					t.Fatal(err)
 				}
 				if err := writer.Close(); err != nil {
@@ -165,7 +178,7 @@ func TestPiPackageTarballCLI(t *testing.T) {
 			}
 			args := append(candidateRefs("1.2.3"), "-pi-tarball", tarball)
 			out, diagnostic, code := candidateRun(t, root, args...)
-			if name == "valid" {
+			if name == "valid" || name == "legacy regular file type" {
 				if code != 0 || diagnostic != "" {
 					t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, diagnostic)
 				}
