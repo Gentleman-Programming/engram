@@ -337,6 +337,42 @@ Standalone MCP client -> engram mcp -> SQLite (deliberate, separate setup)
 
 Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, lifecycle review, conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_review`, `mem_judge`, and `mem_compare`, cross-project discovery through `mem_list_projects`, and local pin curation through `mem_pin`/`mem_unpin`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP is not registered by Pi setup. An existing Pi MCP entry remains active until you manually remove it and restart/reload Pi; native-only agent writes are not guaranteed while it remains.
 
+## Observation history
+
+`mem_get_observation` accepts optional `include_history` (boolean) and
+`history_cursor` (number), forwarding supplied values to HTTP
+`GET /observations/{id}`. Omitting both preserves the bare ID request and existing
+response. Explicit `false` and `0` are forwarded; a cursor alone is forwarded but
+Go ignores it unless `include_history` is `true`. ID lookup and project ownership
+semantics are unchanged.
+
+With a supporting core server, `include_history: true` returns at most 50 prior
+title/content snapshots in `history`, oldest-first within each page, and a truthful
+total `version_count`. Empty history is an empty array. When older pages remain,
+the response includes `history_truncated`, `history_from_version`, and
+`history_cursor`. Submit that emitted cursor with `include_history: true` to fetch
+the older page; terminal pages omit those continuation fields. Omit the cursor or
+send `0` for the most recent page.
+
+Example tool arguments for the first page:
+
+```json
+{"id":42,"include_history":true}
+```
+
+If that response emits `history_cursor: 26`, request the next page with:
+
+```json
+{"id":42,"include_history":true,"history_cursor":26}
+```
+
+Go owns pagination and non-negative integer cursor validation. Pi passes server
+payloads and errors through unchanged and never automatically fetches another
+history page. Updating only the Pi package does not add HTTP history support to
+an older running core; upgrade and restart that server as well. This projection
+is the focused #1857 slice for #1347/#1348 parity checks and #1349's semantic
+release gate, not evidence that those broader gates or a published release pass.
+
 ## Compact memory tool rendering
 
 `mem_search` accepts optional `response_format: "compact"` and forwards it to HTTP `GET /search`. Engram core validates the format and returns `{ result, results }`: a summary plus previews and metadata instead of full memory content. Each result retains `id`, `sync_id`, `title`, `type`, `state`, `scope`, `pinned`, `preview`, and `truncated`, with optional `project`, `topic_key`, `review_after`, and structured `relations.as_source`/`relations.as_target` arrays. Pi passes this payload through unchanged, including empty results and server validation errors. Omitting `response_format` preserves the existing query and response behavior; project, scope, `all_projects`, `match_mode`, and limit semantics are unchanged. Use `mem_get_observation` to read a relevant memory in full before deciding topic identity. This response option affects model-visible data, independently of the collapsed tool chrome below, and requires a core server supporting compact HTTP search.

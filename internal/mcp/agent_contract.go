@@ -165,9 +165,9 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 	},
 	"mem_get_observation": {
 		Effect: "read", Risk: "read-only", ProjectPolicy: "ID-based lookup is not project-filtered; MCP resolves response context and can fall back to the stored owner on ambiguous cwd", SessionPolicy: "id is an observation ID, not a session ID",
-		Guarantees:    []string{"missing observations produce an error", "MCP optional history is bounded and paginated with a validated non-negative integer history_cursor"},
+		Guarantees:    []string{"missing observations produce an error", "MCP and HTTP/Pi optional history is bounded to 50 prior snapshots per page, oldest first, with a truthful total version_count and continuation metadata only when older versions remain; history_cursor is a validated non-negative integer and is ignored unless include_history=true"},
 		ErrorEffects:  "no observation mutation",
-		PiDifferences: []string{"Pi omits project, include_history, and history_cursor inputs; HTTP get returns only the observation"},
+		PiDifferences: []string{"Pi omits the MCP project input; HTTP/Pi returns current observation fields while MCP renders current content in its response context"},
 	},
 	"mem_current_project": {
 		Effect: "detect", Risk: "read-only", ProjectPolicy: "process override or Go detection of directory/cwd; return detection metadata instead of inventing a successful owner", SessionPolicy: "no session attribution required",

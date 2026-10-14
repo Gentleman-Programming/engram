@@ -360,7 +360,12 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
   - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
-- `GET /observations/{id}` — Get single observation by ID
+- `GET /observations/{id}` — Get single observation by ID, without project filtering.
+  - Omitted or false `include_history` preserves the existing observation response and ignores `history_cursor`, even if the cursor is invalid.
+  - `?include_history=true` returns the same current observation fields plus `history` (always an array of `{version,title,content,created_at}`) and truthful total `version_count`. History is bounded to 50 prior snapshots per page, latest page first and oldest-first within each page. Empty history returns `history:[]` and `version_count:0`.
+  - When older snapshots remain, `history_truncated:true`, `history_from_version` (oldest shown version), and `history_cursor` are emitted. Submit the emitted cursor with `include_history=true` to retrieve strictly older versions; all three continuation keys are absent on terminal pages.
+  - Example: `GET /observations/42?include_history=true` with 123 prior snapshots shows versions 74–123 and cursor 74. `GET /observations/42?include_history=true&history_cursor=74` shows versions 24–73 and cursor 24; cursor 24 then returns versions 1–23 without continuation keys.
+  - Cursors follow MCP JSON-number semantics: non-negative integers represented as float64 strictly below 2^63; integral decimal/scientific encodings such as `74.0` and `7.4e1` are accepted. An explicitly empty, nonnumeric, fractional, negative, or out-of-range cursor returns `400` with `error:"history_cursor must be a non-negative integer"`. ID validation (`400`) and missing-observation lookup (`404`) precede cursor validation; rejected reads do not mutate observations or history.
 - `PATCH /observations/{id}?expected_project=X` — Update fields. Body: `{title?, content?, find?, replace?, type?, project?, scope?, topic_key?}`
   - `find` and `replace` must be supplied together and cannot be combined with `content`. They perform a literal, case-sensitive, global replacement inside the existing observation; empty `find`, no match, or normalized-identical output leaves content unchanged.
   - Each replacement input and the transformed result are bounded by the configured observation content limit. `400` is returned for invalid pairs, content conflicts, bounds failures, or title/content validation failures; missing observations return `404`.
@@ -1446,7 +1451,17 @@ recent 50 (oldest first) and adds `history_truncated` (true),
 the optional `history_cursor` argument of a follow-up
 `mem_get_observation(id, include_history: true)` call; the older page is emitted
 without truncation fields once version 1 is reached. Omitting the argument keeps
-the input and output identical to prior releases.
+the input and output identical to prior releases. `history_cursor` is ignored when
+`include_history` is omitted or false.
+
+Pi declares and forwards the same history inputs to HTTP; pagination and cursor
+validation remain Go-owned. HTTP/Pi returns current observation fields, whereas
+MCP renders current content inside its response envelope. The history snapshots,
+total count, and continuation metadata share semantics, not byte-identical
+transport envelopes. This focused #1857 capability supports the #1347/#1348
+parity checks required by #1349; it does not establish release-gate completion,
+change default tool inventory, or add runtime negotiation (#1350). Existing
+implicit-personal search/context differences remain unchanged.
 
 ### mem_session_summary
 

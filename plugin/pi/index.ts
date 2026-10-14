@@ -2030,6 +2030,8 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_get_observation: Type.Object({
     id: Type.Number({ description: "Observation ID to retrieve. Read in full before deciding identity or updating." }),
+    include_history: optionalBoolean("Include Go-owned paginated history: at most 50 prior snapshots, oldest first within each page, with total version_count and continuation metadata when older pages remain"),
+    history_cursor: optionalNumber("Non-negative integer cursor returned as history_cursor by a previous history page; omit or use 0 for the most recent page. Go validates it only when include_history is true"),
   }),
   mem_session_start: Type.Object({
     id: Type.String({ description: "Unique session identifier" }),
@@ -2246,7 +2248,10 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (!requestedProject) requireResolvedProject();
       return fetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: activeProject })}`);
     case "mem_get_observation":
-      return fetch(`/observations/${encodeURIComponent(String(params.id))}`);
+      return fetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({
+        include_history: params.include_history,
+        history_cursor: params.history_cursor,
+      })}`);
     case "mem_save": {
       if (!requestedProject) requireResolvedProject();
       if (writeState) assertOpen(writeState, writeEpoch!);

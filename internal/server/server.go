@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -939,7 +940,48 @@ func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, obs)
+	if r.URL.Query().Get("include_history") != "true" {
+		jsonResponse(w, http.StatusOK, obs)
+		return
+	}
+
+	var cursor int64
+	if values, present := r.URL.Query()["history_cursor"]; present {
+		var numeric float64
+		// Decode a JSON number just as MCP does, including integral scientific
+		// notation and its float64 boundary strictly below 2^63.
+		if len(values) == 0 || json.Unmarshal([]byte(values[0]), &numeric) != nil || strings.TrimSpace(values[0]) == "null" || numeric < 0 || math.Trunc(numeric) != numeric || numeric >= 0x1p63 {
+			jsonError(w, http.StatusBadRequest, "history_cursor must be a non-negative integer")
+			return
+		}
+		cursor = int64(numeric)
+	}
+	page, err := s.store.GetObservationVersionPage(id, store.DefaultObservationVersionPageSize, cursor)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to read observation history: %v", err))
+		return
+	}
+	history := make([]map[string]any, 0, len(page.Versions))
+	for _, version := range page.Versions {
+		history = append(history, map[string]any{
+			"version": version.Version, "title": version.Title,
+			"content": version.Content, "created_at": version.CreatedAt,
+		})
+	}
+	response := struct {
+		*store.Observation
+		History            []map[string]any `json:"history"`
+		VersionCount       int              `json:"version_count"`
+		HistoryTruncated   bool             `json:"history_truncated,omitempty"`
+		HistoryFromVersion int              `json:"history_from_version,omitempty"`
+		HistoryCursor      int64            `json:"history_cursor,omitempty"`
+	}{Observation: obs, History: history, VersionCount: page.Total}
+	if page.HasMore {
+		response.HistoryTruncated = true
+		response.HistoryFromVersion = page.Versions[0].Version
+		response.HistoryCursor = page.NextCursor
+	}
+	jsonResponse(w, http.StatusOK, response)
 }
 
 func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request) {

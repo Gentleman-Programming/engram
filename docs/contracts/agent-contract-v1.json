@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "ac4628922da29ccde963d5092d4e646d867fb36ab03e3c968fe490820552d1ec",
+  "digest": "d1c5a3427698f9865ca5947148410a1109f97f2360d425f7d8fc0c69db165181",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -353,10 +353,10 @@
         "error_effects": "no observation mutation",
         "guarantees": [
           "missing observations produce an error",
-          "MCP optional history is bounded and paginated with a validated non-negative integer history_cursor"
+          "MCP and HTTP/Pi optional history is bounded to 50 prior snapshots per page, oldest first, with a truthful total version_count and continuation metadata only when older versions remain; history_cursor is a validated non-negative integer and is ignored unless include_history=true"
         ],
         "pi_differences": [
-          "Pi omits project, include_history, and history_cursor inputs; HTTP get returns only the observation"
+          "Pi omits the MCP project input; HTTP/Pi returns current observation fields while MCP renders current content in its response context"
         ],
         "project_policy": "ID-based lookup is not project-filtered; MCP resolves response context and can fall back to the stored owner on ambiguous cwd",
         "risk": "read-only",
