@@ -30,6 +30,29 @@ function assertGuardedPublication(source) {
 	assert.equal((source.match(/^        run: npm publish\b/gm) ?? []).length, 1, "there must be no alternate npm publish step");
 }
 
+const ciWorkflow = readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+
+for (const [label, source, jobName] of [
+	["CI", ciWorkflow, "plugin-tests"],
+	["publish preflight", workflow, "publish"],
+]) {
+	test(`${label} prepares locked Go prerequisites before the offline Pi suite`, () => {
+		const job = source.match(new RegExp(`^  ${jobName}:\\n[\\s\\S]*?(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"));
+		assert.ok(job, `${jobName} must exist`);
+		const setup = namedStep("Set up Go for Pi checks", job[0]);
+		const build = namedStep("Build release candidate checker", job[0]);
+		const tests = namedStep("Run Pi plugin tests", job[0]);
+		assert.match(setup.text, /^        uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6$/m);
+		assert.match(setup.text, /^          go-version-file: go\.mod$/m);
+		assert.match(build.text, /^        run: go build -mod=readonly -o "\$RUNNER_TEMP\/engram-release-candidate" \.\/tools\/release-candidate$/m);
+		assert.doesNotMatch(build.text, /^        working-directory:/m, "build must use the module root");
+		assert.ok(setup.end <= build.index && build.end <= tests.index, "Go setup and cache warmup must precede the offline suite");
+		for (const step of [setup, build]) {
+			assert.doesNotMatch(step.text, /^        (?:if|continue-on-error)\s*:/m, "prerequisites must fail closed on every test route");
+		}
+	});
+}
+
 test("both event routes verify the full ref before any npm publication", () => {
 	assertGuardedPublication(workflow);
 });

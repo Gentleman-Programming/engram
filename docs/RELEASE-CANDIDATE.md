@@ -55,6 +55,15 @@ or tag writes, real `node_modules` changes, or source metadata changes occur.
 Missing tools, subprocess failures, malformed exports and capture/cleanup errors
 reject the candidate without forwarding raw private runtime diagnostics.
 
+The Pi test suite also invokes this live Go exporter. CI and the existing Pi
+publish preflight therefore provision Go from `go.mod` and build the helper with
+`-mod=readonly` before `npm test`, preparing its locked modules/build cache for
+the offline checks. This prerequisite build does not run the checker or approve
+a candidate. The publish workflow's triggers, permissions, full-ref guard and
+publish command remain unchanged; tests still immediately precede publication.
+Local tests require an appropriate Go toolchain and already prepared module
+cache; a clean Node-only environment is insufficient.
+
 The original full release gate is **deferred, not implemented or verified**:
 genuine semantic evidence, JSON-schema equivalence, mandatory Go/Pi suite
 orchestration, local npm pack and tarball metadata/content verification remain

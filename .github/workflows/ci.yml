@@ -193,6 +193,14 @@ jobs:
       # No install step: test/plugin-sandbox.mjs copies the plugin into a temp
       # directory with its own stubbed node_modules, so the suite runs from a
       # clean checkout and never writes into plugin/pi/node_modules.
+      - name: Set up Go for Pi checks
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build release candidate checker
+        run: go build -mod=readonly -o "$RUNNER_TEMP/engram-release-candidate" ./tools/release-candidate
+
       - name: Run Pi plugin tests
         working-directory: plugin/pi
         run: npm test
