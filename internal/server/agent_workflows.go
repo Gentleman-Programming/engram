@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -11,17 +12,29 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
-// decodeWorkflow accepts exactly one JSON object; no trailing write instructions.
+// Workflow requests are bounded independently of the Store's content policy.
+const workflowBodyLimit = 1 << 20
+
+// decodeWorkflow accepts exactly one bounded JSON object; no trailing write instructions.
 func decodeWorkflow(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, workflowBodyLimit)
+	refuse := func(err error, message string) {
+		var oversized *http.MaxBytesError
+		if errors.As(err, &oversized) {
+			jsonErrorWithFields(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body exceeds %d-byte limit", workflowBodyLimit), map[string]any{"code": "request_too_large"})
+			return
+		}
+		jsonErrorWithFields(w, http.StatusBadRequest, message, map[string]any{"code": "invalid_arguments"})
+	}
 	var args map[string]any
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&args); err != nil || args == nil {
-		jsonErrorWithFields(w, 400, "body must be a JSON object", map[string]any{"code": "invalid_arguments"})
+		refuse(err, "body must be a JSON object")
 		return nil, false
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		jsonErrorWithFields(w, 400, "body must contain exactly one JSON object", map[string]any{"code": "invalid_arguments"})
+		refuse(err, "body must contain exactly one JSON object")
 		return nil, false
 	}
 	return args, true
@@ -39,7 +52,7 @@ func (s *Server) handleConsolidateObservations(w http.ResponseWriter, r *http.Re
 	}
 	result, err := s.store.ConsolidateObservations(params)
 	if err != nil {
-		status, code := 400, "consolidation_refused"
+		status, code := http.StatusInternalServerError, "consolidation_failed"
 		fields := map[string]any{}
 		switch {
 		case errors.Is(err, store.ErrConsolidateFingerprintMismatch):
@@ -50,7 +63,14 @@ func (s *Server) handleConsolidateObservations(w http.ResponseWriter, r *http.Re
 		case errors.Is(err, store.ErrObservationProjectMismatch):
 			status, code = 403, "project_mismatch"
 		case errors.Is(err, store.ErrExpectedProjectRequired):
-			code = "invalid_arguments"
+			status, code = http.StatusBadRequest, "invalid_arguments"
+		case errors.Is(err, store.ErrConsolidateNeedTwoSources),
+			errors.Is(err, store.ErrConsolidateDuplicateID),
+			errors.Is(err, store.ErrConsolidateMissingObservation),
+			errors.Is(err, store.ErrConsolidateCrossProject),
+			errors.Is(err, store.ErrConsolidateProvenanceCycle),
+			errors.Is(err, store.ErrProjectRequired):
+			status, code = http.StatusBadRequest, "consolidation_refused"
 		}
 		fields["code"] = code
 		jsonErrorWithFields(w, status, err.Error(), fields)
@@ -134,7 +154,7 @@ func (s *Server) handleFinalizeSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	result, err := s.store.FinalizeSession(store.FinalizeSessionParams{SessionID: sessionID, Project: project, Summary: summary})
 	if err != nil {
-		status, code := 400, "session_finalize_failed"
+		status, code := http.StatusInternalServerError, "session_finalize_failed"
 		switch {
 		case errors.Is(err, store.ErrSessionNotFound):
 			status, code = 404, "unknown_session"
@@ -143,7 +163,9 @@ func (s *Server) handleFinalizeSession(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrSessionAlreadyEnded):
 			status, code = 409, "session_already_ended"
 		case errors.Is(err, store.ErrObservationContentRequired), errors.Is(err, store.ErrProjectRequired):
-			code = "invalid_arguments"
+			status, code = http.StatusBadRequest, "invalid_arguments"
+		case errors.Is(err, store.ErrSessionIDRequired):
+			status = http.StatusBadRequest
 		}
 		jsonErrorWithFields(w, status, err.Error(), map[string]any{"code": code, "session_id": sessionID})
 		return

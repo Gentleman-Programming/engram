@@ -2,7 +2,9 @@
 
 These local Go HTTP bridges use the existing store operations. They do not invoke MCP or implement memory algorithms in clients. All three routes use the existing optional Bearer-token mutation policy: when `ENGRAM_HTTP_TOKEN` is configured, supply `Authorization: Bearer <token>`. Session-owned servers also retain their whole-handler authentication.
 
-Send exactly one JSON object. Never automatically replay any of these POSTs after an uncertain network result. The store's finalization retry journal is not a network retry policy.
+Send exactly one JSON object. Each workflow request is limited to **1 MiB (1,048,576 bytes)**, including trailing JSON or whitespace. The decoder enforces this limit before workflow writes, after the existing authentication checks. Overflow detected while reading either the object or its trailing data returns HTTP 413 `{ "error": "body exceeds 1048576-byte limit", "code": "request_too_large" }`; malformed, empty, null, array or additional JSON values within the limit return HTTP 400 `invalid_arguments`. This is a transport resource limit, not a change to Store content rules.
+
+Never automatically replay any of these POSTs after an uncertain network result or HTTP 500. The store's finalization retry journal is not a network retry policy.
 
 ## Consolidate observations
 
@@ -16,7 +18,7 @@ Required: at least two positive exact JSON integer IDs (maximum 9007199254740991
 
 Preview returns HTTP 200 `{ "status": "preview", "plan": ... }`, without writes or write notifications. The plan contains `source_ids`, `sources`, `project`, `fingerprint`, and the resolved `survivor` projection. Repeat the exact reviewed arguments with `confirm:true` and its opaque `fingerprint` only after explicit confirmation. HTTP 201 returns `status:"consolidated"`, `plan`, persisted `survivor`, and `soft_deleted_ids`.
 
-Refusals are `{ "error": "message", "code": "code", "plan": ... }` (plan optional). A stale fingerprint returns HTTP 409 `fingerprint_mismatch` with a replacement preview. Wrong expected owner returns HTTP 403 `project_mismatch`; invalid arguments return HTTP 400 `invalid_arguments`. Other store refusals return HTTP 400 `consolidation_refused`. Never auto-confirm a replacement plan. Ownership, source drift, provenance, survivor construction, soft deletion, and local atomicity remain store-owned; local success does not promise remote visibility.
+Refusals are `{ "error": "message", "code": "code", "plan": ... }` (plan optional). A stale fingerprint returns HTTP 409 `fingerprint_mismatch` with a replacement preview. Wrong expected owner returns HTTP 403 `project_mismatch`; invalid arguments return HTTP 400 `invalid_arguments`. Other known store refusals (duplicate/missing sources, cross-project inputs, provenance cycles or unresolved project ownership) return HTTP 400 `consolidation_refused`. Unexpected database or internal failures return HTTP 500 `consolidation_failed`, retaining the string `error` and structured `code` fields. Never auto-confirm a replacement plan. Ownership, source drift, provenance, survivor construction, soft deletion, and local atomicity remain store-owned; local success does not promise remote visibility.
 
 ## Judge a batch
 
@@ -44,7 +46,7 @@ Both fields must be nonempty strings. `project` asserts the existing session's c
 
 HTTP 200 returns `session_id`, `state:"finalized"|"already_finalized"`, `summary_id`, `summary_sync_id`, `already_finalized`, and `judgment_required:false`. A valid local retry retains the original summary identity even if the new summary text differs, without writes or notification. The store atomically saves the session-summary observation, ends the session, queues normal sync mutations, and journals the local identity; legacy session free-text summary is preserved.
 
-Unknown session: HTTP 404 `unknown_session`. Foreign owner: HTTP 403 `session_project_mismatch`. A session ended separately: HTTP 409 `session_already_ended`. Empty/invalid content: HTTP 400 `invalid_arguments`. Other refusals use HTTP 400 `session_finalize_failed`. Refusals contain string `error` and `code`, and store refusals also carry `session_id`. The journal is local-only, not replicated/exported.
+Unknown session: HTTP 404 `unknown_session`. Foreign owner: HTTP 403 `session_project_mismatch`. A session ended separately: HTTP 409 `session_already_ended`. Empty/invalid content: HTTP 400 `invalid_arguments`. Blank session identity returns HTTP 400 `session_finalize_failed`. Unexpected database or internal failures return HTTP 500 `session_finalize_failed`; they must not be treated as a confirmed client refusal or a reason to replay automatically. Refusals contain string `error` and `code`, and store refusals and internal failures also carry `session_id`. The journal is local-only, not replicated/exported.
 
 ## Transport differences
 
