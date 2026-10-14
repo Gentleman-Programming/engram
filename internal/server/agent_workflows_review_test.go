@@ -179,13 +179,15 @@ func TestAgentWorkflowInfrastructureErrors(t *testing.T) {
 			f := newWorkflowReviewFixture(t)
 			before, directory := f.snapshot(t), f.store.DataDir()
 			path, body, code := "/observations/consolidate", f.consolidate(), "consolidation_failed"
+			message := "consolidation failed"
 			if route == "finalize" {
 				path, body, code = "/sessions/review/finalize", `{"project":"project","summary":"summary"}`, "session_finalize_failed"
+				message = "session finalization failed"
 			}
 			if err := f.store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			want := map[string]any{"error": "sql: database is closed", "code": code}
+			want := map[string]any{"error": message, "code": code}
 			if route == "finalize" {
 				want["session_id"] = "review"
 			}

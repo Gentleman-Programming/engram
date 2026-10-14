@@ -73,7 +73,11 @@ func (s *Server) handleConsolidateObservations(w http.ResponseWriter, r *http.Re
 			status, code = http.StatusBadRequest, "consolidation_refused"
 		}
 		fields["code"] = code
-		jsonErrorWithFields(w, status, err.Error(), fields)
+		message := err.Error()
+		if status == http.StatusInternalServerError {
+			message = "consolidation failed"
+		}
+		jsonErrorWithFields(w, status, message, fields)
 		return
 	}
 	body := map[string]any{"status": "preview", "plan": agentops.ConsolidationPlanJSON(result.Plan)}
@@ -167,7 +171,11 @@ func (s *Server) handleFinalizeSession(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrSessionIDRequired):
 			status = http.StatusBadRequest
 		}
-		jsonErrorWithFields(w, status, err.Error(), map[string]any{"code": code, "session_id": sessionID})
+		message := err.Error()
+		if status == http.StatusInternalServerError {
+			message = "session finalization failed"
+		}
+		jsonErrorWithFields(w, status, message, map[string]any{"code": code, "session_id": sessionID})
 		return
 	}
 	state := "finalized"
