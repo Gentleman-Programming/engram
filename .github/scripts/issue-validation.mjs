@@ -19,14 +19,28 @@ async function readPull(github, repo, number) {
   return validatePull((await github.rest.pulls.get({ ...repo, pull_number: number })).data, number);
 }
 
+function validationReferences(body, repo) {
+  return [...(body || '').matchAll(/(?:closes|fixes|resolves)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi)]
+    .map((match) => ({ owner: match[1] || repo.owner, repo: match[2] || repo.repo, issue_number: Number(match[3]) }));
+}
+
 async function validateIssues(github, repo, pull) {
-  const refs = references(pull.body);
+  const refs = validationReferences(pull.body, repo);
+  const untrusted = refs.filter((ref) => {
+    const identity = `${ref.owner}/${ref.repo}`.toLowerCase();
+    return identity !== `${repo.owner}/${repo.repo}`.toLowerCase() && identity !== 'gentleman-programming/engram';
+  });
+  if (untrusted.length) {
+    const errors = untrusted.map((ref) => `PR #${pull.number}: untrusted closing issue reference ${ref.owner}/${ref.repo}#${ref.issue_number}`);
+    return { referenceErrors: errors, approvedErrors: [...errors] };
+  }
   const referenceErrors = refs.length ? [] : [`PR #${pull.number}: no closing issue reference found`];
   const approvedErrors = [...referenceErrors];
-  for (const issue_number of refs) {
+  for (const ref of refs) {
+    const { issue_number } = ref;
     try {
       if (!numberValid(issue_number)) throw new Error('issue number is malformed');
-      const issue = (await github.rest.issues.get({ ...repo, issue_number })).data;
+      const issue = (await github.rest.issues.get(ref)).data;
       if (!issue || !Array.isArray(issue.labels)
           || issue.labels.some((label) => typeof label?.name !== 'string')
           || !Array.isArray(issue.assignees)

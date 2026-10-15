@@ -54,11 +54,19 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const issuePattern = /(?:closes|fixes|resolves)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi;
+            const referenceRepo = (match) => ({ owner: match[1] || context.repo.owner, repo: match[2] || context.repo.repo });
+            const untrustedReferences = (matches) => matches.filter((match) => {
+              const repo = referenceRepo(match);
+              const identity = `${repo.owner}/${repo.repo}`.toLowerCase();
+              return identity !== `${context.repo.owner}/${context.repo.repo}`.toLowerCase() && identity !== 'gentleman-programming/engram';
+            }).map((match) => `untrusted closing issue reference ${match[1]}/${match[2]}#${match[3]}`);
             const validate = (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
               if (matches.length === 0) return ['no closing issue reference found'];
-              core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[1]).join(', ')}`);
+              const untrusted = untrustedReferences(matches);
+              if (untrusted.length) return untrusted;
+              core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[3]).join(', ')}`);
               return [];
             };
             let failures;
@@ -102,19 +110,26 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const issuePattern = /(?:closes|fixes|resolves)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi;
+            const referenceRepo = (match) => ({ owner: match[1] || context.repo.owner, repo: match[2] || context.repo.repo });
+            const untrustedReferences = (matches) => matches.filter((match) => {
+              const repo = referenceRepo(match);
+              const identity = `${repo.owner}/${repo.repo}`.toLowerCase();
+              return identity !== `${context.repo.owner}/${context.repo.repo}`.toLowerCase() && identity !== 'gentleman-programming/engram';
+            }).map((match) => `untrusted closing issue reference ${match[1]}/${match[2]}#${match[3]}`);
             const validate = async (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
               if (matches.length === 0) return ['no closing issue reference found'];
+              const untrusted = untrustedReferences(matches);
+              if (untrusted.length) return untrusted;
 
               const errors = [];
               for (const match of matches) {
-                const issueNumber = parseInt(match[1], 10);
+                const issueNumber = parseInt(match[3], 10);
                 core.info(`Checking PR #${pull.number} issue #${issueNumber} for status:approved label...`);
                 try {
                   const issue = (await github.rest.issues.get({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
+                    ...referenceRepo(match),
                     issue_number: issueNumber,
                   })).data;
                   if (!Array.isArray(issue.labels) || issue.labels.some((label) => typeof label?.name !== 'string')) {

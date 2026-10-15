@@ -100,5 +100,5 @@ test('additive parser alias preserves exact grammar and evaluator public behavio
   const f = fake({ body, head: 'c'.repeat(40) });
   const results = await evaluateIssueValidation(f.github, context());
   assert.deepEqual(results, [{ headSha: 'c'.repeat(40), reference: { conclusion: 'success', summary: 'Validation passed.' }, approved: { conclusion: 'success', summary: 'Validation passed.' } }]);
-  assert.deepEqual(f.requests, expected([9, 10, 9]));
+  assert.deepEqual(f.requests, expected([9, 10, 9, 12]));
 });

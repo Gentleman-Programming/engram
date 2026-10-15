@@ -105,6 +105,16 @@ retirement stays blocked: fresh T4 probe consent and live evidence are required
 before rollout claims or retirement. See the
 [native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
 
+Closing references also support `Closes OWNER/REPO#N`, `Fixes OWNER/REPO#N`
+and `Resolves OWNER/REPO#N` for the current repository or
+`Gentleman-Programming/engram` (repository identity is case-insensitive).
+Every recognized reference must be approved and assigned in its own repository;
+a recognized reference to another repository rejects both issue checks before
+any issue lookup for that PR, even when mixed with trusted or bare references.
+Unsupported syntax remains ignored. Validation supports qualified references,
+but automatic issue-label refresh discovery remains bare-only (`#N`) in the
+current repository; qualified-only links do not expand discovery or rerun routing.
+
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
 ### Existing PR Transition

@@ -84,7 +84,7 @@ test('irrelevant or invalid events perform no requests or writes', async () => {
 test('exact legacy parser and all references, including duplicates', async () => {
   const f = fake({ pulls: [pull(1, 'preCLOSES #9; fixes\n#10; resolves #9; closes#11; closes owner/repo#12')], issues: { 9: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] }, 10: { labels: [], assignees: [{ login: 'owner-not-author' }] } } });
   conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'success', 'failure');
-  assert.deepEqual(f.journal, [get(), issueGet(), issueGet(10), issueGet(), get()]);
+  assert.deepEqual(f.journal, [get(), issueGet(), issueGet(10), issueGet(), issueGet(12), get()]);
 });
 for (const context of [prEvent(), issueEvent()]) {
   test(`${context.eventName} rejects every unassigned closing issue without writes`, async () => {
