@@ -83,7 +83,7 @@ for (const flag of ["--skip", "--skip-go", "--skip-pi", "--skip-pack", "--bypass
   });
 }
 
-test("current source is not release-ready: actual sandbox registrations differ from ProfileAgent", async () => {
+test("current source remains rejected despite matching ProfileAgent registrations", async () => {
   await withPluginSandbox("engram-candidate-registrations-", async ({ sandbox }) => {
     const registrations = [];
     const register = await importPluginFromSandbox(sandbox);
@@ -95,18 +95,17 @@ test("current source is not release-ready: actual sandbox registrations differ f
     // existing TypeBox stub proves registration only, NOT JSON-schema parity.
     const names = registrations.map(({ name }) => name);
     assert.equal(new Set(names).size, names.length, "actual registrations must be unique");
-    for (const name of ["mem_delete", "mem_stats", "mem_timeline"]) assert.ok(names.includes(name));
-    for (const name of ["mem_consolidate", "mem_judge_many", "mem_session_finalize"]) assert.ok(!names.includes(name));
+    for (const name of ["mem_consolidate", "mem_judge_many", "mem_session_finalize"]) assert.ok(names.includes(name));
+    for (const name of ["mem_delete", "mem_stats", "mem_timeline"]) assert.ok(!names.includes(name));
     assert.ok(registrations.every(({ parameters }) => parameters && typeof parameters === "object"));
   });
   // This invokes the agreed live Go exporter via the public Node CLI, not a
-  // checked-in canonical vector masquerading as live runtime evidence. Source
-  // mismatch is expected rejection, never a passing full-parity claim.
-  // S7 diagnostic/cleanup assertions added after original RED, not yet run.
+  // checked-in canonical vector masquerading as live runtime evidence. Matching
+  // inventories still reject: unknown schema/semantic evidence is never approval.
   const disposableBefore = (await readdir(root)).filter((name) => name.startsWith(".release-candidate-"));
   const result = await rejected(["--core-ref", coreRef, "--pi-ref", piRef], /inventory|parity|mcp-foundation|semantic|mem_consolidate|mem_delete/i);
-  assert.match(result.stderr, /Inventory Go-only: mem_consolidate, mem_judge_many, mem_session_finalize/);
-  assert.match(result.stderr, /Inventory Pi-only: mem_delete, mem_stats, mem_timeline/);
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stderr, /Inventory Go-only:|Inventory Pi-only:|Duplicate Pi registrations:/);
   assert.match(result.stderr, /mcp-foundation/);
   assert.match(result.stderr, /Declared Pi semantic differences/);
   assert.match(result.stderr, /TypeBox stub captures registration only; JSON-schema equivalence is unproven/);

@@ -37,10 +37,12 @@ The sandbox uses the existing test TypeBox stub. It proves registration only,
 identical inventories cannot pass. Unknown schema/semantic proof blocks;
 `mcp-foundation` and declared Pi semantic differences are explicit blockers.
 
-Current source inventory gaps are:
-
-- Go-only: `mem_consolidate`, `mem_judge_many`, `mem_session_finalize`.
-- Pi-only: `mem_delete`, `mem_stats`, `mem_timeline`.
+Current Pi default registrations align with Go's ProfileAgent, including
+`mem_consolidate`, `mem_judge_many`, and `mem_session_finalize`; administrative
+`mem_delete`, `mem_stats`, and `mem_timeline` are excluded. The checker compares
+actual registrations with the live Go inventory and still reports any future
+missing, extra, or duplicate names. Matching names do not establish schema or
+semantic equivalence and do not change the rejection-only outcome.
 
 The Go contract remains `mcp-foundation` with declared Pi differences. These are
 honest source rejection reasons, not failures to be bypassed for a release.

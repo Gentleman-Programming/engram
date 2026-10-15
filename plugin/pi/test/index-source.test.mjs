@@ -50,6 +50,7 @@ function sharedModeTransportSource() {
   return `
     const SERVER_MODE = undefined;
     const SESSION_OWNED = false;
+    const CONFIGURED_HTTP_TOKEN = "";
     const ownedToken = "";
     function transportHeaders(json = false) {
       ${extractFunctionBody("transportHeaders", "{\n  if (SERVER_MODE")}
