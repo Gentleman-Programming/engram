@@ -12,7 +12,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 // Everything the extension entry point pulls in at runtime. `@earendil-works/pi-coding-agent`
 // is a type-only import and is erased, so only the two value imports need runtime stubs.
-const PLUGIN_SOURCES = ["index.ts", "compaction-recovery.js", "memory-tool-chrome.js", "private-redaction.js"];
+const PLUGIN_SOURCES = ["index.ts", "compaction-recovery.js", "memory-tool-chrome.js", "private-redaction.js", "runtime-contract.js", "runtime-contract.json"];
 
 // Stamped into every stub so a test can prove none of them ever reached the real node_modules.
 export const RUNTIME_STUB_MARKER = "engram-pi test runtime stub";

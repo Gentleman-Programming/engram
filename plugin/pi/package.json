@@ -51,6 +51,8 @@
     "memory-tool-chrome.js",
     "mcp-template.json",
     "private-redaction.js",
+    "runtime-contract.js",
+    "runtime-contract.json",
     "test/",
     "README.md",
     "package.json"

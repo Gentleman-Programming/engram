@@ -20,6 +20,14 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const mcpTemplate = JSON.parse(readFileSync(new URL("../mcp-template.json", import.meta.url), "utf8"));
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 
+test("package distributes both runtime contract assets beside its explicit extension", () => {
+	assert.deepEqual(pkg.pi.extensions, ["./index.ts"]);
+	for (const asset of ["runtime-contract.js", "runtime-contract.json"]) {
+		assert.ok(pkg.files.includes(asset), `${asset} must be included in the package files`);
+		assert.ok(existsSync(new URL(`../${asset}`, import.meta.url)), `${asset} must exist beside index.ts`);
+	}
+});
+
 test("package advertises startup policy and session-owned wire contracts v1", () => {
 	assert.deepEqual(pkg.engram, { startupPolicy: 1, sessionOwned: 1 });
 });

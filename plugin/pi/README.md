@@ -337,6 +337,15 @@ Standalone MCP client -> engram mcp -> SQLite (deliberate, separate setup)
 
 Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, lifecycle review, conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_review`, `mem_judge`, and `mem_compare`, cross-project discovery through `mem_list_projects`, and local pin curation through `mem_pin`/`mem_unpin`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP is not registered by Pi setup. An existing Pi MCP entry remains active until you manually remove it and restart/reload Pi; native-only agent writes are not guaranteed while it remains.
 
+## Runtime contract assets
+
+The package includes `runtime-contract.js` and the adjacent Go-generated
+`runtime-contract.json`. The standalone comparison helper accepts only the complete
+expected projection and returns its dynamic server instance identity; it does not
+compute a digest or infer compatibility from versions. These assets are not yet
+wired into consumer readiness or dispatch. Their inclusion does not establish SDK
+or schema-semantic parity, successful pending-batch writes, or release eligibility.
+
 ## Default agent profile
 
 Pi registers exactly the 22 tools in Go's current `ProfileAgent`. Administrative tools (`mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects`) are not model-callable through this default native profile. Use a deliberate standalone `engram mcp --tools=admin` client or the applicable CLI/TUI administrative workflow instead; Pi does not provide an administrative opt-in profile. Reload or restart Pi after updating the extension to replace the previous registered inventory.
