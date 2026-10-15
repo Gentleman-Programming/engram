@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { test } from "node:test";
 import { withPluginSandbox, importPluginFromSandbox } from "./plugin-sandbox.mjs";
 
@@ -14,6 +15,7 @@ async function fixture(detection, run) {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, method: init.method || "GET", body });
     let data = {};
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") data = { capabilities: { isolated_session_registration: true } };
     if (path === "/project/current") data = detection;
     if (path === "/sessions") data = { id: body.id, status: "created" };

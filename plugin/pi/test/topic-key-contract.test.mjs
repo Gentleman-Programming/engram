@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { test } from "node:test";
 import { importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
 
@@ -10,6 +11,7 @@ async function runSuggestion(params, status, payload, check) {
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
     calls.push({ path, method: init.method ?? "GET", body: init.body && JSON.parse(init.body) });
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return Response.json({ status: "ok" });
     if (path === "/project/current") return Response.json({ project: "engram" });
     if (path === "/topic-keys/suggest") return Response.json(payload, { status });

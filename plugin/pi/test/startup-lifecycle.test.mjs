@@ -2,6 +2,7 @@
 // process, so these tests exercise the actual spawn/readiness/failure lifecycle instead of
 // re-implementing it with stubs.
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer, get } from "node:http";
@@ -51,6 +52,7 @@ const server=createServer(async(req,res)=>{
  let body='';for await(const c of req)body+=c;
  if(req.url==='/observations'){req.socket.destroy();return;}
  res.setHeader('content-type','application/json');
+ if(req.url==='/runtime-contract'){res.end(${JSON.stringify(JSON.stringify(fixtureContract()))});return;}
  res.end(JSON.stringify(req.url.startsWith('/project/current')?{project:'owned-project'}:req.url==='/sessions'?{id:JSON.parse(body).id,status:'created'}:req.url.startsWith('/observations/save-result')?{id:1,status:'committed'}:{}));
 });
 server.listen(0,'127.0.0.1',()=>{
@@ -252,6 +254,7 @@ if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "autosync=" + (process.env.ENGRAM_CLOUD_AUTOSYNC ?? "<unset>") + "\\n");
   ${exitCode === undefined
       ? `const server = createServer(async (req, res) => {
+  if (req.url === "/runtime-contract") { res.end(${JSON.stringify(JSON.stringify(fixtureContract()))}); return; }
   if (req.url === "/sessions") {
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -391,6 +394,7 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer(async (request, response) => {
       options.requests?.push({ method: request.method, url: request.url });
+      if (request.url === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
       if (request.url === "/sessions") {
         let body = "";
         for await (const chunk of request) body += chunk;

@@ -2,7 +2,7 @@
 
 `GET /runtime-contract` exposes a read-only Go-owned **server handler
 projection** for the default Pi HTTP adapter. The generator produces the stable
-projection for a future consumer. Pi negotiation remains a separate #1350 unit.
+projection consumed by Pi's exact-only runtime comparison.
 
 ## Authority and response
 
@@ -73,9 +73,18 @@ The [MCP foundation](AGENT-CONTRACT.md) remains separate. Names, route descripto
 and digests are not TypeBox/MCP schema equivalence, semantic parity or release
 approval. Successful pending-batch writes remain outside this unit's proof.
 
-`plugin/pi/runtime-contract.json` is a generated artifact, not an active Pi
-consumer. This slice changes no package manifest, adapter readiness, lifecycle
-behavior or compatibility policy. The existing Pi negotiation child PR still
-needs separate adaptation and verification against this projection. A future
-consumer must reject unsupported contracts explicitly and preserve existing
-transport and instance-identity protections.
+Pi packages the generated `plugin/pi/runtime-contract.json` beside its comparison
+helper. The consumer requalifies before readiness, each memory dispatch and retry,
+and observation result lookup/replay. It rejects missing, malformed, older,
+unknown or incompatible metadata without a SemVer fallback or JS digest authority.
+A private binding retains the configured URL, effective shared/private credential
+and dynamic instance. Metadata cannot replace local ownership checks; explicit
+URLs still skip local binary ownership and cannot authorize local recovery.
+
+Concurrent callers share a bounded 64 KiB, three-second whole-probe flight, not a
+caller's cancellation signal. Qualification is refreshed rather than indefinitely
+cached. Only definite connection refusal may enter the existing generation-bounded
+implicit recovery; HTTP, parsing and compatibility failures cannot restart a
+server. Uncertain observation saves retain frozen destinations and cannot replay
+onto a new binding. These source changes do not prove installed SDK execution,
+semantic parity, hosted CI acceptance or publication readiness.

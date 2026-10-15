@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,6 +27,7 @@ async function withPassiveCaptureFixture(run, registrationFailure) {
     return originalFetch(url, options);
   };
   const server = createServer(async (request, response) => {
+    if (request.url === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
     if (request.url?.startsWith("/project/current")) {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ project: "fixture-project" }));

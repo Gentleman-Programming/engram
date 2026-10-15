@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
@@ -11,6 +12,7 @@ async function scenario(headersFirst, delayMs = 3500) {
   let requests = 0;
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
     if (path === "/project/current") { response.end(JSON.stringify({ project: "pi" })); return; }
     if (path === "/sessions") {
       let body = "";

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { stripTypeScriptTypes } from "node:module";
+import { runtimeContractIdentity, runtimeContractID } from "../runtime-contract.js";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -109,6 +112,7 @@ function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjec
     function shouldScheduleEngramSelfHeal(error, failure) {
       ${extractFunctionBody("shouldScheduleEngramSelfHeal", "{\n  return")}
     }
+    const captureExplicitEndInvocation = () => undefined; // Coordination is covered through registered tools.
     const humanToolName = (toolName) => toolName;
     const createMemoryToolTransport = () => ({
       fetch: async () => null,
@@ -188,6 +192,7 @@ function buildEngramFetchForTest({
     function unreachableMessage() {
       return "gentle-engram could not reach the Engram HTTP server";
     }
+    const ensureRuntimeQualification = async () => {}; // Isolated transport-policy test; public tests qualify metadata.
     const engramFetchResult = async function engramFetchResult(path, opts = {}, allowGuardedRecovery = true) {
       ${body}
     };
@@ -920,6 +925,7 @@ test("normalization preserves typed ownership evidence without text classificati
     constructor(evidence, message) { super(message); this.evidence = evidence; }
   }
   const normalize = new Function("ForeignOwnershipError", "ENGRAM_URL", `
+    class RuntimeContractError extends Error {}
     return function normalizeInitializationError(error) {
       ${extractFunctionBody("normalizeInitializationError", "{\n  const message")}
     };
@@ -1725,6 +1731,64 @@ test("a typed reachability failure still schedules self-heal", async () => {
   assert.equal(recoveries, 1);
 });
 
+// Adapter-level execution of production bodies, not SDK/child-process integration.
+// Only the owned startup acknowledgement is simulated; real recovery does not qualify
+// metadata itself, so it must not recursively await the current qualification flight.
+async function controlledOwnedQualification() {
+  const factory = new Function("runtimeContractIdentity", "runtimeContractID", "contract", stripTypeScriptTypes(`function build() {
+    let ENGRAM_URL = "http://retired.invalid", ownedToken = "synthetic-old";
+    const SESSION_OWNED = true, SERVER_MODE = "session-owned", CONFIGURED_HTTP_TOKEN = "", CONFIGURED_ENGRAM_URL = undefined;
+    let localEngramInstanceID = contract.instance_id;
+    let acceptedRuntimeQualification, runtimeQualificationFlight;
+    let initializationGeneration = 1, recoveredInitializationGeneration = 0, recoveryFlight;
+    const ENGRAM_WRITE_TIMEOUT_MS = 3000;
+    class DeterministicStartupError extends Error {}
+    class RuntimeContractError extends DeterministicStartupError {}
+    class EngramUnavailableError extends Error {}
+    const effectiveTransportToken = () => SESSION_OWNED ? ownedToken : CONFIGURED_HTTP_TOKEN;
+    function transportHeaders(json = false) { ${extractFunctionBody("transportHeaders", "{\n  if (SERVER_MODE")} }
+    function runtimeContractFailure(reason) { ${extractFunctionBody("runtimeContractFailure", "{\n  return")} }
+    function throwIfAborted(signal) { ${extractFunctionBody("throwIfAborted", "{\n  if (!signal")} }
+    function awaitWithAbort(promise, signal) { ${extractFunctionBody("awaitWithAbort", "{\n  if (!signal")} }
+    function isConnectionRefusedError(error) { return error?.code === "ECONNREFUSED"; }
+    let refuse = false, recoveries = 0;
+    const requests = [];
+    async function fetch(url, init) {
+      requests.push([url, new Headers(init.headers).get("authorization")]);
+      if (refuse) { refuse = false; throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" }); }
+      return Response.json(contract);
+    }
+    async function initializeEngramServer() {
+      // Model startOwnedTransportOnce's acknowledged fresh endpoint/token and instance.
+      recoveries++;
+      ENGRAM_URL = "http://replacement.invalid";
+      ownedToken = "synthetic-new";
+      localEngramInstanceID = contract.instance_id;
+    }
+    function recoverImplicitEngramServer() { ${extractFunctionBody("recoverImplicitEngramServer", "{\n  const generation")} }
+    async function ensureRuntimeQualification(signal) { ${extractFunctionBody("ensureRuntimeQualification", "{\n  throwIfAborted")} }
+    return async () => {
+      await ensureRuntimeQualification();
+      refuse = true;
+      let result = "qualified";
+      try { await ensureRuntimeQualification(); } catch (error) { result = error.message; }
+      return { requests, result, recoveries };
+    };
+  }`) + "\nreturn build();");
+  return factory(runtimeContractIdentity, runtimeContractID, fixtureContract())();
+}
+
+test("controlled owned qualification retries a coherent current transport after refusal", async () => {
+  const observed = await controlledOwnedQualification();
+  assert.deepEqual(observed.requests, [
+    ["http://retired.invalid/runtime-contract", "Bearer synthetic-old"],
+    ["http://retired.invalid/runtime-contract", "Bearer synthetic-old"],
+    ["http://replacement.invalid/runtime-contract", "Bearer synthetic-new"],
+  ], "new private credentials must never be sent to the retired endpoint");
+  assert.equal(observed.recoveries, 1);
+  assert.equal(observed.result, "qualified", "same-instance acknowledged owned recovery stays usable");
+});
+
 test("already-cancelled preflight observes a later shared initialization rejection", async () => {
   const awaitWithAbort = buildAwaitWithAbortForTest();
   const controller = new AbortController();
@@ -1740,7 +1804,7 @@ test("already-cancelled preflight observes a later shared initialization rejecti
   await flush();
 
   assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
-  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry, transport\.transportFailure\), signal\);/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch, appendEntry, transport\.transportFailure, endInvocation\), signal\);/);
 });
 
 test("transport policies bound read, doctor and registration retries independently of writes", () => {
