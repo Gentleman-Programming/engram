@@ -38,9 +38,18 @@ func TestRoutingCandidateObserveGitRoot(t *testing.T) {
 	if err := os.WriteFile(config, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	wantInfo, err := os.Stat(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, directory := range []string{repo, nested} {
 		got := ObserveGitRoot(directory)
-		if filepath.Clean(got) != filepath.Clean(repo) {
+		gotInfo, err := os.Stat(got)
+		if err != nil {
+			t.Fatalf("stat observed root %q: %v", got, err)
+		}
+		// Git may resolve a junction while TEMP retains its alias spelling.
+		if !os.SameFile(gotInfo, wantInfo) {
 			t.Fatalf("root %q want %q", got, repo)
 		}
 	}
