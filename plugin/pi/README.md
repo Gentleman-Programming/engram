@@ -559,7 +559,25 @@ Run it again when new chunks are published and you want to import them. Opening 
 
 ## Testing the real HTTP workflows
 
-`test/real-agent-workflows.test.mjs` runs its seven tests from an Engram Go checkout or with `ENGRAM_PI_TEST_SERVER_BINARY` pointing to the prebuilt test server. Without either resource (for example, in the published npm package), this source-only suite explicitly skips before creating a sandbox or attempting `go build`. Go build failures in a checkout and invalid configured binaries still fail; they are not skips. This does not make other repository-dependent test suites runnable from the published package.
+`test/real-agent-workflows.test.mjs` runs its eight tests from an Engram Go checkout or with `ENGRAM_PI_TEST_SERVER_BINARY` pointing to the prebuilt test server. Without either resource (for example, in the published npm package), this source-only suite explicitly skips before creating a sandbox or attempting `go build`. Go build failures in a checkout and invalid configured binaries still fail; they are not skips. This does not make other repository-dependent test suites runnable from the published package.
+
+The runtime-metadata case uses actual Go HTTP handlers: it compares the response to
+the generated projection, checks its instance against health, observes authenticated
+native qualification before dispatch, and checks unauthenticated compound-write
+refusal without observations or session registration. It does not prove SDK schema
+semantics or successful pending-batch writes.
+
+The two `public PATH runtime negotiation` cases in `test/startup-lifecycle.test.mjs`
+require `ENGRAM_PI_TEST_PATH_BINARY` pointing to a separately built
+`test/support/runtime-path-binary/main.go` executable. They never build Go implicitly;
+absence explicitly skips these two cases, while a supplied blank, missing or invalid
+binary fails. The executable is a stdlib-only **synthetic CLI/transport fixture**,
+not production Go handlers. Tests copy it as `engram`/`engram.exe` onto an isolated
+PATH without `ENGRAM_BIN`, checking cold startup, refusal recovery and qualification
+before writes, or rejection before writes for a mismatching projection. Its metadata
+comes from the current generated JSON; no independent inventory or digest is defined.
+Existing owned-mode tests retain the real Node preload/argv protocol and SDK stubs.
+Prebuilt binaries and source preparation alone are not runtime acceptance evidence.
 
 ## Requirements
 
