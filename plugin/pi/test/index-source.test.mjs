@@ -1936,6 +1936,11 @@ test("caller abort propagates instead of being classified as transport timeout",
   const originalFetch = globalThis.fetch;
   const controller = new AbortController();
   globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+    // Qualification can yield before dispatch; match fetch's pre-aborted rejection.
+    if (init.signal.aborted) {
+      reject(init.signal.reason);
+      return;
+    }
     init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
   });
   try {
