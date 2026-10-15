@@ -391,6 +391,11 @@ const (
 	SyncEntityObservation = "observation"
 	SyncEntityPrompt      = "prompt"
 	SyncEntityRelation    = "relation"
+	// SyncEntityProject marks project-level delete tombstones. It is never an
+	// upsert payload entity: sync_mutations only journals session, observation,
+	// and prompt rows, so a project tombstone carries delete evidence for a
+	// whole project rather than a transportable row.
+	SyncEntityProject = "project"
 
 	SyncOpUpsert = "upsert"
 	SyncOpDelete = "delete"
@@ -7636,13 +7641,45 @@ func (s *Store) localMutationHasDeleteEvidenceTx(tx *sql.Tx, mutation SyncMutati
 	switch mutation.Entity {
 	case SyncEntitySession, SyncEntityObservation:
 		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ? AND project = ? AND active = 1)`, mutation.Entity, mutation.EntityKey, mutation.Project).Scan(&exists)
-		return exists, err
+		if err != nil || exists {
+			return exists, err
+		}
 	case SyncEntityPrompt:
 		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM prompt_tombstones WHERE sync_id = ? AND project = ?)`, mutation.EntityKey, mutation.Project).Scan(&exists)
-		return exists, err
+		if err != nil || exists {
+			return exists, err
+		}
 	default:
 		return false, nil
 	}
+	return s.projectTombstoneSupersedesMutationTx(tx, mutation)
+}
+
+// projectTombstoneSupersedesMutationTx reports whether an active hard-delete
+// tombstone for the mutation's project postdates the mutation. Only
+// mutations recorded before the project was hard-deleted carry delete
+// evidence: a project recreated under the same name journals fresh upserts
+// that must still reach the cloud.
+func (s *Store) projectTombstoneSupersedesMutationTx(tx *sql.Tx, mutation SyncMutation) (bool, error) {
+	projectKey, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	if projectKey == "" {
+		return false, nil
+	}
+	var deletedAt string
+	var hardDelete bool
+	err := tx.QueryRow(`SELECT deleted_at, hard_delete FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ? AND project = ? AND active = 1`, SyncEntityProject, projectKey, projectKey).Scan(&deletedAt, &hardDelete)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !hardDelete {
+		return false, nil
+	}
+	occurredAt := normalizeComparableTimestamp(mutation.OccurredAt)
+	deletedAt = normalizeComparableTimestamp(deletedAt)
+	return occurredAt != "" && deletedAt != "" && occurredAt <= deletedAt, nil
 }
 
 func syncMutationSupersededEvidence(mutation SyncMutation, trigger string) (string, error) {
@@ -9993,6 +10030,15 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 				return fmt.Errorf("delete project: delete sessions: %w", err)
 			}
 			result.SessionsDeleted, _ = res.RowsAffected()
+
+			// 4. Record the project delete tombstone. Without it, queued
+			//    mutations for this project keep no delete evidence to
+			//    supersede against and stay pending forever (doctor remains
+			//    blocked on sync_mutation_required_fields).
+			normalizedProject, _ := NormalizeProject(project)
+			if err := s.recordSyncDeleteTombstoneTx(tx, SyncEntityProject, normalizedProject, "", project, Now()); err != nil {
+				return fmt.Errorf("delete project: record project tombstone: %w", err)
+			}
 		}
 
 		return nil
@@ -10344,7 +10390,11 @@ func backfillMutationSource(source []string) string {
 }
 
 func syncDeleteTombstoneNeedsBackfill(alias string) string {
-	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.last_remote_mutation_seq IS NULL AND NOT EXISTS (
+	// Restrict to the entities sync_mutations can journal ('observation',
+	// 'session'). Project-level tombstones carry delete evidence only and have
+	// no transportable delete mutation, so they must never look like missing
+	// backfill work.
+	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.entity IN ('observation', 'session') AND %[1]s.last_remote_mutation_seq IS NULL AND NOT EXISTS (
 		SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = %[1]s.entity
 		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.acked_at IS NULL AND sm.disposition IN ('pending', 'quarantined')
 	)`, alias)
@@ -10352,9 +10402,12 @@ func syncDeleteTombstoneNeedsBackfill(alias string) string {
 
 // recordSyncDeleteTombstoneTx preserves delete intent for entities whose local
 // row is physically removed. Prompt tombstones predate this table and retain
-// their own identity and stale-upsert semantics.
+// their own identity and stale-upsert semantics. Project tombstones (entity
+// 'project', entity_key = normalized project name) record whole-project delete
+// evidence; sync_mutations never journals 'project' rows, so backfill scans
+// must keep skipping them (see syncDeleteTombstoneNeedsBackfill).
 func (s *Store) recordSyncDeleteTombstoneTx(tx *sql.Tx, entity, entityKey, sessionID, project, deletedAt string) error {
-	if entity != SyncEntitySession && entity != SyncEntityObservation {
+	if entity != SyncEntitySession && entity != SyncEntityObservation && entity != SyncEntityProject {
 		return fmt.Errorf("unsupported sync delete tombstone entity %q", entity)
 	}
 	entityKey = strings.TrimSpace(entityKey)
