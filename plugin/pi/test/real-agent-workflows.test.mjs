@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
@@ -8,6 +9,17 @@ import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
 
 const project = "integration-1348";
+const repositoryRoot = join(PLUGIN_ROOT, "../..");
+const repositoryFixtureAvailable = [
+  "go.mod", "internal/server/server.go", "internal/store/store.go",
+  "plugin/pi/test/support/real-server/main.go",
+].every(path => existsSync(join(repositoryRoot, path)));
+const realServerSkip = !process.env.ENGRAM_PI_TEST_SERVER_BINARY && !repositoryFixtureAvailable
+  ? "requires the Engram Go checkout or ENGRAM_PI_TEST_SERVER_BINARY" : false;
+
+function realTest(name, run) {
+  return test(name, { skip: realServerSkip }, run);
+}
 
 async function fixture(run) {
   await withPluginSandbox("engram-real-workflows-", async ({ dir, sandbox }) => {
@@ -17,7 +29,7 @@ async function fixture(run) {
     const executable = process.env.ENGRAM_PI_TEST_SERVER_BINARY ?? join(dir, process.platform === "win32" ? "server.exe" : "server");
     if (!process.env.ENGRAM_PI_TEST_SERVER_BINARY) {
       const build = spawnSync("go", ["build", "-o", executable, "./plugin/pi/test/support/real-server"],
-        { cwd: join(PLUGIN_ROOT, "../.."), env: process.env, encoding: "utf8", timeout: 60000 });
+        { cwd: repositoryRoot, env: process.env, encoding: "utf8", timeout: 60000 });
       assert.ifError(build.error);
       assert.equal(build.status, 0, build.stderr);
     }
@@ -86,7 +98,7 @@ async function fixture(run) {
   });
 }
 
-test("real fixture preserves the original callback failure after child termination", async () => {
+realTest("real fixture preserves the original callback failure after child termination", async () => {
   const original = new Error("original workflow assertion");
   await assert.rejects(fixture(async ({ child }) => {
     const exit = once(child, "exit");
@@ -96,11 +108,11 @@ test("real fixture preserves the original callback failure after child terminati
   }), error => error === original);
 });
 
-test("real fixture accepts a successful callback and clean shutdown", async () => {
+realTest("real fixture accepts a successful callback and clean shutdown", async () => {
   await fixture(async () => {});
 });
 
-test("real fixture reports shutdown timeout after a successful callback", async () => {
+realTest("real fixture reports shutdown timeout after a successful callback", async () => {
   await assert.rejects(fixture(async ({ child }) => {
     // Keep stdin open so the existing shutdown deadline must terminate the child.
     child.stdin.end = () => child.stdin;
@@ -114,7 +126,7 @@ async function save(tool, title, content) {
   return result.details.data.id;
 }
 
-test("real Pi topic vectors match Go without registering sessions or creating observations", async () => {
+realTest("real Pi topic vectors match Go without registering sessions or creating observations", async () => {
   await fixture(async ({ tool, request, rows }) => {
     for (const params of [{ type: "architecture", title: "Auth model" }, { type: "bugfix", title: "Fix café / Unicode" },
       { type: "decision", content: "Use SQLite for local state" }, { title: "X".repeat(120) }]) {
@@ -133,7 +145,7 @@ test("real Pi topic vectors match Go without registering sessions or creating ob
   });
 });
 
-test("real Pi consolidation previews without mutation and confirms the exact Go plan", async () => {
+realTest("real Pi consolidation previews without mutation and confirms the exact Go plan", async () => {
   await fixture(async ({ tool, request, rows }) => {
     const ids = [await save(tool, "First design", "First independent source record."),
       await save(tool, "Second design", "Second independent source record.")];
@@ -155,7 +167,7 @@ test("real Pi consolidation previews without mutation and confirms the exact Go 
   });
 });
 
-test("real Pi batch envelopes and ordered item errors leave public state unchanged", async () => {
+realTest("real Pi batch envelopes and ordered item errors leave public state unchanged", async () => {
   await fixture(async ({ tool, request, rows }) => {
     await save(tool, "Batch source", "Existing observation must remain unchanged.");
     const before = await rows();
@@ -179,7 +191,7 @@ test("real Pi batch envelopes and ordered item errors leave public state unchang
   });
 });
 
-test("real Pi finalization returns Go's original summary receipt and leaves the session ended", async () => {
+realTest("real Pi finalization returns Go's original summary receipt and leaves the session ended", async () => {
   await fixture(async ({ tool, request, rows, events, ctx }) => {
     const unregistered = await tool("mem_session_finalize", { summary: "No session yet" });
     assert.equal(unregistered.isError, true); assert.deepEqual(await rows(), []);
