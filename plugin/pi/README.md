@@ -541,6 +541,10 @@ engram sync --import
 
 Run it again when new chunks are published and you want to import them. Opening Pi or restarting a session never imports new chunks automatically.
 
+## Testing the real HTTP workflows
+
+`test/real-agent-workflows.test.mjs` runs its seven tests from an Engram Go checkout or with `ENGRAM_PI_TEST_SERVER_BINARY` pointing to the prebuilt test server. Without either resource (for example, in the published npm package), this source-only suite explicitly skips before creating a sandbox or attempting `go build`. Go build failures in a checkout and invalid configured binaries still fail; they are not skips. This does not make other repository-dependent test suites runnable from the published package.
+
 ## Requirements
 
 - Pi coding agent with npm package support.
