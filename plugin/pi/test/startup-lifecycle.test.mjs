@@ -7,9 +7,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer, get } from "node:http";
 import { createServer } from "node:net";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT as ROOT, RUNTIME_STUB_MARKER, createPluginSandbox, importPluginFromSandbox } from "./plugin-sandbox.mjs";
 
@@ -48,11 +48,12 @@ if (process.argv[1]!==__filename && invocationArgs[0]==='serve') process.once('u
  throw error;
 });
 const server=createServer(async(req,res)=>{
- log({path:req.url,authorized:req.headers.authorization==='Bearer '+process.env.ENGRAM_TOKEN});
+ log({path:req.url,method:req.method,authorized:req.headers.authorization==='Bearer '+process.env.ENGRAM_TOKEN});
+ if(req.headers.authorization!=='Bearer '+process.env.ENGRAM_TOKEN){res.writeHead(401);res.end('{}');return;}
  let body='';for await(const c of req)body+=c;
  if(req.url==='/observations'){req.socket.destroy();return;}
  res.setHeader('content-type','application/json');
- if(req.url==='/runtime-contract'){res.end(${JSON.stringify(JSON.stringify(fixtureContract()))});return;}
+ if(req.url==='/runtime-contract'){res.end(${JSON.stringify(JSON.stringify({ ...fixtureContract(), ...(options.contractIdentity ? { instance_id: options.contractIdentity } : {}) }))});return;}
  res.end(JSON.stringify(req.url.startsWith('/project/current')?{project:'owned-project'}:req.url==='/sessions'?{id:JSON.parse(body).id,status:'created'}:req.url.startsWith('/observations/save-result')?{id:1,status:'committed'}:{}));
 });
 server.listen(0,'127.0.0.1',()=>{
@@ -138,9 +139,24 @@ test("owned child authenticates every path and reload closes transport without e
   assert.equal(before[0].tokenShape,true);
   assert.ok(before.some(e=>e.path?.startsWith('/observations/save-result')));
   assert.ok(before.filter(e=>e.path).every(e=>e.authorized));
+  assert.equal(tools.size,22);
+  assert.ok(before.findIndex(e=>e.method==='POST')>before.findIndex(e=>e.path==='/runtime-contract'));
   await hooks.get('session_shutdown')({reason:'reload'},ctx);
   const after=await events();assert.ok(after.some(e=>e.eof));assert.ok(!after.some(e=>e.path?.endsWith('/end')));
  });
+});
+
+test("owned rejects authenticated metadata with a different private instance", async () => {
+  await withOwnedFixture({ contractIdentity: "f".repeat(32) }, async ({ hooks, ctx, tools, events, statuses }) => {
+    await hooks.get("session_start")({}, ctx);
+    const result = await tools.get("mem_save").execute("foreign-contract", { title: "Blocked", content: "Must not persist" }, undefined, undefined, ctx);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contract identity does not match/);
+    assert.equal(statuses.some(value => value?.includes("ready")), false);
+    const records = await events();
+    assert.ok(records.some(record => record.path === "/runtime-contract" && record.authorized));
+    assert.equal(records.some(record => record.method === "POST"), false);
+  });
 });
 
 test("owned resources close even with missing session identity and preserve other hosted roots",async()=>{
@@ -300,6 +316,80 @@ setTimeout(() => {
     : { engramBin: binPath };
 }
 
+// Never build implicitly: phase B supplies a separately built stdlib fixture.
+const pathBinary = process.env.ENGRAM_PI_TEST_PATH_BINARY;
+for (const mismatch of [false, true]) {
+  test(`public PATH runtime negotiation (mismatch=${mismatch})`, {
+    skip: pathBinary === undefined ? "requires ENGRAM_PI_TEST_PATH_BINARY (prebuilt synthetic fixture)" : false,
+  }, async () => {
+    assert.ok(pathBinary?.trim(), "configured PATH fixture binary must not be blank");
+    const sourceBinary = resolve(pathBinary);
+    const dir = await mkdtemp(join(tmpdir(), "engram-pi-path-"));
+    const saved = { ...process.env };
+    let plugin, port;
+    const stop = async () => {
+      if (!port) return;
+      try { await fetch(`http://127.0.0.1:${port}/fixture-stop`, { signal: AbortSignal.timeout(500) }); } catch { /* Not started/already stopped. */ }
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        try { await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(200) }); }
+        catch { return; }
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.fail("synthetic PATH fixture did not stop");
+    };
+    try {
+      for (const key of Object.keys(process.env)) if (key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")) delete process.env[key];
+      delete process.env.NODE_OPTIONS;
+      const binary = join(dir, process.platform === "win32" ? "engram.exe" : "engram");
+      await copyFile(sourceBinary, binary);
+      await chmod(binary, 0o755);
+      process.env.PATH = `${dir}${delimiter}${saved.PATH ?? ""}`;
+      port = await freePort();
+      process.env.ENGRAM_DATA_DIR = join(dir, "store");
+      process.env.ENGRAM_PATH_TEST_LOG = join(dir, "events.jsonl");
+      process.env.ENGRAM_PATH_TEST_CONTRACT = join(dir, "contract.json");
+      await writeFile(process.env.ENGRAM_PATH_TEST_CONTRACT, JSON.stringify({ ...fixtureContract(), ...(mismatch ? { digest: "0".repeat(64) } : {}) }));
+      plugin = await loadPlugin({ port, cwd: dir, sandbox: await createPluginSandbox(dir) });
+      assert.equal(process.env.ENGRAM_BIN, undefined, "actual PATH lookup, not an explicit binary");
+      assert.equal(process.env.ENGRAM_URL, undefined);
+      assert.equal(plugin.tools.size, 22);
+      await plugin.hooks.get("session_start")({}, plugin.ctx);
+      const result = await plugin.tools.get("mem_save").execute("path-save", { title: "PATH", content: "Synthetic transport", project: "path-project" }, undefined, undefined, plugin.ctx);
+      const records = () => readFile(process.env.ENGRAM_PATH_TEST_LOG, "utf8").then(text => text.trim().split("\n").map(JSON.parse));
+      const initial = await records();
+      assert.deepEqual(initial.filter(record => record.args).map(record => record.args), [["instance-id"], ["serve"]]);
+      assert.ok(initial.some(record => record.path === "/runtime-contract"));
+      if (mismatch) {
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /runtime contract.*Upgrade/);
+        assert.equal(initial.some(record => record.method === "POST"), false);
+        assert.equal(plugin.statusCalls.some(([, value]) => value.includes("ready")), false);
+      } else {
+        assert.notEqual(result.isError, true, JSON.stringify(result));
+        assert.ok(plugin.statusCalls.some(([, value]) => value.includes("path-project · ready")));
+        assert.ok(initial.findIndex(record => record.method === "POST") > initial.findIndex(record => record.path === "/runtime-contract"));
+        assert.ok(initial.some(record => record.path === "/observations" && record.method === "POST"));
+        await stop();
+        const call = id => plugin.tools.get("mem_context").execute(id, {}, undefined, undefined, plugin.ctx);
+        for (const recovered of await Promise.all([call("recovery-a"), call("recovery-b")])) assert.notEqual(recovered.isError, true, JSON.stringify(recovered));
+        const after = await records();
+        assert.equal(after.filter(record => record.args?.[0] === "serve").length, 2, "concurrent refused probes authorize one restart");
+        const restart = after.findLastIndex(record => record.args?.[0] === "serve");
+        const recoveredRecords = after.slice(restart);
+        assert.ok(recoveredRecords.findIndex(record => record.path === "/context") > recoveredRecords.findIndex(record => record.path === "/runtime-contract"));
+      }
+    } finally {
+      try { if (plugin) await plugin.hooks.get("session_shutdown")?.({ reason: "reload" }, plugin.ctx); await stop(); }
+      finally {
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
+}
+
 test("fake CLI logs logical argv for direct and preload launches", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "engram-pi-cli argv fixture-"));
   try {
@@ -343,7 +433,8 @@ test("fake CLI logs logical argv for direct and preload launches", async (t) => 
 async function loadPlugin({ engramBin, port, cwd, sandbox, explicitUrl }) {
   if (explicitUrl) process.env.ENGRAM_URL = `http://127.0.0.1:${port}`;
   else delete process.env.ENGRAM_URL;
-  process.env.ENGRAM_BIN = engramBin;
+  if (engramBin === undefined) delete process.env.ENGRAM_BIN;
+  else process.env.ENGRAM_BIN = engramBin;
   process.env.ENGRAM_PORT = String(port);
 
   const registerEngram = await importPluginFromSandbox(sandbox);
