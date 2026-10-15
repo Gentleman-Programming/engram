@@ -27,6 +27,7 @@ async function fixture(run) {
     let stderr = "";
     child.stderr.on("data", value => { stderr += value; });
     const lines = createInterface({ input: child.stdout });
+    let bodySucceeded = false;
     try {
       const url = await new Promise((resolve, reject) => {
         const timer = setTimeout(() => finish(new Error(`server readiness timed out: ${stderr}`)), 5000);
@@ -59,22 +60,52 @@ async function fixture(run) {
         const result = await request("/observations?all_projects=true&limit=100");
         assert.equal(result.status, 200); return result.data;
       };
-      await run({ tool, request, rows, events, ctx });
+      await run({ tool, request, rows, events, ctx, child });
+      bodySucceeded = true;
     } finally {
-      for (const [key, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      try {
+        for (const [key, value] of Object.entries(previous)) {
+          if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+        lines.close();
+        let shutdownTimedOut = false;
+        if (child.exitCode === null && child.signalCode === null) {
+          const exit = once(child, "exit");
+          const timer = setTimeout(() => { shutdownTimedOut = true; child.kill(); }, 5000);
+          try { child.stdin.end(); await exit; } finally { clearTimeout(timer); }
+        }
+        if (bodySucceeded) {
+          assert.equal(shutdownTimedOut, false, `server shutdown timed out: ${stderr}`);
+          assert.equal(child.exitCode, 0, stderr);
+        }
+      } catch (cleanupError) {
+        // Cleanup must not replace an existing readiness or callback failure.
+        if (bodySucceeded) throw cleanupError;
       }
-      lines.close();
-      if (child.exitCode === null && child.signalCode === null) {
-        const exit = once(child, "exit");
-        const timer = setTimeout(() => child.kill(), 5000);
-        child.stdin.end();
-        try { await exit; } finally { clearTimeout(timer); }
-      }
-      assert.equal(child.exitCode, 0, stderr);
     }
   });
 }
+
+test("real fixture preserves the original callback failure after child termination", async () => {
+  const original = new Error("original workflow assertion");
+  await assert.rejects(fixture(async ({ child }) => {
+    const exit = once(child, "exit");
+    child.kill();
+    await exit;
+    throw original;
+  }), error => error === original);
+});
+
+test("real fixture accepts a successful callback and clean shutdown", async () => {
+  await fixture(async () => {});
+});
+
+test("real fixture reports shutdown timeout after a successful callback", async () => {
+  await assert.rejects(fixture(async ({ child }) => {
+    // Keep stdin open so the existing shutdown deadline must terminate the child.
+    child.stdin.end = () => child.stdin;
+  }), /server shutdown timed out/);
+});
 
 async function save(tool, title, content) {
   const result = await tool("mem_save", { title, content, project });
