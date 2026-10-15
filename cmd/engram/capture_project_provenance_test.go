@@ -20,7 +20,11 @@ func TestCaptureProjectProvenanceCLISave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	observations, err := st.RecentObservations("example", "project", 10)
 	if err != nil || len(observations) != 1 {
 		t.Fatalf("observations=%+v err=%v", observations, err)

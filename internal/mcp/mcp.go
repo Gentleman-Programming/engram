@@ -201,16 +201,17 @@ func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string, evi
 
 func captureProjectEvidence(s *store.Store, res projectpkg.DetectionResult, sessionID, rawProject, defaultProject string) *store.ProjectProvenance {
 	p := &store.ProjectProvenance{Source: res.Source, Directory: currentWorkingDirectory()}
-	if res.Source == projectpkg.SourceSessionProject {
+	switch res.Source {
+	case projectpkg.SourceSessionProject:
 		if inherited, err := s.CaptureProjectProvenance("session", sessionID); err == nil && inherited != nil {
 			p.Source = inherited.Source
 			p.RawProject = inherited.RawProject
 			return p
 		}
 		p.Source = "unknown"
-	} else if res.Source == projectpkg.SourceExplicitOverride || res.Source == projectpkg.SourceUserSelectedAfterAmbiguousProject {
+	case projectpkg.SourceExplicitOverride, projectpkg.SourceUserSelectedAfterAmbiguousProject:
 		p.RawProject = rawProject
-	} else if res.Source == projectpkg.SourceProcessOverride {
+	case projectpkg.SourceProcessOverride:
 		if raw, ok := projectpkg.ProcessOverride(defaultProject); ok {
 			p.RawProject = raw
 		}
