@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { test } from "node:test";
 import { importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
 
@@ -11,6 +12,7 @@ async function withObservation(body) {
   let status = 200;
   globalThis.fetch = async (url, options) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     if (request.pathname === "/health") return Response.json({ status: "ok" });
     if (request.pathname === "/project/current") return Response.json({ project: "engram" });
     if (request.pathname.startsWith("/observations/")) {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -65,6 +66,7 @@ for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwin
     const started = deferred();
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       if (path === "/project/current") return new Response('{"project":"engram"}');
       if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }), { status: 201 });
       if (path === "/prompts") {
@@ -129,6 +131,7 @@ for (const failure of ["shutdown", "archive", "recovery"]) {
     process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
     globalThis.fetch = async (url, init = {}) => {
       const request = new URL(url);
+      if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
       calls.push({ path: request.pathname, method: init.method ?? "GET", query: request.searchParams, body: init.body ? JSON.parse(init.body) : undefined });
       if (request.pathname === failedPath) return new Response(JSON.stringify({ error: `${failure} rejected` }), { status: 503 });
       if (request.pathname === "/project/current") return new Response('{"project":"engram"}');
@@ -317,6 +320,7 @@ function recordingFetch(routes) {
   const fetchStub = async (url, init = {}) => {
     const method = init.method ?? "GET";
     const path = new URL(url).pathname + new URL(url).search;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
     const route = routes.find((candidate) => candidate.method === method && path.startsWith(candidate.path));
@@ -772,6 +776,7 @@ test("fresh Pi state honors a structured session-project conflict without captur
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
@@ -859,7 +864,8 @@ test("registered Pi-native mem_search reports native provider transport failure"
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (url) => {
+    if (new URL(url).pathname === "/runtime-contract") return runtimeMetadataResponse("/runtime-contract");
     throw new Error("connection refused");
   };
 
@@ -909,6 +915,7 @@ test("a malformed 200 Pi response is a tool error rather than a successful null 
     const path = new URL(url).pathname;
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/search") return new Response('{"observations":', { status: 200, headers: { "Content-Type": "application/json" } });
     throw new Error(`unexpected request: ${url}`);
   };
@@ -944,6 +951,7 @@ test("a 204 Pi response is a successful null without JSON parsing", async () => 
     const path = new URL(url).pathname;
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/search") return new Response(null, { status: 204 });
     throw new Error(`unexpected request: ${url}`);
   };
@@ -978,6 +986,7 @@ test("a successful empty Pi search presents no memories found", async () => {
     const path = new URL(url).pathname;
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/search") return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
     throw new Error(`unexpected request: ${url}`);
   };
@@ -1012,6 +1021,7 @@ test("a timed-out Pi request cannot make a concurrent JSON-null request unavaila
   const nullRequestStarted = deferred();
   globalThis.fetch = async (url) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     if (request.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
     if (request.pathname === "/search" && request.searchParams.get("q") === "json-null") {
@@ -1240,6 +1250,7 @@ test("session-attributed Pi writes bind to acknowledged runtime identity and ret
   const sessionBodies = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1308,6 +1319,7 @@ test("repeated Pi session-attributed writes renew the runtime lease and coalesce
   const observationBodies = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
     if (path === "/sessions") {
@@ -1361,6 +1373,7 @@ test("parallel first-use writes share one acknowledged registration and keep it 
   const writeRequests = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1416,6 +1429,7 @@ test("concurrent explicit projects cannot share an in-flight effective registrat
   const writes = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     if (path === "/sessions") {
@@ -1468,6 +1482,7 @@ test("shared registration failure rejects parallel writes and a later call retri
   const writeRequests = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1539,6 +1554,7 @@ test("an opaque runtime session ID stays byte-identical through registration, co
   const observationBodies = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1642,6 +1658,7 @@ test("separate plugin graphs converge on a server-selected continuation", async 
   let originals = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
@@ -1701,6 +1718,7 @@ test("simultaneous foreign projects honor core continuation ownership", async ()
   let originals = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     // Without a resolved owner, each explicit project may claim the runtime identity itself.
@@ -1762,6 +1780,7 @@ test("shutdown bounds project lookup for an owned pending replacement in a fresh
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path !== "/project/current") throw new Error(`Unexpected shutdown request: ${path}`);
     if (!init.signal) return null; // RED: the old lookup repeats five times without a shutdown signal.
@@ -1807,6 +1826,7 @@ test("an ownerless pending replacement cannot be adopted or ended by a foreign p
   const entries = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     // Without a resolved owner, the explicit project may try to claim the runtime identity itself.
@@ -1859,6 +1879,7 @@ test("an ownerless pending replacement is not registered on first use", async ()
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push({ path, body: init.body ? JSON.parse(init.body) : undefined });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     return new Response(JSON.stringify({ status: "created" }));
@@ -1918,6 +1939,7 @@ test("root resume compatibility negotiates support and fails closed", async () =
         const calls = [];
         globalThis.fetch = async (url, init = {}) => {
           const path = new URL(url).pathname;
+          if (path === "/runtime-contract") return runtimeMetadataResponse(path);
           const body = init.body ? JSON.parse(init.body) : undefined;
           calls.push({ path, body });
           if (path === "/health") return new Response(JSON.stringify(health), { status: healthStatus });
@@ -1965,6 +1987,7 @@ test("retired sandbox self-heal cannot consume lost-ack capability evidence", as
   let retiredClock;
   try {
     const refuse = async (url) => {
+      if (new URL(url).pathname === "/runtime-contract") return runtimeMetadataResponse("/runtime-contract");
       if (new URL(url).pathname === "/project/current") return new Response('{"project":"retry-project"}');
       throw new Error("connection refused");
     };
@@ -1996,6 +2019,7 @@ test("retired sandbox self-heal cannot consume lost-ack capability evidence", as
     const entries = [];
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       const body = init.body ? JSON.parse(init.body) : undefined;
       if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: healthChecks++ !== 0 } }));
       if (path === "/project/current") return new Response('{"project":"retry-project"}');
@@ -2051,6 +2075,7 @@ test("root resume compatibility pins retry support after lost acknowledgement", 
       let healthChecks = 0;
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         const body = init.body ? JSON.parse(init.body) : undefined;
         if (path === "/health") {
           const support = healthChecks++ === 0 ? initial : next;
@@ -2103,6 +2128,7 @@ test("resumed quit adopts core numeric identities and reload retains the persist
   const ended = new Set();
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
@@ -2186,6 +2212,7 @@ test("Pi-native explicit end targets the registered resumed identity, not the ho
   ctx.sessionManager.getBranch = () => entries;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method: init.method ?? "GET", path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2235,6 +2262,7 @@ test("ambiguous resumed explicit end leaves its pending reservation intact; JSON
   let endAttempts = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: effectiveID, status: "created" }));
     if (path === "/observations") return new Response(JSON.stringify({ id: 1 }));
@@ -2283,6 +2311,7 @@ test("Pi-native explicit end in a new graph confirms prior pending ownership bef
   let conflict = false;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
     if (path === "/sessions") return conflict
@@ -2347,6 +2376,7 @@ test("ambiguous legacy mapping registration reuses its persisted identity and en
   const attempts = new Map();
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2404,6 +2434,7 @@ test("a legacy pending mapping cannot be claimed by another project after pre-di
   let failedReplacementAttempts = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
@@ -2453,6 +2484,7 @@ test("two module graphs coalesce concurrent pending replacement shutdown", async
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
@@ -2509,6 +2541,7 @@ test("a peer graph cannot revive a closed replacement without explicit session_s
   let pausePeer = false;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
@@ -2570,6 +2603,7 @@ test("passive capture does not dispatch after a peer closes during body construc
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
@@ -2617,6 +2651,7 @@ test("concurrent uncertain replacement end stays pending and a fresh graph retri
   const effectiveID = `${runtimeID}:resume:reserved`;
   globalThis.fetch = async (url) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
     if (path === `/sessions/${encodeURIComponent(effectiveID)}/end`) {
@@ -2677,6 +2712,7 @@ test("foreign resolved graph cannot end an explicitly owned pending replacement"
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "foreign" }));
     return new Response(JSON.stringify({ status: "created" }));
@@ -2708,6 +2744,7 @@ test("confirmed replacement end clears pending state across repeated shutdown an
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2746,6 +2783,7 @@ test("an unconfirmed replacement end retains pending state for a later shutdown"
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2786,6 +2824,7 @@ test("a concurrent foreign-project caller cannot revoke the pending owner's shut
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
@@ -2839,6 +2878,7 @@ test("a later ownership conflict on an uncertain replacement revokes shutdown en
   let replacementAttempts = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2884,6 +2924,7 @@ test("a rejected replacement ownership never authorizes shutdown end", async () 
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2920,6 +2961,7 @@ test("a persisted uncertain replacement ends after extension reload without anot
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2960,6 +3002,7 @@ test("shutdown waits for resumed registration and rejects attributed writes", as
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -3017,6 +3060,7 @@ test("fallback from ended mapping to live root supersedes identity for writes an
       const calls = [];
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         const body = init.body ? JSON.parse(init.body) : undefined;
         calls.push({ path, body });
         if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
@@ -3070,6 +3114,7 @@ test("read-only legacy shutdown suppresses confirmed delivery but retries uncert
       let ends = 0;
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
         if (path.endsWith("/end")) {
@@ -3103,6 +3148,7 @@ test("hosts without mapping persistence never request core resume", async () => 
   let children = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") {
@@ -3165,6 +3211,7 @@ test("session registration trace is opt-in, metadata-only, and preserves resume 
       syncBuiltinESMExports();
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         const body = init.body ? JSON.parse(init.body) : undefined;
         if (path === "/project/current") return new Response('{"project":"private-project"}');
         if (path === "/health") return new Response('{"version":"3.0.0","capabilities":{"root_session_resume":true}}');
@@ -3239,6 +3286,7 @@ test("session lifecycle trace is private, opt-in, and preserves shutdown behavio
       syncBuiltinESMExports();
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         calls.push(path);
         if (path === "/project/current") return new Response('{"project":"pi"}');
         if (path === "/health") return new Response('{"version":"3.0.0"}');
@@ -3352,6 +3400,7 @@ test("persisted legacy continuation renews without appendEntry", async () => {
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
@@ -3387,6 +3436,7 @@ test("explicit end overlapping core resume awaits and ends the acknowledged cont
   const effectiveID = "explicit-overlap:resume:2";
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") { started.resolve(); await release.promise; return new Response(JSON.stringify({ id: effectiveID, status: "created" })); }
@@ -3428,6 +3478,7 @@ test("malformed persisted mapping never authorizes foreign writes or cleanup", a
   let foreignAck = true;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
@@ -3472,6 +3523,7 @@ test("legacy UUID mapping is registered as-is until ended, then resumes the runt
   let ended = false;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
@@ -3510,6 +3562,7 @@ test("resume registration refuses invalid acknowledgements before persisting or 
   let acknowledgement;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
@@ -3545,6 +3598,7 @@ test("lost core acknowledgement retries the root without guessing a continuation
   let writes = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") {
@@ -3583,6 +3637,7 @@ test("old server ended-session refusal explains compatibility without client gue
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -3617,6 +3672,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
   const endGate = deferred();
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
@@ -3654,6 +3710,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
     const raceEndCalls = [];
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
       if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
       if (path === "/sessions") {
@@ -3684,6 +3741,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
     const uncertainEndCalls = [];
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
       if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
       if (path === "/sessions") {
@@ -3735,6 +3793,7 @@ test("Pi-native explicit end awaits a pending effective registration conflict be
   } });
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
     if (path === "/sessions") {
@@ -3780,6 +3839,7 @@ test("explicit end reconciles only an owned pending effective ID with matching a
   let owner = "local-project";
   globalThis.fetch = async (url) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ code: "session_already_ended", session_id: responseID }), { status: 409 });
@@ -3822,6 +3882,7 @@ test("shutdown closes a paused hook until the same runtime session starts again"
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push({ method: init.method ?? "GET", path });
     if (path === "/project/current") {
       projectLookupStarted.resolve();
@@ -3862,6 +3923,7 @@ test("shutdown stops passive capture after registration", async () => {
       let shutdown;
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         calls.push({ method: init.method ?? "GET", path });
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
@@ -3900,6 +3962,7 @@ test("shutdown stops passive capture after registration", async () => {
       const calls = [];
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         calls.push({ method: init.method ?? "GET", path });
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 503 });
@@ -4073,6 +4136,7 @@ test("compaction timeout does not repeat its archive and queues verification gui
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     calls.push({ method: init.method ?? "GET", path: request.pathname + request.search });
     if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (request.pathname === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
@@ -4113,6 +4177,7 @@ test("ambiguous runtime identity history permanently blocks compaction writes", 
   const registrationGate = deferred();
   globalThis.fetch = async (url, init = {}) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     calls.push({ method: init.method ?? "GET", path: request.pathname + request.search });
     if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (request.pathname === "/sessions") {
@@ -4258,6 +4323,7 @@ test("automatic prompt capture redacts a private block that straddles the trunca
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method: init.method ?? "GET", path, body });
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
