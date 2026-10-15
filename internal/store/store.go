@@ -11465,10 +11465,15 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 	); err != nil {
 		return err
 	}
+	// Stamp occurred_at explicitly with Now(): the column default
+	// datetime('now') carries only second precision, while delete tombstones
+	// record deleted_at with sub-second precision. Relying on the default let
+	// a mutation enqueued after a same-second project deletion compare
+	// occurred_at <= deleted_at and be wrongly superseded.
 	res, err := s.execHook(tx,
-		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		DefaultSyncTargetKey, entity, entityKey, op, string(encoded), source, project,
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, occurred_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		DefaultSyncTargetKey, entity, entityKey, op, string(encoded), source, project, Now(),
 	)
 	if err != nil {
 		return err

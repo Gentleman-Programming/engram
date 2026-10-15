@@ -187,3 +187,199 @@ func TestEnrollProjectAfterHardDeleteIgnoresProjectTombstone(t *testing.T) {
 		t.Fatalf("EnrollProject after hard delete: %v", err)
 	}
 }
+
+// TestDeleteProjectTombstoneUsesNormalizedProjectKey pins the tombstone
+// contract: the recorded project column must carry the same normalized key as
+// entity_key, because projectTombstoneSupersedesMutationTx looks the tombstone
+// up with the mutation's normalized project on both columns. A raw name that
+// changes under NormalizeProject would otherwise strand the tombstone and
+// leave pre-delete mutations pending forever.
+func TestDeleteProjectTombstoneUsesNormalizedProjectKey(t *testing.T) {
+	s := newTestStore(t)
+
+	rawProject := "Foxtxt__Proj" // canonicalizes to "foxtxt_proj"
+	normalized, _ := NormalizeProject(rawProject)
+	if normalized == rawProject {
+		t.Fatalf("fixture: %q must change under NormalizeProject, got %q", rawProject, normalized)
+	}
+	if err := s.CreateSession("s-tomb-norm-1", "foxtxt_proj", "/tmp/foxtxt_proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-tomb-norm-1",
+		Type:      "decision",
+		Title:     "norm observation",
+		Content:   "norm content",
+		Project:   "foxtxt_proj",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	// Simulate legacy rows stored under a non-canonical project name so the
+	// hard delete runs with a raw name that differs from its normalized key.
+	if _, err := s.db.Exec(`UPDATE sessions SET project = ? WHERE id = ?`, rawProject, "s-tomb-norm-1"); err != nil {
+		t.Fatalf("relabel session to raw name: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET project = ? WHERE session_id = ?`, rawProject, "s-tomb-norm-1"); err != nil {
+		t.Fatalf("relabel observation to raw name: %v", err)
+	}
+
+	if _, err := s.DeleteProject(rawProject, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	var tombstoneProject string
+	err := s.db.QueryRow(`SELECT project FROM sync_delete_tombstones WHERE entity = 'project' AND entity_key = ?`, normalized).Scan(&tombstoneProject)
+	if err != nil {
+		t.Fatalf("read project tombstone: %v", err)
+	}
+	if tombstoneProject != normalized {
+		t.Fatalf("tombstone project = %q, want normalized key %q (entity_key and project must match)", tombstoneProject, normalized)
+	}
+
+	// End to end: a queued pre-delete mutation must now find the tombstone and
+	// be superseded by the documented repair path.
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		DefaultSyncTargetKey, SyncEntityObservation, "obs-norm-1", SyncOpUpsert,
+		`{"sync_id":"obs-norm-1","type":"decision","title":"norm","content":"norm content","project":"foxtxt_proj"}`,
+		SyncSourceLocal, normalized, "2026-01-02 15:04:05.000000000"); err != nil {
+		t.Fatalf("seed pre-delete mutation: %v", err)
+	}
+	report, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, normalized, true)
+	if err != nil {
+		t.Fatalf("SupersedeUnenrolledLegacyMutations: %v", err)
+	}
+	if len(report.Actions) != 1 {
+		t.Fatalf("expected the pre-delete mutation to be superseded via the normalized tombstone, got %d actions (%+v)", len(report.Actions), report.Actions)
+	}
+}
+
+// TestDeleteProjectTombstoneSupersedesMutationOccurredAtSameInstant pins the
+// less-than-or-equal fence: a mutation stamped at exactly the tombstone's
+// deleted_at (the same-instant edge within one second) carries delete evidence
+// and must be superseded.
+func TestDeleteProjectTombstoneSupersedesMutationOccurredAtSameInstant(t *testing.T) {
+	s := newTestStore(t)
+
+	enrollTestProject(t, s, "golf")
+	if err := s.CreateSession("s-tomb-same-1", "golf", "/tmp/golf"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-tomb-same-1",
+		Type:      "decision",
+		Title:     "same-instant observation",
+		Content:   "same-instant content",
+		Project:   "golf",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.UnenrollProject("golf"); err != nil {
+		t.Fatalf("unenroll golf: %v", err)
+	}
+	if _, err := s.DeleteProject("golf", true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	var deletedAt string
+	if err := s.db.QueryRow(`SELECT deleted_at FROM sync_delete_tombstones WHERE entity = 'project' AND entity_key = 'golf'`).Scan(&deletedAt); err != nil {
+		t.Fatalf("read tombstone deleted_at: %v", err)
+	}
+	// Stamp the queued mutations at the tombstone's exact instant: this is the
+	// boundary a strict less-than comparison would leave pending.
+	if _, err := s.db.Exec(`UPDATE sync_mutations SET occurred_at = ? WHERE project = 'golf' AND acked_at IS NULL AND disposition = 'pending'`, deletedAt); err != nil {
+		t.Fatalf("stamp mutations at deleted_at: %v", err)
+	}
+
+	report, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, "golf", true)
+	if err != nil {
+		t.Fatalf("SupersedeUnenrolledLegacyMutations: %v", err)
+	}
+	if len(report.Actions) != 2 {
+		t.Fatalf("expected both same-instant mutations to be superseded, got %d actions (%+v)", len(report.Actions), report.Actions)
+	}
+}
+
+// TestDeleteProjectTombstoneKeepsSameSecondPostDeleteMutationPending pins the
+// sub-second fence end to end: mutations journalled through the real enqueue
+// path after a hard delete must stay pending even when everything happens
+// within the same wall-clock second. enqueueSyncMutationTx stamps occurred_at
+// with sub-second precision; the old second-precision column default made such
+// mutations compare occurred_at <= deleted_at and wrongly lose their content.
+func TestDeleteProjectTombstoneKeepsSameSecondPostDeleteMutationPending(t *testing.T) {
+	s := newTestStore(t)
+
+	enrollTestProject(t, s, "hotel")
+	if err := s.CreateSession("s-tomb-pre-1", "hotel", "/tmp/hotel"); err != nil {
+		t.Fatalf("create pre-delete session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-tomb-pre-1",
+		Type:      "decision",
+		Title:     "pre-delete observation",
+		Content:   "pre-delete content",
+		Project:   "hotel",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add pre-delete observation: %v", err)
+	}
+	if err := s.UnenrollProject("hotel"); err != nil {
+		t.Fatalf("unenroll hotel: %v", err)
+	}
+	if _, err := s.DeleteProject("hotel", true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	// Recreate the project under the same name and journal fresh upserts right
+	// after the delete through the real enqueue path.
+	if err := s.EnrollProject("hotel"); err != nil {
+		t.Fatalf("re-enroll hotel: %v", err)
+	}
+	if err := s.CreateSession("s-tomb-post-1", "hotel", "/tmp/hotel"); err != nil {
+		t.Fatalf("create post-delete session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-tomb-post-1",
+		Type:      "decision",
+		Title:     "post-delete observation",
+		Content:   "post-delete content",
+		Project:   "hotel",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add post-delete observation: %v", err)
+	}
+	if err := s.UnenrollProject("hotel"); err != nil {
+		t.Fatalf("unenroll hotel again: %v", err)
+	}
+
+	report, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, "hotel", true)
+	if err != nil {
+		t.Fatalf("SupersedeUnenrolledLegacyMutations: %v", err)
+	}
+	var postObservationSyncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = 's-tomb-post-1'`).Scan(&postObservationSyncID); err != nil {
+		t.Fatalf("read post-delete observation sync_id: %v", err)
+	}
+	for _, action := range report.Actions {
+		if action.EntityKey == "s-tomb-post-1" || action.EntityKey == postObservationSyncID {
+			t.Fatalf("post-delete mutation %q was superseded (%+v); it must stay pending", action.EntityKey, action)
+		}
+	}
+	var disposition string
+	if err := s.db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity = 'session' AND entity_key = 's-tomb-pre-1'`).Scan(&disposition); err != nil {
+		t.Fatalf("read pre-delete session disposition: %v", err)
+	}
+	if disposition != SyncMutationDispositionSuperseded {
+		t.Fatalf("pre-delete session disposition = %q, want %q", disposition, SyncMutationDispositionSuperseded)
+	}
+	for _, key := range []struct{ entity, entityKey string }{{"session", "s-tomb-post-1"}, {"observation", postObservationSyncID}} {
+		if err := s.db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity = ? AND entity_key = ?`, key.entity, key.entityKey).Scan(&disposition); err != nil {
+			t.Fatalf("read post-delete %s disposition: %v", key.entity, err)
+		}
+		if disposition != SyncMutationDispositionPending {
+			t.Fatalf("post-delete %s disposition = %q, want %q (recreated project content must still sync)", key.entity, disposition, SyncMutationDispositionPending)
+		}
+	}
+}
