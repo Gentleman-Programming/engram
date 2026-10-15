@@ -407,6 +407,124 @@ func TestDeletedObsRemoved(t *testing.T) {
 
 // ─── Task 2.7: TestProjectFilter ─────────────────────────────────────────────
 
+// TestExportTraversalRejectedInNewDeletePaths covers the three delete loops
+// added alongside the org axis — filter-exclusion cleanup, stale session hub
+// pruning and stale topic hub pruning — all of which read a relPath from the
+// persisted sync state. A tampered entry that would escape the export root must
+// be refused (same guard as the deleted-observation path), never followed.
+func TestExportTraversalRejectedInNewDeletePaths(t *testing.T) {
+	newEngRoot := func(t *testing.T) (dir, engRoot, relToSensitive, sensitiveFile string) {
+		t.Helper()
+		dir = t.TempDir()
+		externalDir := t.TempDir()
+		sensitiveFile = filepath.Join(externalDir, "secret.txt")
+		if err := os.WriteFile(sensitiveFile, []byte("sensitive content"), 0644); err != nil {
+			t.Fatalf("setup sensitive file: %v", err)
+		}
+		engRoot = filepath.Join(dir, "engram")
+		if err := os.MkdirAll(engRoot, 0755); err != nil {
+			t.Fatalf("mkdir engRoot: %v", err)
+		}
+		rel, err := filepath.Rel(engRoot, sensitiveFile)
+		if err != nil {
+			t.Fatalf("filepath.Rel: %v", err)
+		}
+		return dir, engRoot, rel, sensitiveFile
+	}
+
+	assertRejected := func(t *testing.T, result *ExportResult, sensitiveFile string) {
+		t.Helper()
+		if !fileExists(sensitiveFile) {
+			t.Errorf("expected %s to be preserved, but it was deleted via path traversal", sensitiveFile)
+		}
+		unsafe := false
+		for _, err := range result.Errors {
+			if strings.Contains(err.Error(), "unsafe path rejected") {
+				unsafe = true
+			}
+		}
+		if !unsafe {
+			t.Errorf("expected an unsafe-path-rejected error, got %v", result.Errors)
+		}
+	}
+
+	t.Run("filter-exclusion cleanup rejects traversal", func(t *testing.T) {
+		dir, engRoot, relToSensitive, sensitiveFile := newEngRoot(t)
+		state := SyncState{
+			Version:     1,
+			Files:       map[int64]string{50: relToSensitive},
+			SessionHubs: map[string]string{},
+			TopicHubs:   map[string]string{},
+		}
+		if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+		ms := &mockStore{exportData: &store.ExportData{
+			Observations: []store.Observation{{ID: 50, Type: "bugfix", Title: "Out of scope", Project: strPtr("other")}},
+		}}
+		// A project filter the tracked observation no longer matches drives it
+		// into the filter-exclusion delete loop.
+		exp := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "wanted"})
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertRejected(t, result, sensitiveFile)
+	})
+
+	t.Run("stale session hub pruning rejects traversal", func(t *testing.T) {
+		dir, engRoot, relToSensitive, sensitiveFile := newEngRoot(t)
+		state := SyncState{
+			Version:     1,
+			Files:       map[int64]string{},
+			SessionHubs: map[string]string{"ghost-session": relToSensitive},
+			TopicHubs:   map[string]string{},
+		}
+		if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+		// No observations reference ghost-session, so it is never re-selected
+		// and falls into the stale-session-hub delete loop.
+		ms := &mockStore{exportData: &store.ExportData{}}
+		exp := NewExporter(ms, ExportConfig{VaultPath: dir})
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertRejected(t, result, sensitiveFile)
+	})
+
+	t.Run("empty and dot relPath are rejected, root is not removed", func(t *testing.T) {
+		for _, relPath := range []string{"", "."} {
+			if err := removeExportFile(t.TempDir(), relPath); err == nil {
+				t.Errorf("removeExportFile(root, %q) = nil, want rejection of root-level delete", relPath)
+			}
+		}
+	})
+
+	t.Run("stale topic hub pruning rejects traversal", func(t *testing.T) {
+		dir, engRoot, relToSensitive, sensitiveFile := newEngRoot(t)
+		state := SyncState{
+			Version:     1,
+			Files:       map[int64]string{},
+			SessionHubs: map[string]string{},
+			TopicHubs:   map[string]string{"ghost/topic": relToSensitive},
+		}
+		if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), state); err != nil {
+			t.Fatalf("WriteState: %v", err)
+		}
+		// No observations carry the ghost/topic prefix, so it is never
+		// re-selected and falls into the stale-topic-hub delete loop.
+		ms := &mockStore{exportData: &store.ExportData{}}
+		exp := NewExporter(ms, ExportConfig{VaultPath: dir})
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertRejected(t, result, sensitiveFile)
+	})
+}
+
 func TestProjectFilter(t *testing.T) {
 	t.Run("--project flag limits exported observations to matching project", func(t *testing.T) {
 		dir := t.TempDir()
