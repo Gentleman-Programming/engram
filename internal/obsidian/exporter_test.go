@@ -338,6 +338,15 @@ func TestDeletedObsRemoved(t *testing.T) {
 		if len(result.Errors) == 0 {
 			t.Errorf("expected error reporting unsafe path rejection, got none")
 		}
+		// The permanently unsafe entry must be dropped from persisted state so it
+		// is not retried (and re-reported) on every subsequent export.
+		persisted, err := ReadState(statePath)
+		if err != nil {
+			t.Fatalf("ReadState: %v", err)
+		}
+		if _, stillTracked := persisted.Files[99]; stillTracked {
+			t.Errorf("unsafe Files[99] entry survived in state, expected it dropped")
+		}
 	})
 
 	t.Run("deleted observation through intermediate symlink preserves external file and state", func(t *testing.T) {
@@ -432,7 +441,7 @@ func TestExportTraversalRejectedInNewDeletePaths(t *testing.T) {
 		return dir, engRoot, rel, sensitiveFile
 	}
 
-	assertRejected := func(t *testing.T, result *ExportResult, sensitiveFile string) {
+	assertRejected := func(t *testing.T, engRoot string, result *ExportResult, sensitiveFile, relToSensitive string) {
 		t.Helper()
 		if !fileExists(sensitiveFile) {
 			t.Errorf("expected %s to be preserved, but it was deleted via path traversal", sensitiveFile)
@@ -445,6 +454,27 @@ func TestExportTraversalRejectedInNewDeletePaths(t *testing.T) {
 		}
 		if !unsafe {
 			t.Errorf("expected an unsafe-path-rejected error, got %v", result.Errors)
+		}
+		// A permanently unsafe entry must be dropped from the persisted state so
+		// it is not retried (and re-reported) on every subsequent export.
+		persisted, err := ReadState(filepath.Join(engRoot, ".engram-sync-state.json"))
+		if err != nil {
+			t.Fatalf("ReadState: %v", err)
+		}
+		for id, rel := range persisted.Files {
+			if rel == relToSensitive {
+				t.Errorf("unsafe Files[%d] entry survived in state, expected it dropped", id)
+			}
+		}
+		for id, rel := range persisted.SessionHubs {
+			if rel == relToSensitive {
+				t.Errorf("unsafe SessionHubs[%q] entry survived in state, expected it dropped", id)
+			}
+		}
+		for prefix, rel := range persisted.TopicHubs {
+			if rel == relToSensitive {
+				t.Errorf("unsafe TopicHubs[%q] entry survived in state, expected it dropped", prefix)
+			}
 		}
 	}
 
@@ -469,7 +499,7 @@ func TestExportTraversalRejectedInNewDeletePaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		assertRejected(t, result, sensitiveFile)
+		assertRejected(t, engRoot, result, sensitiveFile, relToSensitive)
 	})
 
 	t.Run("stale session hub pruning rejects traversal", func(t *testing.T) {
@@ -491,7 +521,7 @@ func TestExportTraversalRejectedInNewDeletePaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		assertRejected(t, result, sensitiveFile)
+		assertRejected(t, engRoot, result, sensitiveFile, relToSensitive)
 	})
 
 	t.Run("empty and dot relPath are rejected, root is not removed", func(t *testing.T) {
@@ -521,7 +551,7 @@ func TestExportTraversalRejectedInNewDeletePaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		assertRejected(t, result, sensitiveFile)
+		assertRejected(t, engRoot, result, sensitiveFile, relToSensitive)
 	})
 }
 
