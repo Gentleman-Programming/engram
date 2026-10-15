@@ -2729,6 +2729,8 @@ func cmdProjects(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "alias":
+		cmdProjectsAlias(cfg)
 	case "merge":
 		cmdProjectsMerge(cfg)
 	case "consolidate":
@@ -2747,6 +2749,7 @@ func cmdProjects(cfg store.Config) {
 }
 
 func printProjectsUsage() {
+	fmt.Fprint(os.Stderr, projectAliasUsage)
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
 	fmt.Fprintln(os.Stderr, "       engram projects merge --from <source> --to <canonical> (--dry-run|--apply)")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")

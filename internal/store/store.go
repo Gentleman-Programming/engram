@@ -1401,6 +1401,12 @@ func (s *Store) backfillLegacySessionOwnershipModes() error {
 
 func (s *Store) migrate() error {
 	schema := `
+		CREATE TABLE IF NOT EXISTS project_aliases (
+			kind TEXT NOT NULL CHECK (kind IN ('key', 'cwd')),
+			alias_key TEXT NOT NULL,
+			project TEXT NOT NULL,
+			PRIMARY KEY (kind, alias_key)
+		);
 			CREATE TABLE IF NOT EXISTS sessions (
 				id         TEXT PRIMARY KEY,
 			project    TEXT NOT NULL,

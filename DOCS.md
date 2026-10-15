@@ -35,6 +35,7 @@ For other docs:
 | [Agent Setup](docs/AGENT-SETUP.md)          | Per-agent configuration + compaction survival                                                 |
 | [Codebase Guide](docs/CODEBASE-GUIDE.md)    | Definitive guide to repository structure, package ownership, flows, and maintainer guardrails |
 | [Capture Project Provenance](docs/CAPTURE-PROJECT-PROVENANCE.md) | Optional local capture evidence, compatibility and limits |
+| [Local Project Aliases](docs/PROJECT-ALIASES.md) | Local key/cwd alias administration and read-only future-derivation preview |
 | [Agent Contract](docs/AGENT-CONTRACT.md)    | Go-owned MCP agent-contract foundation, generation, digest, and explicit Pi parity gaps |
 | [Architecture](docs/ARCHITECTURE.md)        | How it works, session lifecycle, CLI reference, project structure                             |
 | [Plugins](docs/PLUGINS.md)                  | OpenCode & Claude Code plugin details                                                         |
@@ -102,6 +103,7 @@ This catalog covers the tracked Markdown documentation surfaces. **Owner `GP`** 
 | [docs/ENGRAM-CLOUD.md](docs/ENGRAM-CLOUD.md) | Cloud readers | Guide: moved-page pointer | Compatibility redirect | GP |
 | [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installers | Guide: installation | Living | GP |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | Plugin users | Canonical: plugin contracts | Living | GP |
+| [docs/PROJECT-ALIASES.md](docs/PROJECT-ALIASES.md) | Local operators | Canonical: local alias CLI and preview | Living | GP |
 | [docs/RELEASE-POLICY.md](docs/RELEASE-POLICY.md) | Maintainers | Policy: releases | Living | GP |
 | [docs/SELF-TESTING.md](docs/SELF-TESTING.md) | Maintainers | Guide: self-tests | Living | GP |
 | [docs/TEAM-USAGE.md](docs/TEAM-USAGE.md) | Teams | Guide: collaboration | Living | GP |
@@ -139,6 +141,7 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **sync_state** — one row per `target_key`, with lifecycle, sequence, retry/backoff, lease, error, success, and update metadata; **sync_mutations** — ordered mutation queue with target, project, entity, operation, payload, source, acknowledgement, and disposition metadata
 - **sync_delete_tombstones** — one row per deleted entity (PK `entity`, `entity_key`) with `session_id`, `project`, `deleted_at`, `hard_delete`, `active`, `last_mutation_seq`, and `last_remote_mutation_seq` metadata. `last_mutation_seq` retains the highest historical local delete-mutation sequence; backfill emits missing delete intent for active tombstones without a recorded remote delete sequence or matching unacknowledged delete mutation, without advancing that field. `last_remote_mutation_seq` records the default cloud target's remote delete floor. Pulled session and observation upserts first pass a tombstone guard: local sync compares a known payload generation with the hard-delete time, while cloud sync checks the applicable remote delete sequence floor. Without its own floor, an active tombstone blocks the default target; for non-default targets, it blocks only when no non-default target has a remote floor. Only permitted upserts can deactivate the tombstone.
 - **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
+- **project_aliases** — local-only future-derivation mappings: `kind` (`key` or `cwd`), `alias_key`, `project`; composite primary key (`kind`, `alias_key`). Not exported, enrollment, or historical ownership.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
 - **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
 - **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` are excluded from ordinary replay. They include terminal discarded-mutation evidence and relations that exceeded the retry cap (5 attempts); cloud imports may rearm eligible retry-cap relations when their dependencies become available. `engram conflicts prune --apply` bounds the evidence eligible for pruning by age and per-scope count, preserving potentially recoverable retry-cap relations.
@@ -201,6 +204,11 @@ engram conflicts <sub>        Conflict audit: list, show, stats, scan, deferred,
 engram doctor                 Read-only diagnostics [--json] [--project P] [--check CODE]
 engram cloud <sub>            Optional cloud configuration, enrollment, upgrade, and server
 engram projects list          List projects with observation/session/prompt counts
+engram projects alias --help  Local future-only aliases; set/list/remove/resolve
+engram projects alias set --key old-name --project team-app
+engram projects alias list
+engram projects alias resolve --designation old-name
+engram projects alias remove --key old-name
 engram projects merge --from acmeapi --to acme-api --dry-run
 engram projects merge --from acmeapi --to acme-api --apply
 engram projects consolidate [--all] [--dry-run]
@@ -1792,6 +1800,8 @@ Both errors carry a `remedy` field naming the exact command to run: `engram proj
 When saving to a project that doesn't exist yet, Engram checks for similar existing project names (Levenshtein distance, substring, case-insensitive matching) and warns the agent if a likely variant already exists.
 
 ### Retroactive cleanup
+
+For local future-only key/cwd mappings, use [project aliases](docs/PROJECT-ALIASES.md). Alias resolution is a read-only preview; it does not enable inbox routing, enroll projects, or rewrite history.
 
 Use `engram projects merge --from acmeapi --to acme-api --dry-run` to preview one explicitly named separator variant without mutation, then `--apply` to merge it. Exactly one mode and both names are required; unrelated names and case/spacing-only normalized-identical inputs are rejected. A distinct legacy NFD spelling is accepted when it normalizes to the NFC target; use the exact stored source spelling. Preview reports observation, session, and prompt counts plus sync identity changes, even with zero rows. It is point-in-time: apply revalidates and reports actual moved row counts, which may differ. Apply's sync identity message is qualitative, not an actual-change count or a claim that the preview's sync state still holds. Sync-only merges can succeed with zero record moves. The reserved `inbox` project cannot be a merge destination, including for an explicitly named separator variant such as `in-box`; preview and apply both reject it.
 
