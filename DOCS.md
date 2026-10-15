@@ -36,6 +36,7 @@ For other docs:
 | [Codebase Guide](docs/CODEBASE-GUIDE.md)    | Definitive guide to repository structure, package ownership, flows, and maintainer guardrails |
 | [Capture Project Provenance](docs/CAPTURE-PROJECT-PROVENANCE.md) | Optional local capture evidence, compatibility and limits |
 | [Local Project Aliases](docs/PROJECT-ALIASES.md) | Local key/cwd alias administration and read-only future-derivation preview |
+| [Cloud Inbox State](docs/CLOUD-INBOX-STATE.md) | Read-only foreign state, reserved inbox retention and transport exclusion |
 | [Agent Contract](docs/AGENT-CONTRACT.md)    | Go-owned MCP agent-contract foundation, generation, digest, and explicit Pi parity gaps |
 | [Pi HTTP Runtime Contract](docs/RUNTIME-CONTRACT.md) | Separate Go HTTP handler registry, identity, digest, and expected projection |
 | [Architecture](docs/ARCHITECTURE.md)        | How it works, session lifecycle, CLI reference, project structure                             |
@@ -106,6 +107,7 @@ This catalog covers the tracked Markdown documentation surfaces. **Owner `GP`** 
 | [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installers | Guide: installation | Living | GP |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | Plugin users | Canonical: plugin contracts | Living | GP |
 | [docs/PROJECT-ALIASES.md](docs/PROJECT-ALIASES.md) | Local operators | Canonical: local alias CLI and preview | Living | GP |
+| [docs/CLOUD-INBOX-STATE.md](docs/CLOUD-INBOX-STATE.md) | Local operators | Canonical: inbox state and retention boundaries | Living | GP |
 | [docs/RELEASE-POLICY.md](docs/RELEASE-POLICY.md) | Maintainers | Policy: releases | Living | GP |
 | [docs/SELF-TESTING.md](docs/SELF-TESTING.md) | Maintainers | Guide: self-tests | Living | GP |
 | [docs/TEAM-USAGE.md](docs/TEAM-USAGE.md) | Teams | Guide: collaboration | Living | GP |

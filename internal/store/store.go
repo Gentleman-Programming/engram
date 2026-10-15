@@ -7321,8 +7321,29 @@ func (s *Store) RecordSyncedChunkForTarget(targetKey, chunkID string) error {
 
 // ─── Local Sync State & Mutation Journal ─────────────────────────────────────
 
+// foreignCloudProject excludes the reserved inbox, which has its own lifecycle.
+func foreignCloudProject(target string) string {
+	if target == SyncInboxTargetKey || !strings.HasPrefix(target, DefaultSyncTargetKey+":") {
+		return ""
+	}
+	return strings.TrimPrefix(target, DefaultSyncTargetKey+":")
+}
+
 func (s *Store) GetSyncState(targetKey string) (*SyncState, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if project := foreignCloudProject(targetKey); project != "" {
+		enrolled, err := s.IsProjectEnrolled(project)
+		if err != nil {
+			return nil, err
+		}
+		if !enrolled {
+			state, err := s.getSyncState(targetKey)
+			if errors.Is(err, sql.ErrNoRows) {
+				return &SyncState{TargetKey: targetKey, Lifecycle: SyncLifecycleIdle}, nil
+			}
+			return state, err
+		}
+	}
 	if err := s.ensureSyncState(targetKey); err != nil {
 		return nil, err
 	}
@@ -7331,6 +7352,9 @@ func (s *Store) GetSyncState(targetKey string) (*SyncState, error) {
 
 func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMutation, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return []SyncMutation{}, nil
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -7413,6 +7437,9 @@ func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
 // sync_state counters do not determine this bound.
 func (s *Store) MaxPendingSyncMutationSeq(targetKey string) (int64, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return 0, nil
+	}
 	var seq int64
 	err := s.db.QueryRow(`
 		SELECT COALESCE(MAX(sm.seq), 0)
@@ -7425,6 +7452,9 @@ func (s *Store) MaxPendingSyncMutationSeq(targetKey string) (int64, error) {
 
 func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return []SyncMutation{}, nil
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -7461,6 +7491,9 @@ func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, ap
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	report := SyncMutationQuarantineReport{Project: project, Applied: apply, Actions: []SyncMutationQuarantineAction{}}
+	if isSyncInboxTarget(targetKey) {
+		return report, nil
+	}
 	runTx := s.withTx
 	if !apply {
 		runTx = s.withReadTx
@@ -7691,6 +7724,9 @@ func (s *Store) refreshSupersededProjectLifecycleTx(tx *sql.Tx, project string, 
 
 func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return []PendingSyncMutationProjectCount{}, nil
+	}
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.project, COUNT(*)
 		FROM sync_mutations sm
@@ -7723,6 +7759,9 @@ func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]Pendin
 // mutations are never skipped — they always sync regardless of enrollment.
 func (s *Store) SkipAckNonEnrolledMutations(targetKey string) (int64, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return 0, nil
+	}
 	res, err := s.execHook(s.db, `
 		UPDATE sync_mutations
 		SET acked_at = datetime('now')
@@ -7740,6 +7779,9 @@ func (s *Store) SkipAckNonEnrolledMutations(targetKey string) (int64, error) {
 }
 
 func (s *Store) AckSyncMutations(targetKey string, lastAckedSeq int64) error {
+	if isSyncInboxTarget(normalizeSyncTargetKey(targetKey)) {
+		return nil
+	}
 	if lastAckedSeq <= 0 {
 		return nil
 	}
@@ -7828,6 +7870,9 @@ func (s *Store) AckSyncMutations(targetKey string, lastAckedSeq int64) error {
 // AckSyncMutationSeqs acknowledges specific mutation sequence numbers without
 // requiring them to be contiguous.
 func (s *Store) AckSyncMutationSeqs(targetKey string, seqs []int64) error {
+	if isSyncInboxTarget(normalizeSyncTargetKey(targetKey)) {
+		return nil
+	}
 	if len(seqs) == 0 {
 		return nil
 	}
@@ -7943,7 +7988,7 @@ func (s *Store) refreshProjectSyncStateTx(tx *sql.Tx, project string) error {
 	if isSyncInboxTarget(projectTargetKey) {
 		return nil
 	}
-	state, err := s.getSyncStateTx(tx, projectTargetKey)
+	state, err := s.getSyncStateForRefreshTx(tx, projectTargetKey)
 	if err != nil {
 		return err
 	}
@@ -8051,7 +8096,7 @@ func (s *Store) applySyncLifecycleTx(tx *sql.Tx, targetKey string, pendingCount 
 	if isSyncInboxTarget(targetKey) {
 		return nil
 	}
-	state, err := s.getSyncStateTx(tx, targetKey)
+	state, err := s.getSyncStateForRefreshTx(tx, targetKey)
 	if err != nil {
 		return err
 	}
@@ -10302,12 +10347,32 @@ func (s *Store) getSyncState(targetKey string) (*SyncState, error) {
 	return &state, nil
 }
 
+// Explicit operational writes retain their state even before enrollment.
 func (s *Store) getSyncStateTx(tx *sql.Tx, targetKey string) (*SyncState, error) {
-	if _, err := s.execHook(tx,
-		`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
-		targetKey, SyncLifecycleIdle,
-	); err != nil {
-		return nil, err
+	return s.syncStateTx(tx, targetKey, true)
+}
+
+// Refreshes may update existing diagnostics, but never mint an unenrolled target.
+func (s *Store) getSyncStateForRefreshTx(tx *sql.Tx, targetKey string) (*SyncState, error) {
+	allowInsert := true
+	if project := foreignCloudProject(targetKey); project != "" {
+		enrolled, err := isProjectEnrolledTx(tx, project)
+		if err != nil {
+			return nil, err
+		}
+		allowInsert = enrolled
+	}
+	return s.syncStateTx(tx, targetKey, allowInsert)
+}
+
+func (s *Store) syncStateTx(tx *sql.Tx, targetKey string, allowInsert bool) (*SyncState, error) {
+	if allowInsert {
+		if _, err := s.execHook(tx,
+			`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
+			targetKey, SyncLifecycleIdle,
+		); err != nil {
+			return nil, err
+		}
 	}
 	row := tx.QueryRow(`
 		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
@@ -10315,6 +10380,9 @@ func (s *Store) getSyncStateTx(tx *sql.Tx, targetKey string) (*SyncState, error)
 		FROM sync_state WHERE target_key = ?`, targetKey)
 	var state SyncState
 	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.LastSuccessAt, &state.UpdatedAt); err != nil {
+		if !allowInsert && errors.Is(err, sql.ErrNoRows) {
+			return &SyncState{TargetKey: targetKey, Lifecycle: SyncLifecycleIdle}, nil
+		}
 		return nil, err
 	}
 	return &state, nil
