@@ -203,6 +203,56 @@ func TestAgentWorkflowInfrastructureErrors(t *testing.T) {
 	}
 }
 
+func TestAgentWorkflowJudgeErrors(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closed=%v", closed), func(t *testing.T) {
+			f := newWorkflowReviewFixture(t)
+			if err := f.store.CreateSession("foreign-review", "foreign", "/tmp"); err != nil {
+				t.Fatal(err)
+			}
+			foreignID, err := f.store.AddObservation(store.AddObservationParams{SessionID: "foreign-review", Project: "foreign", Type: "discovery", Title: "foreign", Content: "foreign source"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			foreign, err := f.store.GetObservation(foreignID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := f.store.GetObservation(f.ids[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.SaveRelation(store.SaveRelationParams{SyncID: "rel-cross", SourceID: source.SyncID, TargetID: foreign.SyncID}); err != nil {
+				t.Fatal(err)
+			}
+			before, directory := f.snapshot(t), f.store.DataDir()
+			missing, cross := `JudgeRelation: relation "missing" not found`, store.ErrCrossProjectRelation.Error()
+			if closed {
+				if err := f.store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				missing, cross = "judgment failed", "judgment failed"
+			}
+			f.post(t, "/conflicts/judge-many", `{"judgments":[{"judgment_id":"missing","relation":"related"},{"judgment_id":"rel-review","relation":"invalid"},{"judgment_id":"rel-cross","relation":"related"}]}`, 200, map[string]any{
+				"outcomes": []any{
+					map[string]any{"index": float64(0), "judgment_id": "missing", "status": "error", "error": missing},
+					map[string]any{"index": float64(1), "judgment_id": "rel-review", "status": "error", "error": `JudgeRelation: invalid relation verb "invalid" — must be one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict`},
+					map[string]any{"index": float64(2), "judgment_id": "rel-cross", "status": "error", "error": cross},
+				},
+			})
+			if closed {
+				reopened, err := store.New(store.FallbackConfig(directory))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = reopened.Close() })
+				f.store = reopened
+			}
+			f.unchanged(t, before)
+		})
+	}
+}
+
 func TestAgentWorkflowDomainRefusals(t *testing.T) {
 	f := newWorkflowReviewFixture(t)
 	before := f.snapshot(t)

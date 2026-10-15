@@ -32,7 +32,7 @@ Refusals are `{ "error": "message", "code": "code", "plan": ... }` (plan optiona
 
 Each object uses `judgment_id`, `relation`, optional `reason`, `evidence`, and numeric `confidence` in [0,1]. Shared session provenance replaces per-item session provenance, including when omitted (empty provenance). Existing store verb validation applies.
 
-HTTP 200 returns `{ "outcomes": [...] }` in input order. Every outcome has `index`, `judgment_id` (null when unavailable), and `status:"success"|"error"`. Success includes `relation` and `judgment_status`; errors include `error`. Successful items retain their individual transactions; no rollback or exactly-once guarantee is added.
+HTTP 200 returns `{ "outcomes": [...] }` in input order. Every outcome has `index`, `judgment_id` (null when unavailable), and `status:"success"|"error"`. Success includes `relation` and `judgment_status`; errors include `error`. Known Store refusals (missing relation, invalid verb and cross-project relation) retain their existing messages; unexpected database or internal failures use `error:"judgment failed"`, without exposing internal details. These remain ordered per-item errors under HTTP 200, and later items still run. Successful items retain their individual transactions; no rollback or exactly-once guarantee is added.
 
 ## Finalize an existing session
 

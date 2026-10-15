@@ -121,7 +121,7 @@ func (s *Server) handleJudgeMany(w http.ResponseWriter, r *http.Request) {
 			} else {
 				relation, err := s.store.JudgeRelation(params)
 				if err != nil {
-					message = err.Error()
+					message = judgmentErrorMessage(err, params)
 				} else {
 					out["status"] = "success"
 					out["relation"] = relation
@@ -136,6 +136,22 @@ func (s *Server) handleJudgeMany(w http.ResponseWriter, r *http.Request) {
 		outcomes = append(outcomes, out)
 	}
 	jsonResponse(w, 200, map[string]any{"outcomes": outcomes})
+}
+
+// Only exact known Store refusals may cross the HTTP boundary. Unexpected
+// errors, including wrapped database failures, must not expose internal details.
+func judgmentErrorMessage(err error, params store.JudgeRelationParams) string {
+	if errors.Is(err, store.ErrCrossProjectRelation) {
+		return store.ErrCrossProjectRelation.Error()
+	}
+	message := err.Error()
+	switch message {
+	case fmt.Sprintf("JudgeRelation: relation %q not found", params.JudgmentID),
+		fmt.Sprintf("JudgeRelation: invalid relation verb %q — must be one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict", params.Relation):
+		return message
+	default:
+		return "judgment failed"
+	}
 }
 
 func (s *Server) handleFinalizeSession(w http.ResponseWriter, r *http.Request) {
