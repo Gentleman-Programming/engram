@@ -29,6 +29,9 @@ var ErrAmbiguousProject = errors.New("ambiguous project: multiple git repos foun
 // used as a project write lock.
 var ErrInvalidConfig = errors.New("invalid .engram/config.json")
 
+// ErrExplicitProjectRequired reports a HOME repository descendant needing designation.
+var ErrExplicitProjectRequired = errors.New("explicit project required: use --project, ENGRAM_PROJECT, or .engram/config.json project_name")
+
 // Source constants describe how the project name was resolved.
 const (
 	SourceGitRemote        = "git_remote"        // current repository has an origin remote; Project may come from its binding
@@ -140,6 +143,8 @@ type DetectionResult struct {
 type DetectionOptions struct {
 	HistoryLookup func(string) ([]string, error)
 	InspectOnly   bool
+	// RequireExplicitHomeProject opts captures into HOME descendant validation.
+	RequireExplicitHomeProject bool
 }
 
 func DetectProjectFull(dir string) DetectionResult {
@@ -236,6 +241,12 @@ func detectFromGitBinding(dir string, options DetectionOptions, historyDirectory
 		}, true
 	}
 
+	if options.RequireExplicitHomeProject {
+		if err := requireHomeProject(dir, root); err != nil {
+			return DetectionResult{Path: root, Error: err}, true
+		}
+	}
+
 	legacyProject := normalize(filepath.Base(root))
 	source := SourceGitRoot
 	if name := detectFromGitRemote(dir); name != "" {
@@ -268,6 +279,48 @@ func detectFromGitBinding(dir string, options DetectionOptions, historyDirectory
 		return DetectionResult{Source: source, Path: root, Error: err}, true
 	}
 	return DetectionResult{Project: binding.Project, Source: source, Path: root}, true
+}
+
+// requireHomeProject runs before history lookup or private binding publication.
+// Query only the requested subtree; an unreadable index is not an empty index.
+func requireHomeProject(dir, root string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine HOME for project selection: %w", err)
+	}
+	home = DirectoryIdentity(home)
+	if DirectoryIdentity(root) != home {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// Linked worktrees retain their own checkout boundary, even when their
+	// shared identity root is HOME. Failure to establish it must fail closed.
+	checkout, err := command.NewContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return fmt.Errorf("cannot verify HOME checkout for project selection: %w", err)
+	}
+	if DirectoryIdentity(strings.TrimSpace(string(checkout))) != home {
+		return nil
+	}
+	cwd := DirectoryIdentity(dir)
+	relative, err := filepath.Rel(home, cwd)
+	if err != nil {
+		return fmt.Errorf("cannot compare HOME project directory: %w", err)
+	}
+	if relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return nil
+	}
+	// '.' is relative to -C's cwd and cannot interpret directory-name globbing.
+	cmd := command.NewContext(ctx, "git", "-C", dir, "ls-files", "--cached", "-z", "--", ".")
+	tracked, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("cannot verify tracked files for HOME project selection; configure project_name explicitly: %w", err)
+	}
+	if len(tracked) == 0 {
+		return ErrExplicitProjectRequired
+	}
+	return nil
 }
 
 type configFile struct {
