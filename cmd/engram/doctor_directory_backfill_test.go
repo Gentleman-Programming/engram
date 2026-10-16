@@ -2,12 +2,125 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	_ "modernc.org/sqlite"
 )
+
+func TestDoctorDirectoryBackfillCaseVariant(t *testing.T) {
+	for _, scope := range []string{"all", "Mixed_Case_Project", "mixed_case_project"} {
+		t.Run(scope, func(t *testing.T) {
+			cfg := testConfig(t)
+			initDoctorStore(t, cfg)
+			db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.SetMaxOpenConns(1)
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Errorf("close doctor backfill database: %v", err)
+				}
+			})
+			// Legacy spellings cannot be created through current session creation.
+			for _, id := range []string{"case-a", "case-b"} {
+				if _, err := db.Exec(`INSERT INTO sessions(id,project,ownership_mode,directory) VALUES (?, 'Mixed_Case_Project', 'shared', '/work/case')`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, id := range []string{"case-a", "case-a", "case-b", "case-a"} {
+				payload := fmt.Sprintf(`{"id":%q,"project":"Mixed_Case_Project","directory":""}`, id)
+				if _, err := db.Exec(`INSERT INTO sync_mutations(seq,target_key,entity,entity_key,op,payload,source,project) VALUES (?, 'cloud', 'session', ?, 'upsert', ?, 'local', 'Mixed_Case_Project')`, i+1, id, payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			counts := func() []int {
+				t.Helper()
+				var result []int
+				for _, table := range []string{"sessions", "observations", "user_prompts", "sync_mutations"} {
+					var n int
+					if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+						t.Fatal(err)
+					}
+					result = append(result, n)
+				}
+				return result
+			}
+			before := counts()
+			// Compare snapshots across opposite scan orders to detect unordered aggregation.
+			if _, err := db.Exec(`PRAGMA reverse_unordered_selects = ON`); err != nil {
+				t.Fatal(err)
+			}
+			var original string
+			if err := db.QueryRow(`SELECT group_concat(payload, '|') FROM (SELECT payload FROM sync_mutations ORDER BY seq)`).Scan(&original); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA reverse_unordered_selects = OFF`); err != nil {
+				t.Fatal(err)
+			}
+			for step, mode := range []string{"--dry-run", "--apply", "--apply"} {
+				args := []string{"engram", "doctor", "repair", "--check", "sync_mutation_required_fields", mode}
+				if scope != "all" {
+					args = append(args, "--project", scope)
+				}
+				withArgs(t, args...)
+				stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+				if stderr != "" {
+					t.Fatalf("%s stderr=%q", mode, stderr)
+				}
+				report := decodeRepairPlan(t, stdout)
+				actions := report["directory_repairs"].([]any)
+				var repaired int
+				if err := db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE json_extract(payload, '$.directory')='/work/case'`).Scan(&repaired); err != nil {
+					t.Fatal(err)
+				}
+				wantActions := 4
+				if step == 2 {
+					wantActions = 0
+				}
+				if report["applied"] != (step == 1) {
+					t.Fatalf("%s applied=%v", mode, report["applied"])
+				}
+				if len(actions) != wantActions {
+					t.Fatalf("%s actions=%v, want %d", mode, actions, wantActions)
+				}
+				for i, action := range actions {
+					want := map[string]any{"seq": float64(i + 1), "project": "mixed_case_project", "entity_key": []string{"case-a", "case-a", "case-b", "case-a"}[i]}
+					if !reflect.DeepEqual(action, want) {
+						t.Fatalf("action=%v, want=%v", action, want)
+					}
+				}
+				if !reflect.DeepEqual(counts(), before) {
+					t.Fatal("row counts changed")
+				}
+				if mode == "--dry-run" {
+					var after string
+					if err := db.QueryRow(`SELECT group_concat(payload, '|') FROM (SELECT payload FROM sync_mutations ORDER BY seq)`).Scan(&after); err != nil {
+						t.Fatal(err)
+					}
+					if after != original || repaired != 0 || report["applied"] != false {
+						t.Fatalf("dry-run changed state: %v", report)
+					}
+				} else {
+					if repaired != 4 {
+						t.Fatalf("repaired=%d, want 4", repaired)
+					}
+					var valid int
+					if err := db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE project='mixed_case_project' AND disposition='pending' AND acked_at IS NULL AND source='local' AND target_key='cloud'`).Scan(&valid); err != nil {
+						t.Fatal(err)
+					}
+					if valid != 4 {
+						t.Fatalf("journal metadata/canonical project changed unexpectedly: %d", valid)
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestDoctorDirectoryBackfillWithoutEnrollment(t *testing.T) {
 	cfg := testConfig(t)

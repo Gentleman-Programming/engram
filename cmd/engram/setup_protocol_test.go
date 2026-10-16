@@ -35,6 +35,9 @@ func TestCmdSetupHelpAnyPositionShowsProtocolFlagAndSkipsStdin(t *testing.T) {
 		if recovered != nil || stderr != "" {
 			t.Fatalf("args=%v: setup --help should exit cleanly, panic=%v stderr=%q", args, recovered, stderr)
 		}
+		if !strings.Contains(stdout, "Claude Code: already-installed engram@engram is updated at user scope; update failures fail setup.") {
+			t.Fatalf("args=%v: usage output missing the exact plugin update scope: %q", args, stdout)
+		}
 		if !strings.Contains(stdout, "--protocol") {
 			t.Fatalf("args=%v: usage output missing literal --protocol: %q", args, stdout)
 		}

@@ -153,6 +153,81 @@ func TestGenerationConnExposesFileControlForPrimeConnection(t *testing.T) {
 	}
 }
 
+func TestGenerationConnFileControlDataVersion(t *testing.T) {
+	underlyingErr := errors.New("data version failed")
+	for _, tt := range []struct {
+		name        string
+		unsupported bool
+		before      bool
+		during      bool
+		baseErr     error
+	}{
+		{name: "forwards value and database name"},
+		{name: "unsupported connection", unsupported: true},
+		{name: "preserves underlying error identity", baseErr: underlyingErr},
+		{name: "rejects generation change before call", before: true},
+		{name: "rejects generation replacement during successful call", during: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			generation, dbPath := newTestDatabaseGeneration(t, false, false)
+			// Use a value above MaxInt32 to protect the uint32 forwarding contract.
+			const version uint32 = 0xfedcba98
+			base := &testFenceFileControlConn{dataVersion: version, dataVersionErr: tt.baseErr}
+			if tt.during {
+				base.onDataVersion = func() { replaceTestFile(t, dbPath) }
+			}
+			var underlying driver.Conn = base
+			if tt.unsupported {
+				underlying = &testFenceConn{}
+			}
+			conn := generationConn{Conn: underlying, generation: generation}
+			// Local structural assertion keeps this regression runnable with the
+			// old sqlite interface: an absent bridge fails here, not at compilation.
+			fc, ok := any(conn).(interface {
+				FileControlDataVersion(string) (uint32, error)
+			})
+			if !ok {
+				t.Fatal("generation connection does not expose FileControlDataVersion")
+			}
+			if tt.before {
+				replaceTestFile(t, dbPath)
+			}
+			value, err := fc.FileControlDataVersion("attached")
+			switch {
+			case tt.before || tt.during:
+				assertGenerationChanged(t, err)
+			case tt.unsupported:
+				if err == nil || err.Error() != "database connection does not implement sqlite.FileControl" {
+					t.Fatalf("error = %v, want unsupported sqlite.FileControl error", err)
+				}
+			case tt.baseErr != nil:
+				if err != underlyingErr {
+					t.Fatalf("error = %v, want original underlying error", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("FileControlDataVersion: %v", err)
+				}
+			}
+			wantValue := version
+			if tt.before || tt.during || tt.unsupported || tt.baseErr != nil {
+				wantValue = 0
+			}
+			if value != wantValue {
+				t.Errorf("data version = %#x, want %#x", value, wantValue)
+			}
+			wantCalls := 1
+			wantDBName := "attached"
+			if tt.before || tt.unsupported {
+				wantCalls, wantDBName = 0, ""
+			}
+			if base.dataVersionCalls != wantCalls || base.dataVersionDBName != wantDBName {
+				t.Errorf("underlying calls/database = (%d, %q), want (%d, %q)", base.dataVersionCalls, base.dataVersionDBName, wantCalls, wantDBName)
+			}
+		})
+	}
+}
+
 func TestNewRejectsGenerationChangedBeforeSQLiteOpens(t *testing.T) {
 	original := openDB
 	t.Cleanup(func() { openDB = original })
@@ -358,13 +433,27 @@ type testFenceConn struct {
 
 type testFenceFileControlConn struct {
 	testFenceConn
-	dbName string
-	mode   int
+	dbName            string
+	mode              int
+	dataVersion       uint32
+	dataVersionErr    error
+	dataVersionCalls  int
+	dataVersionDBName string
+	onDataVersion     func()
 }
 
 func (c *testFenceFileControlConn) FileControlPersistWAL(dbName string, mode int) (int, error) {
 	c.dbName, c.mode = dbName, mode
 	return mode, nil
+}
+
+func (c *testFenceFileControlConn) FileControlDataVersion(dbName string) (uint32, error) {
+	c.dataVersionCalls++
+	c.dataVersionDBName = dbName
+	if c.onDataVersion != nil {
+		c.onDataVersion()
+	}
+	return c.dataVersion, c.dataVersionErr
 }
 
 func (c *testFenceConn) Prepare(string) (driver.Stmt, error) { return testFenceStmt{}, nil }

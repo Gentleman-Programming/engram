@@ -1494,6 +1494,75 @@ func TestCmdCloudUpgradeDoctorRequiresProjectAndIsDeterministic(t *testing.T) {
 	})
 }
 
+func TestCmdCloudUpgradeDoctorScopesPolicyToProject(t *testing.T) {
+	for _, denied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("selected project denied=%t", denied), func(t *testing.T) {
+			stubExitWithPanic(t)
+			stubRuntimeHooks(t)
+			cfg := testConfig(t)
+			if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+				t.Fatal(err)
+			}
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			})
+			for _, project := range []string{"project-a", "project-b"} {
+				if err := s.EnrollProject(project); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.MarkSyncHealthy("cloud:project-a"); err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range []string{"cloud:project-b", constants.TargetKeyCloud} {
+				if err := s.MarkSyncBlocked(target, constants.ReasonPolicyForbidden, "project-b denied"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if denied {
+				if err := s.MarkSyncBlocked("cloud:project-a", constants.ReasonPolicyForbidden, "project-a denied"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{Project: "project-a", Stage: store.UpgradeStageBootstrapVerified}); err != nil {
+				t.Fatal(err)
+			}
+
+			withArgs(t, "engram", "cloud", "upgrade", "doctor", "--project", "project-a")
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("doctor must succeed: recovered=%v stderr=%q", recovered, stderr)
+			}
+			want := "project: project-a\nstatus: ready\nclass: ready\nreason_code: upgrade_ready\nmessage: project \"project-a\" is ready for cloud bootstrap\n"
+			wantStage, wantClass, wantCode := store.UpgradeStageDoctorReady, "ready", "upgrade_ready"
+			if denied {
+				want = "project: project-a\nstatus: blocked\nclass: policy\nreason_code: policy_forbidden\nmessage: project \"project-a\" is blocked by organization policy\n"
+				wantStage, wantClass, wantCode = store.UpgradeStageDoctorBlocked, "policy", constants.ReasonPolicyForbidden
+			}
+			if stdout != want {
+				t.Fatalf("doctor output: got %q, want %q", stdout, want)
+			}
+			// Read persisted results through the public CLI, not the underlying tables.
+			withArgs(t, "engram", "cloud", "upgrade", "status", "--project", "project-a")
+			stdout, stderr, recovered = captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("status must succeed: recovered=%v stderr=%q", recovered, stderr)
+			}
+			for _, field := range []string{"stage: " + wantStage, "class: " + wantClass, "reason_code: " + wantCode} {
+				if !strings.Contains(stdout, field+"\n") {
+					t.Fatalf("status missing %q: %q", field, stdout)
+				}
+			}
+		})
+	}
+}
+
 func TestCmdSyncCloudPreflightsLegacyMutationPayloads(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)

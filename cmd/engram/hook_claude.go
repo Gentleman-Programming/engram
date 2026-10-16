@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -40,12 +39,32 @@ var claudeEngramToolPrefixes = []string{
 	"mcp__plugin_engram_engram__",
 }
 
+// The default leaves one second of Claude's five-second host timeout for startup
+// and verdict output. A configured budget also requires a longer host timeout.
+const hookSessionConfirmationTimeout = 4 * time.Second
+
+// hookSessionConfirmationBudget keeps all HTTP confirmation steps under one
+// deadline. Invalid or nonpositive overrides retain the fail-closed default.
+func hookSessionConfirmationBudget() time.Duration {
+	timeout, err := time.ParseDuration(strings.TrimSpace(os.Getenv("ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT")))
+	if err != nil || timeout <= 0 {
+		return hookSessionConfirmationTimeout
+	}
+	return timeout
+}
+
+var errHookSessionUnconfirmed = errors.New("host session registration could not be confirmed")
+
 var claudeHookOutput = func(response []byte) error {
 	_, err := os.Stdout.Write(response)
 	return err
 }
 
 func cmdHook(args []string) {
+	if len(args) == 1 && (args[0] == "codex-register" || args[0] == "codex-resolve" || args[0] == "codex-session-end") {
+		cmdCodexLifecycle(args[0])
+		return
+	}
 	if len(args) == 1 && args[0] == "codex-user-prompt-submit" {
 		cmdCodexUserPromptSubmit()
 		return
@@ -53,6 +72,12 @@ func cmdHook(args []string) {
 	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
 		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|codex-pre-tool-use|codex-user-prompt-submit")
 		exitFunc(1)
+		return
+	}
+
+	// Pi owns its Engram session natively (gentle-engram); when pi-claude-bridge
+	// runs Claude Code inside a Pi turn, this hook must stay a silent no-op.
+	if args[0] == "claude-pre-tool-use" && runningUnderPi() {
 		return
 	}
 
@@ -72,6 +97,11 @@ func cmdHook(args []string) {
 	}
 }
 
+// runningUnderPi reports whether Pi marked this process tree with PI_CODING_AGENT.
+func runningUnderPi() bool {
+	return os.Getenv("PI_CODING_AGENT") != ""
+}
+
 // guardClaudePreToolUse confirms the host session before binding a mutating tool.
 // Read-only and non-Engram calls never contact the server.
 func guardClaudePreToolUse(input []byte) []byte {
@@ -88,47 +118,226 @@ func guardClaudePreToolUse(input []byte) []byte {
 	}
 	id, idOK := claudeHookRequiredString(payload, "session_id")
 	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
-	if !idOK || !cwdOK || !confirmClaudeSession(id, cwd) {
-		return claudePreToolUseDeny("Claude host session registration could not be confirmed")
+	if !idOK || !cwdOK {
+		return claudePreToolUseDeny("Claude " + errHookSessionUnconfirmed.Error())
+	}
+	effective, err := confirmHookSession(id, cwd, true)
+	if err != nil {
+		return hookSessionConfirmationDeny("Claude", err)
+	}
+	if effective != id {
+		payload["session_id"], _ = json.Marshal(effective)
+		input, _ = json.Marshal(payload)
 	}
 	return transformClaudePreToolUse(input)
 }
 
-func confirmClaudeSession(id, cwd string) bool {
-	return confirmHookSession(id, cwd, true)
+func hookSessionConfirmationDeny(agent string, err error) []byte {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return claudePreToolUseDeny(agent + " host session confirmation timed out (server slow or unavailable)")
+	}
+	// Cause-specific failures name their reason; the unexplained fallback keeps
+	// the historical generic message.
+	return claudePreToolUseDeny(agent + " " + err.Error())
 }
 
-func confirmHookSession(id, cwd string, projectOwned bool) bool {
-	base := strings.TrimSpace(os.Getenv("ENGRAM_URL"))
-	client := &http.Client{}
+// confirmHookSession returns the session ID writes must use: the host ID, or
+// the live continuation that SessionStart registered after a resume (#1624).
+func confirmHookSession(id, cwd string, projectOwned bool) (effective string, confirmationErr error) {
+	base, client := hookEndpointClient("")
 	if base == "" {
-		if socket := strings.TrimSpace(os.Getenv("ENGRAM_SOCKET")); socket != "" {
-			base = "http://localhost"
-			client.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-			}}
-		} else {
-			port := strings.TrimSpace(os.Getenv("ENGRAM_PORT"))
-			n, err := strconv.Atoi(port)
-			if port == "" {
-				n = 7437
-			} else if err != nil || n < 1 || n > 65535 {
-				return false
-			}
-			base = fmt.Sprintf("http://127.0.0.1:%d", n)
+		return "", errHookSessionUnconfirmed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
+	defer func() {
+		// Preserve timeout information even when a transport/JSON helper returns
+		// only a failed confirmation. Other failures keep the existing denial.
+		if confirmationErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			confirmationErr = context.DeadlineExceeded
+		}
+		cancel()
+	}()
+	// A registered session owns its project: confirm the write against that
+	// owner instead of re-deriving a project from the shell's current cwd
+	// (#1717). The cwd names the project only on first registration, and rows
+	// without a project (legacy upgraded stores) keep the derived path. A
+	// lookup that fails outright denies the write: a degraded answer is not a
+	// first registration.
+	session, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
+	if lookupErr != nil {
+		return "", lookupErr
+	}
+	if known && session.EndedAt != nil {
+		// Claude keeps the session ID on --resume, so the root stays ended and
+		// SessionStart registered a continuation. Bind to it only if it is live;
+		// the gate itself never creates one (#1624).
+		continuation, ok := hookLiveContinuation(ctx, client, base, session)
+		if !ok {
+			return "", &hookDenialError{message: fmt.Sprintf("host session %q already ended", id)}
+		}
+		return continuation, nil
+	}
+	project := session.Project
+	if !known {
+		var resolutionErr error
+		if project, resolutionErr = hookResolveCwdProject(ctx, client, base, cwd); resolutionErr != nil {
+			return "", resolutionErr
 		}
 	}
-	base = strings.TrimRight(base, "/")
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
-	var authority json.RawMessage
-	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
-		return false
+	if err := hookRegisterSession(ctx, client, base, id, project, cwd, projectOwned); err != nil {
+		return "", err
 	}
-	project, ok := codexProjectAuthority(authority)
+	return id, nil
+}
+
+// hookPersistedSession is the persisted owner and scope of an existing session.
+type hookPersistedSession struct {
+	ID            string  `json:"id"`
+	Project       string  `json:"project"`
+	Directory     string  `json:"directory"`
+	OwnershipMode string  `json:"ownership_mode"`
+	EndedAt       *string `json:"ended_at"`
+}
+
+// hookLiveContinuation resolves the live continuation of an ended root from
+// the root's persisted scope and renews its lease. It never registers a new
+// identity; any failure reports false so the gate fails closed.
+func hookLiveContinuation(ctx context.Context, client *http.Client, base string, root hookPersistedSession) (string, bool) {
+	if strings.TrimSpace(root.Directory) == "" {
+		return "", false
+	}
+	scope, _ := json.Marshal(map[string]string{
+		"id": root.ID, "project": root.Project, "directory": root.Directory, "ownership_mode": root.OwnershipMode,
+	})
+	var resolved struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		ResumedFrom string `json:"resumed_from"`
+	}
+	if !codexJSON(ctx, client, http.MethodPost, base+"/runtime-sessions/resolve", scope, &resolved) ||
+		resolved.Status != "resolved" || resolved.ResumedFrom != root.ID || !codexContinuation(resolved.ID, root.ID) {
+		return "", false
+	}
+	if err := hookRegisterSession(ctx, client, base, resolved.ID, root.Project, root.Directory, root.OwnershipMode == "project_owned"); err != nil {
+		return "", false
+	}
+	return resolved.ID, true
+}
+
+// hookSessionOwnerProject reports the project a persisted session is bound
+// to. Only a missing session (404) or a validated legacy blank-project row
+// defers to cwd-derived first registration; transport errors, non-2xx/404
+// statuses, malformed payloads, sessions that do not identify the requested
+// ID, and missing or non-string project fields all fail closed with a named
+// lookup cause instead of silently re-deriving the write's project (#1717
+// review follow-up). Success payloads decode without the error-body bound
+// because they carry the full session row, including large summaries. Ended
+// sessions count too: their registration attempt is refused by the server
+// with session_already_ended, which the denial names.
+func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id string) (owner hookPersistedSession, known bool, lookupErr error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
+	}
+	response, err := client.Do(request)
+	if err != nil || response == nil {
+		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
+	}
+	defer func() { _ = response.Body.Close() }()
+	switch {
+	case response.StatusCode == http.StatusNotFound:
+		// Unknown session: first registration derives the project from cwd.
+		return hookPersistedSession{}, false, nil
+	case response.StatusCode >= 200 && response.StatusCode < 300:
+		// Success payloads are the full session row, including summaries that
+		// legitimately exceed the error-body bound, so they decode from the
+		// response body directly. The row must identify the requested session
+		// and carry a present string-valued project; only a validated blank
+		// project is the legacy row that defers to cwd-derived registration.
+		var session struct {
+			ID            string  `json:"id"`
+			Project       *string `json:"project"`
+			Directory     string  `json:"directory"`
+			OwnershipMode string  `json:"ownership_mode"`
+			EndedAt       *string `json:"ended_at"`
+		}
+		if json.NewDecoder(response.Body).Decode(&session) != nil || session.ID != id || session.Project == nil {
+			return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed (malformed session)"}
+		}
+		owner := strings.TrimSpace(*session.Project)
+		if owner == "" {
+			return hookPersistedSession{}, false, nil
+		}
+		return hookPersistedSession{ID: id, Project: owner, Directory: session.Directory, OwnershipMode: session.OwnershipMode, EndedAt: session.EndedAt}, true, nil
+	default:
+		return hookPersistedSession{}, false, &hookDenialError{message: fmt.Sprintf("host session lookup failed (HTTP %d)", response.StatusCode)}
+	}
+}
+
+// hookResolveCwdProject derives the project for a first registration from the
+// hook cwd. A resolution failure the server explains (ambiguous directory,
+// transition conflict, invalid name) becomes a denial naming that cause
+// instead of the generic unconfirmed message.
+func hookResolveCwdProject(ctx context.Context, client *http.Client, base, cwd string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil)
+	if err != nil {
+		return "", errHookSessionUnconfirmed
+	}
+	response, err := client.Do(request)
+	if err != nil || response == nil {
+		return "", errHookSessionUnconfirmed
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit))
+	if err != nil {
+		return "", errHookSessionUnconfirmed
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", hookResolutionDenial(body)
+	}
+	project, ok := codexProjectAuthority(body)
 	if !ok {
-		return false
+		// A resolvable-looking answer without a usable project carries an
+		// error_hint (for example an ambiguous cwd); name that cause too.
+		return "", hookResolutionDenial(body)
 	}
+	return project, nil
+}
+
+// hookDenialBodyLimit bounds how much of an error body the hook parses; error
+// payloads are small and the hook runs under the Claude hook timeout.
+const hookDenialBodyLimit = 1 << 16
+
+// hookResolutionDenial names a failed cwd resolution with the server's own
+// code and message so the denial cause is distinguishable (#1717).
+func hookResolutionDenial(body []byte) error {
+	var payload struct {
+		Code      string `json:"code"`
+		Error     string `json:"error"`
+		ErrorHint string `json:"error_hint"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return errHookSessionUnconfirmed
+	}
+	if payload.Code != "" {
+		detail := strings.TrimPrefix(payload.Error, "project resolution failed: ")
+		return &hookDenialError{message: fmt.Sprintf("host project resolution failed: %s: %s", payload.Code, detail)}
+	}
+	if payload.ErrorHint != "" {
+		return &hookDenialError{message: "host project resolution failed: " + payload.ErrorHint}
+	}
+	return errHookSessionUnconfirmed
+}
+
+// hookDenialError carries a cause-specific confirmation failure. The generic
+// unconfirmed error remains the fallback for unexplained failures.
+type hookDenialError struct {
+	message string
+}
+
+func (e *hookDenialError) Error() string { return e.message }
+
+func hookRegisterSession(ctx context.Context, client *http.Client, base, id, project, cwd string, projectOwned bool) error {
 	registration := map[string]string{"id": id, "project": project, "directory": cwd}
 	if projectOwned {
 		registration["ownership_mode"] = "project_owned"
@@ -136,22 +345,47 @@ func confirmHookSession(id, cwd string, projectOwned bool) bool {
 	body, _ := json.Marshal(registration)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/sessions", strings.NewReader(string(body)))
 	if err != nil {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil || resp == nil {
-		return false
+		return errHookSessionUnconfirmed
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
-		return false
+		return hookRegistrationDenial(resp.Body)
 	}
 	var result struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
-	return json.NewDecoder(resp.Body).Decode(&result) == nil && result.ID == id && result.Status == "created"
+	if json.NewDecoder(resp.Body).Decode(&result) != nil || result.ID != id || result.Status != "created" {
+		return errHookSessionUnconfirmed
+	}
+	return nil
+}
+
+// hookRegistrationDenial surfaces the server's structured refusal (for example
+// session_already_ended or session_project_conflict with its projects) in the
+// denial reason, so equal-looking failures stay distinguishable (#1624, #1717).
+func hookRegistrationDenial(body io.Reader) error {
+	var payload struct {
+		Code             string `json:"code"`
+		SessionID        string `json:"session_id"`
+		OwnerProject     string `json:"owner_project"`
+		RequestedProject string `json:"requested_project"`
+	}
+	if json.NewDecoder(io.LimitReader(body, hookDenialBodyLimit)).Decode(&payload) != nil || payload.Code == "" {
+		return errHookSessionUnconfirmed
+	}
+	switch payload.Code {
+	case "session_already_ended":
+		return &hookDenialError{message: fmt.Sprintf("host session %q already ended", payload.SessionID)}
+	case "session_project_conflict":
+		return &hookDenialError{message: fmt.Sprintf("host session_project_conflict: session %q belongs to %q, not %q", payload.SessionID, payload.OwnerProject, payload.RequestedProject)}
+	}
+	return errHookSessionUnconfirmed
 }
 
 // transformClaudePreToolUse consumes Claude Code's authoritative PreToolUse
@@ -212,12 +446,23 @@ func guardCodexPreToolUse(input []byte) []byte {
 	if !isClaudeEngramWriteOrSessionTool(tool) {
 		return transformCodexPreToolUse(input)
 	}
-	id, idOK := claudeHookRequiredString(payload, "session_id")
-	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
-	if !idOK || !cwdOK || !confirmHookSession(id, cwd, false) {
-		return claudePreToolUseDeny("Codex host session registration could not be confirmed")
+	_, idOK := claudeHookRequiredString(payload, "session_id")
+	_, cwdOK := claudeHookRequiredString(payload, "cwd")
+	if !idOK || !cwdOK {
+		return claudePreToolUseDeny("Codex host session resolution could not be confirmed")
 	}
-	return transformCodexPreToolUse(input)
+	ctx, cancel := context.WithTimeout(context.Background(), hookSessionConfirmationBudget())
+	defer cancel()
+	effective, reason := runCodexLifecycleResult(ctx, "codex-resolve", input, codexHookURL())
+	if effective == "" {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return hookSessionConfirmationDeny("Codex", ctx.Err())
+		}
+		return claudePreToolUseDeny(reason)
+	}
+	payload["session_id"], _ = json.Marshal(effective)
+	bound, _ := json.Marshal(payload)
+	return transformCodexPreToolUse(bound)
 }
 
 // Codex requires an explicit allow alongside updatedInput for MCP argument rewrites.

@@ -480,12 +480,105 @@ func TestMCPToolContractV1(t *testing.T) {
 	if err := removeApprovedExpectedProjectDelta(live); err != nil {
 		t.Fatal(err)
 	}
+	if err := removeApprovedCurrentProjectDelta(live); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeApprovedOlderHistoryDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyMCPToolContract(fixture, live, before); err != nil {
 		t.Fatal(err)
 	}
 	if after, err := os.ReadFile("testdata/tool-contract-v1.json"); err != nil || string(before) != string(after) {
 		t.Fatalf("fixture changed: %v", err)
 	}
+}
+
+// removeApprovedOlderHistoryDelta asserts only issue #1711's optional boolean
+// addition, then removes it from the observed schema for the unchanged v1 ratchet.
+func removeApprovedOlderHistoryDelta(live map[string]mcpToolSchema) error {
+	tool, ok := live["mem_context"]
+	if !ok {
+		return fmt.Errorf("mem_context is missing")
+	}
+	field, ok := tool.Properties["older_history"]
+	if !ok || !slices.Equal(field.Types, []string{"boolean"}) || len(field.Properties) != 0 || len(field.Required) != 0 || field.Items != nil || len(field.Enum) != 0 || !field.Additional {
+		return fmt.Errorf("mem_context older_history must retain the approved boolean schema: %#v", field)
+	}
+	if slices.Contains(tool.Required, "older_history") {
+		return fmt.Errorf("mem_context older_history must be optional")
+	}
+	delete(tool.Properties, "older_history")
+	live["mem_context"] = tool
+	return nil
+}
+
+func TestApprovedOlderHistoryDeltaPreservesRatchet(t *testing.T) {
+	for _, tc := range []struct {
+		name, change, want string
+	}{
+		{"approved optional boolean", "", ""},
+		{"missing option", "missing", "approved boolean schema"},
+		{"different type", "type", "approved boolean schema"},
+		{"restricted values", "enum", "approved boolean schema"},
+		{"required option", "required", "must be optional"},
+		{"another context property changed", "context", "type-narrowed"},
+		{"another tool changed", "other", "type-narrowed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, live := map[string]mcpToolSchema{}, map[string]mcpToolSchema{}
+			for _, name := range []string{"mem_context", "mem_search"} {
+				const schema = `{"type":"object","properties":{"project":{"type":"string"}},"additionalProperties":false}`
+				fixture[name] = mustNormalize(t, schema)
+				live[name] = mustNormalize(t, schema)
+			}
+			live["mem_context"].Properties["older_history"] = mcpToolSchema{Types: []string{"boolean"}, Additional: true}
+			switch tc.change {
+			case "missing":
+				delete(live["mem_context"].Properties, "older_history")
+			case "type":
+				live["mem_context"].Properties["older_history"] = mcpToolSchema{Types: []string{"string"}, Additional: true}
+			case "enum":
+				live["mem_context"].Properties["older_history"] = mcpToolSchema{Types: []string{"boolean"}, Additional: true, Enum: []string{"true"}}
+			case "required":
+				tool := live["mem_context"]
+				tool.Required = []string{"older_history"}
+				live["mem_context"] = tool
+			case "context", "other":
+				name := "mem_context"
+				if tc.change == "other" {
+					name = "mem_search"
+				}
+				live[name].Properties["project"] = mcpToolSchema{Types: []string{"number"}, Additional: true}
+			}
+			err := removeApprovedOlderHistoryDelta(live)
+			if err == nil {
+				err = compareMCPToolContract(fixture, live)
+			}
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func removeApprovedCurrentProjectDelta(live map[string]mcpToolSchema) error {
+	tool, ok := live["mem_current_project"]
+	if !ok {
+		return fmt.Errorf("mem_current_project is missing")
+	}
+	for _, prop := range []string{"directory", "cwd"} {
+		field, ok := tool.Properties[prop]
+		if !ok || !slices.Equal(field.Types, []string{"string"}) || len(field.Properties) != 0 || len(field.Required) != 0 || field.Items != nil || len(field.Enum) != 0 || !field.Additional {
+			return fmt.Errorf("mem_current_project %s must retain optional string schema: %#v", prop, field)
+		}
+		if slices.Contains(tool.Required, prop) {
+			return fmt.Errorf("mem_current_project %s must be optional", prop)
+		}
+		delete(tool.Properties, prop)
+	}
+	live["mem_current_project"] = tool
+	return nil
 }
 
 // removeApprovedExpectedProjectDelta applies only the two approved v1 breaks.

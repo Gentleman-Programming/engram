@@ -45,7 +45,7 @@ brew update && brew upgrade engram
 
 **Option A: Install via `go install` (recommended for technical users)**
 
-If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it.
+If you have Go installed, you can compile the binary locally from source, but this does not guarantee protection from antivirus alerts or Windows security-policy blocking.
 
 Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule puts the major version in the module path starting at major version 2, so each major line has its own `go install` path. Pick the line that matches the major version you want:
 
@@ -123,14 +123,55 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 > distribution trust problem, not a security problem. The source code is fully auditable.
 >
 > **Recommended workaround:** Technical Windows users should prefer **Option A (`go install`)** or
-> **Option B (build from source)**. Binaries you compile locally will not trigger AV alerts because
-> they originate from your own machine.
+> **Option B (build from source)**. Building locally is an option, not a guarantee against
+> antivirus alerts or Windows security-policy blocking.
 
 > **Other Windows notes:**
 > - Data is stored in `%USERPROFILE%\.engram\engram.db`
 > - Override with `ENGRAM_DATA_DIR` environment variable
 > - All core features work natively: CLI, MCP server, TUI, HTTP API, Git Sync
 > - No WSL required for the core binary — it's a native Windows executable
+
+---
+
+## Windows troubleshooting: executable blocked before MCP starts
+
+**Distinguish a missing executable from Windows rejecting an existing one.**
+Smart App Control or another security policy can prevent `engram.exe` from
+starting, including a locally compiled `go install` binary. Building locally is
+not a guarantee against security-policy blocking, despite the antivirus guidance
+above.
+
+| Observation | What to check |
+|-------------|---------------|
+| The configured executable does not exist, or the client resolves a different file | Check the exact MCP executable path and the installation location; this is a path-resolution problem. |
+| Windows explicitly reports that security policy blocked the existing executable | Treat this as an OS launch rejection, not an MCP protocol or argument error. |
+| Git Bash reports `Permission denied` / exit 126, or an MCP client reports `EUNKNOWN: uv_spawn` | These errors alone do not identify Smart App Control; correlate them with the Windows launch error and security-policy evidence. |
+| Authenticode status is `NotSigned` | This describes the file's signature, but does not by itself prove which policy blocked it. A signature status alone is not a policy diagnosis. |
+
+Issue #1703 reports Windows 11 Smart App Control enabled, an unsigned
+`engram.exe`, a PowerShell policy rejection, Git Bash exit 126, and a Claude Code
+MCP `EUNKNOWN: uv_spawn` error. These are reported observations, not an
+independently reproduced diagnosis for every similar startup failure.
+
+If Windows rejects the executable before it starts, the MCP server cannot begin
+its protocol exchange. Reinstalling or changing MCP arguments cannot be assumed
+to resolve that rejection. Locally compiled binaries are separate from release
+artifacts: signing a distributed release would not sign a local `go install`
+build. This guidance does not establish the signing status of current downloads
+or identify a signed workaround.
+
+**For a support report, collect only the relevant evidence:**
+
+- Installation route: `go install`, local source build, downloaded release, or installer.
+- Exact executable path configured in the MCP client, and whether that file exists.
+- Exact error from an already attempted direct launch of that same file, including the shell used; do not substitute only the MCP client's generic error.
+- Authenticode signature status for that same file, plus any explicit Windows security-policy message or known Smart App Control state.
+
+Redact personal path components when sharing evidence. Do not disable Smart App
+Control, antivirus, or other security controls to troubleshoot this issue. On a
+managed device, ask the security administrator to review the rejection under the
+organization's policy rather than attempting a bypass.
 
 ---
 

@@ -85,23 +85,7 @@ func TestCodexSessionEndHook(t *testing.T) {
 			t.Fatalf("read Windows session-end adapter: %v", err)
 		}
 		content := string(data)
-		for _, required := range []string{
-			"[Console]::In.ReadToEnd()",
-			"ConvertFrom-Json",
-			"session_id",
-			"ENGRAM_PORT",
-			"'7437'",
-			"[System.Uri]::EscapeDataString",
-			"http://127.0.0.1:",
-			"/sessions/",
-			"/end",
-			"Invoke-WebRequest",
-			"-UseBasicParsing",
-			"-TimeoutSec 2",
-			"-MaximumRedirection 0",
-			"*> $null",
-			"exit 0",
-		} {
+		for _, required := range []string{"[Console]::In.ReadToEnd()", "engram hook codex-session-end", "*> $null", "exit 0"} {
 			if !strings.Contains(content, required) {
 				t.Errorf("Windows session-end adapter must contain %q", required)
 			}
@@ -112,8 +96,8 @@ func TestCodexSessionEndHook(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read Unix session-end adapter: %v", err)
 		}
-		if !strings.Contains(string(shellData), "--max-time 2") {
-			t.Errorf("Unix session-end adapter must bound curl with --max-time 2")
+		if !strings.Contains(string(shellData), "engram hook codex-session-end >/dev/null 2>&1") {
+			t.Error("Unix adapter must delegate bounded closure with detached output")
 		}
 	})
 
@@ -152,13 +136,25 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 	}
 
 	requests := make(chan string, 1)
+	directories := make(chan string, 1)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests <- r.Method + " " + r.URL.EscapedPath()
-		w.WriteHeader(http.StatusNoContent)
+		if r.URL.Path == "/project/current" {
+			_, _ = w.Write([]byte(`{"project":"end-project","project_source":"config"}`))
+			return
+		}
+		var payload struct{ ID, Project, Directory string }
+		if json.NewDecoder(r.Body).Decode(&payload) != nil || payload.Project != "end-project" || payload.Directory == "" {
+			t.Error("invalid canonical end payload")
+		}
+		if strings.HasPrefix(payload.ID, "session-é") {
+			directories <- payload.Directory
+		}
+		requests <- r.Method + " " + r.URL.EscapedPath() + " " + payload.ID
+		_, _ = w.Write([]byte(`{"id":"session id/with?characters","status":"ended"}`))
 	})}
 	defer server.Close()
 	go func() { _ = server.Serve(listener) }()
@@ -171,7 +167,7 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 		}
 		select {
 		case got := <-requests:
-			if got != "POST /sessions/session%20id%2Fwith%3Fcharacters/end" {
+			if got != "POST /runtime-sessions/end session id/with?characters" {
 				t.Errorf("request = %q", got)
 			}
 		case <-time.After(3 * time.Second):
@@ -179,15 +175,46 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves UTF-8 identity and directory", func(t *testing.T) {
+		cwd := filepath.Join(t.TempDir(), "日本語-é")
+		if err := os.Mkdir(cwd, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		id := "session-é-日本語"
+		input, err := json.Marshal(map[string]string{"session_id": id, "cwd": cwd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code := runCodexWindowsPowerShell(t, adapterPath, string(input), &port, 3*time.Second)
+		if code != 0 || stdout != "" || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		select {
+		case got := <-requests:
+			if got != "POST /runtime-sessions/end "+id {
+				t.Fatalf("identity changed: %q", got)
+			}
+			if got := <-directories; got != cwd {
+				t.Fatalf("directory=%q, want %q", got, cwd)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing UTF-8 end request")
+		}
+	})
+
 	t.Run("executes the manifest command through cmd.exe", func(t *testing.T) {
 		command := strings.ReplaceAll(codexWindowsSessionEndCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
-		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"session id/with?characters"}`, port)
+		for _, item := range codexWindowsEndEnv(t, port) {
+			key, value, _ := strings.Cut(item, "=")
+			t.Setenv(key, value)
+		}
+		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"session id/with?characters","cwd":`+jsonQuote(t.TempDir())+`}`, port)
 		if code != 0 || stdout != "" || stderr != "" {
 			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
 		}
 		select {
 		case got := <-requests:
-			if got != "POST /sessions/session%20id%2Fwith%3Fcharacters/end" {
+			if got != "POST /runtime-sessions/end session id/with?characters" {
 				t.Errorf("request = %q", got)
 			}
 		case <-time.After(3 * time.Second):
@@ -235,25 +262,46 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 	})
 }
 
+func codexWindowsEndEnv(t *testing.T, port string) []string {
+	t.Helper()
+	binary := buildCodexFixtureCLI(t)
+	root := t.TempDir()
+	env := append([]string{}, os.Environ()...)
+	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CURL_HOME", "CODEX_HOME", "ENGRAM_DATA_DIR", "TMPDIR", "TMP", "TEMP"} {
+		env = append(env, key+"="+root)
+	}
+	return append(env, "PATH="+filepath.Dir(binary)+string(os.PathListSeparator)+os.Getenv("PATH"), "ENGRAM_URL=", "ENGRAM_SOCKET=", "ENGRAM_PORT="+port)
+}
+
 func runCodexWindowsSessionEnd(t *testing.T, adapterPath, input string, port *string) (string, string, int) {
 	t.Helper()
-	return runCodexWindowsPowerShell(t, adapterPath, input, port, 5*time.Second)
+	var payload map[string]any
+	if json.Unmarshal([]byte(input), &payload) == nil && payload != nil {
+		payload["cwd"] = t.TempDir()
+		data, _ := json.Marshal(payload)
+		input = string(data)
+	}
+	return runCodexWindowsPowerShell(t, adapterPath, input, port, 3*time.Second)
 }
 
 func runCodexWindowsPowerShell(t *testing.T, adapterPath, input string, port *string, timeout time.Duration) (string, string, int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	run := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapterPath)
-	run.Env = make([]string, 0, len(os.Environ())+1)
+	preparedEnv := make([]string, 0, len(os.Environ())+1)
 	for _, env := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(env), "ENGRAM_PORT=") {
-			run.Env = append(run.Env, env)
+			preparedEnv = append(preparedEnv, env)
 		}
 	}
 	if port != nil {
-		run.Env = append(run.Env, "ENGRAM_PORT="+*port)
+		preparedEnv = append(preparedEnv, "ENGRAM_PORT="+*port)
+		if strings.HasSuffix(adapterPath, "session-end.ps1") {
+			preparedEnv = codexWindowsEndEnv(t, *port)
+		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	run := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapterPath)
+	run.Env = preparedEnv
 	run.Stdin = strings.NewReader(input)
 	var stdout, stderr strings.Builder
 	run.Stdout = &stdout

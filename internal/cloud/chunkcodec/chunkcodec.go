@@ -57,6 +57,15 @@ func CanonicalizeForProject(payload []byte, project string) ([]byte, error) {
 				return nil, fmt.Errorf("%s[%d] must be an object", key, i)
 			}
 			if key == "sessions" {
+				if mode, _ := row["ownership_mode"].(string); mode == store.SessionOwnershipProjectOwned {
+					raw, err := json.Marshal(row)
+					if err != nil {
+						return nil, err
+					}
+					if err := store.ValidateCloudSessionDirectory(raw); err != nil {
+						return nil, fmt.Errorf("sessions[%d]: %w", i, err)
+					}
+				}
 				sessionID, _ := row["id"].(string)
 				sessionID = strings.TrimSpace(sessionID)
 				if !hasMutationList || sessionID == "" {
@@ -218,35 +227,38 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 }
 
 type mutationSessionPayload struct {
-	ID         string  `json:"id"`
-	Project    string  `json:"project"`
-	Directory  string  `json:"directory,omitempty"`
-	StartedAt  string  `json:"started_at,omitempty"`
-	EndedAt    *string `json:"ended_at,omitempty"`
-	Summary    *string `json:"summary,omitempty"`
-	Deleted    bool    `json:"deleted,omitempty"`
-	DeletedAt  *string `json:"deleted_at,omitempty"`
-	HardDelete bool    `json:"hard_delete,omitempty"`
+	ID            string  `json:"id"`
+	Project       string  `json:"project"`
+	OwnershipMode string  `json:"ownership_mode,omitempty"`
+	Directory     string  `json:"directory,omitempty"`
+	StartedAt     string  `json:"started_at,omitempty"`
+	EndedAt       *string `json:"ended_at,omitempty"`
+	Summary       *string `json:"summary,omitempty"`
+	Deleted       bool    `json:"deleted,omitempty"`
+	DeletedAt     *string `json:"deleted_at,omitempty"`
+	HardDelete    bool    `json:"hard_delete,omitempty"`
 }
 
 type mutationObservationPayload struct {
-	SyncID         string  `json:"sync_id"`
-	SessionID      string  `json:"session_id"`
-	Type           string  `json:"type"`
-	Title          string  `json:"title"`
-	Content        string  `json:"content"`
-	ToolName       *string `json:"tool_name,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	Scope          string  `json:"scope"`
-	TopicKey       *string `json:"topic_key,omitempty"`
-	RevisionCount  int     `json:"revision_count,omitempty"`
-	DuplicateCount int     `json:"duplicate_count,omitempty"`
-	LastSeenAt     *string `json:"last_seen_at,omitempty"`
-	CreatedAt      string  `json:"created_at,omitempty"`
-	UpdatedAt      string  `json:"updated_at,omitempty"`
-	Deleted        bool    `json:"deleted,omitempty"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
-	HardDelete     bool    `json:"hard_delete,omitempty"`
+	SupersededBySyncID *string         `json:"superseded_by_sync_id,omitempty"`
+	SyncID             string          `json:"sync_id"`
+	SessionID          string          `json:"session_id"`
+	Type               string          `json:"type"`
+	Title              string          `json:"title"`
+	Content            string          `json:"content"`
+	ToolName           *string         `json:"tool_name,omitempty"`
+	Project            *string         `json:"project,omitempty"`
+	Scope              string          `json:"scope"`
+	TopicKey           *string         `json:"topic_key,omitempty"`
+	RevisionCount      int             `json:"revision_count,omitempty"`
+	DuplicateCount     int             `json:"duplicate_count,omitempty"`
+	LastSeenAt         *string         `json:"last_seen_at,omitempty"`
+	ReviewAfter        json.RawMessage `json:"review_after,omitempty"`
+	CreatedAt          string          `json:"created_at,omitempty"`
+	UpdatedAt          string          `json:"updated_at,omitempty"`
+	Deleted            bool            `json:"deleted,omitempty"`
+	DeletedAt          *string         `json:"deleted_at,omitempty"`
+	HardDelete         bool            `json:"hard_delete,omitempty"`
 }
 
 type mutationPromptPayload struct {
@@ -389,8 +401,14 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		if body.ID == "" {
 			return "", "", fmt.Errorf("session payload id is required")
 		}
-		if op == store.SyncOpUpsert && body.Directory == "" {
-			return "", "", fmt.Errorf("session payload directory is required for upsert")
+		if op == store.SyncOpUpsert {
+			if body.OwnershipMode == store.SessionOwnershipProjectOwned {
+				if err := store.ValidateCloudSessionDirectory([]byte(payload)); err != nil {
+					return "", "", err
+				}
+			} else if body.Directory == "" {
+				return "", "", fmt.Errorf("session payload directory is required for upsert")
+			}
 		}
 		if op == store.SyncOpDelete {
 			body.Directory = ""

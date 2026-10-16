@@ -16,11 +16,20 @@ body:
         >
         > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.
 
+  - type: checkboxes
+    id: existing-issue-search
+    attributes:
+      label: Existing Issue Search
+      description: Search for a canonical root-cause tracker. Add a new occurrence there; maintainers decide whether roots match.
+      options:
+        - label: I searched existing issues and will add evidence to a canonical tracker when applicable.
+          required: true
+
   - type: textarea
     id: description
     attributes:
-      label: "📝 Bug Description"
-      description: A clear and concise description of what the bug is.
+      label: "📝 Observed Consequence"
+      description: Describe the user-visible consequence; do not diagnose the root cause.
       placeholder: |
         What happened? Be specific — include error messages, unexpected behavior, etc.
     validations:
@@ -86,10 +95,10 @@ body:
       required: true
 
   - type: input
-    id: engram-version
+    id: release-version
     attributes:
-      label: Engram Version
-      description: "Run `engram version` to get this."
+      label: Release Version (Report Context)
+      description: "Run `engram version` to report context; the investigator verifies current remote main."
       placeholder: "e.g. 0.3.1"
     validations:
       required: true

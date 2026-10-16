@@ -97,11 +97,14 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
 	for _, required := range []string{
 		"pull_request:",
-		"types: [opened, edited, labeled, unlabeled, synchronize]",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
 		"check-issue-reference:",
 		"name: Check Issue Reference",
 		"check-issue-approved:",
 		"name: Check Issue Has status:approved",
+		"permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
+		"issue.assignees.length === 0",
+		"has no assignee. Assign an owner before merge.",
 	} {
 		if !strings.Contains(prCheck, required) {
 			t.Errorf("%s does not contain %q", prCheckPath, required)
@@ -236,6 +239,8 @@ func TestPRIssueReferenceContract(t *testing.T) {
 		{name: "non-closing reference", body: "Refs #1270", want: []string{"1270"}},
 		{name: "non-closing reference lowercase", body: "refs #42", want: []string{"42"}},
 		{name: "mixed closing and non-closing", body: "Refs #1270\nCloses #1493", want: []string{"1270", "1493"}},
+		{name: "cross-repo closing reference", body: "Closes Gentleman-Programming/engram#123", want: []string{"123"}},
+		{name: "cross-repo non-closing reference", body: "Refs Gentleman-Programming/engram#456", want: []string{"456"}},
 		{name: "missing reference", body: "This PR improves the plugin and its tests.", want: []string{}},
 		{name: "bare issue number", body: "See issue 123 for details.", want: []string{}},
 		{name: "bare hash", body: "Related: #123", want: []string{}},
@@ -247,7 +252,9 @@ func TestPRIssueReferenceContract(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var numbers []string
 			for _, match := range pattern.FindAllStringSubmatch(tt.body, -1) {
-				numbers = append(numbers, match[1])
+				// The workflow regex captures optional owner/repo in groups 1 and 2,
+				// and the issue number in group 3.
+				numbers = append(numbers, match[3])
 			}
 			if diff := compareStringSlices(numbers, tt.want); diff != "" {
 				t.Fatal(diff)
@@ -328,7 +335,8 @@ func TestPRIssueReferenceApprovalOutcomes(t *testing.T) {
 		}
 		var failures []string
 		for _, match := range matches {
-			number := match[1]
+			// Optional owner/repo occupy groups 1 and 2; the issue number is group 3.
+			number := match[3]
 			approved := false
 			for _, label := range labels[number] {
 				if label == "status:approved" {

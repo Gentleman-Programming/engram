@@ -30,7 +30,7 @@ Use this skill when:
 ## Workflow
 
 ```
-1. Verify issue has `status:approved` label
+1. Verify every linked issue has `status:approved`, a real assignee, and the proportional evidence defined in CONTRIBUTING.md; the PR author need not match the assignee
 2. Create branch: feat/*, fix/*, docs/*, refactor/*, chore/*
 3. Implement changes
 4. For behavior changes, run a focused regression test and affected package tests locally; record commands and outcomes. For docs-only changes, record N/A for Go tests and verify the documentation.
@@ -88,7 +88,9 @@ Refs #<issue-number>
 ```
 
 Valid keywords (case insensitive): `Closes #N`, `Fixes #N`, `Resolves #N` are closing references — use them only when this PR completes the issue (they auto-close it on merge). `Refs #N` is a non-closing reference for reviewable partial PRs of an approved umbrella issue; it passes the same checks but never closes the issue.
-Every referenced issue MUST have the `status:approved` label. Bare issue numbers or arbitrary prose are not accepted references.
+Every referenced issue MUST have `status:approved` and a real assignee. Approval means a maintainer accepted proportional evidence: scope/checks for trivial changes; current-remote-main SHA, reproduction, root cause, and regression tests for bugs; approved design, non-goals, and independent review for high-risk changes. Evidence can live in the issue; no separate design document is required by default.
+
+Existing PRs must comply before merge, without waiting for backlog-wide migration. Re-run native validation after issue approval/assignment changes; do not rely on stale green checks.
 
 ### 2. PR Type (REQUIRED)
 
@@ -146,7 +148,7 @@ The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#
 | Check | Job name | What it verifies |
 |-------|----------|-----------------|
 | PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` (closing) or `Refs #N` (non-closing) |
-| PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
+| PR Validation | `Check Issue Has status:approved` | Every linked issue is approved and assigned |
 | PR Label Policy | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
 | Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
 | CI | `Unit Tests` | `go test ./...` passes |

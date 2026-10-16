@@ -428,23 +428,14 @@ func cmdCloudUpgradeDoctor(cfg store.Config) {
 }
 
 func cloudUpgradePolicyDenied(s *store.Store, project string) (bool, error) {
-	targets := []string{cloudTargetKeyForProject(project)}
-	if cloudTargetKeyForProject(project) != constants.TargetKeyCloud {
-		targets = append(targets, constants.TargetKeyCloud)
+	state, err := s.GetSyncState(cloudTargetKeyForProject(project))
+	if err != nil {
+		return false, err
 	}
-	for _, targetKey := range targets {
-		state, err := s.GetSyncState(targetKey)
-		if err != nil {
-			return false, err
-		}
-		if state == nil {
-			continue
-		}
-		if strings.TrimSpace(derefString(state.ReasonCode)) == constants.ReasonPolicyForbidden {
-			return true, nil
-		}
+	if state == nil {
+		return false, nil
 	}
-	return false, nil
+	return strings.TrimSpace(derefString(state.ReasonCode)) == constants.ReasonPolicyForbidden, nil
 }
 
 func parseCloudUpgradeProjectArg(args []string) string {

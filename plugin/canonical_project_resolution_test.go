@@ -16,6 +16,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 	bashPath := codexTestBash(t)
 	requireCodexUnixTools(t, bashPath)
 
+	binary := buildCodexFixtureCLI(t)
 	for _, agent := range []string{"claude-code", "codex"} {
 		t.Run(agent+" uses configured project instead of git-derived name", func(t *testing.T) {
 			cwd := lifecycleProjectDirectory(t)
@@ -39,6 +40,9 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 					w.WriteHeader(http.StatusNoContent)
 				case "/context":
 					_, _ = w.Write([]byte(`{"context":""}`))
+				case "/sessions/canonical-session":
+					// Claude looks up an existing root before resuming; this one is new.
+					w.WriteHeader(http.StatusNotFound)
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
 					w.WriteHeader(http.StatusNotFound)
@@ -46,7 +50,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 			}))
 			defer server.Close()
 
-			runLifecycleSessionStart(t, bashPath, agent, server.URL, `{"session_id":"canonical-session","cwd":`+jsonQuote(cwd)+`}`)
+			runLifecycleSessionStart(t, bashPath, agent, server.URL, binary, `{"session_id":"canonical-session","cwd":`+jsonQuote(cwd)+`}`)
 			if requestedCWD != cwd {
 				t.Fatalf("canonical request cwd = %q, want %q", requestedCWD, cwd)
 			}
@@ -87,7 +91,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 				}))
 				defer server.Close()
 
-				runLifecycleSessionStart(t, bashPath, agent, server.URL, `{"session_id":"closed-session","cwd":`+jsonQuote(cwd)+`}`)
+				runLifecycleSessionStart(t, bashPath, agent, server.URL, binary, `{"session_id":"closed-session","cwd":`+jsonQuote(cwd)+`}`)
 				if wroteSession {
 					t.Fatal("session write must not occur when canonical project resolution fails")
 				}
@@ -118,7 +122,7 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 			}))
 			defer server.Close()
 
-			runLifecycleSessionStart(t, bashPath, agent, server.URL, `{"session_id":"override-session","cwd":`+jsonQuote(cwd)+`}`)
+			runLifecycleSessionStart(t, bashPath, agent, server.URL, binary, `{"session_id":"override-session","cwd":`+jsonQuote(cwd)+`}`)
 			if sessionProject != "override-project" {
 				t.Fatalf("session project = %q; want process override", sessionProject)
 			}
@@ -144,7 +148,7 @@ func lifecycleProjectDirectory(t *testing.T) string {
 	return cwd
 }
 
-func runLifecycleSessionStart(t *testing.T, bashPath, agent, serverURL, input string) {
+func runLifecycleSessionStart(t *testing.T, bashPath, agent, serverURL, binary, input string) {
 	t.Helper()
 	parsedURL, err := url.Parse(serverURL)
 	if err != nil {
@@ -153,6 +157,9 @@ func runLifecycleSessionStart(t *testing.T, bashPath, agent, serverURL, input st
 	adapterPath := filepath.Join(repoRoot(t), "plugin", agent, "scripts", "session-start.sh")
 	run := exec.Command(bashPath, adapterPath)
 	run.Env = append(os.Environ(), "ENGRAM_URL="+serverURL, "ENGRAM_PORT="+parsedURL.Port())
+	if agent == "codex" {
+		run.Env = codexHandoffEnv(t, t.TempDir(), serverURL, binary)
+	}
 	run.Stdin = strings.NewReader(input)
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("run %s session start: %v: %s", agent, err, output)

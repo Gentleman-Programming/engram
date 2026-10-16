@@ -26,6 +26,9 @@ function bus() {
 async function fixture(body) {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
+  const originalChildFlag = process.env.GENTLE_PI_AGENTS_CHILD;
+  // This fixture models human input, even when tests run inside a subagent.
+  delete process.env.GENTLE_PI_AGENTS_CHILD;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   const calls = [];
   let registration = async (id) => ({ id, status: "created" });
@@ -65,6 +68,8 @@ async function fixture(body) {
   } finally {
     globalThis.fetch = originalFetch;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (originalChildFlag === undefined) delete process.env.GENTLE_PI_AGENTS_CHILD;
+    else process.env.GENTLE_PI_AGENTS_CHILD = originalChildFlag;
   }
 }
 

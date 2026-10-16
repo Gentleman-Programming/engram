@@ -34,6 +34,7 @@ The Pi npm publish workflow also supports manual dispatch, but it only publishes
 
 ## Related policies
 
+- [Rejection-only candidate checker](./RELEASE-CANDIDATE.md) for opt-in metadata validation and current Pi blockers; it cannot approve a release and does not implement the full candidate gate.
 - [Security policy](../SECURITY.md) for vulnerability reporting and supported-version security fixes.
 - [Installation guide](./INSTALLATION.md) for installation methods.
 - [Engram Cloud quickstart](./engram-cloud/quickstart.md) for Cloud deployment guidance.

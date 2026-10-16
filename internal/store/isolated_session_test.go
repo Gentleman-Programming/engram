@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRegisterIsolatedSession(t *testing.T) {
@@ -107,6 +108,129 @@ func TestRegisterIsolatedSessionRejectedContinuationPreservesAllState(t *testing
 			}
 		})
 	}
+}
+
+// publicRegistrationState captures registration effects only through public
+// interfaces: every listed session (lease included), the pending journal and the
+// aggregate counters.
+type publicRegistrationState struct {
+	Sessions map[string]*Session
+	Journal  []SyncMutation
+	Stats    *Stats
+}
+
+func capturePublicRegistrationState(t *testing.T, s *Store, ids ...string) publicRegistrationState {
+	t.Helper()
+	state := publicRegistrationState{Sessions: make(map[string]*Session)}
+	for _, id := range ids {
+		session, err := s.GetSession(id)
+		if err != nil {
+			session = nil
+		}
+		state.Sessions[id] = session
+	}
+	journal, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Journal = journal
+	if state.Stats, err = s.Stats(); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+// A shared row, whatever produced it, is not an isolated identity: isolated
+// registration must refuse it before any lease, ownership repair or journal write.
+func TestRegisterIsolatedSessionRejectsExistingSharedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resumes []bool
+		seed    func(t *testing.T, s *Store)
+	}{
+		{name: "live shared root", resumes: []bool{true, false}, seed: func(t *testing.T, s *Store) {
+			if err := s.StartSession("satellite", "target", ""); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "ended shared root", resumes: []bool{true, false}, seed: func(t *testing.T, s *Store) {
+			if err := s.StartSession("satellite", "target", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.EndSession("satellite", "terminal"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "shared continuation", resumes: []bool{true}, seed: func(t *testing.T, s *Store) {
+			if _, err := s.RegisterIsolatedSession("satellite", "target", true); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.EndSession("satellite", "terminal"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.StartSession("satellite:resume:2", "target", ""); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			if err := s.EnrollProject("target"); err != nil {
+				t.Fatal(err)
+			}
+			tc.seed(t, s)
+			ids := []string{"satellite", "satellite:resume:2", "satellite:resume:3"}
+			before := capturePublicRegistrationState(t, s, ids...)
+			// Lease renewal has one-second resolution; let a renewal become observable.
+			time.Sleep(1100 * time.Millisecond)
+			for _, resume := range tc.resumes {
+				if _, err := s.RegisterIsolatedSession("satellite", "target", resume); !errors.Is(err, ErrSessionIsolationConflict) {
+					t.Fatalf("resume=%t: expected isolation conflict, got %v", resume, err)
+				}
+			}
+			if after := capturePublicRegistrationState(t, s, ids...); !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejection mutated session/lease/owner/journal/counters:\nbefore=%#v\nafter=%#v", before, after)
+			}
+		})
+	}
+}
+
+// Non-isolated shared registration and adoption of an unclassified blank
+// identity keep their existing behavior.
+func TestSharedIsolationGuardPreservesOtherRegistrations(t *testing.T) {
+	t.Run("non-isolated shared registration", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.StartSession("runtime", "target", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.StartSession("runtime", "target", "/repos/runtime"); err != nil {
+			t.Fatalf("shared re-registration: %v", err)
+		}
+		if id, err := s.ResumeSessionWithOwnershipMode("runtime", "target", "/repos/runtime", SessionOwnershipShared); err != nil || id != "runtime" {
+			t.Fatalf("shared resume = %q, %v", id, err)
+		}
+		session, err := s.GetSession("runtime")
+		if err != nil || session.OwnershipMode != SessionOwnershipShared || session.Directory != "/repos/runtime" {
+			t.Fatalf("shared session = %#v, %v", session, err)
+		}
+	})
+	// Structural legacy-fixture evidence only, not public proof: no public API
+	// creates a row with blank project and blank ownership mode, so the fixture
+	// is written directly. Public adoption of such rows remains unproven.
+	t.Run("structural legacy fixture: unclassified blank identity adoption", func(t *testing.T) {
+		s := newTestStore(t)
+		if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('satellite', '', '', '')`); err != nil {
+			t.Fatal(err)
+		}
+		if id, err := s.RegisterIsolatedSession("satellite", "target", true); err != nil || id != "satellite" {
+			t.Fatalf("adoption = %q, %v", id, err)
+		}
+		session, err := s.GetSession("satellite")
+		if err != nil || session.Project != "target" || session.OwnershipMode != SessionOwnershipProjectOwned || session.Directory != "" {
+			t.Fatalf("adopted session = %#v, %v", session, err)
+		}
+	})
 }
 
 func TestRegisterIsolatedSessionRefusesRuntimeBoundLegacyIdentity(t *testing.T) {

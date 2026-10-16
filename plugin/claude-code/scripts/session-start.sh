@@ -44,13 +44,26 @@ fi
 
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
-# Create session
+# Create session. Claude keeps the session ID on --resume, so resume=true lets
+# the server register a live continuation when the original session already ended.
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
+  # Roots created before Claude registered project_owned sessions are shared;
+  # resuming one keeps that mode so its continuation stays resolvable.
+  OWNERSHIP_MODE="project_owned"
+  ENCODED_SESSION_ID=$(printf '%s' "$SESSION_ID" | jq -sRr @uri 2>/dev/null)
+  SESSION=""
+  if [ -n "$ENCODED_SESSION_ID" ]; then
+    SESSION=$(engram_curl -sf "${ENGRAM_URL}/sessions/${ENCODED_SESSION_ID}" --max-time 1 2>/dev/null)
+  fi
+  if [ -n "$SESSION" ] && printf '%s' "$SESSION" \
+    | jq -e --arg id "$SESSION_ID" '.id == $id and .ended_at != null and .ownership_mode == "shared"' >/dev/null 2>&1; then
+    OWNERSHIP_MODE="shared"
+  fi
   engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir, ownership_mode: "project_owned"}')" \
+    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" --arg mode "$OWNERSHIP_MODE" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}')" \
     > /dev/null
 fi
 
@@ -166,7 +179,7 @@ if [ "$mode" != "slim" ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
-You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
+You have engram memory tools. The agent MUST follow this protocol without waiting for activation.
 
 ### CORE TOOLS — always available, no ToolSearch needed
 mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
@@ -183,6 +196,7 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Pattern established (naming, structure, approach)
 - User preference or constraint learned
 - Feature implemented with non-obvious approach
+- Configuration change or environment setup done
 - User confirms your recommendation ("go with that", "sounds good", or the equivalent in the user's language)
 - User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
 - Discussion concludes with a clear direction chosen
@@ -199,7 +213,15 @@ Memory operations are internal bookkeeping, never the user-facing answer. Comple
 - User's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
 ### SESSION CLOSE — before saying "done":
-Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
+Call `mem_session_summary` with: Goal, Instructions, Discoveries, Accomplished, Next Steps, Relevant Files.
+Summary persistence does not end the session; Claude's SessionEnd hook owns lifecycle closure.
+
+### PASSIVE CAPTURE — adapter-specific safety net
+Include a "## Key Learnings:" section with numbered items when completing a task or subtask.
+Claude's SubagentStop hook forwards eligible delegated/subagent output for server-side extraction.
+Ordinary main-agent responses are not automatically captured; the section alone does not guarantee storage.
+Use `mem_save` as the primary path for significant, verified knowledge. Explicit
+`mem_capture_passive(content)` extraction is a safety net, not a replacement for `mem_save`.
 PROTOCOL
 fi
 

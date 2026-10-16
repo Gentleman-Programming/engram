@@ -21,8 +21,8 @@ async function scenario(headersFirst, delayMs = 3500) {
     if (path === "/observations") {
       requests++;
       for await (const _chunk of request) { /* Ensure the server receives the complete write. */ }
-      if (headersFirst) { response.writeHead(200, { "Content-Type": "application/json" }); response.write('{"id":'); }
-      setTimeout(() => response.end(headersFirst ? "1}" : '{"id":1}'), delayMs);
+      if (headersFirst) { response.writeHead(201, { "Content-Type": "application/json" }); response.write('{"id":'); }
+      setTimeout(() => response.end(headersFirst ? '1,"status":"saved"}' : '{"id":1,"status":"saved"}'), delayMs);
       return;
     }
     response.statusCode = 404; response.end();

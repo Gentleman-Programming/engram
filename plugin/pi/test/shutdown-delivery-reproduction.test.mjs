@@ -59,11 +59,14 @@ async function scenario(interrupted, fault) {
         return res.end(JSON.stringify({ id: identity, status: 'created' }));
       }
       if (path === '/observations') {
-        assert.deepEqual(body, { session_id: identity, title: 'disposable', content: 'synthetic fixture only', type: 'manual', project: 'synthetic-1632', scope: 'project' });
+        assert.match(body.operation_id, /^[0-9a-f-]{36}$/i);
+        delete body.operation_id;
+        assert.deepEqual(body, { session_id: identity, title: 'disposable', content: 'synthetic fixture only', type: 'manual', project: 'synthetic-1632', scope: 'project',
+          project_provenance: { source: 'unknown', directory: fileURLToPath(new URL('../', import.meta.url)) } });
         return res.end('{"id":1}');
       }
       assert.equal(path, `/sessions/${identity}/end`, 'unexpected request');
-      assert.deepEqual(body, { summary: '' });
+      assert.deepEqual(body, { summary: '', project_provenance: { source: 'unknown', directory: fileURLToPath(new URL('../', import.meta.url)) } });
       record('end_received');
       res.on('close', () => record('end_connection_closed'));
       release = () => { committed = true; record('fake_commit'); res.end('{}'); };
@@ -78,7 +81,7 @@ async function scenario(interrupted, fault) {
       else server.listen(0, '127.0.0.1', resolve);
     }), 'listen');
     child = fork(fileURLToPath(new URL('./support/shutdown-delivery-child.mjs', import.meta.url)), [`http://127.0.0.1:${server.address().port}`, identity], {
-      env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH },
+      env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
       ...(fault === 'spawn' ? { execPath: `${process.execPath}.synthetic-missing` } : {}),
     });

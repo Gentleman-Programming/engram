@@ -41,6 +41,14 @@ Engram trusts the **agent** to decide what's worth remembering — not a firehos
 
 ## Session Lifecycle
 
+Codex runtime identity is core-owned: startup registers a resumable root, while
+writes, prompt capture and compaction resolve an existing active identity.
+Runtime closing resolves and ends atomically without creating a continuation.
+Both root and continuation must satisfy existing project-sharing policy, exact
+ownership and canonical worktree; equivalent directory spelling is accepted without rewriting
+stored rows. Ended roots remain terminal. These operations are separate from
+ordinary exact-ID session ending; adapters maintain no identity cache.
+
 ```
 Session starts → Agent works → Agent saves memories proactively
                                     ↓
@@ -57,7 +65,7 @@ Context injection depends on the integration and available context: Claude Code 
 
 ## MCP Tools
 
-The stdio MCP server exposes memory capture, retrieval, session context, and administration tools to agents; project resolution occurs at tool call time. The canonical inventory and tool contracts are in [DOCS.md MCP Tools](../DOCS.md#mcp-tools-23-tools).
+The stdio MCP server exposes memory capture, retrieval, session context, and administration tools to agents; project resolution occurs at tool call time. The canonical inventory and tool contracts are in [DOCS.md MCP Tools](../DOCS.md#mcp-tools-26-tools). MCP clients may use deferred `mem_judge_many` for ordered independent verdicts and `mem_session_finalize` for atomic summary/close. The local finalization journal is not a new cloud entity.
 
 ---
 
@@ -77,9 +85,11 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 
 - `mem_save` now supports `scope` (`project` default, `personal` and `global` also accepted)
 - `mem_save` also supports `topic_key`; with a topic key, saves become upserts (same project+scope+topic updates the existing memory)
-- `mem_save` supports `capture_prompt` (`true` by default). When the same MCP process lifecycle has current prompt context for the same project and session, it best-effort records that prompt alongside the observation. The prompt context must be fed before the later `mem_save` (typically via `mem_save_prompt`); `mem_save` still succeeds if context is unavailable or prompt capture fails. Automated artifact saves should pass `capture_prompt=false`.
+- `mem_save` supports `capture_prompt` (`true` by default) in MCP and native Pi. Runtime adapters supply current prompt context for the observation's session/project; `Store.CapturePromptForSave` owns opt-out and exact prompt dedupe. MCP supplies process-local context (typically fed by `mem_save_prompt`), while Pi supplies the eligible current turn's redacted/truncated payload. Pi preserves that payload when steer/follow-up input is enqueued and when the initial user message starts after `before_agent_start`; subsequent user `message_start` events mark queued-input consumption and invalidate the preceding prompt context and ownership proof. Queued turns neither capture nor inherit context, including repeated identical input; a normal subsequent run establishes fresh context. Capture stores an independent prompt row, not an observation-ID link, and errors are nonfatal after a successful observation save. `capture_prompt=false` skips only this per-save attempt, not Pi's independent lifecycle capture.
 - `mem_save` and `mem_search` expose lifecycle metadata: computed `state` (`active` or `needs_review`) and `review_after` when a review cycle applies.
-- `mem_review` supports `action="list"` (`project`, `limit`) and `action="mark_reviewed"` (`observation_id`). Marking reviewed is local-only for now because `review_after` is intentionally not part of sync payloads in this phase.
+- New local observations use initial review defaults: `config` and `preference` 3 months; `discovery`, `pattern`, and `decision` 6 months; `architecture`, `bugfix`, and `policy` 12 months. These are review prompts, not empirically calibrated expiration deadlines. Unmapped types (including `learning`, operational events, and `session_summary`) have no default. No migration or backfill schedules existing local memories; topic revisions and deduplication preserve their existing dates, including null.
+- Overdue memories remain searchable with their original content and `state="needs_review"`; they are not hidden or deleted. `mem_review action="list"` surfaces them, and `action="mark_reviewed"` restarts the type's review interval. Hard expiry remains deferred. Queue volume and review usefulness should inform future default adjustments.
+- `mem_review` supports `action="list"` (`project`, `limit`) and `action="mark_reviewed"` (`observation_id`). Marking reviewed atomically enqueues an observation sync mutation. `review_after` is replicated, including explicit null resets; legacy missing fields preserve existing dates or derive new dates from the observation's creation time only for the original `decision`/`policy`/`preference` types. Imported legacy records of the five newly scheduled types remain unscheduled when the field is missing; explicit dates and explicit nulls retain their existing semantics.
 - Exact dedupe prevents repeated inserts in a rolling window (hash + project + scope + type + title)
 - Duplicates update metadata (`duplicate_count`, `last_seen_at`, `updated_at`) instead of creating new rows
 - Topic upserts increment `revision_count` so evolving decisions stay in one memory
@@ -196,7 +206,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (23 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (26 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge

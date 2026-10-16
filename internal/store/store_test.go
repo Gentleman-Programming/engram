@@ -622,6 +622,7 @@ func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *test
 		ownershipMode                                      any
 	}{
 		{"manual save session", "manual-save-target", "target", "target", SessionOwnershipProjectOwned, ""},
+		{"manual save session with non-canonical suffix", "manual-save-Target", "target", "target", SessionOwnershipProjectOwned, ""},
 		{"shared session", "agent-session", "target", "target", SessionOwnershipShared, ""},
 		{"legacy NULL mode", "legacy-null-mode", "target", "target", SessionOwnershipShared, nil},
 		{"whitespace-only mode", "whitespace-mode", "target", "target", SessionOwnershipShared, " \t "},
@@ -683,6 +684,90 @@ func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *test
 	}
 }
 
+func TestRescuedManualSessionRejectsForeignRegistrationWithoutMutation(t *testing.T) {
+	for _, sessionID := range []string{"manual-save-athlos", "manual-save-Athlos"} {
+		t.Run(sessionID, func(t *testing.T) {
+			s := newTestStore(t)
+			enrollTestProject(t, s, "athlos")
+			enrollTestProject(t, s, "other")
+			if err := s.CreateSession(sessionID, "Athlos", "/original"); err != nil {
+				t.Fatal(err)
+			}
+			// NULL reproduces the pre-ownership state; all behavior below uses
+			// the public store interface rather than inspecting SQL storage.
+			if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = NULL WHERE id = ?`, sessionID); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "athlos", SessionIDs: []string{sessionID}})
+			if err != nil || result.RescuedSessions != 1 || !result.Complete || !result.Journaled {
+				t.Fatalf("rescue = %#v, err=%v", result, err)
+			}
+			before, err := s.GetSession(sessionID)
+			if err != nil || before.Project != "athlos" || before.OwnershipMode != SessionOwnershipProjectOwned {
+				t.Fatalf("rescued session = %#v, err=%v", before, err)
+			}
+			mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+			if err != nil || len(mutationsBefore) != 1 {
+				t.Fatalf("rescued mutations = %#v, err=%v", mutationsBefore, err)
+			}
+			for _, mode := range []string{SessionOwnershipShared, SessionOwnershipProjectOwned} {
+				err := s.CreateSessionWithOwnershipMode(sessionID, "other", "/foreign", mode)
+				if !errors.Is(err, ErrSessionOwnershipMismatch) {
+					t.Fatalf("foreign %s registration = %v, want ownership mismatch", mode, err)
+				}
+				if mode == SessionOwnershipProjectOwned {
+					var conflict *SessionProjectConflictError
+					if !errors.As(err, &conflict) || conflict.SessionID != sessionID || conflict.OwnerProject != "athlos" || conflict.RequestedProject != "other" {
+						t.Fatalf("foreign strict registration = %v, want structured athlos ownership conflict", err)
+					}
+				} else {
+					want := fmt.Sprintf("%s: session %q belongs to %q, not %q", ErrSessionOwnershipMismatch, sessionID, "athlos", "other")
+					if err.Error() != want {
+						t.Fatalf("foreign shared registration error = %q, want %q", err, want)
+					}
+				}
+				after, err := s.GetSession(sessionID)
+				if err != nil || !reflect.DeepEqual(after, before) {
+					t.Fatalf("foreign %s registration changed session: before=%#v after=%#v err=%v", mode, before, after, err)
+				}
+				mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+				if err != nil || !reflect.DeepEqual(mutationsAfter, mutationsBefore) {
+					t.Fatalf("foreign %s registration changed journal: before=%#v after=%#v err=%v", mode, mutationsBefore, mutationsAfter, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRescuePreservesAlreadySharedManualSession(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "athlos")
+	const sessionID = "manual-save-Athlos"
+	if err := s.CreateSession(sessionID, "athlos", "/original"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetSession(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationsBefore, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "athlos", SessionIDs: []string{sessionID}})
+	if err != nil || result.RescuedSessions != 0 || result.SkippedRecords != 1 {
+		t.Fatalf("already-shared rescue = %#v, err=%v, want one skipped session", result, err)
+	}
+	after, err := s.GetSession(sessionID)
+	if err != nil || after.OwnershipMode != SessionOwnershipShared || !reflect.DeepEqual(after, before) {
+		t.Fatalf("already-shared rescue changed session: before=%#v after=%#v err=%v", before, after, err)
+	}
+	mutationsAfter, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
+	if err != nil || !reflect.DeepEqual(mutationsAfter, mutationsBefore) {
+		t.Fatalf("already-shared rescue changed journal: before=%#v after=%#v err=%v", mutationsBefore, mutationsAfter, err)
+	}
+}
+
 type rescueRowsAffectedResult struct {
 	affected int64
 	err      error
@@ -719,7 +804,7 @@ func TestRescueNullProjectOwnershipRollsBackWhenOwnershipModeSealCannotConfirmOn
 			originalExec := s.hooks.exec
 			hookCalled := false
 			s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-				if query == rescueSessionQuery.updateOwnershipMode {
+				if query == rescueSessionQuery.stampOwnershipMode {
 					hookCalled = true
 					return tc.result, nil
 				}
@@ -10238,8 +10323,9 @@ func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
 		id      string
 		payload string
 	}{
-		{name: "pulled mutation with blank directory", id: "blank-directory", payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`},
-		{name: "pulled mutation with omitted directory", id: "omitted-directory", payload: `{"id":"omitted-directory","project":"engram"}`},
+		// A blank string or omitted directory is admitted as an inert partial
+		// session; see TestCloudPulledMutationAcceptsBlankOrMissingDirectory.
+		{name: "pulled mutation with null directory", id: "null-directory", payload: `{"id":"null-directory","project":"engram","directory":null}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
@@ -16685,7 +16771,7 @@ func withinDays(t *testing.T, label, value string, expected time.Time, days int)
 }
 
 // TestAddObservation_DecayDefaults verifies that AddObservation populates
-// review_after for known types (decision, policy, preference) and leaves it
+// review_after for configured knowledge types and leaves it
 // NULL for unknown/unlisted types. expires_at is NULL for all types Phase 1.
 func TestAddObservation_DecayDefaults(t *testing.T) {
 	s := newTestStore(t)
@@ -16705,8 +16791,8 @@ func TestAddObservation_DecayDefaults(t *testing.T) {
 		{"preference", false, 3},
 		{"observation", true, 0},
 		{"manual", true, 0},
-		{"bugfix", true, 0},
-		{"architecture", true, 0},
+		{"bugfix", false, 12},
+		{"architecture", false, 12},
 		{"", true, 0},
 	}
 
@@ -17018,7 +17104,7 @@ func TestMarkReviewedForProjectMatchesLegacyMixedCaseProject(t *testing.T) {
 	}
 }
 
-func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
+func TestMarkReviewedEnqueuesSyncMutation(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
@@ -17046,8 +17132,19 @@ func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPendingSyncMutations after: %v", err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("MarkReviewed enqueued sync mutation: before=%d after=%d", len(before), len(after))
+	if len(after) != len(before)+1 {
+		t.Fatalf("MarkReviewed mutation count: before=%d after=%d", len(before), len(after))
+	}
+	obs, err := s.GetObservation(obsID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(after[len(after)-1].Payload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if obs.ReviewAfter == nil || payload["review_after"] != *obs.ReviewAfter {
+		t.Fatalf("review mutation = %#v", payload)
 	}
 }
 

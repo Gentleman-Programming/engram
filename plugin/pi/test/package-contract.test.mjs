@@ -20,12 +20,28 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const mcpTemplate = JSON.parse(readFileSync(new URL("../mcp-template.json", import.meta.url), "utf8"));
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 
+test("package distributes both runtime contract assets beside its explicit extension", () => {
+	assert.deepEqual(pkg.pi.extensions, ["./index.ts"]);
+	for (const asset of ["runtime-contract.js", "runtime-contract.json"]) {
+		assert.ok(pkg.files.includes(asset), `${asset} must be included in the package files`);
+		assert.ok(existsSync(new URL(`../${asset}`, import.meta.url)), `${asset} must exist beside index.ts`);
+	}
+});
+
+test("package advertises startup policy and session-owned wire contracts v1", () => {
+	assert.deepEqual(pkg.engram, { startupPolicy: 1, sessionOwned: 1 });
+});
+
+test("package test runner serializes files without dropping any public tests", () => {
+	assert.equal(pkg.scripts.test, "node --test --test-concurrency=1 test/*.test.mjs");
+});
+
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-test("next Pi package release is 0.2.0", () => {
-	assert.equal(pkg.version, "0.2.0");
+test("next Pi package release is 0.4.2", () => {
+	assert.equal(pkg.version, "0.4.2");
 });
-const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16"];
+const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16", "npm:gentle-engram@0.2.0", "npm:gentle-engram@0.3.0", "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RELEASE_CONTRACT_PATH = fileURLToPath(new URL("./release-contract.mjs", import.meta.url));
@@ -245,6 +261,42 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 		rmSync(agentDir, { recursive: true, force: true });
 	}
 });
+
+for (const previousVersion of ["0.2.0", "0.3.0", "0.4.0", "0.4.1"]) {
+test(`pi-engram init upgrades ${previousVersion} without changing unrelated config and remains idempotent`, () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-upgrade-"));
+	try {
+		const settingsPath = join(agentDir, "settings.json");
+		const mcpPath = join(agentDir, "mcp.json");
+		writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:existing", `npm:gentle-engram@${previousVersion}`], custom: true }));
+		const originalMcp = JSON.stringify({ mcpServers: { other: { command: "other" } } });
+		writeFileSync(mcpPath, originalMcp);
+		for (const action of ["Added", "Kept"]) {
+			const before = readFileSync(settingsPath, "utf8");
+			const result = spawnSync(process.execPath, [CLI_PATH, "init"], {
+				encoding: "utf8", env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+			});
+			assert.equal(result.status, 0, result.stderr);
+			assert.equal(result.stderr, "");
+			assert.equal(result.stdout, [
+				`Pi agent dir: ${agentDir}`,
+				`${action} npm:gentle-engram@0.4.2 in settings.json`,
+				"Pi-native mem_* tools own agent writes; no Engram MCP registration is created.",
+				"Set ENGRAM_URL for an existing engram serve instance, or ENGRAM_BIN for a custom engram binary path.",
+				"",
+			].join("\n"));
+			assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), {
+				packages: ["npm:existing", "npm:gentle-engram@0.4.2"], custom: true,
+			});
+			assert.equal(readFileSync(mcpPath, "utf8"), originalMcp);
+			if (action === "Kept") assert.equal(readFileSync(settingsPath, "utf8"), before);
+		}
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+}
 
 test("Pi release contract accepts the matching full tag ref and CLI guidance", () => {
 	const result = runReleaseContract(`refs/tags/pi-v${pkg.version}`);

@@ -112,13 +112,17 @@ func ensureDatabaseFile(path string) error {
 }
 
 var openDB = func(dbPath string, generation *databaseGeneration) (*sql.DB, error) {
-	sqliteDriver := &sqlite.Driver{}
-	sqliteDriver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
-		if fc, ok := conn.(sqlite.FileControl); ok {
-			_, _ = fc.FileControlPersistWAL("main", 1)
-		}
-		return nil
-	})
+	// Obtain the registered driver without opening a connection. A fresh
+	// sqlite.Driver would omit deterministic functions registered at startup.
+	// Do not mutate shared driver hooks or copy its private implementation.
+	registry, err := sql.Open("sqlite", storeDSN(dbPath))
+	if err != nil {
+		return nil, err
+	}
+	sqliteDriver := registry.Driver()
+	if err := registry.Close(); err != nil {
+		return nil, err
+	}
 	d := &generationDriver{Driver: sqliteDriver, generation: generation}
 	return sql.OpenDB(generationConnector{driver: d, name: storeDSN(dbPath)}), nil
 }
@@ -145,6 +149,11 @@ func (d *generationDriver) Open(name string) (driver.Conn, error) {
 	conn, err := d.Driver.Open(name)
 	if err != nil {
 		return nil, err
+	}
+	// Keep WAL persistence initialization local to this fenced connection,
+	// in the same position as the former per-driver connection hook.
+	if fc, ok := conn.(sqlite.FileControl); ok {
+		_, _ = fc.FileControlPersistWAL("main", 1)
 	}
 	if err := d.generation.check(); err != nil {
 		_ = conn.Close()
@@ -319,6 +328,26 @@ func (c generationConn) FileControlPersistWAL(dbName string, mode int) (int, err
 		return 0, errors.New("database connection does not implement sqlite.FileControl")
 	}
 	result, err := fc.FileControlPersistWAL(dbName, mode)
+	if err != nil {
+		return 0, err
+	}
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	return result, nil
+}
+
+// FileControlDataVersion forwards modernc's data version query while rejecting
+// results from a database generation that changed before or during the call.
+func (c generationConn) FileControlDataVersion(dbName string) (uint32, error) {
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	fc, ok := c.Conn.(sqlite.FileControl)
+	if !ok {
+		return 0, errors.New("database connection does not implement sqlite.FileControl")
+	}
+	result, err := fc.FileControlDataVersion(dbName)
 	if err != nil {
 		return 0, err
 	}

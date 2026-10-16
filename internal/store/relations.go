@@ -94,10 +94,27 @@ type CandidateOptions struct {
 	// Query optionally overrides the saved observation title as the candidate
 	// query source. Empty uses the saved title.
 	Query string
+	// RequireSaveRelevance opts into title/topic relevance filtering before the
+	// candidate limit and pending relation inserts. MCP saves enable it; broad
+	// recall scans and other callers retain their existing behavior by default.
+	RequireSaveRelevance bool
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
 	SkipInsert bool
+	// Timings optionally receives per-call diagnostic durations. Use a distinct
+	// pointer for each concurrent call. Nil performs no timing instrumentation.
+	Timings *CandidateTimings
+}
+
+// CandidateTimings separates candidate lookup (including row consumption and
+// closure) from pending-relation insertion. Durations include database waits;
+// they are not CPU times or separate SQLite lock-wait measurements.
+type CandidateTimings struct {
+	Lookup  time.Duration
+	Inserts time.Duration
+	// RowsRead counts result rows consumed by Go, not SQLite FTS index work.
+	RowsRead int
 }
 
 // ─── Phase 3 types ────────────────────────────────────────────────────────────
@@ -347,7 +364,8 @@ type JudgeRelationParams struct {
 // ─── FindCandidates ───────────────────────────────────────────────────────────
 
 // FindCandidates runs a post-transaction FTS5 candidate query for the given
-// savedID and returns at most opts.Limit candidates above the BM25 floor.
+// savedID and returns at most opts.Limit candidates satisfying the rank predicate
+// and, when opted in, the save relevance gate.
 //
 // For each candidate, a pending memory_relations row is inserted and the row's
 // sync_id is exposed as Candidate.JudgmentID.
@@ -356,6 +374,11 @@ type JudgeRelationParams struct {
 // Errors from this method are expected to be logged and swallowed by callers —
 // detection failure must never fail the originating save.
 func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
+	if opts.Timings != nil {
+		*opts.Timings = CandidateTimings{}
+		started := time.Now()
+		defer func() { opts.Timings.Lookup = time.Since(started) - opts.Timings.Inserts }()
+	}
 	// Apply defaults.
 	limit := opts.Limit
 	if limit <= 0 {
@@ -367,10 +390,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Get the saved observation to build the FTS query and for project/scope filtering.
-	var title, project, scope, sourceSyncID string
+	var title, project, scope, sourceSyncID, sourceTopic string
 	err = s.db.QueryRow(
-		`SELECT title, ifnull(project,''), scope, ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID,
-	).Scan(&title, &project, &scope, &sourceSyncID)
+		`SELECT title, ifnull(project,''), scope, ifnull(sync_id,''), ifnull(topic_key,'') FROM observations WHERE id = ?`, savedID,
+	).Scan(&title, &project, &scope, &sourceSyncID, &sourceTopic)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("FindCandidates: observation %d not found", savedID)
 	}
@@ -395,8 +418,19 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		return nil, nil
 	}
 
+	args := []any{ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope}
+	if opts.RequireSaveRelevance {
+		// Filter titles/topics inside the ranked CTE before materialization.
+		// Keep original FTS scores and a positive SQL result limit: incidental
+		// content matches must not consume the cap or cross into the Go loop.
+		query = strings.Replace(query, "AND o.scope = ?", "AND o.scope = ?\n\t\t  AND engram_save_candidate_relevant(?, ?, o.title, o.topic_key) = 1", 1)
+		// Unit separator cannot occur in normalized terms. Avoid NUL, which
+		// SQLite text-function argument conversion treats as a terminator.
+		args = append(args, strings.Join(saveCandidateTerms(queryText), "\x1f"), sourceTopic)
+	}
+	args = append(args, threshold, limit)
 	// Apply the rank predicate in SQL before ordering and limiting.
-	rows, err := s.db.Query(query, ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope, threshold, limit)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
@@ -417,6 +451,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 				return nil, fmt.Errorf("FindCandidates: scan: %w; close rows: %v", err, closeErr)
 			}
 			return nil, fmt.Errorf("FindCandidates: scan: %w", err)
+		}
+		if opts.Timings != nil {
+			opts.Timings.RowsRead++
 		}
 		raw = append(raw, rc)
 	}
@@ -452,6 +489,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Insert a pending relation row for each candidate.
+	if opts.Timings != nil {
+		started := time.Now()
+		defer func() { opts.Timings.Inserts = time.Since(started) }()
+	}
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
 		judgmentID := newSyncID("rel")
@@ -1058,24 +1099,30 @@ func (s *Store) GetRelationsForObservationsContext(ctx context.Context, syncIDs 
 	return result, nil
 }
 
+// Materialize eligible ranks once, then filter and sort the stored scores.
+// Keeping MATCH against the original FTS table preserves corpus-wide BM25
+// statistics; project/scope and relation filters do not change the scoring corpus.
 const findCandidatesFTSQuery = `
-	SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.title, o.type, o.topic_key,
-	       fts.rank
-	FROM observations_fts fts
-	CROSS JOIN observations o ON o.id = fts.rowid
-	WHERE observations_fts MATCH ?
-	  AND o.id != ?
-	  AND NOT EXISTS (
-		SELECT 1 FROM memory_relations r
-		WHERE ((r.source_id = ? AND r.target_id = ifnull(o.sync_id,''))
-		    OR (r.source_id = ifnull(o.sync_id,'') AND r.target_id = ?))
-		  AND r.judgment_status = 'judged'
-	  )
-	  AND o.deleted_at IS NULL
-	  AND ifnull(o.project,'') = ifnull(?,'')
-	  AND o.scope = ?
-	  AND fts.rank %s ?
-	ORDER BY fts.rank
+	WITH ranked AS MATERIALIZED (
+		SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.title, o.type, o.topic_key,
+		       fts.rank AS score
+		FROM observations_fts fts
+		CROSS JOIN observations o ON o.id = fts.rowid
+		WHERE observations_fts MATCH ?
+		  AND o.id != ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM memory_relations r
+			WHERE ((r.source_id = ? AND r.target_id = ifnull(o.sync_id,''))
+			    OR (r.source_id = ifnull(o.sync_id,'') AND r.target_id = ?))
+			  AND r.judgment_status = 'judged'
+		  )
+		  AND o.deleted_at IS NULL
+		  AND ifnull(o.project,'') = ifnull(?,'')
+		  AND o.scope = ?
+	)
+	SELECT id, sync_id, title, type, topic_key, score FROM ranked
+	WHERE score %s ?
+	ORDER BY score
 	LIMIT ?
 `
 

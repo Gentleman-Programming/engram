@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -27,6 +28,15 @@ var migrationLockTimeout = 60 * time.Second
 // would open a race where a third process re-creates the path and locks a
 // different inode/file object, defeating the exclusion.
 func acquireMigrationLock(path string) (func(), error) {
+	return acquireMigrationLockContext(context.Background(), path)
+}
+
+// acquireMigrationLockContext is synchronous: cancellation closes only this
+// waiter's descriptor, never the holder's lock or work in another goroutine.
+func acquireMigrationLockContext(ctx context.Context, path string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open migration lock file %s: %w", path, err)
@@ -35,12 +45,21 @@ func acquireMigrationLock(path string) (func(), error) {
 	deadline := time.Now().Add(migrationLockTimeout)
 	backoff := 10 * time.Millisecond
 	for {
+		if err := ctx.Err(); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
 		acquired, err := tryLockMigrationFile(f)
 		if err != nil {
 			_ = f.Close()
 			return nil, fmt.Errorf("lock migration lock file %s: %w", path, err)
 		}
 		if acquired {
+			if err := ctx.Err(); err != nil {
+				_ = unlockMigrationFile(f)
+				_ = f.Close()
+				return nil, err
+			}
 			return func() {
 				_ = unlockMigrationFile(f)
 				_ = f.Close()
@@ -53,7 +72,14 @@ func acquireMigrationLock(path string) (func(), error) {
 				migrationLockTimeout, path,
 			)
 		}
-		time.Sleep(backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = f.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 		// Grow the poll interval but cap it low: healthy holders release the
 		// lock within milliseconds (the startup repair fast path is read-only),
 		// and every engram subcommand acquires this lock, so an aggressive cap

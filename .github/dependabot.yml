@@ -48,3 +48,19 @@ updates:
       prefix: "chore(deps)"
     reviewers:
       - "Gentleman-Programming"
+
+  # Obsidian npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/plugin/obsidian"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 3
+    labels:
+      - "type:chore"
+    commit-message:
+      prefix: "chore(deps)"

@@ -26,6 +26,8 @@ Pi and OpenCode activity renews the local runtime lease through their existing s
 
 Pi sends `resume: true` for runtime-root registration and adopts only a valid acknowledged effective ID. The Go core selects numeric continuations; Pi persists the mapping in its session entries for reloads and uses it for attributed writes and shutdown `/end`. Legacy `:resume:<uuid>` mappings are re-registered as-is; an ended mapping falls back to root registration with `resume: true`. Reload does not end the session. Ownership conflicts and an older server's `409 session_already_ended` block writes rather than triggering client-generated identities.
 
+When resuming an ended, directory-bound host, new numeric continuations inherit its persisted project, directory, and ownership mode after registration ownership checks. After a received `409 runtime session scope conflict`, Codex looks up the ended root and makes at most one resolve/end request with its persisted directory and mode while retaining the caller's requested project: `shared` hosts still allow cross-project use, but `project_owned` hosts reject foreign projects. This rebinding is limited to that confirmed rejection; normal paths, unrelated errors, and uncertain transport failures do not trigger it. Fresh and live-host paths keep their existing registration and resolution behavior.
+
 ### Codex on Windows
 - The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
 - The adapter reads the setup-owned absolute pin and invokes its native hook command.
@@ -71,6 +73,7 @@ The plugin:
 - **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
 - **Injects session-only runtime context** into the compaction prompt; manual `mem_context` and `GET /context` remain project/scope-scoped
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
+- **Captures delegation learnings** from OpenCode V1 `task` output and V2 `subagent` output (normalized internally to the legacy `Task` alias), using passive capture with source `task-complete`. V1 result objects contribute their string `output` field rather than wrapper metadata; plain string results remain unchanged, and other object shapes retain JSON serialization as a fallback. Other tool results are not submitted for passive capture.
 - **Strips `<private>` tags** before sending data
 - **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `engram setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
 
@@ -143,7 +146,7 @@ plugin/claude-code/
 │   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
 │   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
-│   └── session-end.sh             # Logs end-of-session event at session end
+│   └── session-end.sh             # Ends the session (or its live resume continuation)
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
 ```
 
@@ -151,14 +154,16 @@ plugin/claude-code/
 
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
+   Before rewriting input, the hook confirms project-owned session registration using one shared HTTP budget (four seconds by default). Set `ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT` in the hook process environment to a positive Go duration such as `8s` or `500ms` to override it; unset, blank, invalid, overflowed, zero, or negative values use `4s`. A session that is already registered is confirmed against its registered owner project (#1717): the cwd names the project only on first registration, so writes keep succeeding wherever the shell currently is. The default leaves one second within the configured five-second hook timeout for process startup and verdict output. If increasing the budget, also raise the host's configured PreToolUse timeout above that budget with startup/output headroom; the environment variable does not change the host timeout. The same variable applies to Codex PreToolUse (whose shipped outer timeout is ten seconds), but not to Codex prompt capture. This is a slow-server mitigation, not a fix for autosync latency. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; unexplained failures retain `Claude host session registration could not be confirmed`. Denials the server explains name their cause instead: an ended session reports `host session ... already ended`, a project conflict reports `session_project_conflict` with the owner and requested projects, and a cwd the server cannot resolve for first registration reports the resolution failure with the server's reason. Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
+   Claude Code keeps the same `session_id` on `--resume`. When that original session has already ended, the hook binds the call to the live `<id>:resume:N` continuation that SessionStart registered, resolved from the original session's persisted project and directory. The ended session stays ended, and the hook never creates a continuation itself; with no live continuation the call is denied with `host session ... already ended`.
 2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 
 Session binding is best-effort if the host times out the PreToolUse hook: normal permission flow can continue without the rewrite, so an explicit wrong same-project session ID might be persisted. This limitation was reproduced with an induced one-second hook timeout in a scratch test; it has not been observed with the production hook timeout.
 
-**On session start** (`startup`):
+**On session start** (`startup`, `resume`, `clear`, `fork`):
 1. Ensures the engram HTTP server is running
-2. Creates a new session via the API
+2. Registers the session via the API with `resume: true`, so a resumed conversation whose session already ended gets a live `<id>:resume:N` continuation instead of a refused registration. The registration is `project_owned`, except when the ended session is a legacy `shared` root (created before Claude registered project-owned sessions): it is resumed as `shared` so the continuation stays resolvable. A new continuation inherits the complete persisted root scope, so a same-project resume from another non-Git directory or linked worktree does not split registration from write binding and closure.
 3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
 4. Injects previous session context into Claude's initial context
 
@@ -167,7 +172,16 @@ Session binding is best-effort if the host times out the PreToolUse hook: normal
 2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
 3. This ensures no work is lost when context is compressed
 
+**On session end**:
+The hook looks up the session first. If the original session has already ended (a resumed conversation), it ends the live continuation through `POST /runtime-sessions/end` with the session's persisted project, directory, and ownership mode; otherwise it calls `POST /sessions/{id}/end` as before. Both calls are bounded and fail open.
+
+Resume does not rewrite or skip an already-existing continuation with a conflicting scope. Those identities still fail closed; start a new host conversation if one was created with incompatible scope by an older core. Blank legacy bindings and directory-less isolated sessions are not silently converted into runtime-bound identities. Use a matching updated core for the new-continuation behavior; updating only plugin assets does not change registration semantics.
+
 **On user prompt submit**:
+The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompts/capture-decision` endpoint whether to capture a prompt. This replaces capture's former `GET /project/current` read, rather than adding another human-prompt preflight. Go skips blank prompts and prompts whose trimmed content starts with `<task-notification>` or `<agent-message`; only a valid `capture` decision with canonical project metadata permits `POST /prompts`, using the original content unchanged. Filtering affects persistence only, not ToolSearch or save reminders, and does not delete existing rows. The Windows Git Bash safe path remains builtin-only and skips all prompt persistence and API calls.
+
+**Server compatibility:** Automatic Claude prompt capture requires an Engram server with `/prompts/capture-decision`. Older servers (404), unavailable/slow servers, and malformed or invalid decisions silently skip capture; normal hooks, first-message ToolSearch, and existing save-reminder reads continue to work. There is no local classifier fallback. Decision responses must be 2xx without redirects. Adapters reject project metadata containing path separators, ASCII controls, or surrounding whitespace; these are transport sanity checks, not project normalization. Go remains the canonical-name authority, including lowercasing and repeated separator normalization; adapters never repair server metadata.
+
 1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
@@ -205,6 +219,24 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 - **After compaction** — 3-step recovery: persist summary → load context → continue
 
 ---
+
+## MCP Tool Reference — mem_session_finalize
+
+MCP clients can finalize an existing exact session with required `session_id` and caller-authored `summary`, plus the optional summary project-resolution fields. One transaction saves a structured observation, ends the session, queues the normal enrolled-project mutations and records a local retry journal. The existing free-text session summary is preserved.
+
+Successful local retries return the same `summary_id` / `summary_sync_id` with `state: already_finalized` and no writes. A session ended separately rejects rather than silently dropping or backfilling the supplied summary. The journal is not synced/exported, so imported ended sessions without a local marker reject too. This MCP addition does not change host hooks or native Pi/HTTP tools. See [the full contract](../DOCS.md#mem_session_finalize).
+
+## MCP Tool Reference — mem_judge_many
+
+Available in agent and admin profiles and explicit allowlists; deferred loading avoids eager schema duplication. After `mem_save` returns `judgment_required`, prefer this tool when available; otherwise call `mem_judge` for each candidate.
+
+Submit `judgments`, an array of 1–32 objects, plus optional shared `session_id` provenance. Each object requires `judgment_id` from `candidates[]` and `relation`; optional `reason`, `evidence`, and `confidence` follow `mem_judge`. Never reuse the top-level judgment ID for all candidates.
+
+The whole array shape/count and shared session type are checked before writes. Items run in submitted order within one queued task, using independent existing judgment transactions. Malformed entries, unknown IDs, invalid verdicts and project guard failures yield individual errors without stopping subsequent items.
+
+The JSON response has `outcomes` in input order. Each has zero-based `index`, `judgment_id` (null if unavailable), and `status` (`success` or `error`). Success includes `judgment_status`, the updated `relation` row, and any other fields from the existing judgment response; error includes an `error` string. Partial failure is not a top-level tool error; invalid array shape/count is.
+
+Repeated IDs are processed in order, so later successful decisions overwrite earlier ones. Identical retries converge the persisted verdict but retain existing sync mutation refresh semantics: this is not exactly-once delivery. Existing `mem_judge` remains unchanged.
 
 ## MCP Tool Reference — mem_judge
 
@@ -306,9 +338,15 @@ Old clients that read only the `result` string continue to work — these fields
 
 ### mem_save prompt capture
 
-`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated saves.
+`mem_save` accepts `capture_prompt` as an optional boolean in MCP and native Pi. Omission defaults to `true`. In MCP, a present value must be a typed boolean: strings (including `"false"`), numbers, and `null` return the exact tool error `capture_prompt must be a boolean` before project resolution or any session, observation, or prompt write. The shared Go policy defaults to `true`: when the runtime supplies a current user prompt for the same project and session, Engram best-effort stores an independent `user_prompts` row using exact project + session + stored-content dedupe. This is not an observation-ID-to-prompt-ID link. Passing `capture_prompt=false` skips only that save's prompt capture attempt and is intended for automated saves.
 
 If no current prompt is available to the MCP process, or if best-effort prompt capture fails, `mem_save` still succeeds and no prompt is invented from the observation content. Plugins/protocol hooks that can observe user prompts must feed that prompt context before relying on automatic capture. Calling `mem_save_prompt` in the same MCP process records the prompt and makes it available to later `mem_save` calls for the same project/session; a different MCP process lifecycle does not inherit that in-memory prompt context.
+
+Native Pi supplies the current eligible turn's already-redacted, truncated prompt with `/observations` as `current_prompt`, alongside `capture_prompt`. It does not infer current context from stored history or reuse a prompt from another session/project. Pi's independent `before_agent_start` lifecycle capture remains enabled even when a later save opts out; opting out does not remove an existing prompt row. The Go dedupe policy prevents a per-save attempt from duplicating a lifecycle-captured row.
+
+### Pi observation-save recovery
+
+Pi-native `mem_save` sends one generated operation UUID with a frozen request payload and destination. If its initial acknowledgement is ambiguous, it looks up `GET /observations/save-result?operation_id=...`. Only a `404` whose body has both `code: "observation_save_result_not_found"` and `error: "no committed result found for operation_id"` for a never-recorded operation authorizes one exact replay after a cancellable 250ms backoff. A soft-deleted or tombstoned operation returns `410` and remains unknown without a replay or another lookup. Legacy `400` replies, generic or malformed `404` replies, transport errors, and invalid receipts also remain unknown and do not replay. A replay that is still ambiguous, including a `409` or `410`, gets exactly one final lookup; it never sends another POST. Positive IDs are required before Pi reports a save. Caller cancellation propagates through every recovery stage. Receipts are retained indefinitely by the local operation ledger; Pi does not replace an uncertain operation ID. Telemetry for this recovery remains deferred.
 
 ---
 
@@ -327,6 +365,7 @@ The `engram conflicts <sub-command>` command provides read and scan access to th
 | `engram conflicts stats` | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes |
 | `engram conflicts scan` | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
 | `engram conflicts deferred` | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay` |
+| `engram conflicts prune` | Bound dead rows in `sync_apply_deferred` by age and per-scope count; dry run by default, deletes with `--apply` |
 
 When `--project` is omitted, the command falls back to the cwd-detected project (same resolution as all other `engram` commands).
 

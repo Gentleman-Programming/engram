@@ -235,6 +235,9 @@ func (s *CloudServer) pushBodyLimit() int64 {
 
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
+	s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusFound)
+	})
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	var dashboardStore dashboard.DashboardStore
 	if store, ok := s.store.(dashboard.DashboardStore); ok {
@@ -906,7 +909,7 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 		if strings.TrimSpace(session.ID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
-		if strings.TrimSpace(session.Directory) == "" {
+		if strings.TrimSpace(session.Directory) == "" && session.OwnershipMode != store.SessionOwnershipProjectOwned {
 			return fmt.Errorf("sessions[%d].directory is required", i)
 		}
 	}

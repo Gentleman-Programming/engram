@@ -1,0 +1,1157 @@
+{
+  "contract_id": "engram.agent-contract/v1",
+  "digest": "d1c5a3427698f9865ca5947148410a1109f97f2360d425f7d8fc0c69db165181",
+  "operations": {
+    "mem_capture_passive": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Capture Learnings"
+      },
+      "description": "Extract and save structured learnings from text output. Use this at the end of a task to capture knowledge automatically.\n\nThe tool looks for sections like \"## Key Learnings:\" or \"## Aprendizajes Clave:\" and extracts numbered or bulleted items. Each item is saved as a separate observation.\n\nDuplicates are automatically detected and skipped — safe to call multiple times with the same content.",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "The text output containing a '## Key Learnings:' section with numbered or bulleted items",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Source identifier (e.g. 'subagent-stop', 'session-end')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-observations",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "Go parses learnings and reports extracted/saved/duplicate counts",
+          "an explicit MCP session is not silently replaced with another identity"
+        ],
+        "pi_differences": [
+          "default source is mcp-passive for MCP and pi-tool for Pi",
+          "Pi requires acknowledged host attribution and never sends implicit passive capture to a foreign satellite"
+        ],
+        "pi_runtime_fields": {
+          "session_id": "acknowledged effective host session; passive capture never selects a foreign satellite"
+        },
+        "project_policy": "existing session association or resolved current project; no arbitrary model-selected project",
+        "risk": "persistent-write",
+        "session_policy": "explicit MCP session_id or Go-selected fallback session; session/project ownership remains Go-owned"
+      }
+    },
+    "mem_compare": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Compare Memory Pair (Persist Semantic Verdict)"
+      },
+      "description": "Persist a semantic verdict you have already judged externally (with your LLM) into Engram.\n\nWHEN TO CALL: After you have evaluated two memories and reached a verdict, call mem_compare to PERSIST that verdict into the relation store. You do the judgment; mem_compare records it.\n\nPARAMS:\n  memory_id_a  (required) — integer id of the first observation (from mem_search or mem_get_observation)\n  memory_id_b  (required) — integer id of the second observation\n  relation     (required) — one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict\n  confidence   (required) — float 0..1; your self-reported confidence in the verdict\n  reasoning    (required) — explanation of the verdict, max 200 chars\n  model        (optional) — your model identifier, stored for provenance (e.g. \"claude-haiku-4-5\")\n\nBEHAVIOR:\n  - Persists the verdict via JudgeBySemantic with system provenance (marked_by_actor=\"engram\").\n  - not_conflict: persists a judged relation and returns its sync_id, so future scans do not re-evaluate the pair.\n  - Idempotent: calling again for the same pair updates the existing row.\n  - Cross-project pairs are rejected.\n\nSUCCESS: Returns { \"sync_id\": \"rel-...\" } on every persisted verdict.\nERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-project pair.",
+      "input_schema": {
+        "properties": {
+          "confidence": {
+            "description": "Confidence score 0.0..1.0",
+            "type": "number"
+          },
+          "memory_id_a": {
+            "description": "Integer id of the first observation (from mem_search #id)",
+            "type": "number"
+          },
+          "memory_id_b": {
+            "description": "Integer id of the second observation (from mem_search #id)",
+            "type": "number"
+          },
+          "model": {
+            "description": "Your model identifier for provenance (e.g. \"claude-haiku-4-5\")",
+            "type": "string"
+          },
+          "reasoning": {
+            "description": "Brief explanation of the verdict (max 200 chars)",
+            "type": "string"
+          },
+          "relation": {
+            "description": "Verdict: related | compatible | scoped | conflicts_with | supersedes | not_conflict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id_a",
+          "memory_id_b",
+          "relation",
+          "confidence",
+          "reasoning"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-relation",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "both observations, relation, reasoning, and confidence are required",
+          "confidence must be between 0 and 1",
+          "Go persists an externally judged verdict and returns its sync_id"
+        ],
+        "pi_differences": [
+          "HTTP decoding requires integer IDs; MCP handler currently converts numeric IDs to int64"
+        ],
+        "project_policy": "Go resolves both observation IDs to durable sync IDs",
+        "risk": "persistent-write",
+        "session_policy": "memory_id_a and memory_id_b are observation IDs; model is optional provenance"
+      }
+    },
+    "mem_consolidate": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Consolidate Memories"
+      },
+      "description": "Atomically consolidate at least two live observations owned by expected_project. Preview by default without writes; inspect the returned plan, then repeat the exact arguments with confirm=true and its opaque fingerprint. Drift refuses without writes and returns a new preview. Never automatically confirm a replacement plan or retry an uncertain write. Session/scope are inherited; this guarantees local atomicity, not remote visibility.",
+      "input_schema": {
+        "properties": {
+          "confirm": {
+            "description": "Default false: preview only; true requires the preview fingerprint",
+            "type": "boolean"
+          },
+          "expected_project": {
+            "description": "Explicit expected canonical owner of every source, not a target-project override",
+            "type": "string"
+          },
+          "fingerprint": {
+            "description": "Opaque preview fingerprint, required when confirm=true",
+            "type": "string"
+          },
+          "ids_to_delete": {
+            "description": "At least two distinct positive integer observation IDs, each at most 9007199254740991",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "new_content": {
+            "description": "Non-empty summary; store appends the provenance footer",
+            "type": "string"
+          },
+          "new_title": {
+            "description": "Non-empty consolidated survivor title",
+            "type": "string"
+          },
+          "topic_key": {
+            "description": "Optional explicit survivor topic key",
+            "type": "string"
+          },
+          "type": {
+            "description": "Optional survivor type; defaults to newest source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ids_to_delete",
+          "new_title",
+          "new_content",
+          "expected_project"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "consolidate-observations",
+        "error_effects": "validation and drift refusals do not mutate local observations; a lost or uncertain write result must not be automatically retried or treated as rollback",
+        "guarantees": [
+          "preview is the default and does not write",
+          "confirmation requires the exact preview arguments and opaque fingerprint",
+          "drift refuses without writes and returns a replacement preview that must not be automatically confirmed",
+          "at least two distinct live observation IDs must have the asserted owner",
+          "consolidation is locally atomic, not a guarantee of remote visibility"
+        ],
+        "pi_differences": [
+          "mem_consolidate is Go/MCP-only; Pi has no recipe or dispatch for this operation"
+        ],
+        "project_policy": "expected_project explicitly asserts the existing canonical owner of every source; it is not a destination override",
+        "risk": "persistent-write",
+        "session_policy": "source session and scope are inherited; model arguments cannot override them"
+      }
+    },
+    "mem_context": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Get Memory Context"
+      },
+      "description": "Get recent memory context from previous sessions. Shows recent sessions and observations to understand what was done before.",
+      "input_schema": {
+        "properties": {
+          "compact": {
+            "description": "Drop the inline content preview from observation bullets to save tokens.",
+            "type": "boolean"
+          },
+          "max_bytes": {
+            "description": "Total context budget in bytes. Default 16384; values above 65536 are clamped to 65536.",
+            "type": "number"
+          },
+          "older_history": {
+            "description": "Include a bounded Older History overview with counts and sampled titles outside the recent window.",
+            "type": "boolean"
+          },
+          "project": {
+            "description": "Filter by project (omit for all projects)",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Filter observations by scope: project, personal, or global. Omit to apply no scope filter.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "read",
+        "error_effects": "no observation mutation",
+        "guarantees": [
+          "personal scope without explicit project clears the observation project filter",
+          "MCP bounds its complete context result, including its suffix",
+          "default byte budget is 16384; ceiling is 65536; preserve UTF-8"
+        ],
+        "pi_differences": [
+          "MCP reserves bytes for activity/stats suffix and caps pinned rows at 20; HTTP/Pi has different presentation",
+          "Pi sends its resolved project rather than the MCP implicit-personal filter"
+        ],
+        "project_policy": "explicit known project, then process override or detected current project; resolution errors stay explicit",
+        "risk": "read-only",
+        "session_policy": "no session attribution required"
+      }
+    },
+    "mem_current_project": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Detect Current Project"
+      },
+      "description": "Detect the current project from the working directory. Returns project name, source (how it was detected), path, and available alternatives. NEVER errors — use this for discovery before writing. Recommended as the first call when starting a new session.",
+      "input_schema": {
+        "properties": {
+          "cwd": {
+            "description": "Alias for directory.",
+            "type": "string"
+          },
+          "directory": {
+            "description": "Optional workspace directory to detect the project from. Defaults to the process working directory.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "detect",
+        "error_effects": "detection metadata is not write authorization",
+        "guarantees": [
+          "MCP reports ambiguous detection as a successful informational envelope with error_hint"
+        ],
+        "pi_differences": [
+          "Pi exposes cwd but not the MCP directory alias; default cwd comes from the host",
+          "Pi can use local configuration fallback when the HTTP route is unavailable"
+        ],
+        "project_policy": "process override or Go detection of directory/cwd; return detection metadata instead of inventing a successful owner",
+        "risk": "read-only",
+        "session_policy": "no session attribution required"
+      }
+    },
+    "mem_doctor": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Run Engram Doctor"
+      },
+      "description": "Run read-only operational diagnostics. Returns the same structured envelope as `engram doctor --json`.",
+      "input_schema": {
+        "properties": {
+          "check": {
+            "description": "Optional diagnostic check code to run",
+            "type": "string"
+          },
+          "project": {
+            "description": "Project to diagnose (omit for auto-detect)",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "diagnose",
+        "error_effects": "no caller registration or binding repair",
+        "guarantees": [
+          "optional check selects one diagnostic; omission runs all",
+          "a report with status=error is a tool error"
+        ],
+        "pi_differences": [
+          "Pi adds a separate Go caller-binding diagnostic and a safe unknown fallback on unsupported servers"
+        ],
+        "pi_runtime_fields": {
+          "caller_binding": "observed host/runtime identity, effective mapping, and host API availability; not model authority"
+        },
+        "project_policy": "explicit project or read-only current-project inspection",
+        "risk": "read-only",
+        "session_policy": "diagnosis does not register or repair a caller session"
+      }
+    },
+    "mem_get_observation": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Get Observation"
+      },
+      "description": "Get the full content of a specific observation by ID. Use when you need the complete, untruncated content of an observation found via mem_search or mem_timeline.",
+      "input_schema": {
+        "properties": {
+          "history_cursor": {
+            "description": "Optional non-negative integer cursor returned as history_cursor by a previous truncated include_history response; submit it in a follow-up call to fetch the older page. Omit for the most recent page.",
+            "type": "number"
+          },
+          "id": {
+            "description": "The observation ID to retrieve",
+            "type": "number"
+          },
+          "include_history": {
+            "description": "When true, render the observation's bounded version history: the 50 most recent prior title/content snapshots, oldest first, with version_count set to the total stored count in the envelope. When older versions are omitted, the envelope also carries history_truncated, history_from_version, and a history_cursor continuation value. Omit for the historical default output.",
+            "type": "boolean"
+          },
+          "project": {
+            "description": "Optional project for response context, validated against known projects. Omit to use the process override or cwd detection. ID-based lookup is not filtered by project ownership.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "read",
+        "error_effects": "no observation mutation",
+        "guarantees": [
+          "missing observations produce an error",
+          "MCP and HTTP/Pi optional history is bounded to 50 prior snapshots per page, oldest first, with a truthful total version_count and continuation metadata only when older versions remain; history_cursor is a validated non-negative integer and is ignored unless include_history=true"
+        ],
+        "pi_differences": [
+          "Pi omits the MCP project input; HTTP/Pi returns current observation fields while MCP renders current content in its response context"
+        ],
+        "project_policy": "ID-based lookup is not project-filtered; MCP resolves response context and can fall back to the stored owner on ambiguous cwd",
+        "risk": "read-only",
+        "session_policy": "id is an observation ID, not a session ID"
+      }
+    },
+    "mem_judge": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Judge Memory Conflict"
+      },
+      "description": "Record a verdict on a pending memory conflict surfaced by mem_save.\n\nWHEN TO CALL: After mem_save returns judgment_required=true, iterate candidates[] and call mem_judge once per entry using that entry's judgment_id.\n\nPARAMS:\n  judgment_id (required) — from candidates[].judgment_id in the mem_save response\n  relation    (required) — one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict\n  reason      (optional) — free-text explanation of the verdict\n  evidence    (optional) — JSON or text supporting the verdict\n  confidence  (optional) — float 0..1; default 1.0\n\nWHEN TO ASK USER:\n  - confidence \u003c 0.7: surface to user before judging\n  - relation in {supersedes, conflicts_with} AND type in {architecture, policy, decision}: ask user\n  - otherwise: resolve silently\n\nSUCCESS: Returns the updated relation row with judgment_status=\"judged\".\nERROR: Returns IsError=true if judgment_id is unknown or relation verb is invalid. Row is NOT mutated on error.\n\nRe-judging an already-judged ID overwrites the verdict (deliberate revision).",
+      "input_schema": {
+        "properties": {
+          "confidence": {
+            "description": "Confidence score 0.0..1.0 (default: 1.0)",
+            "type": "number"
+          },
+          "evidence": {
+            "description": "Supporting evidence (JSON or free text)",
+            "type": "string"
+          },
+          "judgment_id": {
+            "description": "The judgment_id from candidates[] in the mem_save response (format: rel-\u003chex\u003e)",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Free-text explanation of the verdict",
+            "type": "string"
+          },
+          "relation": {
+            "description": "Verdict: related | compatible | scoped | conflicts_with | supersedes | not_conflict",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session ID for provenance (default: auto)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "judgment_id",
+          "relation"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-relation",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "judgment_id and relation are required",
+          "supplied confidence must be between 0 and 1",
+          "Go persists the verdict and returns the relation"
+        ],
+        "pi_differences": [
+          "Pi defaults omitted provenance session_id to the host ID; it also accepts an explicitly supplied provenance ID"
+        ],
+        "project_policy": "Go resolves and validates the identified judgment; not a current-project lookup",
+        "risk": "persistent-write",
+        "session_policy": "optional session_id is provenance, not proof of host authority"
+      }
+    },
+    "mem_judge_many": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Judge Memory Relations in Batch"
+      },
+      "description": "Record 1..32 caller-authored judgments in submitted order. Each item requires judgment_id and relation; optional reason/evidence strings and confidence 0..1. Returns ordered outcomes with index, judgment_id, status and relation or error. Item errors do not stop later items. Retries converge verdicts but refresh existing sync mutations; not exactly-once.",
+      "input_schema": {
+        "properties": {
+          "judgments": {
+            "items": {
+              "properties": {
+                "confidence": {
+                  "type": "number"
+                },
+                "evidence": {
+                  "type": "string"
+                },
+                "judgment_id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "relation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "judgment_id",
+                "relation"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "description": "Optional shared session provenance, as in mem_judge",
+            "type": "string"
+          }
+        },
+        "required": [
+          "judgments"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-relations",
+        "error_effects": "invalid batch shape or shared session_id type is rejected before item writes; item failures do not roll back successful items; a later error or lost acknowledgement does not prove rollback",
+        "guarantees": [
+          "require an array of 1..32 caller-authored judgments before processing any item",
+          "each item requires judgment_id and relation; supplied reason/evidence must be strings and confidence must be finite and between 0 and 1",
+          "process items in submitted order and return ordered outcomes with index, judgment_id, status and relation or error",
+          "item errors do not stop later items",
+          "retries converge verdicts but refresh existing sync mutations; not exactly-once"
+        ],
+        "pi_differences": [
+          "mem_judge_many is Go/MCP-only; Pi has no recipe or dispatch for this operation"
+        ],
+        "project_policy": "Go resolves and validates each identified judgment; not a current-project lookup or batch destination override",
+        "risk": "persistent-write",
+        "session_policy": "optional shared session_id is provenance for every item, not proof of host authority; item-level session_id is not used"
+      }
+    },
+    "mem_list_projects": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List Known Projects"
+      },
+      "description": "List every project known to Engram, with per-project observation/session/prompt counts, ordered by observation count (same view as `engram projects list`). Use for cross-project discovery when the working directory matches no known project: pick the right project, then scope mem_search/mem_context to it. Returns a successful empty list when nothing is stored yet; a store failure returns a tool error.",
+      "input_schema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "read",
+        "error_effects": "store lookup failure is an error, not an empty listing",
+        "guarantees": [
+          "return projects and count",
+          "an empty store is a successful empty array, not an error"
+        ],
+        "project_policy": "all projects; no implicit current-project filter",
+        "risk": "read-only",
+        "session_policy": "no session attribution required"
+      }
+    },
+    "mem_pin": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Pin Memory"
+      },
+      "description": "Pin a local observation so it appears before recent observations in memory context. Pinned state is local to this device and is not synced.",
+      "input_schema": {
+        "properties": {
+          "id": {
+            "description": "Observation ID to pin",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "local-pin",
+        "error_effects": "MCP can fail to reload after changing the pin; such an error is not a rollback",
+        "guarantees": [
+          "set the local pinned state to true through Go"
+        ],
+        "project_policy": "ID-based operation; no current-project filter",
+        "risk": "local-curation",
+        "session_policy": "id identifies an observation"
+      }
+    },
+    "mem_review": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Review Memories"
+      },
+      "description": "Review observation lifecycle state. action=list returns observations whose review_after has passed; action=mark_reviewed resets one observation's review_after using its type decay policy.",
+      "input_schema": {
+        "properties": {
+          "action": {
+            "description": "Action: list | mark_reviewed",
+            "type": "string"
+          },
+          "id": {
+            "description": "Backward-compatible alias for observation_id.",
+            "type": "number"
+          },
+          "limit": {
+            "description": "Max results for action=list (default: 10).",
+            "type": "number"
+          },
+          "observation_id": {
+            "description": "Observation id for action=mark_reviewed.",
+            "type": "number"
+          },
+          "project": {
+            "description": "Optional project filter for action=list; omit to list all projects.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "read-or-mark-reviewed",
+        "error_effects": "invalid action/ID is rejected before mutation; reload can fail after marking reviewed",
+        "guarantees": [
+          "actions are list or mark_reviewed",
+          "omitted-project list is global",
+          "mark_reviewed is confined when a project is resolved"
+        ],
+        "pi_differences": [
+          "Pi accepts an explicit project for mark_reviewed; the current MCP branch only uses project for list"
+        ],
+        "project_policy": "list: explicit known project or all projects; current MCP mark_reviewed ignores the project argument and uses current/process resolution",
+        "risk": "persistent-write",
+        "session_policy": "observation_id (or id alias) identifies an observation",
+        "target_rule": "mark_reviewed: explicit project confines the mutation; omission requires the current resolved project; never mark globally"
+      }
+    },
+    "mem_save": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save Memory"
+      },
+      "description": "Save an important observation to persistent memory. Call this PROACTIVELY after completing significant work — don't wait to be asked.\n\nWHEN to save (call this after each of these):\n- Architectural decisions or tradeoffs\n- Bug fixes (what was wrong, why, how you fixed it)\n- New patterns or conventions established\n- Configuration changes or environment setup\n- Important discoveries or gotchas\n- File structure changes\n\nFORMAT for content — use this structured format:\n  **What**: [concise description of what was done]\n  **Why**: [the reasoning, user request, or problem that drove it]\n  **Where**: [files/paths affected, e.g. src/auth/middleware.ts, internal/store/store.go]\n  **Learned**: [any gotchas, edge cases, or decisions made — omit if none]\n\nTITLE should be short and searchable, like: \"JWT auth middleware\", \"FTS5 query sanitization\", \"Fixed N+1 in user list\"\n\nExamples:\n  title: \"Switched from sessions to JWT\"\n  type: \"decision\"\n  content: \"**What**: Replaced express-session with jsonwebtoken for auth\\n**Why**: Session storage doesn't scale across multiple instances\\n**Where**: src/middleware/auth.ts, src/routes/login.ts\\n**Learned**: Must set httpOnly and secure flags on the cookie, refresh tokens need separate rotation logic\"\n\n  title: \"Fixed FTS5 syntax error on special chars\"\n  type: \"bugfix\"\n  content: \"**What**: Wrapped each search term in quotes before passing to FTS5 MATCH\\n**Why**: Users typing queries like 'fix auth bug' would crash because FTS5 interprets special chars as operators\\n**Where**: internal/store/store.go — sanitizeFTS() function\\n**Learned**: FTS5 MATCH syntax is NOT the same as LIKE — always sanitize user input\"",
+      "input_schema": {
+        "properties": {
+          "capture_prompt": {
+            "description": "Automatically capture the current user prompt when available. Omission defaults to true; false skips capture for automated saves. If present, must be a boolean; other values return capture_prompt must be a boolean before project resolution or writes.",
+            "type": "boolean"
+          },
+          "content": {
+            "description": "Structured content using **What**, **Why**, **Where**, **Learned** format. Required unless observation alias is provided.",
+            "type": "string"
+          },
+          "observation": {
+            "description": "Backward-compatible alias for content. Prefer content for new clients.",
+            "type": "string"
+          },
+          "project": {
+            "description": "Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly.",
+            "type": "string"
+          },
+          "project_choice_reason": {
+            "description": "Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error.",
+            "type": "string"
+          },
+          "recovery_token": {
+            "description": "Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Scope for this observation: project (default), personal, or global",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Short, searchable title (e.g. 'JWT auth middleware', 'Fixed N+1 query')",
+            "type": "string"
+          },
+          "topic_key": {
+            "description": "Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-observation",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "content or the legacy observation alias is required",
+          "invalid title/content is rejected by MCP before implicit session creation",
+          "type defaults to manual",
+          "topic_key can update an existing observation instead of inserting a new one",
+          "optional current-prompt capture is nonfatal",
+          "MCP detects conflict candidates after save; detection failure does not invalidate the saved observation"
+        ],
+        "pi_differences": [
+          "HTTP/Pi save acknowledgement lacks MCP conflict candidates and judgment metadata",
+          "Pi does not expose observation alias or MCP ambiguous-project recovery parameters",
+          "Pi adds cwd target selection and host registration/acknowledgement recovery"
+        ],
+        "pi_runtime_fields": {
+          "current_prompt": "host-captured prompt matching the active project and acknowledged effective session",
+          "session_id": "acknowledged effective host session (or explicit-target satellite)"
+        },
+        "project_policy": "validated explicit project, existing session association, process override, then repository/directory detection; normalize the resolved owner",
+        "risk": "persistent-write",
+        "session_policy": "explicit MCP session_id or Go-selected fallback session; session/project ownership remains Go-owned"
+      }
+    },
+    "mem_save_prompt": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save User Prompt"
+      },
+      "description": "Save a user prompt to persistent memory. Use this to record what the user asked — their intent, questions, and requests — so future sessions have context about the user's goals.",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "The user's prompt text",
+            "type": "string"
+          },
+          "project": {
+            "description": "Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project.",
+            "type": "string"
+          },
+          "project_choice_reason": {
+            "description": "Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error.",
+            "type": "string"
+          },
+          "recovery_token": {
+            "description": "Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-prompt",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "persist prompt attribution through Go",
+          "MCP records the current prompt for later automatic capture"
+        ],
+        "pi_differences": [
+          "Pi supports explicit project/cwd destinations using isolated satellites; MCP prompt project precedence differs",
+          "Pi returns prompt_id/status while MCP returns a text/project/truncation envelope"
+        ],
+        "pi_runtime_fields": {
+          "session_id": "acknowledged effective host session (or explicit-target satellite)"
+        },
+        "project_policy": "existing MCP session association takes precedence; ambiguous-project recovery is explicitly validated",
+        "risk": "persistent-write",
+        "session_policy": "explicit MCP session_id or Go-selected fallback session; session/project ownership remains Go-owned"
+      }
+    },
+    "mem_search": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Search Memory"
+      },
+      "description": "Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions.",
+      "input_schema": {
+        "properties": {
+          "all_projects": {
+            "description": "Search across every project instead of the current one. When true, the project argument is ignored and results may come from any project. Useful for recalling decisions logged elsewhere when you don't know the project key.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Max results (default: 10, max: 20)",
+            "type": "number"
+          },
+          "match_mode": {
+            "description": "Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error.",
+            "type": "string"
+          },
+          "project": {
+            "description": "Filter by project name. Ignored when all_projects=true.",
+            "type": "string"
+          },
+          "query": {
+            "description": "Search query — natural language or keywords",
+            "type": "string"
+          },
+          "response_format": {
+            "description": "Response format: omit for the legacy response, or use \"compact\" for bounded previews and structured results.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Filter by scope: project, personal, or global. Omit to apply no scope filter.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Filter by type: tool_use, file_change, command, file_read, search, manual, decision, architecture, bugfix, pattern",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "read",
+        "error_effects": "no observation mutation; invalid MCP match_mode/response_format is rejected before project resolution",
+        "guarantees": [
+          "all_projects=true ignores project selection",
+          "match_mode is all by default or any; other values are rejected",
+          "personal scope without explicit project searches across projects",
+          "default limit is 10"
+        ],
+        "pi_differences": [
+          "Pi sends its resolved project to HTTP, while MCP clears the project filter for implicit personal scope",
+          "MCP uses bounded previews by default; HTTP/Pi uses full search result rows unless response_format=compact"
+        ],
+        "project_policy": "explicit known project, then process override or detected current project; resolution errors stay explicit",
+        "risk": "read-only",
+        "session_policy": "no session attribution required; MCP activity is tracked separately"
+      }
+    },
+    "mem_session_end": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "End Session"
+      },
+      "description": "Mark a coding session as completed with an optional summary.",
+      "input_schema": {
+        "properties": {
+          "id": {
+            "description": "Session identifier to close",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Summary of what was accomplished",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "end-session",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "Go ends the identified session with an optional summary",
+          "Pi refuses foreign IDs before dispatching an end request"
+        ],
+        "pi_differences": [
+          "Pi end is deliberately limited to its current host/effective session with local ownership and persistence evidence"
+        ],
+        "pi_runtime_fields": {
+          "effective_session_id": "confirmed host continuation mapping; cannot be chosen by model parameters"
+        },
+        "project_policy": "MCP resolves response context but ends the named session; invalid repository binding/configuration remains an error",
+        "risk": "persistent-write",
+        "session_policy": "MCP id selects a session; Pi restricts it to the current host identity and maps it to the acknowledged effective session"
+      }
+    },
+    "mem_session_finalize": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Finalize Session"
+      },
+      "description": "Atomically save a caller-authored structured summary and end an existing exact session. Use Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files in summary. Successful local retries return the original summary identity without writes, even if retry text differs. Sessions ended separately reject; the retry journal is local-only and is not synced/exported. Preserves the legacy free-text session summary.",
+      "input_schema": {
+        "properties": {
+          "project": {
+            "description": "Optional explicit project, validated using summary project resolution and exact session ownership.",
+            "type": "string"
+          },
+          "project_choice_reason": {
+            "description": "user_selected_after_ambiguous_project only after explicit user choice.",
+            "type": "string"
+          },
+          "recovery_token": {
+            "description": "Short-lived ambiguous-project recovery token bound to this session/context/choice.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Exact existing session ID; never implicitly created.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Caller-authored structured summary; nonempty.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-summary-and-end-session",
+        "error_effects": "validation and ownership refusals do not finalize the session; finalization transaction failures roll back its local writes; a lost acknowledgement is not proof of rollback and retry identity depends on the local journal",
+        "guarantees": [
+          "nonempty session_id and summary strings are required",
+          "Go atomically saves a session_summary observation, ends the session, queues normal sync mutations, and records a local retry journal",
+          "preserve the legacy free-text session summary",
+          "successful local retries return the original summary_id and summary_sync_id without writes even if valid retry text differs",
+          "sessions ended separately or imported already ended without the local finalization journal reject",
+          "the retry journal is local-only and is not synced or exported; local atomicity does not guarantee remote visibility"
+        ],
+        "pi_differences": [
+          "mem_session_finalize is Go/MCP-only; Pi has no recipe or dispatch for this operation; existing Pi session summary and end behavior is unchanged"
+        ],
+        "project_policy": "optional explicit project is validated through summary project resolution and must match the exact existing session owner; ambiguous-project recovery cannot create a session",
+        "risk": "persistent-write",
+        "session_policy": "required session_id selects an existing exact identity; never trimmed, implicitly created, or mapped from a host continuation"
+      }
+    },
+    "mem_session_start": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Start Session"
+      },
+      "description": "Register a caller-provided session ID. Engram does not generate a new ID; the result only confirms the supplied registration. Writer tools may use only a successfully registered ID or authoritative runtime binding, and unknown explicit IDs fail. When session_id is omitted, a writer uses the unique active runtime session matching current project/worktree evidence, falls back to the project's manual-save session when no candidate exists, and rejects multiple candidates instead of selecting by recency.",
+      "input_schema": {
+        "properties": {
+          "directory": {
+            "description": "Working directory",
+            "type": "string"
+          },
+          "id": {
+            "description": "Caller-provided unique session ID; Engram does not generate one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-session",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "Go validates lifecycle and ownership",
+          "session_already_ended is explicit and includes the refused session ID"
+        ],
+        "pi_differences": [
+          "Pi passes its current resolved project even when an explicit directory is supplied; MCP detects that directory",
+          "this explicit tool is distinct from Pi host-owned resume registration"
+        ],
+        "project_policy": "MCP detects from an explicit directory or current process/repository; no model project override",
+        "risk": "persistent-write",
+        "session_policy": "id is an explicit session ID; an ended identity is not reopened by start"
+      }
+    },
+    "mem_session_summary": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save Session Summary"
+      },
+      "description": "Save a comprehensive end-of-session summary. Call this when a session is ending or when significant work is complete. This creates a structured summary that future sessions will use to understand what happened.\n\nFORMAT — use this exact structure in the content field:\n\n## Goal\n[One sentence: what were we building/working on in this session]\n\n## Instructions\n[User preferences, constraints, or context discovered during this session. Things a future agent needs to know about HOW the user wants things done. Skip if nothing notable.]\n\n## Discoveries\n- [Technical finding, gotcha, or learning 1]\n- [Technical finding 2]\n- [Important API behavior, config quirk, etc.]\n\n## Accomplished\n- ✅ [Completed task 1 — with key implementation details]\n- ✅ [Completed task 2 — mention files changed]\n- 🔲 [Identified but not yet done — for next session]\n\n## Next Steps\n- [What remains to be done — for the next session]\n\n## Relevant Files\n- path/to/file.ts — [what it does or what changed]\n- path/to/other.go — [role in the architecture]\n\nGUIDELINES:\n- Be CONCISE but don't lose important details (file paths, error messages, decisions)\n- Focus on WHAT and WHY, not HOW (the code itself is in the repo)\n- Include things that would save a future agent time\n- The Discoveries section is the most valuable — capture gotchas and non-obvious learnings\n- Relevant Files should only include files that were significantly changed or are important for context",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "Full session summary using the Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files format",
+            "type": "string"
+          },
+          "project": {
+            "description": "Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly.",
+            "type": "string"
+          },
+          "project_choice_reason": {
+            "description": "Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error.",
+            "type": "string"
+          },
+          "recovery_token": {
+            "description": "Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Optional authoritative session ID already registered by the runtime or mem_session_start; never invent one. Omit by default; ambiguity fails closed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "write-observation",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "nonblank content is required before MCP session creation",
+          "save a session_summary observation; do not end the session"
+        ],
+        "pi_differences": [
+          "Pi uses the HTTP observation route with a different summary title and output envelope",
+          "Pi adds cwd selection rather than MCP recovery parameters"
+        ],
+        "pi_runtime_fields": {
+          "session_id": "acknowledged effective host session (or explicit-target satellite)"
+        },
+        "project_policy": "validated explicit project, existing session association, process override, then repository/directory detection; normalize the resolved owner",
+        "risk": "persistent-write",
+        "session_policy": "explicit MCP session_id or Go-selected fallback session; session/project ownership remains Go-owned"
+      }
+    },
+    "mem_suggest_topic_key": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Suggest Topic Key"
+      },
+      "description": "Suggest a stable topic_key for memory upserts. Use this before mem_save when you want evolving topics (like architecture decisions) to update a single observation over time.",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "Observation content used as fallback if title is empty",
+            "type": "string"
+          },
+          "title": {
+            "description": "Observation title (preferred input for stable keys)",
+            "type": "string"
+          },
+          "type": {
+            "description": "Observation type/category, e.g. architecture, decision, bugfix",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "compute",
+        "error_effects": "invalid input does not mutate records",
+        "guarantees": [
+          "require nonblank title or content",
+          "Go owns the topic-key algorithm; no records are saved"
+        ],
+        "pi_differences": [
+          "Pi currently computes its own slug instead of calling the Go topic-key endpoint, including different empty-input behavior"
+        ],
+        "project_policy": "not applicable",
+        "risk": "read-only",
+        "session_policy": "not applicable"
+      }
+    },
+    "mem_unpin": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Unpin Memory"
+      },
+      "description": "Unpin a local observation so it only appears in normal recency order. Pinned state is local to this device and is not synced.",
+      "input_schema": {
+        "properties": {
+          "id": {
+            "description": "Observation ID to unpin",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "local-unpin",
+        "error_effects": "MCP can fail to reload after changing the pin; such an error is not a rollback",
+        "guarantees": [
+          "set the local pinned state to false through Go"
+        ],
+        "project_policy": "ID-based operation; no current-project filter",
+        "risk": "local-curation",
+        "session_policy": "id identifies an observation"
+      }
+    },
+    "mem_update": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Update Memory"
+      },
+      "description": "Update an existing observation by ID. Only provided fields are changed.",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "New content; cannot be combined with find and replace",
+            "type": "string"
+          },
+          "expected_project": {
+            "description": "Required expected owner, checked atomically against the observation; independent of the server's current project",
+            "type": "string"
+          },
+          "find": {
+            "description": "Literal case-sensitive text to replace everywhere; requires replace",
+            "type": "string"
+          },
+          "id": {
+            "description": "Observation ID to update",
+            "type": "number"
+          },
+          "replace": {
+            "description": "Literal replacement text; requires find",
+            "type": "string"
+          },
+          "scope": {
+            "description": "New scope: project, personal, or global",
+            "type": "string"
+          },
+          "title": {
+            "description": "New title",
+            "type": "string"
+          },
+          "topic_key": {
+            "description": "New topic key (normalized internally)",
+            "type": "string"
+          },
+          "type": {
+            "description": "New type/category",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "expected_project"
+        ],
+        "type": "object"
+      },
+      "semantics": {
+        "effect": "update-observation",
+        "error_effects": "validation guarantees are operation-specific; a later error or lost acknowledgement must not be interpreted as proof of rollback",
+        "guarantees": [
+          "only supplied fields change",
+          "at least one update field is required",
+          "owner validation is enforced in Go",
+          "literal find/replace requires a pair and cannot be combined with content"
+        ],
+        "pi_differences": [
+          "Pi omits find and replace although the Go HTTP update route supports them"
+        ],
+        "project_policy": "expected_project is a required caller-authored owner assertion; do not move the observation to another project",
+        "risk": "persistent-write",
+        "session_policy": "id identifies an existing observation"
+      }
+    }
+  },
+  "profile": "agent",
+  "revision": 1,
+  "status": "mcp-foundation"
+}
