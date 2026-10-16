@@ -11,7 +11,7 @@ import (
 
 // TestSyncTargetClosedSpaceCheck pins the closed-set invariant: every sync_state
 // target must be one of cloud, cloud:inbox, local, or cloud:<enrolled project>.
-// Foreign target rows are reported as error findings with human-decision
+// Foreign target rows are reported with pending-mutation-based severity and human-decision
 // guidance; the reserved inbox row and the local chunk target never flag.
 func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 	tests := []struct {
@@ -89,7 +89,7 @@ func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 					t.Fatalf("seed dormant foreign target: %v", err)
 				}
 			},
-			wantStatus:        StatusError,
+			wantStatus:        StatusWarning,
 			wantReason:        ReasonForeignSyncTarget,
 			wantFinding:       true,
 			wantNextStepHas:   []string{"inert drift", "no action is required"},
@@ -120,7 +120,7 @@ func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 					t.Fatalf("expected one finding, got %+v", check.Findings)
 				}
 				finding := check.Findings[0]
-				if finding.Severity != SeverityError || finding.ReasonCode != ReasonForeignSyncTarget || !finding.RequiresConfirmation {
+				if string(finding.Severity) != tc.wantStatus || finding.ReasonCode != ReasonForeignSyncTarget || !finding.RequiresConfirmation {
 					t.Fatalf("finding=%+v", finding)
 				}
 				var evidence map[string]any
@@ -200,11 +200,17 @@ func TestSyncTargetClosedSpaceReportsEveryForeignTarget(t *testing.T) {
 		}
 	}
 
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES ('satellite:foo', ?, 'obs-mixed', ?, '{}', ?, '')`, store.SyncEntityObservation, store.SyncOpUpsert, store.SyncSourceLocal); err != nil {
+		t.Fatal(err)
+	}
 	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckSyncTargetClosedSpace)
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
 	check := report.Checks[0]
+	if report.Status != StatusError || check.Result != StatusError {
+		t.Fatalf("mixed findings must retain error: %+v", report)
+	}
 	if len(check.Findings) != 2 {
 		t.Fatalf("expected two findings, got %+v", check.Findings)
 	}
@@ -215,6 +221,13 @@ func TestSyncTargetClosedSpaceReportsEveryForeignTarget(t *testing.T) {
 		}
 		if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
 			t.Fatalf("decode finding evidence: %v", err)
+		}
+		wantSeverity := SeverityWarning
+		if evidence.TargetKey == "satellite:foo" {
+			wantSeverity = SeverityError
+		}
+		if finding.Severity != wantSeverity || !finding.RequiresConfirmation {
+			t.Fatalf("finding=%+v, want severity=%s with confirmation", finding, wantSeverity)
 		}
 		flagged[evidence.TargetKey] = true
 	}

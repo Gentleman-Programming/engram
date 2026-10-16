@@ -183,6 +183,8 @@ The CLI `--json` and MCP tool return:
 - Session modes are `shared` and `project_owned`. Runtime and HTTP-created sessions default to `shared`; deterministic CLI and MCP manual-save sessions are `project_owned`. Shared sync can use old peers. Project-owned sync requires a mode-capable manifest (version 2); returning to an older manifest after project-owned sessions exist is unsupported and fails loudly.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
 
+`sync_target_closed_space` reports foreign sync targets as warnings when they have zero unacknowledged mutations (inert drift), and as errors when pending mutations require review. Mixed findings retain an error result. Existing guidance and finding-level confirmation requirements are unchanged; diagnosis does not repair these rows.
+
 ## Safety
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
