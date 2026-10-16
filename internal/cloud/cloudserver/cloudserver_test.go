@@ -2368,13 +2368,6 @@ func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) 
 	}
 }
 
-// TestWithVersionNormalizesLeadingV verifies that WithVersion accepts both
-// "v1.20.3" (the shape ldflags produces when the upstream passes a tagged
-// semver) and "1.20.3" (the shape after cmd/engram's debug.ReadBuildInfo
-// fallback already strips it), storing the canonical bare semver on
-// CloudServer. The Layout / LoginPage templ components prepend the "v" when
-// rendering, so the stored value must not carry one — otherwise the user-
-// visible chrome shows "vN.N.N" rendered as "vvN.N.N".
 // TestWithVersionProducesDisplayLabel pins the display mapping owned by
 // WithVersion. MountConfig.Version is rendered verbatim by the dashboard
 // chrome, so the option has to hand over an already display-ready identifier:

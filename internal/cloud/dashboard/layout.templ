@@ -46,11 +46,7 @@ templ Layout(title string, username string, activeTab string, isAdmin bool, vers
 						@content
 					</main>
 					<footer class="shell-footer">
-						<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY
-							if version != "" {
-								· { version }
-							}
-						</small>
+						<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY{ versionMarker(version) }</small>
 					</footer>
 				</div>
 			</div>

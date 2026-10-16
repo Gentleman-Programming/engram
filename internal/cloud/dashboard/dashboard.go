@@ -62,6 +62,19 @@ type MountConfig struct {
 	Version string
 }
 
+// versionMarker renders the chrome suffix for a build identifier, separator
+// included. It returns an empty string when there is no version to show so the
+// footer stays byte-identical to the un-versioned render instead of gaining a
+// stray separator. Keeping the separator here rather than as template literal
+// text is deliberate: templ turns the newline before a conditional into a
+// trailing space, which would leak into the empty case.
+func versionMarker(version string) string {
+	if version == "" {
+		return ""
+	}
+	return " · " + version
+}
+
 type DashboardStore interface {
 	// Existing methods (from cloud-dashboard-parity).
 	ListProjects(query string) ([]cloudstore.DashboardProjectRow, error)

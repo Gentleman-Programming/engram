@@ -84,6 +84,12 @@ func TestLayoutOmitsVersionWhenMountConfigVersionEmpty(t *testing.T) {
 	if !strings.Contains(body, "ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY") {
 		t.Errorf("expected baseline footer copy in body, body=%q", body)
 	}
+	// The empty-version footer must be byte-identical to the pre-#1657 render:
+	// the canonical copy ends the <small> exactly, with no separator left
+	// behind by the version marker conditional.
+	if !strings.Contains(body, "ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY</small>") {
+		t.Errorf("expected the canonical footer copy to end the <small> exactly, body=%q", body)
+	}
 }
 
 // TestLoginPageRendersVersionWhenMountConfigVersionSet is the T3 RED test for
