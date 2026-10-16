@@ -24,6 +24,9 @@ cloud dashboard UI. No public API renames.
 - One PR per the issue-first workflow — link with `Closes #1657`.
 - One `type:feature` label on the PR.
 - `MountConfig.Version` is optional (zero value = omit rendering).
+- `MountConfig.Version` is **display-ready**: the chrome renders it verbatim
+  and never adds a prefix of its own. `cloudserver.WithVersion()` owns the
+  mapping onto that shape, so `dev` stays `dev` instead of `vdev`.
 - The change must compile without modifying any of the 22 existing
   `MountConfig{...}` test fixtures.
 - Generated templ files (`*_templ.go`) must be regenerated, not hand-edited.
@@ -92,9 +95,24 @@ cloud dashboard UI. No public API renames.
     Out of scope for this change — flagged for a follow-up if Alán wants
     the CLI / TUI / dashboard paths to converge.
 
-- [ ] **T9 — Amend T7 commit with T8 fix**
-  Amend `5a078ec` with the v-prefix normalization fix + new test.
-  Single atomic work-unit commit remains.
+- [x] **T9 — Amend T7 commit with T8 fix**
+  T8 landed in the single work-unit commit on this branch (`3983db4`).
+
+- [x] **T10 — `dev` renders as-is (follow-up after CodeRabbit review)**
+  Issue #1657 requires `dev` to render as-is; T2/T3 only covered set + empty.
+  T8's normalization sat *upstream* of a template that prepended `v` to every
+  non-empty value, so `dev` rendered as `vdev` and an already display-ready
+  identifier rendered as `vv1.2.3-test`.
+  - `layout.templ` / `login.templ` now render `{ version }` verbatim.
+  - `cloudserver.WithVersion` maps onto the display shape via `displayVersion`:
+    a semver-shaped id gets exactly one `v` (`v3.0.0` and `3.0.0` → `v3.0.0`),
+    while a non-semver id such as `dev` is preserved.
+  - Tests: `TestChromeRendersNonSemverVersionAsIs` (layout + login footers),
+    single-marker counts in the two "set" tests,
+    `TestWithVersionProducesDisplayLabel` (6 sub-cases incl. `dev`).
+  - Evidence: `go test ./internal/cloud/dashboard/... ./internal/cloud/cloudserver/...`
+    — ok; `make deadcode-check` — no newly unreachable functions; `go vet`,
+    `gofmt -l`, `go build ./...` — clean.
 
 ## Out of scope
 

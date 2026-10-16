@@ -2375,15 +2375,22 @@ func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) 
 // CloudServer. The Layout / LoginPage templ components prepend the "v" when
 // rendering, so the stored value must not carry one — otherwise the user-
 // visible chrome shows "vN.N.N" rendered as "vvN.N.N".
-func TestWithVersionNormalizesLeadingV(t *testing.T) {
+// TestWithVersionProducesDisplayLabel pins the display mapping owned by
+// WithVersion. MountConfig.Version is rendered verbatim by the dashboard
+// chrome, so the option has to hand over an already display-ready identifier:
+// a semver build carries exactly one "v" regardless of the shape ldflags or
+// debug.ReadBuildInfo supplied, while a non-semver build identifier such as
+// "dev" must survive untouched (#1657).
+func TestWithVersionProducesDisplayLabel(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{name: "with leading v", in: "v3.0.0", want: "3.0.0"},
-		{name: "without leading v", in: "3.0.0", want: "3.0.0"},
-		{name: "with leading v and trailing whitespace", in: "  v1.20.3-rc.1  ", want: "1.20.3-rc.1"},
+		{name: "leading v is kept exactly once", in: "v3.0.0", want: "v3.0.0"},
+		{name: "bare semver gains one v", in: "3.0.0", want: "v3.0.0"},
+		{name: "surrounding whitespace is trimmed", in: "  v1.20.3-rc.1  ", want: "v1.20.3-rc.1"},
+		{name: "dev stays dev", in: "dev", want: "dev"},
 		{name: "empty stays empty", in: "", want: ""},
 		{name: "only whitespace stays empty", in: "   ", want: ""},
 	}

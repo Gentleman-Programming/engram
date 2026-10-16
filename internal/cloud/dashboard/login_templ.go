@@ -11,8 +11,10 @@ import templruntime "github.com/a-h/templ/runtime"
 // LoginPage renders the standalone login page (no layout wrapper).
 // ADAPTED: added next string parameter for post-login redirect; token-only form
 // (integrated dashboard uses ENGRAM_CLOUD_TOKEN, not user/password credentials).
-// version is the optional build identifier (e.g. ldflags-injected semver).
-// Empty version omits the marker so local / un-versioned builds stay clean.
+// version is the optional, display-ready build identifier rendered verbatim
+// (e.g. "v1.20.3" for a semver build, "dev" for an un-versioned local build).
+// Empty version omits the marker so the chrome stays byte-identical without a
+// build id.
 func LoginPage(errorMsg string, next string, version string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -46,7 +48,7 @@ func LoginPage(errorMsg string, next string, version string) templ.Component {
 			var templ_7745c5c3_Var2 string
 			templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(errorMsg)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `login.templ`, Line: 37, Col: 18}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `login.templ`, Line: 39, Col: 18}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 			if templ_7745c5c3_Err != nil {
@@ -69,7 +71,7 @@ func LoginPage(errorMsg string, next string, version string) templ.Component {
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(next)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `login.templ`, Line: 42, Col: 53}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `login.templ`, Line: 44, Col: 53}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
@@ -85,14 +87,14 @@ func LoginPage(errorMsg string, next string, version string) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		if version != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<div class=\"login-footer\"><small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · v")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<div class=\"login-footer\"><small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var4 string
 			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(version)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `login.templ`, Line: 60, Col: 80}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `login.templ`, Line: 62, Col: 79}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 			if templ_7745c5c3_Err != nil {

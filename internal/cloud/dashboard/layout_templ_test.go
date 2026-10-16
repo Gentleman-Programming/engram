@@ -21,10 +21,10 @@ func TestLayoutRendersVersionInFooterWhenMountConfigVersionSet(t *testing.T) {
 			}
 			return errUnauthorized
 		},
-		IsAdmin:      func(_ *http.Request) bool { return false },
-		Store:        parityStoreStub{},
+		IsAdmin:        func(_ *http.Request) bool { return false },
+		Store:          parityStoreStub{},
 		GetDisplayName: func(_ *http.Request) string { return "operator" },
-		Version:      "1.2.3-test",
+		Version:        "v1.2.3-test",
 	})
 
 	rec := httptest.NewRecorder()
@@ -35,6 +35,12 @@ func TestLayoutRendersVersionInFooterWhenMountConfigVersionSet(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `v1.2.3-test`) {
 		t.Errorf("expected Layout footer to contain %q, body=%q", `v1.2.3-test`, body)
+	}
+	// MountConfig.Version is already display-ready (see the Version field doc),
+	// so the chrome must render it verbatim instead of prefixing it a second
+	// time. Regression guard for the "vv1.2.3-test" double-prefix bug.
+	if got := strings.Count(body, `v1.2.3-test`); got != 1 {
+		t.Errorf("expected exactly one %q marker, got %d, body=%q", `v1.2.3-test`, got, body)
 	}
 	// The version marker must sit inside the same <small> as the canonical
 	// footer copy so the chrome stays one cohesive row instead of a new
@@ -89,7 +95,7 @@ func TestLoginPageRendersVersionWhenMountConfigVersionSet(t *testing.T) {
 	Mount(mux, MountConfig{
 		RequireSession: func(r *http.Request) error { return errUnauthorized },
 		Store:          parityStoreStub{},
-		Version:        "1.2.3-test",
+		Version:        "v1.2.3-test",
 	})
 
 	rec := httptest.NewRecorder()
@@ -100,6 +106,53 @@ func TestLoginPageRendersVersionWhenMountConfigVersionSet(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `v1.2.3-test`) {
 		t.Errorf("expected LoginPage to contain %q, body=%q", `v1.2.3-test`, body)
+	}
+	if got := strings.Count(body, `v1.2.3-test`); got != 1 {
+		t.Errorf("expected exactly one %q marker, got %d, body=%q", `v1.2.3-test`, got, body)
+	}
+}
+
+// TestChromeRendersNonSemverVersionAsIs is the regression guard for the
+// CodeRabbit finding on #1658. Both chrome surfaces used to prepend "v" to
+// every non-empty identifier, so a legitimate local build reported itself as
+// "vdev". Issue #1657 requires "dev" to render as-is.
+func TestChromeRendersNonSemverVersionAsIs(t *testing.T) {
+	mux := http.NewServeMux()
+	Mount(mux, MountConfig{
+		RequireSession: func(r *http.Request) error {
+			if r.URL.Query().Get("auth") == "ok" {
+				return nil
+			}
+			return errUnauthorized
+		},
+		IsAdmin:        func(_ *http.Request) bool { return false },
+		Store:          parityStoreStub{},
+		GetDisplayName: func(_ *http.Request) string { return "operator" },
+		Version:        "dev",
+	})
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "layout footer", path: "/dashboard/?auth=ok"},
+		{name: "login footer", path: "/dashboard/login"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "LIVE SYNC READY · dev</small>") {
+				t.Errorf("expected footer to render the version as-is, body=%q", body)
+			}
+			if strings.Contains(body, "vdev") {
+				t.Errorf("expected no duplicated v prefix on a non-semver identifier, body=%q", body)
+			}
+		})
 	}
 }
 

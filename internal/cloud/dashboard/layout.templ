@@ -3,8 +3,10 @@ package dashboard
 // Layout wraps page content in the base HTML shell with nav, head, and footer.
 // activeTab should be one of: "dashboard", "browser", "projects", "contributors", "admin".
 // ADAPTED: username comes from Principal.DisplayName() at the call site (no context reads).
-// version is the optional build identifier (e.g. ldflags-injected semver).
-// Empty version omits the marker so local / un-versioned builds stay clean.
+// version is the optional, display-ready build identifier rendered verbatim
+// (e.g. "v1.20.3" for a semver build, "dev" for an un-versioned local build).
+// Empty version omits the marker so the chrome stays byte-identical without a
+// build id.
 templ Layout(title string, username string, activeTab string, isAdmin bool, version string, content templ.Component) {
 	<!DOCTYPE html>
 	<html lang="en" data-theme="dark">
@@ -46,7 +48,7 @@ templ Layout(title string, username string, activeTab string, isAdmin bool, vers
 					<footer class="shell-footer">
 						<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY
 							if version != "" {
-								· v{ version }
+								· { version }
 							}
 						</small>
 					</footer>

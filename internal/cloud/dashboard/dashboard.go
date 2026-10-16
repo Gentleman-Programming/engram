@@ -54,9 +54,11 @@ type MountConfig struct {
 	ManagedUsers      ManagedUsersStore
 	MaxLoginBodyBytes int64
 	StatusProvider    SyncStatusProvider
-	// Version is the running server build identifier (e.g. ldflags-injected
-	// semver). Optional: when empty the chrome omits the version marker
-	// entirely, so unset keeps current rendering byte-identical.
+	// Version is the display-ready running server build identifier, rendered
+	// verbatim in the dashboard chrome (e.g. "v1.20.3" for a semver build,
+	// "dev" for an un-versioned local build). cloudserver.WithVersion()
+	// produces this shape. Optional: when empty the chrome omits the version
+	// marker entirely, so unset keeps current rendering byte-identical.
 	Version string
 }
 
