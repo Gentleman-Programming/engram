@@ -478,6 +478,29 @@ The command is a dry run: it prints the canonical label list as JSON and never w
 - Do not include `Co-Authored-By` trailers in commits
 - Do not include paths prohibited by the [Transient Artifact Policy](#transient-artifact-policy)
 
+### Focused Verification Map
+
+Use the row that matches the change, not every row. These are existing entry points,
+not a new required local gate. Run commands from the listed directory; paths are
+relative to the repository root.
+
+| Changed area | Working directory | Prerequisites | Existing commands | What they verify |
+|--------------|-------------------|---------------|-------------------|------------------|
+| Go behavior | Repository root | Go version from [go.mod](go.mod) and module dependencies | `go test ./internal/setup -run '^TestStaleMCPCommands$' -count=1`, then `go test ./internal/setup -count=1` | Example focused regression and affected-package suite. Substitute the actual changed package and regression; this is not the full module suite. |
+| Pi plugin | `plugin/pi` | Node.js 24, npm, and Go from [go.mod](go.mod) for Go-backed fixtures; no npm install step | `npm test` | Pi plugin suite from a Go checkout, including fixture-based workflows; not the full installed-host lifecycle. See [scripts](plugin/pi/package.json) and [real HTTP test prerequisites](plugin/pi/README.md#testing-the-real-http-workflows). |
+| Obsidian plugin | `plugin/obsidian` | Node.js 24, npm, and dependencies installed with `npm ci` under the existing [dependency policy](#npm-dependency-hygiene) | `npm test`, `npm run typecheck`, `npm run build` | Plugin tests, TypeScript checking, and bundle generation; not an interactive Obsidian smoke test. See [scripts](plugin/obsidian/package.json). |
+| PR policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs` | Merge-queue, label, artifact and PR-size helper logic; not live GitHub permissions or event delivery. |
+| Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy helper suites; not live approval-refresh behavior. |
+
+The [CI workflow](.github/workflows/ci.yml) is authoritative for hosted commands,
+setup steps and platform coverage; the [Makefile](Makefile) defines the existing
+lint and quality-ratchet targets. This map does not replace either definition.
+Record which commands actually ran and their results; distinguish structural
+command checks from execution. A green local subset is **not** a full CI or release
+verdict. Hosted full-unit, E2E, plugin and applicable platform results remain
+pending until GitHub runs them. Documentation-only changes can use proportional
+link/command-definition checks without executing unrelated suites.
+
 ### Conventional Commit Format
 
 ```
