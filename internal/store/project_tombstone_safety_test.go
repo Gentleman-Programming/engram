@@ -14,6 +14,90 @@ func safetyPending(t *testing.T, s *Store) []SyncMutation {
 	return rows
 }
 
+func TestProjectTombstoneLegacyProjectSpelling(t *testing.T) {
+	for _, scope := range []string{"alpha", ""} {
+		for _, enrolled := range []bool{false, true} {
+			name := scope
+			if name == "" {
+				name = "unscoped"
+			}
+			if enrolled {
+				name += "/enrolled"
+			}
+			t.Run(name, func(t *testing.T) {
+				s := newTestStore(t)
+				check := func(err error) {
+					t.Helper()
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, project := range []string{"alpha", "beta"} {
+					check(s.EnrollProject(project))
+					check(s.CreateSession(project+"-session", project, "/synthetic"))
+					_, err := s.AddObservation(AddObservationParams{SessionID: project + "-session", Type: "decision", Title: "old", Content: "deleted content", Project: project, Scope: "project"})
+					check(err)
+					check(s.UnenrollProject(project))
+					_, err = s.DeleteProject(project, true)
+					check(err)
+				}
+				// Current public writers normalize project names. Recreate only the
+				// historical journal spelling emitted by legacy startup backfills.
+				_, err := s.DB().Exec(`UPDATE sync_mutations SET project = 'Alpha' WHERE project = 'alpha'`)
+				check(err)
+				if enrolled {
+					check(s.EnrollProject("alpha"))
+				}
+				before, err := s.ListPendingProjectMutations("")
+				check(err)
+				dry, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, scope, false)
+				check(err)
+				unchanged, err := s.ListPendingProjectMutations("")
+				check(err)
+				if !reflect.DeepEqual(before, unchanged) {
+					t.Error("dry-run changed journal")
+				}
+				applied, err := s.SupersedeUnenrolledLegacyMutations(DefaultSyncTargetKey, scope, true)
+				check(err)
+				if !reflect.DeepEqual(dry.Actions, applied.Actions) {
+					t.Error("dry-run/apply actions differ")
+				}
+				after, err := s.ListPendingProjectMutations("")
+				check(err)
+				checked := 0
+				for _, original := range before {
+					if original.Op != SyncOpUpsert || original.Disposition != SyncMutationDispositionPending {
+						continue
+					}
+					checked++
+					want := SyncMutationDispositionPending
+					if (original.Project == "Alpha" && !enrolled) || (original.Project == "beta" && scope == "") {
+						want = SyncMutationDispositionSuperseded
+					}
+					found := false
+					for _, current := range after {
+						if current.Seq == original.Seq {
+							found = true
+							if current.Disposition != want {
+								t.Errorf("project %s seq %d disposition=%s want=%s", original.Project, original.Seq, current.Disposition, want)
+							}
+							if want == SyncMutationDispositionPending && !reflect.DeepEqual(original, current) {
+								t.Error("excluded mutation changed")
+							}
+						}
+					}
+					if !found {
+						t.Error("journal evidence disappeared")
+					}
+				}
+				if checked != 4 {
+					t.Fatalf("expected four historical upserts, got %d", checked)
+				}
+			})
+		}
+	}
+}
+
 func TestProjectTombstonePreservesNewSameIdentityMutation(t *testing.T) {
 	s := newTestStore(t)
 	check := func(err error) {

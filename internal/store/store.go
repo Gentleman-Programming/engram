@@ -7568,13 +7568,8 @@ func (s *Store) SupersedeUnenrolledLegacyMutations(targetKey, project string, ap
 		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 			FROM sync_mutations sm
 			WHERE sm.target_key = ? AND sm.acked_at IS NULL AND sm.disposition = ?
-			  AND sm.source = ? AND sm.op = ? AND sm.project != ''
-			  AND NOT EXISTS (SELECT 1 FROM sync_enrolled_projects sep WHERE sep.project = sm.project)`
+			  AND sm.source = ? AND sm.op = ? AND sm.project != ''`
 		args := []any{targetKey, SyncMutationDispositionPending, SyncSourceLocal, SyncOpUpsert}
-		if project != "" {
-			query += ` AND sm.project = ?`
-			args = append(args, project)
-		}
 		query += ` ORDER BY sm.seq ASC`
 		rows, err := s.queryItHook(tx, query, args...)
 		if err != nil {
@@ -7585,6 +7580,19 @@ func (s *Store) SupersedeUnenrolledLegacyMutations(targetKey, project string, ap
 			var mutation SyncMutation
 			if err := rows.Scan(&mutation.Seq, &mutation.TargetKey, &mutation.Entity, &mutation.EntityKey, &mutation.Op, &mutation.Payload, &mutation.Source, &mutation.Project, &mutation.OccurredAt, &mutation.AckedAt); err != nil {
 				return closeRowsWithError(rows, err)
+			}
+			// Legacy backfills retained raw project spelling. Qualify ownership
+			// and enrollment with the same identity semantics as current writers.
+			projectKey, _ := NormalizeProject(mutation.Project)
+			if projectKey == "" || (project != "" && projectKey != project) {
+				continue
+			}
+			enrolled, err := isProjectEnrolledTx(tx, projectKey)
+			if err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			if enrolled {
+				continue
 			}
 			current, err := s.localMutationHasDeleteEvidenceTx(tx, mutation)
 			if err != nil {
