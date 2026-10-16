@@ -7609,11 +7609,22 @@ func (s *Store) SupersedeUnenrolledLegacyMutations(targetKey, project string, ap
 			if !apply {
 				continue
 			}
-			changed, err := s.supersedePendingLocalUpsertTx(tx, mutation.TargetKey, mutation.Entity, mutation.EntityKey, mutation.Project, action.ReasonCode, action.Evidence)
+			// Selection proves delete evidence for this sequence, not every
+			// generation sharing the entity identity. Keep apply within that fence.
+			result, err := s.execHook(tx, `UPDATE sync_mutations
+				SET disposition = ?, disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now')
+				WHERE target_key = ? AND seq = ? AND acked_at IS NULL
+				  AND disposition = ? AND source = ? AND op = ?`,
+				SyncMutationDispositionSuperseded, action.ReasonCode, action.Evidence,
+				mutation.TargetKey, mutation.Seq, SyncMutationDispositionPending, SyncSourceLocal, SyncOpUpsert)
 			if err != nil {
 				return err
 			}
-			if changed {
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed > 0 {
 				affectedProjects[mutation.Project] = struct{}{}
 			}
 		}
@@ -7661,6 +7672,15 @@ func (s *Store) localMutationHasDeleteEvidenceTx(tx *sql.Tx, mutation SyncMutati
 // evidence: a project recreated under the same name journals fresh upserts
 // that must still reach the cloud.
 func (s *Store) projectTombstoneSupersedesMutationTx(tx *sql.Tx, mutation SyncMutation) (bool, error) {
+	// Hard project deletion intentionally retains sessions referenced by another
+	// project. Project-wide evidence cannot declare that live identity deleted.
+	if mutation.Entity == SyncEntitySession {
+		var live bool
+		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, mutation.EntityKey).Scan(&live)
+		if err != nil || live {
+			return false, err
+		}
+	}
 	projectKey, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
 	if projectKey == "" {
 		return false, nil
