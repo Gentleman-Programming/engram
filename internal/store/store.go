@@ -10951,7 +10951,7 @@ func (s *Store) EnsureEnrolledProjectSyncMutations(ctx context.Context) error {
 	if s.repairOperation != nil {
 		err = s.repairOperation()
 	} else {
-		err = s.repairEnrolledProjectSyncMutations()
+		err = s.repairEnrolledProjectSyncMutations(ctx)
 	}
 
 	s.repairMu.Lock()
@@ -10965,24 +10965,19 @@ func (s *Store) EnsureEnrolledProjectSyncMutations(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) repairEnrolledProjectSyncMutations() error {
-	// Discover projects outside transactions; each selected project is still
-	// repaired atomically by the existing per-project backfill transaction.
-	projects, err := s.enrolledProjectsNeedingBackfill()
-	if err != nil {
-		return err
+func (s *Store) repairEnrolledProjectSyncMutations(contexts ...context.Context) error {
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
 	}
-	for _, project := range projects {
-		if err := s.withTx(func(tx *sql.Tx) error {
-			return s.backfillProjectSyncMutationsTx(tx, project)
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.repairEnrolledProjectSyncMutationsContext(ctx)
 }
 
 func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	return s.backfillSessionSyncMutationsBatchTx(tx, project, nil, source...)
+}
+
+func (s *Store) backfillSessionSyncMutationsBatchTx(tx *sql.Tx, project string, batch *repairBatch, source ...string) error {
 	mutationSource := backfillMutationSource(source)
 	// Blank source identities are skipped, not enqueued: enqueueSyncMutationTx
 	// rejects them and a single corrupt row would otherwise roll back the whole
@@ -11002,8 +10997,8 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string, sourc
 			  AND sm.source = ?
 			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
-		ORDER BY started_at ASC, id ASC`,
-		project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, mutationSource,
+		`+batch.page("sessions", "id", " ORDER BY started_at ASC, id ASC"),
+		append([]any{project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, mutationSource}, batch.args("sessions")...)...,
 	)
 	if err != nil {
 		return err
@@ -11033,11 +11028,16 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string, sourc
 		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntitySession, payload.ID, SyncOpUpsert, payload, mutationSource); err != nil {
 			return err
 		}
+		batch.record("sessions", payload.ID)
 	}
 	return nil
 }
 
 func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	return s.backfillObservationSyncMutationsBatchTx(tx, project, nil, source...)
+}
+
+func (s *Store) backfillObservationSyncMutationsBatchTx(tx *sql.Tx, project string, batch *repairBatch, source ...string) error {
 	mutationSource := backfillMutationSource(source)
 	// ── Live observations ─────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
@@ -11059,8 +11059,8 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 			  AND sm.source = ?
 			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
-		ORDER BY o.id ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityObservation, mutationSource,
+		`+batch.page("observations", "o.sync_id", " ORDER BY o.id ASC"),
+		append([]any{project, project, DefaultSyncTargetKey, SyncEntityObservation, mutationSource}, batch.args("observations")...)...,
 	)
 	if err != nil {
 		return err
@@ -11102,6 +11102,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityObservation, payload.SyncID, SyncOpUpsert, payload, mutationSource); err != nil {
 			return err
 		}
+		batch.record("observations", payload.SyncID)
 	}
 
 	// ── Deleted observations ──────────────────────────────────────────────────
@@ -11124,8 +11125,8 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 			  AND sm.source = ?
 			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
-		ORDER BY o.id ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, mutationSource,
+		`+batch.page("deleted-observations", "o.sync_id", " ORDER BY o.id ASC"),
+		append([]any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, mutationSource}, batch.args("deleted-observations")...)...,
 	)
 	if err != nil {
 		return err
@@ -11154,18 +11155,23 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, s
 		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityObservation, payload.SyncID, SyncOpDelete, payload, mutationSource); err != nil {
 			return err
 		}
+		batch.record("deleted-observations", payload.SyncID)
 	}
 	return nil
 }
 
 func (s *Store) backfillSyncDeleteTombstonesTx(tx *sql.Tx, project string, source ...string) error {
+	return s.backfillSyncDeleteTombstonesBatchTx(tx, project, nil, source...)
+}
+
+func (s *Store) backfillSyncDeleteTombstonesBatchTx(tx *sql.Tx, project string, batch *repairBatch, source ...string) error {
 	mutationSource := backfillMutationSource(source)
 	rows, err := s.queryItHook(tx, `
 		SELECT entity, entity_key, ifnull(session_id, ''), project, deleted_at, hard_delete
 		FROM sync_delete_tombstones tombstone
 		WHERE project = ? AND `+syncDeleteTombstoneNeedsBackfill("tombstone")+`
-		ORDER BY CASE entity WHEN 'observation' THEN 0 WHEN 'session' THEN 1 ELSE 2 END, deleted_at ASC, entity_key ASC`,
-		project, DefaultSyncTargetKey, SyncOpDelete, mutationSource,
+		`+batch.page("tombstones", "entity || ':' || entity_key", " ORDER BY CASE entity WHEN 'observation' THEN 0 WHEN 'session' THEN 1 ELSE 2 END, deleted_at ASC, entity_key ASC"),
+		append([]any{project, DefaultSyncTargetKey, SyncOpDelete, mutationSource}, batch.args("tombstones")...)...,
 	)
 	if err != nil {
 		return err
@@ -11189,6 +11195,7 @@ func (s *Store) backfillSyncDeleteTombstonesTx(tx *sql.Tx, project string, sourc
 		return err
 	}
 	for _, item := range pending {
+		batch.record("tombstones", item.entity+":"+item.entityKey)
 		switch item.entity {
 		case SyncEntityObservation:
 			payload := syncObservationPayload{
@@ -11221,6 +11228,10 @@ func (s *Store) backfillSyncDeleteTombstonesTx(tx *sql.Tx, project string, sourc
 }
 
 func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	return s.backfillPromptSyncMutationsBatchTx(tx, project, nil, source...)
+}
+
+func (s *Store) backfillPromptSyncMutationsBatchTx(tx *sql.Tx, project string, batch *repairBatch, source ...string) error {
 	mutationSource := backfillMutationSource(source)
 	// ── Live prompts ──────────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
@@ -11240,8 +11251,8 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 			  AND sm.source = ?
 			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
-		ORDER BY p.id ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource,
+		`+batch.page("prompts", "p.sync_id", " ORDER BY p.id ASC"),
+		append([]any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource}, batch.args("prompts")...)...,
 	)
 	if err != nil {
 		return err
@@ -11268,6 +11279,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpUpsert, payload, mutationSource); err != nil {
 			return err
 		}
+		batch.record("prompts", payload.SyncID)
 	}
 
 	// ── Tombstoned prompts ────────────────────────────────────────────────────
@@ -11289,8 +11301,8 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 			  AND sm.op = ?
 			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
-		ORDER BY deleted_at ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource, SyncOpDelete,
+		`+batch.page("prompt-tombstones", "prompt_tombstones.sync_id", " ORDER BY deleted_at ASC"),
+		append([]any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource, SyncOpDelete}, batch.args("prompt-tombstones")...)...,
 	)
 	if err != nil {
 		return err
@@ -11319,6 +11331,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpDelete, payload, mutationSource); err != nil {
 			return err
 		}
+		batch.record("prompt-tombstones", payload.SyncID)
 	}
 	return nil
 }
@@ -11340,6 +11353,10 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source
 // intentionally omits that filter to avoid skipping cross-project edges where
 // only the source belongs to this project.
 func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	return s.backfillRelationSyncMutationsBatchTx(tx, project, nil, source...)
+}
+
+func (s *Store) backfillRelationSyncMutationsBatchTx(tx *sql.Tx, project string, batch *repairBatch, source ...string) error {
 	mutationSource := backfillMutationSource(source)
 	// Only backfill fully-judged relations: exclude orphaned/pending and any row
 	// that is missing marked_by_actor or marked_by_kind.  Cloud validation
@@ -11368,10 +11385,8 @@ func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string, sour
 		      AND sm.source = ?
 		      AND sm.disposition IN ('pending', 'quarantined')
 		  )
-		ORDER BY r.created_at ASC, r.sync_id ASC`,
-		JudgmentStatusOrphaned, JudgmentStatusPending,
-		project,
-		DefaultSyncTargetKey, SyncEntityRelation, mutationSource,
+		`+batch.page("relations", "r.sync_id", " ORDER BY r.created_at ASC, r.sync_id ASC"),
+		append([]any{JudgmentStatusOrphaned, JudgmentStatusPending, project, DefaultSyncTargetKey, SyncEntityRelation, mutationSource}, batch.args("relations")...)...,
 	)
 	if err != nil {
 		return err
@@ -11402,6 +11417,7 @@ func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string, sour
 		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityRelation, p.SyncID, SyncOpUpsert, p, mutationSource); err != nil {
 			return err
 		}
+		batch.record("relations", p.SyncID)
 	}
 	return nil
 }

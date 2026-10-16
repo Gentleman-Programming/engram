@@ -2,6 +2,10 @@
 
 `engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
+## Enrolled sync journal repair
+
+Before export or autosync push, missing journal entries are repaired in bounded atomic batches. A failed or cancelled attempt preserves earlier committed batches; retry resumes missing work without treating partial progress as completion. Other operations such as enrollment, project merge and cloud upgrade retain their caller-owned atomic transactions. This does not turn the base doctor command into a repair operation or promise a writer latency bound.
+
 ## CLI
 
 ```bash
