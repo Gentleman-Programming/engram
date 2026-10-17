@@ -54,19 +54,23 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi;
+            // Closes/Fixes/Resolves are closing references (they auto-close the issue on merge).
+            // Refs is a non-closing reference for approved partial PRs. All forms require status:approved and an assignee.
+            const issuePattern = /(?:closes|fixes|resolves|refs)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi;
             const referenceRepo = (match) => ({ owner: match[1] || context.repo.owner, repo: match[2] || context.repo.repo });
             const untrustedReferences = (matches) => matches.filter((match) => {
               const repo = referenceRepo(match);
               const identity = `${repo.owner}/${repo.repo}`.toLowerCase();
               return identity !== `${context.repo.owner}/${context.repo.repo}`.toLowerCase() && identity !== 'gentleman-programming/engram';
-            }).map((match) => `untrusted closing issue reference ${match[1]}/${match[2]}#${match[3]}`);
+            }).map((match) => `untrusted issue reference ${match[1] || context.repo.owner}/${match[2] || context.repo.repo}#${match[3]}`);
             const validate = (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) return ['no closing issue reference found'];
+              if (matches.length === 0) return ['no issue reference found'];
               const untrusted = untrustedReferences(matches);
               if (untrusted.length) return untrusted;
               core.info(`✅ PR #${pull.number} references issue(s): #${matches.map((match) => match[3]).join(', ')}`);
+              return [];
+            };
               return [];
             };
             let failures;
@@ -89,7 +93,7 @@ jobs:
             if (failures.length > 0) {
               core.setFailed(
                 '❌ PR must reference an approved issue.\n' +
-                'Add "Closes #N", "Fixes #N", or "Resolves #N" to every PR body.\n' +
+                'Add "Closes #N", "Fixes #N", "Resolves #N", or non-closing "Refs #N" to every PR body.\n' +
                 failures.join('\n')
               );
             }
@@ -110,16 +114,18 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const issuePattern = /(?:closes|fixes|resolves)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi;
+            // Closes/Fixes/Resolves are closing references (they auto-close the issue on merge).
+            // Refs is a non-closing reference for approved partial PRs. All forms require status:approved and an assignee.
+            const issuePattern = /(?:closes|fixes|resolves|refs)\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)/gi;
             const referenceRepo = (match) => ({ owner: match[1] || context.repo.owner, repo: match[2] || context.repo.repo });
             const untrustedReferences = (matches) => matches.filter((match) => {
               const repo = referenceRepo(match);
               const identity = `${repo.owner}/${repo.repo}`.toLowerCase();
               return identity !== `${context.repo.owner}/${context.repo.repo}`.toLowerCase() && identity !== 'gentleman-programming/engram';
-            }).map((match) => `untrusted closing issue reference ${match[1]}/${match[2]}#${match[3]}`);
+            }).map((match) => `untrusted issue reference ${match[1] || context.repo.owner}/${match[2] || context.repo.repo}#${match[3]}`);
             const validate = async (pull) => {
               const matches = [...(pull.body || '').matchAll(issuePattern)];
-              if (matches.length === 0) return ['no closing issue reference found'];
+              if (matches.length === 0) return ['no issue reference found'];
               const untrusted = untrustedReferences(matches);
               if (untrusted.length) return untrusted;
 
