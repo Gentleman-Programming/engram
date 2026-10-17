@@ -341,6 +341,13 @@ nav [role="tab"][aria-selected="true"],
 	text-transform: uppercase;
 }
 
+/* The login page renders outside the app shell, so its footer reuses the shell
+   footer chrome but centers itself against the login card width. */
+.login-footer {
+	max-width: 1240px;
+	margin: 0 auto;
+}
+
 .hero-panel,
 .data-frame,
 .card,

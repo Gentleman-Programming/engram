@@ -84,6 +84,7 @@ type CloudServer struct {
 	maxPushBodyBytes    int64
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
+	version             string
 	listenAndServe      func(addr string, handler http.Handler) error
 }
 
@@ -129,6 +130,17 @@ var (
 func WithSyncStatusProvider(provider dashboard.SyncStatusProvider) Option {
 	return func(s *CloudServer) {
 		s.syncStatus = provider
+	}
+}
+
+// WithVersion records the running build version so the dashboard chrome can
+// render it (layout footer and login page). The value is passed through
+// verbatim: "dev" is a legitimate value for local builds and is not treated as
+// absent. Omitting the option leaves the version unknown, and the dashboard
+// then renders none.
+func WithVersion(version string) Option {
+	return func(s *CloudServer) {
+		s.version = strings.TrimSpace(version)
 	}
 }
 
@@ -297,6 +309,7 @@ func (s *CloudServer) routes() {
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
+		Version:           s.version,
 	})
 	s.mux.HandleFunc("GET /dashboard/bootstrap", s.handleDashboardBootstrapPage)
 	s.mux.HandleFunc("POST /dashboard/bootstrap", s.handleDashboardBootstrapSubmit)
