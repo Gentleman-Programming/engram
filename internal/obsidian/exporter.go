@@ -1,6 +1,7 @@
 package obsidian
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 type ExportConfig struct {
 	VaultPath   string          // --vault (required): path to the Obsidian vault root
 	Project     string          // --project (optional): filter export to a single project
+	Org         string          // --org (optional): filter export to a single org (#776)
 	Limit       int             // --limit (0 = no limit)
 	Since       time.Time       // --since (zero = use state file)
 	Force       bool            // --force: ignore state, full re-export
@@ -36,6 +38,30 @@ type Exporter struct {
 // NewExporter constructs an Exporter. Validation happens in Export().
 func NewExporter(s StoreReader, cfg ExportConfig) *Exporter {
 	return &Exporter{store: s, config: cfg}
+}
+
+// matchesFilters reports whether obs is in scope for the current export's
+// Project and Org filters. An empty filter matches everything for that axis.
+func (e *Exporter) matchesFilters(obs store.Observation) bool {
+	if e.config.Project != "" {
+		proj := ""
+		if obs.Project != nil {
+			proj = *obs.Project
+		}
+		if proj != e.config.Project {
+			return false
+		}
+	}
+	if e.config.Org != "" {
+		org := ""
+		if obs.Org != nil {
+			org = *obs.Org
+		}
+		if org != e.config.Org {
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizePathComponent strips path separators and dot-dot sequences from a
@@ -157,22 +183,38 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		if !tracked {
 			continue
 		}
-		absPath := filepath.Join(engRoot, relPath)
-		cleanRoot := filepath.Clean(engRoot)
-		cleanPath := filepath.Clean(absPath)
-		if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
-			result.Errors = append(result.Errors, fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath))
+		if err := removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", filepath.Join(engRoot, relPath), err))
+			if errors.Is(err, errUnsafeExportPath) {
+				// Permanently unsafe entry: drop it so it is not retried every export.
+				delete(state.Files, obs.ID)
+			}
+		} else {
+			result.Deleted++
+			delete(state.Files, obs.ID)
+		}
+	}
+
+	// ── Handle filter exclusions: clean up files for observations that no
+	// longer match the current Project/Org filters ───────────────────────────
+	// The exporter is documented as a live mirror of the selected filters, so
+	// a previously-tracked observation that drops out of scope (e.g. a
+	// narrower --org on a later run) must lose its file too — otherwise it
+	// lingers as an orphan the filter can never reach again to clean up.
+	for _, obs := range data.Observations {
+		if obs.DeletedAt != nil {
+			continue // already handled above
+		}
+		relPath, tracked := state.Files[obs.ID]
+		if !tracked || e.matchesFilters(obs) {
 			continue
 		}
-		root, err := os.OpenRoot(engRoot)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("open export root for delete %s: %w", cleanPath, err))
-			continue
-		}
-		err = root.Remove(relPath)
-		_ = root.Close()
-		if err != nil && !os.IsNotExist(err) {
-			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", cleanPath, err))
+		if err := removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", filepath.Join(engRoot, relPath), err))
+			if errors.Is(err, errUnsafeExportPath) {
+				// Permanently unsafe entry: drop it so it is not retried every export.
+				delete(state.Files, obs.ID)
+			}
 		} else {
 			result.Deleted++
 			delete(state.Files, obs.ID)
@@ -197,15 +239,8 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 
-		// Project filter
-		if e.config.Project != "" {
-			proj := ""
-			if obs.Project != nil {
-				proj = *obs.Project
-			}
-			if proj != e.config.Project {
-				continue
-			}
+		if !e.matchesFilters(obs) {
+			continue
 		}
 
 		// Incremental filter: skip if updated_at <= cutoff AND already in state
@@ -301,6 +336,12 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	// ── Generate session hub notes ────────────────────────────────────────────
+	// Rebuilt fresh from the current selection every run, same as state.Files:
+	// a hub whose session drops out of scope (filtered out, or its ref count
+	// falls below the hub threshold) must lose its tracked entry and file too,
+	// not linger pointing at content the current run no longer selects.
+	previousSessionHubs := state.SessionHubs
+	state.SessionHubs = make(map[string]string, len(sessionObsRefs))
 	for sessionID, refs := range sessionObsRefs {
 		if len(refs) == 0 {
 			continue
@@ -320,8 +361,26 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		state.SessionHubs[sessionID] = filepath.Join("_sessions", sessionID+".md")
 		result.HubsCreated++
 	}
+	for sessionID, relPath := range previousSessionHubs {
+		if _, stillSelected := state.SessionHubs[sessionID]; stillSelected {
+			continue
+		}
+		if err := removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("delete stale session hub %s: %w", filepath.Join(engRoot, relPath), err))
+			if !errors.Is(err, errUnsafeExportPath) {
+				// Transient failure: keep the entry so the next export retries
+				// instead of orphaning the file once the pruned state persists.
+				// A permanently unsafe entry is dropped instead of retried.
+				state.SessionHubs[sessionID] = relPath
+			}
+		} else {
+			result.Deleted++
+		}
+	}
 
 	// ── Generate topic hub notes ──────────────────────────────────────────────
+	previousTopicHubs := state.TopicHubs
+	state.TopicHubs = make(map[string]string, len(topicObsRefs))
 	for prefix, refs := range topicObsRefs {
 		if !ShouldCreateTopicHub(len(refs)) {
 			continue
@@ -336,6 +395,22 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
 		result.HubsCreated++
 	}
+	for prefix, relPath := range previousTopicHubs {
+		if _, stillSelected := state.TopicHubs[prefix]; stillSelected {
+			continue
+		}
+		if err := removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("delete stale topic hub %s: %w", filepath.Join(engRoot, relPath), err))
+			if !errors.Is(err, errUnsafeExportPath) {
+				// Transient failure: keep the entry so the next export retries
+				// instead of orphaning the file once the pruned state persists.
+				// A permanently unsafe entry is dropped instead of retried.
+				state.TopicHubs[prefix] = relPath
+			}
+		} else {
+			result.Deleted++
+		}
+	}
 
 	// ── Persist updated state ─────────────────────────────────────────────────
 	state.LastExportAt = time.Now().UTC().Format(time.RFC3339)
@@ -345,6 +420,38 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	return result, nil
+}
+
+// errUnsafeExportPath marks a relPath that fails the escape-root check. It is a
+// permanent property of the state entry (not a transient I/O failure), so
+// callers drop the entry instead of retrying it on every export.
+var errUnsafeExportPath = errors.New("unsafe path rejected (would escape export root)")
+
+// removeExportFile deletes relPath beneath engRoot through a traversal-safe
+// root handle. relPath is read from the persisted sync state, so a tampered
+// entry that would escape the export root is refused instead of followed
+// (defence in depth: an explicit prefix check plus os.Root confinement). A
+// missing file counts as already removed and returns nil. An escape-check
+// failure is reported as errUnsafeExportPath.
+func removeExportFile(engRoot, relPath string) error {
+	cleanRoot := filepath.Clean(engRoot)
+	cleanPath := filepath.Clean(filepath.Join(engRoot, relPath))
+	// Reject anything that is not strictly beneath the root, including the root
+	// itself (an empty or "." relPath): only tracked files under the export
+	// root may be removed. os.Root enforces this too; the check keeps the clear
+	// error and does not lean on stdlib internals.
+	if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
+		return fmt.Errorf("%w: %s", errUnsafeExportPath, cleanPath)
+	}
+	root, err := os.OpenRoot(engRoot)
+	if err != nil {
+		return fmt.Errorf("open export root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.Remove(relPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func writeSessionHub(sessionsDir, name, content string) error {
