@@ -148,6 +148,26 @@ func (e *Exporter) Export() (*ExportResult, error) {
 
 	result := &ExportResult{}
 
+	// present lists every observation the store still returns, soft deleted
+	// rows included. A tracked note whose ID is absent from it belonged to an
+	// observation that was hard deleted: the row is gone from the store, so the
+	// soft-delete loop below can never visit it (issue #1900).
+	present := make(map[int64]bool, len(data.Observations))
+	for _, obs := range data.Observations {
+		present[obs.ID] = true
+	}
+
+	// A project-scoped export only reads that project's rows, so anything it
+	// does not see is still tracked on purpose and must not be pruned.
+	fullScope := e.config.Project == ""
+
+	// trackedPaths remembers where each note lived before this run so a rename
+	// can retire the old file after state.Files is overwritten.
+	trackedPaths := make(map[int64]string, len(state.Files))
+	for id, relPath := range state.Files {
+		trackedPaths[id] = relPath
+	}
+
 	// ── Handle deleted observations: clean up files ───────────────────────────
 	for _, obs := range data.Observations {
 		if obs.DeletedAt == nil {
@@ -157,25 +177,26 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		if !tracked {
 			continue
 		}
-		absPath := filepath.Join(engRoot, relPath)
-		cleanRoot := filepath.Clean(engRoot)
-		cleanPath := filepath.Clean(absPath)
-		if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
-			result.Errors = append(result.Errors, fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath))
+		if err := e.removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, err)
 			continue
 		}
-		root, err := os.OpenRoot(engRoot)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("open export root for delete %s: %w", cleanPath, err))
-			continue
-		}
-		err = root.Remove(relPath)
-		_ = root.Close()
-		if err != nil && !os.IsNotExist(err) {
-			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", cleanPath, err))
-		} else {
+		result.Deleted++
+		delete(state.Files, obs.ID)
+	}
+
+	// ── Reconcile notes whose observation was hard deleted ───────────────────
+	if fullScope {
+		for id, relPath := range state.Files {
+			if present[id] {
+				continue
+			}
+			if err := e.removeExportFile(engRoot, relPath); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
 			result.Deleted++
-			delete(state.Files, obs.ID)
+			delete(state.Files, id)
 		}
 	}
 
@@ -300,7 +321,35 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 	}
 
+	// ── Retire notes left behind by a rename ─────────────────────────────────
+	// The slug is derived from the title, so renaming an observation changes
+	// its target path. state.Files now points at the new note and the old one
+	// is no longer tracked, which left it behind in the vault forever
+	// (issue #1900). Remove it unless another live observation now owns that
+	// exact path.
+	if fullScope {
+		owned := make(map[string]struct{}, len(state.Files))
+		for _, relPath := range state.Files {
+			owned[relPath] = struct{}{}
+		}
+		for id, relPath := range state.Files {
+			old, tracked := trackedPaths[id]
+			if !tracked || old == relPath {
+				continue
+			}
+			if _, taken := owned[old]; taken {
+				continue
+			}
+			if err := e.removeExportFile(engRoot, old); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
+			result.Deleted++
+		}
+	}
+
 	// ── Generate session hub notes ────────────────────────────────────────────
+	writtenSessions := make(map[string]bool, len(sessionObsRefs))
 	for sessionID, refs := range sessionObsRefs {
 		if len(refs) == 0 {
 			continue
@@ -318,10 +367,12 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 		state.SessionHubs[sessionID] = filepath.Join("_sessions", sessionID+".md")
+		writtenSessions[sessionID] = true
 		result.HubsCreated++
 	}
 
 	// ── Generate topic hub notes ──────────────────────────────────────────────
+	writtenTopics := make(map[string]bool, len(topicObsRefs))
 	for prefix, refs := range topicObsRefs {
 		if !ShouldCreateTopicHub(len(refs)) {
 			continue
@@ -334,7 +385,36 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 		state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
+		writtenTopics[prefix] = true
 		result.HubsCreated++
+	}
+
+	// ── Retire hubs that no longer reference a live observation ───────────────
+	// A session or topic whose observations were all deleted is never rewritten
+	// above, so its hub stayed in the vault as an orphan (issue #1900).
+	if fullScope {
+		for sessionID, relPath := range state.SessionHubs {
+			if writtenSessions[sessionID] {
+				continue
+			}
+			if err := e.removeExportFile(engRoot, relPath); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
+			result.Deleted++
+			delete(state.SessionHubs, sessionID)
+		}
+		for prefix, relPath := range state.TopicHubs {
+			if writtenTopics[prefix] {
+				continue
+			}
+			if err := e.removeExportFile(engRoot, relPath); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
+			result.Deleted++
+			delete(state.TopicHubs, prefix)
+		}
 	}
 
 	// ── Persist updated state ─────────────────────────────────────────────────
@@ -345,6 +425,29 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	return result, nil
+}
+
+// removeExportFile deletes one note tracked by the sync state from the export
+// root. relPath is resolved against engRoot and rejected when it escapes that
+// root, so a corrupted or hostile state file cannot delete anything outside
+// {vault}/engram. A missing file is not an error: the goal is only that the
+// note is gone.
+func (e *Exporter) removeExportFile(engRoot, relPath string) error {
+	cleanPath := filepath.Clean(filepath.Join(engRoot, relPath))
+	cleanRoot := filepath.Clean(engRoot)
+	if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
+		return fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath)
+	}
+	root, err := os.OpenRoot(engRoot)
+	if err != nil {
+		return fmt.Errorf("open export root for delete %s: %w", cleanPath, err)
+	}
+	err = root.Remove(relPath)
+	_ = root.Close()
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete %s: %w", cleanPath, err)
+	}
+	return nil
 }
 
 func writeSessionHub(sessionsDir, name, content string) error {

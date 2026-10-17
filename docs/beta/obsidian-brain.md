@@ -273,7 +273,9 @@ The `--watch` flag turns the export into a long-running daemon. Use cases:
 2026/04/06 23:29:29 [2026-04-06T21:29:29Z] sync: created=5 updated=2 deleted=0 skipped=1731 hubs=279
 ```
 
-Counts: how many notes were created, updated, deleted (soft-deleted obs), skipped (unchanged), and total hub notes regenerated.
+Counts: how many notes were created, updated, deleted (soft-deleted obs, hard-deleted obs, obs renamed to a new path, and session/topic hubs left with no live obs), skipped (unchanged), and total hub notes regenerated.
+
+Deletions are reconciled against the sync state, so the vault keeps exactly one note per live observation. A project-scoped export (`--project`) only prunes what it can see.
 
 ### Running Persistent
 
