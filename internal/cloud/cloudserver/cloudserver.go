@@ -85,6 +85,10 @@ type CloudServer struct {
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
 	listenAndServe      func(addr string, handler http.Handler) error
+	// version is the optional running build identifier surfaced in the
+	// dashboard chrome (Layout footer + LoginPage). Empty string keeps the
+	// chrome unchanged so un-versioned local builds render byte-identical.
+	version string
 }
 
 const defaultHost = "127.0.0.1"
@@ -177,6 +181,35 @@ func WithMaxPushBodyBytes(limit int64) Option {
 			s.maxPushBodyBytes = limit
 		}
 	}
+}
+
+// WithVersion sets the build identifier (e.g. ldflags-injected semver) that
+// the dashboard chrome surfaces in the Layout footer and the LoginPage so
+// operators can confirm the running build from the browser alone. The stored
+// value is already display-ready, because MountConfig.Version is rendered
+// verbatim: a semver build carries exactly one leading "v" whichever shape
+// reached us ("v1.20.3" and "1.20.3" both display as "v1.20.3"), while a
+// non-semver build identifier such as "dev" is preserved as-is so a local
+// build is never mislabelled "vdev". Empty and whitespace-only values stay
+// empty so the chrome renders byte-identical for an un-versioned build.
+func WithVersion(version string) Option {
+	return func(s *CloudServer) {
+		s.version = displayVersion(version)
+	}
+}
+
+// displayVersion maps a raw build identifier onto its dashboard display form.
+func displayVersion(version string) string {
+	trimmed := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if trimmed == "" {
+		return ""
+	}
+	// Only a semver-shaped identifier earns the "v" prefix; tags such as "dev"
+	// are legitimate build identifiers and must render as themselves (#1657).
+	if trimmed[0] < '0' || trimmed[0] > '9' {
+		return trimmed
+	}
+	return "v" + trimmed
 }
 
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {
@@ -297,6 +330,7 @@ func (s *CloudServer) routes() {
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
+		Version:           s.version,
 	})
 	s.mux.HandleFunc("GET /dashboard/bootstrap", s.handleDashboardBootstrapPage)
 	s.mux.HandleFunc("POST /dashboard/bootstrap", s.handleDashboardBootstrapSubmit)

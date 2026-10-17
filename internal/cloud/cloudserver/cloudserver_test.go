@@ -2367,3 +2367,32 @@ func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) 
 		})
 	}
 }
+
+// TestWithVersionProducesDisplayLabel pins the display mapping owned by
+// WithVersion. MountConfig.Version is rendered verbatim by the dashboard
+// chrome, so the option has to hand over an already display-ready identifier:
+// a semver build carries exactly one "v" regardless of the shape ldflags or
+// debug.ReadBuildInfo supplied, while a non-semver build identifier such as
+// "dev" must survive untouched (#1657).
+func TestWithVersionProducesDisplayLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "leading v is kept exactly once", in: "v3.0.0", want: "v3.0.0"},
+		{name: "bare semver gains one v", in: "3.0.0", want: "v3.0.0"},
+		{name: "surrounding whitespace is trimmed", in: "  v1.20.3-rc.1  ", want: "v1.20.3-rc.1"},
+		{name: "dev stays dev", in: "dev", want: "dev"},
+		{name: "empty stays empty", in: "", want: ""},
+		{name: "only whitespace stays empty", in: "   ", want: ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{}, fakeAuth{}, 0, WithVersion(tt.in))
+			if srv.version != tt.want {
+				t.Fatalf("CloudServer.version = %q, want %q (input=%q)", srv.version, tt.want, tt.in)
+			}
+		})
+	}
+}
