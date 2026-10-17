@@ -1068,14 +1068,17 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	if len(pendingEntries) == 0 {
 		return result, nil
 	}
-	legacyChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
+	// decodedChunks holds pending chunks already parsed in this import, so the
+	// apply loop reuses them instead of reading and decoding them again. The
+	// legacy ownership preflight seeds it; local classification adds the rest.
+	decodedChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
 	if err != nil {
 		return nil, err
 	}
 	availableSessionIDs := map[string]struct{}{}
 	if mode == importModeLocal {
 		var err error
-		availableSessionIDs, err = sy.sessionIDsAvailableInChunks(entries, knownChunks)
+		availableSessionIDs, err = sy.sessionIDsAvailableInChunks(entries, knownChunks, decodedChunks)
 		if err != nil {
 			return nil, err
 		}
@@ -1087,7 +1090,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	// such edges before apply and surface them as visible warnings instead.
 	var dependencyOracle *importDependencyOracle
 	if mode == importModeCloud {
-		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, legacyChunks, manifestVersion)
+		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, decodedChunks, manifestVersion)
 	}
 
 	lastErrors := map[string]error{}
@@ -1096,7 +1099,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 		nextPending := make([]ChunkEntry, 0, len(pendingEntries))
 
 		for _, entry := range pendingEntries {
-			chunk, loaded := legacyChunks[entry.ID]
+			chunk, loaded := decodedChunks[entry.ID]
 			if !loaded && dependencyOracle != nil {
 				if cached, ok := dependencyOracle.cachedChunk(entry.ID); ok {
 					chunk, loaded = cached, true
@@ -1197,6 +1200,10 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			importResult := estimateMutationImportResult(chunk)
 			knownChunks[entry.ID] = true
 			delete(lastErrors, entry.ID)
+			if mode == importModeLocal {
+				// An imported chunk is never applied again; release its decode.
+				delete(decodedChunks, entry.ID)
+			}
 
 			result.ChunksImported++
 			result.SessionsImported += importResult.SessionsImported
@@ -1565,23 +1572,33 @@ func importDependencyError(chunk ChunkData, err error) error {
 	return fmt.Errorf("%w; pending session dependencies: %s", err, strings.Join(sessions, ", "))
 }
 
-func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks map[string]bool) (map[string]struct{}, error) {
+// sessionIDsAvailableInChunks collects the session upserts of every manifest
+// entry, already-known entries included. It reuses chunks in decoded and adds
+// each pending chunk it parses there, so the apply loop never decodes it again;
+// already-known chunks are scanned but not retained. Retained chunks skip the
+// apply loop's ownership check safely: it is a no-op for current manifests, and
+// legacy pending chunks were already checked and seeded by the preflight.
+func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks map[string]bool, decoded map[string]ChunkData) (map[string]struct{}, error) {
 	available := make(map[string]struct{})
 	for _, entry := range entries {
-		chunkJSON, err := sy.transport.ReadChunk(entry.ID)
-		if err != nil {
-			if errors.Is(err, ErrChunkNotFound) || knownChunks[entry.ID] {
-				continue
+		chunk, ok := decoded[entry.ID]
+		if !ok {
+			chunkJSON, err := sy.transport.ReadChunk(entry.ID)
+			if err != nil {
+				if errors.Is(err, ErrChunkNotFound) || knownChunks[entry.ID] {
+					continue
+				}
+				return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 			}
-			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
-		}
-
-		var chunk ChunkData
-		if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
-			if knownChunks[entry.ID] {
-				continue
+			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+				if knownChunks[entry.ID] {
+					continue
+				}
+				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
 			}
-			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+			if !knownChunks[entry.ID] {
+				decoded[entry.ID] = chunk
+			}
 		}
 		for _, mutation := range buildImportMutations(chunk) {
 			if mutation.Entity != store.SyncEntitySession || mutation.Op != store.SyncOpUpsert {
