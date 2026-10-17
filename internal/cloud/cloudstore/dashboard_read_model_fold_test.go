@@ -206,7 +206,7 @@ func openDashboardFoldPostgres(t *testing.T) *CloudStore {
 	if err != nil {
 		t.Fatalf("open admin db: %v", err)
 	}
-	t.Cleanup(func() { adminDB.Close() })
+	t.Cleanup(func() { _ = adminDB.Close() })
 	if _, err := adminDB.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
@@ -219,7 +219,7 @@ func openDashboardFoldPostgres(t *testing.T) *CloudStore {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { cs.Close() })
+	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }
 
