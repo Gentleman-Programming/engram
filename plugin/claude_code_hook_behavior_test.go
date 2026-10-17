@@ -1138,3 +1138,72 @@ func TestSessionStartResumeKeepsLegacySharedOwnership(t *testing.T) {
 		})
 	}
 }
+
+// Compaction fires SessionStart with source "compact", which runs
+// post-compaction.sh instead of session-start.sh. Claude keeps the session ID
+// across compaction too, so when the root (and any continuation) already ended,
+// registering without resume is refused with session_already_ended and every
+// later write is denied by the PreToolUse gate. post-compaction.sh must register
+// exactly like session-start.sh: resume=true, keeping a legacy shared root's
+// ownership mode.
+func TestPostCompactionRegistersResumableClaudeSession(t *testing.T) {
+	requireHookBinaries(t)
+
+	for _, tc := range []struct {
+		name     string
+		lookup   string
+		wantMode string
+	}{
+		{"ended legacy shared root", `{"id":"claude-compacted","ownership_mode":"shared","ended_at":"2026-10-09 12:00:00"}`, "shared"},
+		{"ended project_owned root", `{"id":"claude-compacted","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, "project_owned"},
+		{"live project_owned root", `{"id":"claude-compacted","ownership_mode":"project_owned"}`, "project_owned"},
+		{"unknown session", "", "project_owned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var registered struct {
+				ID            string `json:"id"`
+				Project       string `json:"project"`
+				Directory     string `json:"directory"`
+				OwnershipMode string `json:"ownership_mode"`
+				Resume        bool   `json:"resume"`
+			}
+			var registrations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/claude-compacted" && tc.lookup != "":
+					_, _ = io.WriteString(w, tc.lookup)
+				case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+					if err := json.NewDecoder(r.Body).Decode(&registered); err != nil {
+						t.Errorf("decode session registration: %v", err)
+						return
+					}
+					registrations++
+					w.WriteHeader(http.StatusCreated)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			stubDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(stubDir, "engram"), []byte("#!/bin/bash\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("write engram stub: %v", err)
+			}
+			cwd := t.TempDir()
+			runHook(t, "post-compaction.sh", `{"session_id":"claude-compacted","cwd":`+strconv.Quote(cwd)+`,"source":"compact"}`,
+				map[string]string{"ENGRAM_URL": srv.URL, "PATH": stubDir + ":" + os.Getenv("PATH")})
+
+			if registrations != 1 {
+				t.Fatalf("session registrations = %d, want 1", registrations)
+			}
+			if registered.ID != "claude-compacted" || registered.Project != "engram" || registered.Directory != cwd {
+				t.Fatalf("session registration = %+v, want the Claude session, resolved project and cwd", registered)
+			}
+			if !registered.Resume || registered.OwnershipMode != tc.wantMode {
+				t.Fatalf("registration = %+v, want resume with %s", registered, tc.wantMode)
+			}
+		})
+	}
+}
