@@ -162,7 +162,7 @@ func (f *dashboardPGFixture) calls(tb testing.TB) int64 {
 	var calls int64
 	// Exclusive workload on the owned DB. Parameters prevent the sampler query
 	// from matching its own SQL. All three actual read-model SELECT shapes count.
-	if err := f.db.QueryRowContext(ctx, `SELECT COALESCE(sum(calls),0)::bigint FROM public.pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND (query LIKE $1 OR query LIKE $2 OR query LIKE $3)`, "SELECT chunk_id, project_name, created_by, created_at, payload FROM cloud_chunks%", "SELECT seq, project, entity, entity_key, op, payload::text, occurred_at FROM cloud_mutations%", "%LEFT JOIN cloud_project_controls c ON c.project = p.project%").Scan(&calls); err != nil {
+	if err := f.db.QueryRowContext(ctx, `SELECT COALESCE(sum(calls),0)::bigint FROM public.pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND (query LIKE $1 OR query LIKE $2 OR query LIKE $3)`, "SELECT chunk_id, project_name, created_by, created_at, payload FROM cloud_chunks%", "SELECT seq, project, entity, entity_key, op, payload, occurred_at FROM cloud_mutations%", "%LEFT JOIN cloud_project_controls c ON c.project = p.project%").Scan(&calls); err != nil {
 		tb.Fatal(err)
 	}
 	return calls
@@ -194,22 +194,23 @@ func (f *dashboardPGFixture) read(tb testing.TB, mode string) {
 		}
 		return
 	}
-	// Four forced overlapping cache misses. Real SQL/folding occurs after the
-	// barrier; this does not estimate naturally occurring concurrency incidence.
+	// Four forced overlapping cache misses share one build: the first caller
+	// enters the loader and the other three attach to it before release. Real
+	// SQL/folding occurs after the barrier; this does not estimate naturally
+	// occurring concurrency incidence.
 	f.entered = make(chan struct{}, 4)
 	f.release = make(chan struct{})
 	results := make(chan characterizationResult, 4)
 	for i := 0; i < 4; i++ {
 		go characterizationRead(f.cs, results)
 	}
-	for i := 0; i < 4; i++ {
-		select {
-		case <-f.entered:
-		case <-time.After(10 * time.Second):
-			close(f.release)
-			tb.Fatal("cold callers did not all enter")
-		}
+	select {
+	case <-f.entered:
+	case <-time.After(10 * time.Second):
+		close(f.release)
+		tb.Fatal("cold caller did not enter the loader")
 	}
+	waitForDashboardBuildWaiters(tb, f.cs, 3)
 	close(f.release)
 	for i := 0; i < 4; i++ {
 		select {
@@ -239,9 +240,7 @@ func TestDashboardReadModelPostgresCounts(t *testing.T) {
 					if mode == "warm" {
 						want = 0
 					}
-					if mode == "concurrent" {
-						want = 4
-					}
+					// Concurrent cold readers share one build, so they cost one cold build.
 					if got := f.calls(t) - queries; got != want*3 {
 						t.Fatalf("%s SQL SELECTs=%d want=%d", mode, got, want*3)
 					}
@@ -310,9 +309,7 @@ func BenchmarkDashboardReadModelPostgres(b *testing.B) {
 					if mode == "warm" {
 						want = 0
 					}
-					if mode == "concurrent" {
-						want = 4
-					}
+					// Concurrent cold readers share one build, so they cost one cold build.
 					if qdelta != int64(b.N)*want*3 || bdelta != int64(b.N)*want {
 						b.Fatalf("measurement counts: SELECTs=%d builds=%d operations=%d", qdelta, bdelta, b.N)
 					}
@@ -321,7 +318,7 @@ func BenchmarkDashboardReadModelPostgres(b *testing.B) {
 					b.ReportMetric(float64(bdelta)/float64(b.N), "builds/op")
 					b.ReportMetric(float64(f.buildNS.Load()-buildNS)/float64(b.N), "build-ns/op")
 					b.ReportMetric(float64(latencies[int(math.Ceil(.95*float64(len(latencies))))-1]), "sample-p95-ns")
-					b.Logf("p95 is nearest-rank over %d operation samples; concurrent op=4 barrier-controlled callers; mutation/write/control preparation and SQL sampler excluded", b.N)
+					b.Logf("p95 is nearest-rank over %d operation samples; concurrent op=4 barrier-controlled callers sharing one build; mutation/write/control preparation and SQL sampler excluded", b.N)
 				})
 			}
 		}
