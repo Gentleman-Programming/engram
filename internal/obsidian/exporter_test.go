@@ -1116,3 +1116,217 @@ func makeObs(id int64, sessionID, project, obsType, title, topicKey, ts string) 
 	}
 	return obs
 }
+
+// ─── Issue #1900: reconcile notes left behind by deletions and renames ────────
+
+// staleNoteExport is a small harness for the reconciliation cases: it exports
+// a vault, then exports again with a different store snapshot.
+func newReconcileVault(t *testing.T) (dir, engRoot string) {
+	t.Helper()
+	dir = t.TempDir()
+	engRoot = filepath.Join(dir, "engram")
+	if err := os.MkdirAll(engRoot, 0755); err != nil {
+		t.Fatalf("mkdir engRoot: %v", err)
+	}
+	return dir, engRoot
+}
+
+func readStateFiles(t *testing.T, engRoot string) SyncState {
+	t.Helper()
+	state, err := ReadState(filepath.Join(engRoot, ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	return state
+}
+
+func TestExportRemovesNoteOfHardDeletedObservation(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	stale := filepath.Join(engRoot, "demo", "manual", "hard-gone-2.md")
+	if err := writeFile(stale, []byte("stale")); err != nil {
+		t.Fatalf("setup stale note: %v", err)
+	}
+	keep := makeObs(1, "sess-1", "demo", "manual", "keep me", "", "2026-01-01T10:00:00Z")
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{1: "demo/manual/keep-me-1.md", 2: "demo/manual/hard-gone-2.md"},
+		SessionHubs: map[string]string{},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	// Observation 2 was hard deleted: the store no longer returns its row.
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{keep},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 1 {
+		t.Errorf("Deleted: got %d, want 1", result.Deleted)
+	}
+	if fileExists(stale) {
+		t.Errorf("expected %s to be deleted, but it still exists", stale)
+	}
+	if _, tracked := readStateFiles(t, engRoot).Files[2]; tracked {
+		t.Error("hard-deleted observation is still tracked in the sync state")
+	}
+	if _, tracked := readStateFiles(t, engRoot).Files[1]; !tracked {
+		t.Error("live observation lost its sync state entry")
+	}
+}
+
+func TestExportRemovesPreviousNoteAfterRename(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	oldNote := filepath.Join(engRoot, "demo", "manual", "keep-me-1.md")
+	if err := writeFile(oldNote, []byte("old")); err != nil {
+		t.Fatalf("setup old note: %v", err)
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{1: "demo/manual/keep-me-1.md"},
+		SessionHubs: map[string]string{},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	renamed := makeObs(1, "sess-1", "demo", "manual", "keep me renamed", "", "2026-01-01T10:00:00Z")
+	newNote := filepath.Join(engRoot, "demo", "manual", "keep-me-renamed-1.md")
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{renamed},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 1 {
+		t.Errorf("Deleted: got %d, want 1 (the note the rename retired)", result.Deleted)
+	}
+	if fileExists(oldNote) {
+		t.Errorf("expected %s to be removed after the rename, but it still exists", oldNote)
+	}
+	if !fileExists(newNote) {
+		t.Errorf("expected %s to exist after the rename", newNote)
+	}
+	if got := readStateFiles(t, engRoot).Files[1]; got != "demo/manual/keep-me-renamed-1.md" {
+		t.Errorf("state path: got %q, want %q", got, "demo/manual/keep-me-renamed-1.md")
+	}
+}
+
+func TestExportDoesNotRemoveNoteThatAnotherEntryNowOwns(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	// Slugs are id-suffixed, so only a hand-edited state file can make two
+	// entries name the same path. When that happens the live note wins.
+	target := filepath.Join(engRoot, "demo", "manual", "renamed-1.md")
+	if err := writeFile(target, []byte("live note")); err != nil {
+		t.Fatalf("setup target note: %v", err)
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{1: "demo/manual/keep-me-1.md", 2: "demo/manual/renamed-1.md"},
+		SessionHubs: map[string]string{},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	renamed := makeObs(1, "sess-1", "demo", "manual", "renamed", "", "2026-01-01T10:00:00Z")
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{renamed},
+	}}
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fileExists(target) {
+		t.Errorf("expected %s to survive: it is the live path of observation 1", target)
+	}
+}
+
+func TestExportRemovesOrphanedHubs(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	orphanSession := filepath.Join(engRoot, "_sessions", "sess-gone.md")
+	orphanTopic := filepath.Join(engRoot, "_topics", "gone--topic.md")
+	for _, p := range []string{orphanSession, orphanTopic} {
+		if err := writeFile(p, []byte("orphan")); err != nil {
+			t.Fatalf("setup %s: %v", p, err)
+		}
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{},
+		SessionHubs: map[string]string{"sess-gone": "_sessions/sess-gone.md"},
+		TopicHubs:   map[string]string{"gone/topic": "_topics/gone--topic.md"},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 2 {
+		t.Errorf("Deleted: got %d, want 2 (the orphaned session and topic hubs)", result.Deleted)
+	}
+	if fileExists(orphanSession) || fileExists(orphanTopic) {
+		t.Error("expected orphaned hubs to be removed")
+	}
+	state := readStateFiles(t, engRoot)
+	if len(state.SessionHubs) != 0 || len(state.TopicHubs) != 0 {
+		t.Errorf("orphaned hubs still tracked: sessions=%v topics=%v", state.SessionHubs, state.TopicHubs)
+	}
+}
+
+func TestProjectScopedExportKeepsUntrackedNotesAndHubs(t *testing.T) {
+	dir, engRoot := newReconcileVault(t)
+
+	// Notes and hubs belonging to another project are absent from a
+	// project-scoped export and must survive it untouched.
+	otherNote := filepath.Join(engRoot, "other", "manual", "elsewhere-9.md")
+	otherHub := filepath.Join(engRoot, "_sessions", "sess-other.md")
+	for _, p := range []string{otherNote, otherHub} {
+		if err := writeFile(p, []byte("other project")); err != nil {
+			t.Fatalf("setup %s: %v", p, err)
+		}
+	}
+	if err := WriteState(filepath.Join(engRoot, ".engram-sync-state.json"), SyncState{
+		Files:       map[int64]string{9: "other/manual/elsewhere-9.md"},
+		SessionHubs: map[string]string{"sess-other": "_sessions/sess-other.md"},
+		TopicHubs:   map[string]string{},
+		Version:     1,
+	}); err != nil {
+		t.Fatalf("setup WriteState: %v", err)
+	}
+
+	scoped := makeObs(1, "sess-1", "demo", "manual", "scoped note", "", "2026-01-01T10:00:00Z")
+	ms := &mockStore{exportData: &store.ExportData{
+		Sessions:     []store.Session{},
+		Observations: []store.Observation{scoped},
+	}}
+	result, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "demo"}).Export()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Deleted != 0 {
+		t.Errorf("Deleted: got %d, want 0 for a project-scoped export", result.Deleted)
+	}
+	if !fileExists(otherNote) || !fileExists(otherHub) {
+		t.Error("project-scoped export removed a note or hub it does not own")
+	}
+	if _, tracked := readStateFiles(t, engRoot).Files[9]; !tracked {
+		t.Error("project-scoped export dropped another project's sync state entry")
+	}
+}
