@@ -1446,7 +1446,7 @@ func cmdSearch(cfg store.Config) {
 	}
 }
 
-const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]\nUntracked folders inside a HOME Git repository require --project, ENGRAM_PROJECT, or .engram/config.json project_name."
 
 type saveArgs struct {
 	title       string
@@ -1535,7 +1535,7 @@ func cmdSave(cfg store.Config) {
 	_, preflightErr := project.Resolve(project.ResolutionOptions{
 		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
 		Detect: func(dir string) project.DetectionResult {
-			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true})
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true, RequireExplicitHomeProject: true})
 		},
 	})
 	if preflightErr != nil {
@@ -1555,7 +1555,7 @@ func cmdSave(cfg store.Config) {
 		Explicit:  projectName,
 		Directory: cwd,
 		Detect: func(dir string) project.DetectionResult {
-			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory, RequireExplicitHomeProject: true})
 		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {

@@ -1268,7 +1268,7 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 				res = processRes
 			}
 		} else {
-			res = s.DetectProject(cwd)
+			res = captureProjectDetector(s)(cwd)
 		}
 
 		envelope := map[string]any{
@@ -2575,7 +2575,7 @@ func resolveSessionStartProject(s *store.Store, explicitDirectory, defaultProjec
 	if explicitDirectory == "" {
 		return resolveWriteProjectWithProcessOverride(s, defaultProject, false)
 	}
-	res := s.DetectProject(explicitDirectory)
+	res := captureProjectDetector(s)(explicitDirectory)
 	if res.Error != nil {
 		return res, res.Error
 	}
@@ -2590,11 +2590,11 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 
 		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, false)
 		if err != nil {
-			if errors.Is(err, projectpkg.ErrInvalidConfig) || errors.Is(err, projectpkg.ErrRepositoryBinding) {
+			if !errors.Is(err, projectpkg.ErrAmbiguousProject) {
 				return writeProjectErrorResult(nil, "", detRes, err), nil
 			}
-			// For session end, still complete the operation even if project resolution fails.
-			// Use basename fallback.
+			// Retain legacy ambiguity completion, but never recover HOME designation
+			// or failed membership/history checks through a guessed basename.
 			cwd, _ := os.Getwd()
 			detRes = projectpkg.DetectionResult{
 				Project: projectpkg.CanonicalizeProjectName(filepath.Base(cwd)),
@@ -2958,14 +2958,24 @@ func sessionProjectResolutionError(sessionID, sessionProject, sessionMode, reque
 	return fmt.Errorf("%w: session %q has unclassified ownership for %q and cannot accept %q", store.ErrProjectOwnershipAmbiguous, sessionID, sessionProject, requestedProject)
 }
 
+// captureProjectDetector is strict only at capture and adapter-context boundaries.
+// Ordinary read resolution and existing explicit/session authority remain unchanged.
+func captureProjectDetector(s *store.Store) func(string) projectpkg.DetectionResult {
+	return func(directory string) projectpkg.DetectionResult {
+		return projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{
+			HistoryLookup: s.ProjectHistory, RequireExplicitHomeProject: true,
+		})
+	}
+}
+
 // resolveWriteProject detects the current project from the process working
-// directory. Returns ErrAmbiguousProject if cwd is a parent of multiple repos.
+// directory, requiring explicit designation for untracked HOME repository children.
 func resolveWriteProject(s *store.Store) (projectpkg.DetectionResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
 	}
-	res := s.DetectProject(cwd)
+	res := captureProjectDetector(s)(cwd)
 	if res.Error != nil {
 		return res, res.Error
 	}
@@ -2988,7 +2998,7 @@ func processProjectResult(defaultProject string) (projectpkg.DetectionResult, bo
 }
 
 func resolveWriteProjectWithProcessOverride(s *store.Store, defaultProject string, requireKnownProcess bool) (projectpkg.DetectionResult, error) {
-	return resolveMCPProjectWithPolicy(s, "", defaultProject, requireKnownProcess)
+	return resolveMCPProjectWithDetector(s, "", defaultProject, requireKnownProcess, captureProjectDetector(s))
 }
 
 // storedProjectFallback anchors resolution on the observation's own project
@@ -3083,7 +3093,7 @@ func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice st
 			if err != nil {
 				return projectpkg.DetectionResult{}, err
 			}
-			return resolveMCPProjectWithPolicy(s, "", defaultProject, false)
+			return resolveWriteProjectWithProcessOverride(s, defaultProject, false)
 		}
 	}
 	return resolveSaveWriteProject(s, projectChoice, explicitProjectProvided, reason, sessionID, validateToken)
@@ -3543,6 +3553,9 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 // resolution fails. It handles ambiguous project errors and invalid configs.
 func writeProjectErrorResult(activity *SessionActivity, sessionID string, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
 	code := "ambiguous_project"
+	if errors.Is(err, projectpkg.ErrExplicitProjectRequired) {
+		return errorWithMeta("explicit_project_required", err.Error(), nil)
+	}
 	var transition *projectpkg.ProjectTransitionError
 	if errors.As(err, &transition) {
 		return errorWithMeta("project_transition_conflict", err.Error(), res.AvailableProjects)
@@ -3716,6 +3729,8 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		"available_projects": availableProjects,
 	}
 	switch code {
+	case "explicit_project_required":
+		envelope["hint"] = "Set ENGRAM_PROJECT or .engram/config.json project_name, or supply a supported explicit project; do not guess a folder name."
 	case "ambiguous_project":
 		envelope["hint"] = "Ask the user to choose one of available_projects, then retry the same write tool (mem_save, mem_save_prompt, or mem_session_summary) with project and project_choice_reason=user_selected_after_ambiguous_project; alternatively cd into the target repo or add repo .engram/config.json."
 	case "database_generation_changed":

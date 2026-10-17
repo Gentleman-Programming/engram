@@ -189,7 +189,7 @@ engram tui                    Launch terminal UI
 engram test [suite]            Run isolated self-tests [--quick] [--json]
 engram init [name]             Initialize .engram/config.json [--force]
 engram search <query>         Search memories [--project P|--all] [--match all|any]
-engram save <title> <msg>     Save a memory
+engram save <title> <msg>     Save a memory [--project P]
 engram delete <obs_id>        Delete an observation [--hard]
 engram delete session <id>    Delete an empty session
 engram delete prompt <id>     Delete a prompt permanently
@@ -231,6 +231,18 @@ Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enr
 ---
 
 ## HTTP API Endpoints
+
+### Explicit project selection inside HOME repositories
+
+When HOME itself is a Git repository, capture from an untracked descendant requires an explicit project designation. This includes new dotfiles folders: folder names alone are not project intent. HOME itself, subfolders containing Git-index-tracked files, nested independent repositories, and ordinary non-HOME monorepos retain normal detection.
+
+Selection retains request project → process override (`engram mcp --project`, then `ENGRAM_PROJECT`) → applicable `.engram/config.json` → cwd detection precedence. Existing config inheritance and session-bound authority are unchanged; operations that require known explicit projects still require them.
+
+- CLI: use `engram save <title> <content> --project <name>`, `ENGRAM_PROJECT`, or `.engram/config.json` containing `{"project_name":"<name>"}`. Rejection happens before SQLite is opened or a Git binding is created.
+- MCP: implicit capture, session start/end, and project-context negotiation require designation. Capture errors use `error_code:"explicit_project_required"` with English guidance, not ambiguity-recovery tokens. `mem_current_project` remains informational, returning an empty project and an actionable `error_hint`; do not promote an unsafe HOME label into an explicit request. Use process/config designation or a supported explicit project argument. Existing session-authoritative captures remain supported.
+- HTTP: both `GET /project/current` and human-input `POST /prompts/capture-decision` return `409` with `code:"explicit_project_required"` and `error:"project resolution failed: explicit project required: use --project, ENGRAM_PROJECT, or .engram/config.json project_name"`. Configure the server process or an applicable project config before retrying; skipped non-human input still returns `decision:"skip"`. Explicit/session-bound capture endpoints retain their existing authority contracts.
+
+Rejected captures preserve stored records, counters and journal entries, and do not initialize a mistaken HOME binding. Ordinary reads/listing and stored-record-ID reads are unchanged. This policy does not migrate memories, rename private bindings, or rebind sessions.
 
 ### Project-scoped read migration
 
@@ -460,7 +472,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Project Detection / Migration
 
 - `GET /project/current` — Detect the current project. Query: `?cwd=/path/to/repo`
-  - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
+  - Successful detection returns `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`; unsafe untracked HOME descendants instead return the `409 explicit_project_required` contract above.
   - Ambiguous cwd is a successful discovery response: `project` is empty, `project_source` is `ambiguous`, `available_projects` lists the candidates, and `error_hint` explains why no project was selected.
   - Other current-project-scoped HTTP routes return `404` for an unknown explicit project, `409` with `{error, code:"ambiguous_project", available_projects, project_source, project_path}` for an ambiguous cwd, and `400` for an invalid selector or configuration.
   - For automatic Git detection, Engram creates a private versioned binding in the repository's shared Git metadata. It retains the first normalized remote/root label through remote renames, linked worktrees, and repository moves; the binding is not tracked and clones or forks create their own opaque ID. A corrupt or unwritable binding fails closed: configure `.engram/config.json` with the intended project name rather than relying on a renamed remote. Global local/cloud `project_id` propagation and alias migration remain deferred.
