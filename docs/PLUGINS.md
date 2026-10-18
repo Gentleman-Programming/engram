@@ -182,7 +182,7 @@ The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompt
 
 **Server compatibility:** Automatic Claude prompt capture requires an Engram server with `/prompts/capture-decision`. Older servers (404), unavailable/slow servers, and malformed or invalid decisions silently skip capture; normal hooks, first-message ToolSearch, and existing save-reminder reads continue to work. There is no local classifier fallback. Decision responses must be 2xx without redirects. Adapters reject project metadata containing path separators, ASCII controls, or surrounding whitespace; these are transport sanity checks, not project normalization. Go remains the canonical-name authority, including lowercasing and repeated separator normalization; adapters never repair server metadata.
 
-1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
+1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding. After loading tools, the Bash hook and PowerShell fallback instruct the model to reuse usable prior-session context already provided by SessionStart and call `mem_context` only if that context was absent or not useful (including empty or unavailable context). This is guidance, not hook-side detection of injected context or a guarantee of model compliance.
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
 
