@@ -1,6 +1,6 @@
 # Session-owned core/Pi pair — unreleased preparation
 
-This is a **draft preparation**, not release approval or a published compatibility claim.
+This is **unreleased preparation**, not release approval or a published compatibility claim.
 It addresses the distribution gap in #1921 without implementing the coordinator in #1349.
 
 ## Proposed pair
@@ -62,10 +62,12 @@ is claimed by this preparation. Actual validation results must accompany the eve
 
 ## Merge and issue disposition
 
-Keep the preparation PR **draft**. Do not merge an installer pin to an unavailable npm target;
+The preparation PR may move to **Ready for review** only after explicit maintainer authorization.
+Review readiness does not authorize merge, queue admission, publication or installation.
+Do not merge an installer pin to an unavailable npm target;
 publication availability alone is insufficient without artifact pairing and upgrade validation.
 Do not push tags, dispatch publishing workflows, install into user environments or publish npm
 as part of this PR. Publication remains a separate maintainer decision with its own evidence.
 After an authorized release, inspect the actual published metadata, artifact identities and
-supported upgrade. Only then resolve #1921. A preparation child may close when its draft-preparation
+supported upgrade. Only then resolve #1921. A preparation child may close when its preparation
 work is delivered; neither #1921 nor #1349 is resolved by a source version bump.
