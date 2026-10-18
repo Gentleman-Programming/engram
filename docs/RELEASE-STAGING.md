@@ -6,6 +6,31 @@ an arbitrary candidate workflow ref. No dispatch is authorized by this change.
 Supply a reviewed full lowercase 40-hex source SHA and a core `major.minor.patch`
 version (without `v`). Validation precedes candidate checkout and build.
 
+## Trust boundary and artifact acceptance
+
+`github.workflow_sha` identifies the selected workflow revision, not its approval.
+The `policy` checkout records that revision but is not used by later steps and
+is not an independent trust check. This workflow does not enforce a trusted-ref
+restriction outside its editable YAML. A modified workflow can remove an in-file
+guard or an environment reference; neither prevents every other artifact upload.
+
+Before a separately authorized dispatch, independently review and approve the
+exact workflow revision. Before accepting any output as staging evidence:
+
+1. Use GitHub's [workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs)
+   to corroborate the expected repository, workflow ID/path, `workflow_dispatch`
+   event, reviewed workflow revision, run ID/attempt and successful completion.
+2. Use the [artifact API](https://docs.github.com/en/rest/actions/artifacts) to
+   verify the exact artifact ID, its association with that run and its digest.
+   Bind the manifest's candidate SHA and per-file hashes to the reviewed candidate
+   and downloaded files. An archive digest is not a per-file checksum.
+3. Reject missing or mismatched evidence. Artifact names, a mutable branch name
+   or a manifest written by the producing workflow cannot establish approval.
+
+These are required operator/consumer checks, not implemented automatic enforcement
+or verified repository/organization policy. They do not authorize dispatch or
+establish runtime compatibility, final release provenance or publication rights.
+
 ## What it produces
 
 The trusted workflow and frozen candidate have separate sibling checkouts.
