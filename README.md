@@ -21,6 +21,7 @@
 <a href="https://engram.gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
 <a href="#get-started"><strong>Quickstart</strong></a> &bull;
 <a href="DOCS.md"><strong>Docs</strong></a> &bull;
+<a href="docs/RELEASE-STAGING.md"><strong>Candidate staging</strong></a> &bull;
 <a href="https://gentle-ai.gentlemanprogramming.com/"><strong>Gentle-AI</strong></a> &bull;
 <a href="https://gentle-ai-wiki.gentlemanprogramming.com/"><strong>Wiki</strong></a>
 </p>
