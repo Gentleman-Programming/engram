@@ -48,6 +48,13 @@ this preparation runs setup regressions only against isolated fixture settings.
   delivery recovery. Existing core/Pi workflows are independent and do not provide atomic pairing.
   No publication sequence, rollback guarantee or coordinator is introduced by this document.
 
+The combined candidate includes the [release policy's candidate-first guards](./RELEASE-POLICY.md#candidate-first-publication-and-manual-promotion).
+They check the actual `0.5.0` installer pin and required public companion metadata before core
+publication; source preparation alone does not prove that version is publicly available.
+Pi publication uses `candidate`; promotion to `latest` remains manual and rights-gated.
+Core's existing Homebrew behavior remains non-atomic. These guards do not transfer earlier
+artifact/runtime evidence to a new source tree or prove official release bytes or bundle upgrades.
+
 The [candidate checker](./RELEASE-CANDIDATE.md) remains **rejection-only**. Passing its tests,
 metadata checks or package-content inspection cannot certify runtime compatibility or release readiness.
 No published-binary handshake, supported Windows bundle upgrade or publisher-permission evidence
