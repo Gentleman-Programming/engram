@@ -56,6 +56,24 @@ func TestReleaseStaging(t *testing.T) {
 			}
 		}
 	})
+	t.Run("job-env-output-context", func(t *testing.T) {
+		const marker = "\n    env:\n"
+		if strings.Count(w, marker) != 1 {
+			t.Fatal("exactly one job-level env block required")
+		}
+		_, env, _ := strings.Cut(w, marker)
+		end := strings.Index(env, "\n    steps:")
+		if end < 0 {
+			t.Fatal("job-level env must end before steps")
+		}
+		env = env[:end]
+		if strings.Contains(env, "runner.") {
+			t.Error("runner context is unavailable in job-level env")
+		}
+		if !strings.Contains(env, "      OUT: ${{ github.workspace }}/staging") {
+			t.Error("job output must use github.workspace staging outside candidate checkout")
+		}
+	})
 	t.Run("build-and-package-evidence", func(t *testing.T) {
 		for _, want := range []string{"go-version: \"1.25.10\"", "GOTOOLCHAIN: local", "CGO_ENABLED: '0'", "linux darwin windows", "amd64 arm64", "-mod=readonly", "-trimpath", "-buildvcs=true", "-X main.version=", "go version -m", "vcs.revision=", "vcs.modified=false", "git status --porcelain", "--untracked-files=all", "npm pack --ignore-scripts --json --pack-destination", "sha256", "sha512", "workflow_sha", "candidate_sha", "run_attempt"} {
 			if !strings.Contains(w, want) {
@@ -75,7 +93,7 @@ func TestReleaseStaging(t *testing.T) {
 		if next := strings.Index(upload, "\n      - "); next >= 0 {
 			upload = upload[:next]
 		}
-		for _, want := range []string{"actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7", "if: success()", "if-no-files-found: error", "overwrite: false", "retention-days: 7", "candidate-${{ github.run_id }}-${{ github.run_attempt }}", "${{ runner.temp }}/staging/"} {
+		for _, want := range []string{"actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7", "if: success()", "if-no-files-found: error", "overwrite: false", "retention-days: 7", "candidate-${{ github.run_id }}-${{ github.run_attempt }}", "${{ github.workspace }}/staging/"} {
 			if !strings.Contains(upload, want) {
 				t.Errorf("missing upload boundary %q", want)
 			}

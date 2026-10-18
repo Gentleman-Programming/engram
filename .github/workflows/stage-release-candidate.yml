@@ -24,7 +24,7 @@ jobs:
       CORE_VERSION: ${{ inputs.core_version }}
       GOTOOLCHAIN: local
       CGO_ENABLED: '0'
-      OUT: ${{ runner.temp }}/staging
+      OUT: ${{ github.workspace }}/staging
     steps:
       - name: Validate inputs
         shell: bash
@@ -135,7 +135,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/staging/*
+          path: ${{ github.workspace }}/staging/*
           if-no-files-found: error
           overwrite: false
           retention-days: 7

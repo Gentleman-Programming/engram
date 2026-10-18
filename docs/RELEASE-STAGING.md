@@ -15,7 +15,9 @@ Go 1.25.10 builds six Linux/macOS/Windows amd64/arm64 raw unsigned binaries with
 CGO disabled, readonly modules, trimpath and embedded version/VCS information.
 Each binary's inspected build metadata must match the source revision and report
 `vcs.modified=false`; source cleanliness is checked before and after packaging.
-All outputs are outside the candidate checkout. Candidate binaries are not run.
+All outputs use `${{ github.workspace }}/staging`, outside the sibling candidate
+and policy checkouts. The `github` context is available in job-level `env`;
+`runner` is not. Candidate binaries are not run.
 
 Pi is packed locally with `npm pack --ignore-scripts`; no installation, lifecycle
 hook, candidate JavaScript, registry publication, tag movement or Homebrew update
