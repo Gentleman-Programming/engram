@@ -3918,6 +3918,8 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
+                       repair --project P --check CODE (--plan|--dry-run|--apply)
+                       repair mutates state: only --apply writes (default --dry-run).
   context [project] [--project PROJECT|--all] [--scope SCOPE] [--older-history]
                      Show recent context from previous sessions
   stats [--project PROJECT|--all]

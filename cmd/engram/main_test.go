@@ -3278,6 +3278,44 @@ func TestObsidianExportInHelpText(t *testing.T) {
 	}
 }
 
+// TestDoctorHelpNamesRepairSubcommand guards the top-level help against the
+// #1940 gap: `doctor` itself is read-only, but `engram doctor repair --apply`
+// writes, and a help line that lists only the flags of the base command hides a
+// mutating subcommand behind a "read-only" description.
+func TestDoctorHelpNamesRepairSubcommand(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+
+	lines := strings.Split(stdout, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "  doctor ") {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		t.Fatalf("expected a 'doctor' line in help text, got: %q", stdout)
+	}
+
+	// Continuation lines of an entry are indented to the description column;
+	// the next entry starts at the two-space command column and ends the block.
+	var block strings.Builder
+	block.WriteString(lines[start] + "\n")
+	for _, line := range lines[start+1:] {
+		if !strings.HasPrefix(line, "                     ") {
+			break
+		}
+		block.WriteString(line + "\n")
+	}
+
+	blockText := block.String()
+	for _, want := range []string{"repair", "--apply"} {
+		if !strings.Contains(blockText, want) {
+			t.Fatalf("expected doctor help block to mention %q, got: %q", want, blockText)
+		}
+	}
+}
+
 // ─── obsidian-export Phase 4 tests (graph-config, watch, interval) ───────────
 
 // captureExitPanic is a helper that runs fn inside a panic-recovering wrapper,
