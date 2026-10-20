@@ -6,12 +6,17 @@ import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { importPluginFromSandbox, PLUGIN_ROOT, withPluginSandbox } from "./plugin-sandbox.mjs";
 
 // The runtime context these fixtures hand the plugin still points at the checkout, because the
 // plugin only ever reads `cwd`. The module it loads comes from the sandbox, so nothing under the
 // checkout is written to or removed.
 const ROOT = PLUGIN_ROOT;
+
+// This isolated test worker models a primary runtime by default, regardless of its launcher.
+// Child-role scenarios below explicitly set and restore their own marker.
+delete process.env.GENTLE_PI_AGENTS_CHILD;
 
 function deferred() {
   let resolve;
@@ -51,6 +56,27 @@ async function loadPluginHarness(sandbox, appendEntry) {
   return { registeredTools, eventHandlers };
 }
 
+test("warning fixture completes under an inherited delegated-child role", () => {
+  const env = { ...process.env, GENTLE_PI_AGENTS_CHILD: "1" };
+  // A nested runner must execute its selected test, not inherit Node's worker context.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, [
+    "--test", "--test-reporter=tap", "--test-concurrency=1", "--test-timeout=4000",
+    "--test-name-pattern=^background warning routing: tui-server$",
+    fileURLToPath(import.meta.url),
+  ], { env, encoding: "utf8", timeout: 10000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /ok 1 - background warning routing: tui-server/);
+  assert.match(result.stdout, /# tests 1\b/);
+  assert.match(result.stdout, /# pass 1\b/);
+  for (const counter of ["fail", "cancelled", "skipped"]) {
+    assert.match(result.stdout, new RegExp(`# ${counter} 0\\b`));
+  }
+});
+
 // Mode labels model documented hasUI capabilities; this is not a live RPC client test.
 for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwing-notifier", "missing-notifier", "incomplete-ui"]) {
   test(`background warning routing: ${scenario}`, async () => {
@@ -87,7 +113,7 @@ for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwin
         };
         if (["missing-notifier", "incomplete-ui"].includes(scenario)) delete ctx.ui.notify;
         const capture = eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "a sufficiently long captured prompt" }, ctx);
-        await started.promise;
+        await waitFor(started.promise, `background warning routing: ${scenario}: prompt capture did not start`);
         // Another session event must not steal the suspended capture's diagnostic UI.
         const unrelated = runtimeContext("unrelated-session");
         unrelated.hasUI = true;
