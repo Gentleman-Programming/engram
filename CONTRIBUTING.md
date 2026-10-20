@@ -43,10 +43,62 @@ A short explanation in the issue is sufficient; no separate design document is r
 
 Once the issue is approved:
 
-1. Fork the repo and create a branch from `main`
+1. Fork the repo and create a branch from the canonical `main`
 2. Implement your change
 3. Open a PR using the PR template — **link the approved issue** with `Closes #N`
 4. Add exactly **one `type:*` label** to the PR (see label system below)
+
+#### Forks and remotes
+
+A pull request targets the canonical repository. A fork is where the branch lives, not where the pull request opens.
+
+| Remote | Points at | Holds |
+|---------|-----------|-------|
+| `origin` | your fork | your branches |
+| `upstream` | the canonical repository | the canonical `main` |
+
+Verify both remotes before publishing, then branch from the canonical `main`:
+
+```bash
+git remote -v                                   # origin must be your fork, upstream the canonical repository
+git fetch upstream
+git checkout -b feat/1821-short-description upstream/main
+git push -u origin feat/1821-short-description
+```
+
+A fork's default branch is not kept current for you. Branching from a local `main` that has fallen behind produces a diff that does not apply cleanly.
+
+Open the pull request against the canonical repository explicitly, so the destination is never inferred from the clone you happen to be in:
+
+```bash
+gh pr create --repo <canonical-owner>/<canonical-repo> \
+  --head <your-fork-owner>:<branch> --base main \
+  --title "feat(scope): description" --body-file pull_request_body.md
+```
+
+#### Authorizations are separate
+
+| Action | Who performs it |
+|--------|-----------------|
+| Create a fork and push branches to it | you, once you are authorized to use your fork |
+| Open or update a pull request in the canonical repository | you, once you are authorized to publish there |
+| Apply the `type:*` label to a pull request in the canonical repository | a maintainer with triage access. A contributor without it receives `does not have the correct permissions to execute AddLabelsToLabelable`; that is a maintainer step, not something to retry |
+| Merge a pull request | a maintainer |
+
+Request the specific action you need. Being authorized to open a pull request is not authorization to label it or to merge it.
+
+#### When a push to the canonical repository is rejected
+
+Do not push branches to the canonical repository. It fails in one of two ways, depending on your access:
+
+- **Without push access** — the remote refuses the push: `ERROR: Permission to <canonical-owner>/<canonical-repo>.git denied to <you>`.
+- **With push access** — the repository's ruleset rejects the new branch: the push fails with `GH013` and the required checks are reported as expected.
+
+Both are the controls working as designed.
+
+- Do not retry the push, silently switch the destination, use an exempt branch namespace, fabricate checks, or change the ruleset.
+- Push the branch to your fork and open the pull request from there, as described above.
+- If neither the fork nor the label step is authorized for your account, stop and ask a maintainer for an authorized route. Record the rejection on the issue: it is useful evidence, not an obstacle to work around.
 
 ### Step 4: Automated PR Checks
 

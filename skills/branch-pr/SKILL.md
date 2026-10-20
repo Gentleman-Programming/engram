@@ -24,6 +24,8 @@ Use this skill when:
 2. **Every PR MUST have exactly one `type:*` label**
 3. **All required automated checks must pass** before merge is possible
 4. **Blank PRs without issue linkage will be blocked** by GitHub Actions
+5. **The PR targets the canonical repository, the branch lives in your fork** — `origin` is your fork, `upstream` is the canonical repository. A push straight to the canonical repository is refused, either by permissions or by the ruleset with `GH013`; do not retry it or switch destinations silently
+6. **Applying the `type:*` label needs maintainer triage access** on the canonical repository. When the API refuses, ask a maintainer instead of retrying
 
 ---
 
@@ -31,12 +33,12 @@ Use this skill when:
 
 ```
 1. Verify every linked issue has `status:approved`, a real assignee, and the proportional evidence defined in CONTRIBUTING.md; the PR author need not match the assignee
-2. Create branch: feat/*, fix/*, docs/*, refactor/*, chore/*
+2. Create branch from the canonical `main` (`upstream/main`), with `origin` pointing at your fork: feat/*, fix/*, docs/*, refactor/*, chore/*
 3. Implement changes
 4. For behavior changes, run a focused regression test and affected package tests locally; record commands and outcomes. For docs-only changes, record N/A for Go tests and verify the documentation.
 5. Check every changed path against the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
-6. Open PR using the template
-7. Add exactly one type:* label
+6. Push the branch to your fork, then open the PR against the canonical repository using the template
+7. Add exactly one type:* label — this needs a maintainer with triage access on the canonical repository, so ask for it rather than retrying
 8. After pushing/opening the PR, wait for GitHub CI's full unit/E2E/lint and applicable platform checks; report results only after they run
 ```
 
@@ -216,8 +218,12 @@ update docs                      ← no conventional commit format
 ## Commands
 
 ```bash
-# Create branch
-git checkout -b feat/my-feature main
+# Identify the remotes before publishing. origin must be your fork and upstream
+# the canonical repository; verify with git remote -v before pushing anything.
+git fetch upstream
+
+# Branch from the canonical main, not from a local main that may be stale.
+git checkout -b feat/my-feature upstream/main
 
 # For behavior changes, run actual focused regression and affected package commands:
 # go test ./internal/store -run '<actual regression test name>'
@@ -228,10 +234,53 @@ git checkout -b feat/my-feature main
 # After pushing, GitHub CI runs broad unit/E2E/lint and applicable platform checks;
 # do not claim their results until the checks actually pass.
 
-# Push and create PR
+# Push to your fork, never to the canonical repository. A direct push to the
+# canonical repository is refused, by permissions or by its ruleset with GH013.
 git push -u origin feat/my-feature
-gh pr create --title "feat(scope): description" --body "Closes #N"
 
-# Add type label to PR
+# Open the PR against the canonical repository, explicitly, so the destination is
+# never inferred from the clone you are in.
+gh pr create --repo <canonical-owner>/<canonical-repo> \
+  --head <your-fork-owner>:feat/my-feature --base main \
+  --title "feat(scope): description" --body-file pull_request_body.md
+
+# The type:* label needs triage access to the canonical repository. A contributor
+# without it gets "does not have the correct permissions to execute
+# AddLabelsToLabelable": ask a maintainer to apply it, and do not retry.
 gh pr edit <pr-number> --add-label "type:feature"
 ```
+
+## Forks, Remotes, and Publication
+
+A pull request targets the canonical repository. A fork is where the branch lives, not where the pull request opens.
+
+| Remote | Points at | Holds |
+|---------|-----------|-------|
+| `origin` | your fork | your branches |
+| `upstream` | the canonical repository | the canonical `main` |
+
+A fork's default branch is not kept current for you. Branch from `upstream/main` so the diff applies cleanly, and push to `origin` so the branch is where the pull request can read it from.
+
+### Authorizations are separate
+
+| Action | Who performs it |
+|--------|-----------------|
+| Create a fork and push branches to it | you, once authorized to use your fork |
+| Open or update a pull request in the canonical repository | you, once authorized to publish there |
+| Apply the `type:*` label to a pull request in the canonical repository | a maintainer with triage access |
+| Merge a pull request | a maintainer |
+
+Being authorized to open a pull request is not authorization to label it or to merge it. Request the specific action you need.
+
+### When a push to the canonical repository is rejected
+
+Do not push branches to the canonical repository. It fails in one of two ways, depending on your access:
+
+- **Without push access** — the remote refuses the push: `ERROR: Permission to <canonical-owner>/<canonical-repo>.git denied to <you>`.
+- **With push access** — the repository's ruleset rejects the new branch: the push fails with `GH013` and the required checks are reported as expected.
+
+Both are the controls working as designed.
+
+- Do not retry the push, silently switch the destination, use an exempt branch namespace, fabricate checks, or change the ruleset.
+- Push the branch to your fork and open the pull request from there.
+- If neither the fork nor the label step is authorized for your account, stop and ask a maintainer for an authorized route, and record the rejection on the issue as evidence.
