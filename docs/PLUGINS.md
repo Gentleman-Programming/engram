@@ -22,6 +22,12 @@
 | Codex | Codex plugin assets under `plugin/codex/`; `engram setup codex` best-effort installs the marketplace plugin and writes MCP/instruction config. |
 | Pi | Pi package under `plugin/pi/` exposes Pi-native HTTP memory tools; Pi 0.99.0+ built-in MCP handles other servers, and an installed `pi-mcp-adapter` replaces it, so setup does not add it. |
 
+### Client-local project inspection
+
+`engram hook resolve-hook-project` reads existing hook JSON from stdin and uses its exact lowercase `cwd` field to inspect the local filesystem. Other hook fields are ignored. It prints canonical `project`, `project_source` and `project_path` JSON, or `{}` when input or identity is unusable. Malformed input, duplicate `cwd`, inaccessible directories, ambiguity and invalid/unbound Git identities never fall back to an HTTP lookup. Malformed Git metadata in the cwd, its ancestors or a promoted child is not treated as a plain directory. Readable non-Git directories retain basename resolution.
+
+Inspection does not open the database, initialize global configuration, create Git bindings or register sessions. Existing config and repository bindings remain authoritative. The standalone action shares the native Codex prompt's 1.5-second inspection budget; internal callers can instead pass their remaining context to the shared Go inspector. This helper alone does not change the registration hooks or repair already misattributed sessions.
+
 Pi and OpenCode activity renews the local runtime lease through their existing session registration paths. This is local SQLite liveness only: it has no timer, cloud synchronization, or cross-machine coordination.
 
 Pi sends `resume: true` for runtime-root registration and adopts only a valid acknowledged effective ID. The Go core selects numeric continuations; Pi persists the mapping in its session entries for reloads and uses it for attributed writes and shutdown `/end`. Legacy `:resume:<uuid>` mappings are re-registered as-is; an ended mapping falls back to root registration with `resume: true`. Reload does not end the session. Ownership conflicts and an older server's `409 session_already_ended` block writes rather than triggering client-generated identities.
