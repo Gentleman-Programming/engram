@@ -124,7 +124,11 @@ func TestSQLiteTempHTTPDeletedInheritedDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, path, err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("close HTTP response body: %v", err)
+			}
+		}()
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatal(err)
