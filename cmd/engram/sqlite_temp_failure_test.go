@@ -58,7 +58,7 @@ func TestSQLiteTempFailurePaths(t *testing.T) {
 			}
 			wantStderr := ""
 			if strings.HasSuffix(mode, "preparation") {
-				wantStderr = "engram: engram: data directory must be an absolute path, got \"relative-data\" — set ENGRAM_DATA_DIR or ensure your home directory is resolvable\n"
+				wantStderr = "engram: prepare SQLite temp directory: data directory must be an absolute path, got \"relative-data\" — set ENGRAM_DATA_DIR or ensure your home directory is resolvable\n"
 				if strings.HasPrefix(mode, "isolation-") {
 					wantStderr += wantStderr
 				}

@@ -46,7 +46,7 @@ func prepareSQLiteTemp(dataDir string) error {
 		return nil
 	}
 	if err := store.ValidateDataDirectory(dataDir); err != nil {
-		return err
+		return fmt.Errorf("prepare SQLite temp directory: %s", strings.TrimPrefix(err.Error(), "engram: "))
 	}
 	dir := filepath.Join(dataDir, "tmp", "sqlite")
 	if err := os.MkdirAll(dir, 0700); err != nil {
