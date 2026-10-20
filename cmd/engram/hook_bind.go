@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/hostbind"
@@ -27,6 +26,10 @@ func hostBindingDataDirFromEnvOrConfig() string {
 	return cfg.DataDir
 }
 
+// hostProcessPID returns the PID of the process that launched this hook. It is a
+// seam so tests can bind to a known process.
+var hostProcessPID = os.Getppid
+
 // publishClaudeHostBinding links the Claude host process to the session it
 // reported. It is best effort by design: a hook verdict or SessionStart must
 // never fail because the binding could not be written, and an absent binding
@@ -43,10 +46,11 @@ func publishClaudeHostBinding(sessionID string, hostPID int) {
 }
 
 // cmdClaudeBindSession is invoked by Claude's SessionStart hook (startup,
-// resume, clear, fork) to refresh the host-to-session binding. The host
-// process is passed by the hook script as ENGRAM_HOST_PID, because this
-// command's own parent is the script, not Claude. It prints nothing and always
-// succeeds so it can never disturb session start.
+// resume, clear, fork) to refresh the host-to-session binding. The hook is
+// registered in exec form (no shell), so this command's parent is the Claude
+// process itself. It prints nothing (plain stdout on SessionStart would be
+// added to the model context) and always succeeds so it can never disturb
+// session start.
 func cmdClaudeBindSession() {
 	if runningUnderPi() {
 		return
@@ -63,9 +67,5 @@ func cmdClaudeBindSession() {
 	if !ok {
 		return
 	}
-	hostPID, err := strconv.Atoi(strings.TrimSpace(os.Getenv("ENGRAM_HOST_PID")))
-	if err != nil {
-		return
-	}
-	publishClaudeHostBinding(sessionID, hostPID)
+	publishClaudeHostBinding(sessionID, hostProcessPID())
 }

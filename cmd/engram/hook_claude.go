@@ -129,9 +129,6 @@ func guardClaudePreToolUse(input []byte) []byte {
 	if err != nil {
 		return hookSessionConfirmationDeny("Claude", err)
 	}
-	// The host owns this session; remember that for MCP writes whose hook
-	// binding is cancelled later (#1693). Best effort: never affects the verdict.
-	publishClaudeHostBinding(id, os.Getppid())
 	if effective != id {
 		payload["session_id"], _ = json.Marshal(effective)
 		input, _ = json.Marshal(payload)
