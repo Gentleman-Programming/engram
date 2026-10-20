@@ -174,11 +174,51 @@ func testConfig(t *testing.T) store.Config {
 
 func withArgs(t *testing.T, args ...string) {
 	t.Helper()
+	// Normal main() now changes process TEMP/TMP on Windows. Restore those
+	// values before deleting any root they may reference, and keep an otherwise
+	// unconfigured mocked-store dispatch away from the user's default data dir.
+	if runtime.GOOS == "windows" && len(args) > 1 {
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "test", "compatibility", "migrate-copy", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
+		default:
+			isolateMainStartup(t)
+		}
+	}
 	old := os.Args
 	os.Args = args
 	t.Cleanup(func() {
 		os.Args = old
 	})
+}
+
+// isolateMainStartup leaves explicit fixture configs and configuration errors
+// intact. Only the resolved real default is redirected; no home files are read.
+func isolateMainStartup(t *testing.T) {
+	t.Helper()
+	root := t.TempDir() // Register deletion before environment restoration (LIFO).
+	for _, key := range []string{"TEMP", "TMP"} {
+		value, present := os.LookupEnv(key)
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	oldConfig := storeDefaultConfig
+	storeDefaultConfig = func() (store.Config, error) {
+		cfg, err := oldConfig()
+		if err != nil {
+			return cfg, err
+		}
+		defaultCfg, defaultErr := store.DefaultConfig()
+		if defaultErr == nil && cfg.DataDir == defaultCfg.DataDir {
+			cfg.DataDir = filepath.Join(root, "data")
+		}
+		return cfg, nil
+	}
+	t.Cleanup(func() { storeDefaultConfig = oldConfig })
 }
 
 func withCwd(t *testing.T, dir string) {

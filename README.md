@@ -102,6 +102,8 @@ Codex mutating Engram tools require the running core's `/health` response to adv
 
 A **Go binary** with SQLite + FTS5 full-text search, exposed through CLI, HTTP API, MCP, and an interactive TUI. It works with any MCP-compatible agent, including Claude Code, OpenCode, Gemini CLI, Codex, VS Code (Copilot), Antigravity, Cursor, and Windsurf. No Node.js, Python, or Docker is required: one binary, one SQLite file.
 
+The data directory defaults to `~/.engram`; a nonblank `ENGRAM_DATA_DIR` overrides it and must be an absolute path. On Windows, normal CLI startup (including `serve` and `mcp`) creates and checks `<data-directory>/tmp/sqlite` before opening SQLite, then sets `TEMP` and `TMP` for that process only. Startup fails with an operation-specific diagnostic if the directory cannot be used. User/system environment settings and the working directory are unchanged. The directory is shared between processes and is not cleaned by Engram; SQLite manages its own uniquely named temporary files. Linux/macOS, config-free commands, isolated self-tests, `compatibility`, and `migrate-copy` retain their existing behavior.
+
 **[Docs →](docs/ARCHITECTURE.md)**
 
 ---
