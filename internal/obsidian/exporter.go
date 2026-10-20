@@ -311,6 +311,26 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		for _, relPath := range state.Files {
 			owned[filepath.Clean(relPath)] = struct{}{}
 		}
+		// Snapshot physical identities once: case-only aliases can name a live
+		// file even when their normalized lexical paths differ.
+		root, identityErr := os.OpenRoot(engRoot)
+		var liveFiles []os.FileInfo
+		if identityErr == nil {
+			defer func() { _ = root.Close() }()
+			for path := range owned {
+				info, err := root.Stat(path)
+				if err != nil && !os.IsNotExist(err) {
+					identityErr = err
+					break
+				}
+				if err == nil {
+					liveFiles = append(liveFiles, info)
+				}
+			}
+		}
+		if identityErr != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("stat live export ownership: %w", identityErr))
+		}
 		for id, relPath := range state.Files {
 			if old, tracked := trackedPaths[id]; tracked && filepath.Clean(old) != filepath.Clean(relPath) {
 				state.PendingRetirements[id] = append(state.PendingRetirements[id], old)
@@ -329,6 +349,29 @@ func (e *Exporter) Export() (*ExportResult, error) {
 				}
 				seen[clean] = true
 				if _, taken := owned[clean]; taken {
+					remaining = append(remaining, path)
+					continue
+				}
+				if identityErr != nil {
+					remaining = append(remaining, path)
+					continue // Unknown ownership must never permit removal.
+				}
+				info, err := root.Stat(path)
+				if err != nil && !os.IsNotExist(err) {
+					result.Errors = append(result.Errors, fmt.Errorf("delete %s: stat retirement ownership: %w", path, err))
+					remaining = append(remaining, path)
+					continue
+				}
+				taken := false
+				if err == nil {
+					for _, live := range liveFiles {
+						if os.SameFile(info, live) {
+							taken = true
+							break
+						}
+					}
+				}
+				if taken {
 					remaining = append(remaining, path)
 					continue
 				}

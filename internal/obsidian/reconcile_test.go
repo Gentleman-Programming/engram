@@ -8,6 +8,72 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
+func TestCaseOnlyRenameOwnership(t *testing.T) {
+	for _, field := range []string{"type", "project"} {
+		t.Run(field, func(t *testing.T) {
+			dir, root := newReconcileVault(t)
+			obs := makeObs(1, "", "demo", "manual", "live", "", "2026-01-01T10:00:00Z")
+			ms := &mockStore{exportData: &store.ExportData{Observations: []store.Observation{obs}}}
+			cfg := ExportConfig{VaultPath: dir}
+			if _, err := NewExporter(ms, cfg).Export(); err != nil {
+				t.Fatal(err)
+			}
+			old := readStateFiles(t, root).Files[1]
+			target := filepath.Join("demo", "MANUAL", "live-1.md")
+			if field == "project" {
+				target = filepath.Join("DEMO", "manual", "live-1.md")
+				project := "DEMO"
+				ms.exportData.Observations[0].Project = &project
+			} else {
+				ms.exportData.Observations[0].Type = "MANUAL"
+			}
+			if _, err := os.Stat(filepath.Join(root, target)); os.IsNotExist(err) {
+				t.Skip("temp filesystem is case-sensitive; case-only aliases are distinct")
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				r, err := NewExporter(ms, cfg).Export()
+				if err != nil {
+					t.Fatal(err)
+				}
+				content, readErr := os.ReadFile(filepath.Join(root, target))
+				state := readStateFiles(t, root)
+				if len(r.Errors) != 0 || r.Deleted != 0 || readErr != nil || string(content) != ObservationToMarkdown(ms.exportData.Observations[0]) || state.Files[1] != target || len(state.PendingRetirements[1]) != 1 || state.PendingRetirements[1][0] != old {
+					t.Fatalf("live case alias retired: result=%+v read=%v state=%+v", r, readErr, state)
+				}
+			}
+		})
+	}
+}
+
+func TestPhysicalPathOwnership(t *testing.T) {
+	dir, root := newReconcileVault(t)
+	obs := makeObs(1, "", "demo", "manual", "live", "", "2026-01-01T10:00:00Z")
+	ms := &mockStore{exportData: &store.ExportData{Observations: []store.Observation{obs}}}
+	cfg := ExportConfig{VaultPath: dir}
+	if _, err := NewExporter(ms, cfg).Export(); err != nil {
+		t.Fatal(err)
+	}
+	state := readStateFiles(t, root)
+	if err := os.Link(filepath.Join(root, state.Files[1]), filepath.Join(root, "alias.md")); err != nil {
+		t.Fatal(err)
+	}
+	state.PendingRetirements[2] = []string{"alias.md"}
+	if err := WriteState(filepath.Join(root, ".engram-sync-state.json"), state); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		r, err := NewExporter(ms, cfg).Export()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Errors) != 0 || r.Deleted != 0 || !fileExists(filepath.Join(root, "alias.md")) || len(readStateFiles(t, root).PendingRetirements[2]) != 1 {
+			t.Fatalf("physical alias owned by another note retired: %+v", r)
+		}
+	}
+}
+
 func TestScopedRenameRetriesRetirement(t *testing.T) {
 	for _, blocked := range []bool{false, true} {
 		t.Run(map[bool]string{false: "success", true: "retry"}[blocked], func(t *testing.T) {
