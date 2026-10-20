@@ -207,6 +207,18 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	sessionObsRefs := make(map[string][]ObsRef)
 	// topicObsRefs tracks obs per topic prefix for hub generation.
 	topicObsRefs := make(map[string][]ObsRef)
+	// Live counts protect existing hubs even when exporting their notes fails.
+	liveSessionCounts := make(map[string]int)
+	liveTopicCounts := make(map[string]int)
+	addHubRef := func(obs store.Observation) {
+		ref := obsToRef(obs)
+		if obs.SessionID != "" {
+			sessionObsRefs[obs.SessionID] = append(sessionObsRefs[obs.SessionID], ref)
+		}
+		if prefix := obsTopicPrefix(obs); prefix != "" {
+			topicObsRefs[prefix] = append(topicObsRefs[prefix], ref)
+		}
+	}
 
 	for _, obs := range data.Observations {
 		// Skip deleted
@@ -232,12 +244,11 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		obsType := sanitizePathComponent(obs.Type)
 		relPath := filepath.Join(project, obsType, Slugify(obs.Title, obs.ID)+".md")
 		// Desired references survive note/hub write failures.
-		ref := obsToRef(obs)
 		if obs.SessionID != "" {
-			sessionObsRefs[obs.SessionID] = append(sessionObsRefs[obs.SessionID], ref)
+			liveSessionCounts[obs.SessionID]++
 		}
 		if prefix := obsTopicPrefix(obs); prefix != "" {
-			topicObsRefs[prefix] = append(topicObsRefs[prefix], ref)
+			liveTopicCounts[prefix]++
 		}
 
 		// Incremental filter: a changed path must retry even below the cutoff.
@@ -247,6 +258,7 @@ func (e *Exporter) Export() (*ExportResult, error) {
 				// Only skip if already tracked in state (already exported)
 				if old, tracked := state.Files[obs.ID]; tracked && filepath.Clean(old) == relPath {
 					result.Skipped++
+					addHubRef(obs)
 					continue
 				}
 			}
@@ -281,6 +293,7 @@ func (e *Exporter) Export() (*ExportResult, error) {
 				result.Skipped++
 				// Track in state in case it wasn't tracked (e.g. after --force)
 				state.Files[obs.ID] = relPath
+				addHubRef(obs)
 				continue
 			}
 			// Content changed → update
@@ -299,7 +312,7 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 
 		state.Files[obs.ID] = relPath
-
+		addHubRef(obs)
 	}
 
 	// ── Retire notes left behind by a rename ─────────────────────────────────
@@ -432,7 +445,7 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	// above, so its hub stayed in the vault as an orphan (issue #1900).
 	if fullScope {
 		for sessionID, relPath := range state.SessionHubs {
-			if len(sessionObsRefs[sessionID]) > 0 {
+			if liveSessionCounts[sessionID] > 0 {
 				continue
 			}
 			if err := e.removeExportFile(engRoot, relPath); err != nil {
@@ -443,7 +456,7 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			delete(state.SessionHubs, sessionID)
 		}
 		for prefix, relPath := range state.TopicHubs {
-			if ShouldCreateTopicHub(len(topicObsRefs[prefix])) {
+			if ShouldCreateTopicHub(liveTopicCounts[prefix]) {
 				continue
 			}
 			if err := e.removeExportFile(engRoot, relPath); err != nil {

@@ -196,6 +196,8 @@ The wikilinks at the bottom are what give the graph view its connections. Obsidi
 
 ### Hub Notes
 
+Hub generation includes only successfully written or skipped notes, not notes whose export failed. Existing hubs remain tracked while their observations are live, even when note or hub writes fail.
+
 **Session hubs** (in `_sessions/`) — one per session, contains backlinks to every observation captured in that session. Open one to see the full chronological story of a work session.
 
 **Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `architecture/obsidian-plugin/*` observations cluster under `_topics/architecture--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).

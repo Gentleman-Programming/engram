@@ -3,10 +3,93 @@ package obsidian
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
+
+func TestFailedNotesDoNotGenerateHubReferences(t *testing.T) {
+	for _, successful := range []int{0, 1, 2} {
+		t.Run(string(rune('0'+successful))+" successful notes", func(t *testing.T) {
+			dir, root := newReconcileVault(t)
+			observations := []store.Observation{
+				makeObs(1, "s", "demo", "manual", "failed", "topic/failed", "2026-01-01T10:00:00Z"),
+				makeObs(2, "s", "demo", "manual", "good", "topic/good", "2026-01-01T10:00:00Z"),
+				makeObs(3, "s", "demo", "manual", "also good", "topic/also", "2026-01-01T10:00:00Z"),
+			}[:successful+1]
+			if err := os.MkdirAll(filepath.Join(root, "demo", "manual", "failed-1.md"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			ms := &mockStore{exportData: &store.ExportData{Observations: observations}}
+			r, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantHubs := successful // one session, plus a topic only for two successful notes
+			if len(r.Errors) != 1 || !strings.Contains(r.Errors[0].Error(), "write") || r.Created != successful || r.Updated != 0 || r.Deleted != 0 || r.Skipped != 0 || r.HubsCreated != wantHubs {
+				t.Errorf("failed note must not generate hubs: %+v", r)
+			}
+			state := readStateFiles(t, root)
+			if len(state.Files) != successful || state.Files[1] != "" || len(state.SessionHubs)+len(state.TopicHubs) != wantHubs {
+				t.Errorf("failed export tracked: %+v", state)
+			}
+			for _, hub := range []string{filepath.Join("_sessions", "s.md"), filepath.Join("_topics", "topic.md")} {
+				content, readErr := os.ReadFile(filepath.Join(root, hub))
+				wantExists := successful > 0 && (strings.HasPrefix(hub, "_sessions") || successful == 2)
+				if !wantExists {
+					if !os.IsNotExist(readErr) {
+						t.Errorf("unexpected hub %s: %v", hub, readErr)
+					}
+					continue
+				}
+				if readErr != nil || strings.Contains(string(content), "failed-1") || !strings.Contains(string(content), "good-2") {
+					t.Errorf("hub contains failed reference or lacks successful one: %s: %q %v", hub, content, readErr)
+				}
+			}
+		})
+	}
+}
+
+func TestDesiredHubsSurviveNoteRewriteFailure(t *testing.T) {
+	dir, root := newReconcileVault(t)
+	observations := []store.Observation{
+		makeObs(1, "s", "demo", "manual", "one", "topic/one", "2026-01-01T10:00:00Z"),
+		makeObs(2, "s", "demo", "manual", "two", "topic/two", "2026-01-01T10:00:00Z"),
+	}
+	ms := &mockStore{exportData: &store.ExportData{Observations: observations}}
+	cfg := ExportConfig{VaultPath: dir}
+	if _, err := NewExporter(ms, cfg).Export(); err != nil {
+		t.Fatal(err)
+	}
+	before := readStateFiles(t, root)
+	for i := range ms.exportData.Observations {
+		ms.exportData.Observations[i].Type = "blocked"
+	}
+	if err := os.WriteFile(filepath.Join(root, "demo", "blocked"), []byte("block directory creation"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewExporter(ms, cfg).Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := readStateFiles(t, root)
+	if len(r.Errors) != 2 || r.Deleted != 0 || r.HubsCreated != 0 || len(after.SessionHubs) != 1 || len(after.TopicHubs) != 1 {
+		t.Fatalf("live hubs lost or rewritten after note failure: %+v state=%+v", r, after)
+	}
+	for _, hubs := range []map[string]string{before.SessionHubs, before.TopicHubs} {
+		for _, path := range hubs {
+			if !fileExists(filepath.Join(root, path)) {
+				t.Errorf("live hub retired: %s", path)
+			}
+		}
+	}
+	for id, path := range before.Files {
+		if after.Files[id] != path || !fileExists(filepath.Join(root, path)) {
+			t.Errorf("previous note lost: %d", id)
+		}
+	}
+}
 
 func TestCaseOnlyRenameOwnership(t *testing.T) {
 	for _, field := range []string{"type", "project"} {
