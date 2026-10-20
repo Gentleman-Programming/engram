@@ -355,6 +355,9 @@ func (s *Store) listEndedSessionCandidates(project string) ([]string, error) {
 // nothing, which leaves the family without a comparable baseline.
 func (s *Store) sessionFamilyMembers(root string) ([]sessionFamilyMember, error) {
 	prefix := root + continuationSessionMarker
+	// The continuation range is the one continuationSessionsQuery uses; the
+	// columns differ here because the root row and the continuation rows are
+	// read as one result and the end instant is normalized.
 	rows, err := s.queryItHook(s.db, `SELECT id, ifnull(project, ''), ifnull(datetime(ended_at), ''), ended_at IS NULL
 		FROM sessions WHERE id = ?
 		UNION ALL
