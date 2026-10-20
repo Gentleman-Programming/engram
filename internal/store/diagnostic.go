@@ -231,11 +231,14 @@ func sessionFamilyRoot(id string) string {
 	return id[:index]
 }
 
-// sessionFamilyMember is one session row of a conversation family.
+// sessionFamilyMember is one session row of a conversation family. EndedAt is
+// the normalized end instant, so members written by different producers stay
+// comparable; Open marks a row that never ended.
 type sessionFamilyMember struct {
 	ID      string
 	Project string
-	EndedAt *string
+	EndedAt string
+	Open    bool
 }
 
 // ListEndedSessionActivity returns one entry per conversation that kept
@@ -261,8 +264,8 @@ func (s *Store) ListEndedSessionActivity(project string) ([]EndedSessionActivity
 
 	roots := make([]string, 0, len(candidates))
 	seen := map[string]struct{}{}
-	for _, candidate := range candidates {
-		root := sessionFamilyRoot(candidate.ID)
+	for _, id := range candidates {
+		root := sessionFamilyRoot(id)
 		if _, known := seen[root]; !known {
 			seen[root] = struct{}{}
 			roots = append(roots, root)
@@ -306,14 +309,14 @@ func (s *Store) ListEndedSessionActivity(project string) ([]EndedSessionActivity
 	return activity, nil
 }
 
-// listEndedSessionCandidates returns the ended sessions that received a prompt
-// after their own end. It is a superset of the reported activity: a prompt
-// newer than the family baseline is always newer than the end of the session
-// that received it.
-func (s *Store) listEndedSessionCandidates(project string) ([]sessionFamilyMember, error) {
+// listEndedSessionCandidates returns the ids of the ended sessions that
+// received a prompt after their own end. It is a superset of the reported
+// activity: a prompt newer than the family baseline is always newer than the
+// end of the session that received it.
+func (s *Store) listEndedSessionCandidates(project string) ([]string, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT s.id, ifnull(s.project, ''), s.ended_at
+	query := `SELECT s.id
 		FROM sessions s
 		WHERE s.ended_at IS NOT NULL
 			AND EXISTS (SELECT 1 FROM user_prompts p
@@ -331,44 +334,45 @@ func (s *Store) listEndedSessionCandidates(project string) ([]sessionFamilyMembe
 	}
 	defer func() { _ = rows.Close() }()
 
-	candidates := make([]sessionFamilyMember, 0)
+	candidates := make([]string, 0)
 	for rows.Next() {
-		var member sessionFamilyMember
-		if err := rows.Scan(&member.ID, &member.Project, &member.EndedAt); err != nil {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		candidates = append(candidates, member)
+		candidates = append(candidates, id)
 	}
 	return candidates, rows.Err()
 }
 
 // sessionFamilyMembers returns the root session of a conversation and every
 // continuation opened from it, in id order.
+//
+// The end instant is normalized through SQLite's datetime(), the same
+// normalization the candidate and prompt comparisons use. A session that ended
+// carries the normalized instant; a session that never ended is marked open.
+// An end instant that cannot be parsed stays empty and therefore orders
+// nothing, which leaves the family without a comparable baseline.
 func (s *Store) sessionFamilyMembers(root string) ([]sessionFamilyMember, error) {
-	members := make([]sessionFamilyMember, 0, 2)
-	session, err := s.GetSession(root)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
-		return nil, err
-	default:
-		members = append(members, sessionFamilyMember{ID: session.ID, Project: session.Project, EndedAt: session.EndedAt})
-	}
-
 	prefix := root + continuationSessionMarker
-	rows, err := s.queryItHook(s.db, continuationSessionsQuery, prefix+"0", prefix+":")
+	rows, err := s.queryItHook(s.db, `SELECT id, ifnull(project, ''), ifnull(datetime(ended_at), ''), ended_at IS NULL
+		FROM sessions WHERE id = ?
+		UNION ALL
+		SELECT id, ifnull(project, ''), ifnull(datetime(ended_at), ''), ended_at IS NULL
+		FROM sessions WHERE id >= ? AND id < ?
+		ORDER BY id`, root, prefix+"0", prefix+":")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
+	members := make([]sessionFamilyMember, 0, 2)
 	for rows.Next() {
-		var id string
-		var endedAt *string
-		if err := rows.Scan(&id, &endedAt); err != nil {
+		var member sessionFamilyMember
+		if err := rows.Scan(&member.ID, &member.Project, &member.EndedAt, &member.Open); err != nil {
 			return nil, err
 		}
-		members = append(members, sessionFamilyMember{ID: id, EndedAt: endedAt})
+		members = append(members, member)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -377,17 +381,18 @@ func (s *Store) sessionFamilyMembers(root string) ([]sessionFamilyMember, error)
 }
 
 // familyBaseline returns the latest end across a conversation family and
-// whether any of its sessions is still open.
+// whether any of its sessions is still open. The end instants are already
+// normalized, so they compare as plain instants.
 func familyBaseline(members []sessionFamilyMember) (string, bool) {
 	baseline := ""
 	open := false
 	for _, member := range members {
-		if member.EndedAt == nil {
+		if member.Open {
 			open = true
 			continue
 		}
-		if *member.EndedAt > baseline {
-			baseline = *member.EndedAt
+		if member.EndedAt > baseline {
+			baseline = member.EndedAt
 		}
 	}
 	return baseline, open
