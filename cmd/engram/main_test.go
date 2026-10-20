@@ -3309,10 +3309,17 @@ func TestDoctorHelpNamesRepairSubcommand(t *testing.T) {
 	}
 
 	blockText := block.String()
-	for _, want := range []string{"repair", "--apply"} {
+	for _, want := range []string{
+		"Run read-only operational diagnostics [--json] [--project P] [--check CODE]",
+		"repair --project P --check CODE (--plan|--dry-run|--apply)",
+		"repair mutates state: only --apply writes.",
+	} {
 		if !strings.Contains(blockText, want) {
 			t.Fatalf("expected doctor help block to mention %q, got: %q", want, blockText)
 		}
+	}
+	if strings.Contains(blockText, "default --dry-run") {
+		t.Fatalf("doctor help must not advertise a default mode for all repair checks: %q", blockText)
 	}
 }
 
