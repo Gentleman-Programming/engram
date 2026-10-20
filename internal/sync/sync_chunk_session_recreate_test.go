@@ -7,6 +7,7 @@ package sync
 // assertions added on top.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -229,6 +230,63 @@ func TestChunkDeleteThenRecreateConvergesToRecreatedState(t *testing.T) {
 		chunkObservationUpsert("obs-2", "S1"),
 	})
 	assertSessionConverged(t, s, "S1", "obs-2")
+}
+
+func TestImportRecreatePreservesLocalSessionData(t *testing.T) {
+	s := newChunkOrderingStore(t)
+	if err := s.EnrollProject("p"); err != nil {
+		t.Fatal(err)
+	}
+	applyOrderedChunk(t, s, "seed-1947", []store.SyncMutation{chunkSessionUpsert("S1"), chunkObservationUpsert("O1", "S1")})
+	if _, err := s.AddPrompt(store.AddPromptParams{SessionID: "S1", Project: "p", Content: "local prompt"}); err != nil {
+		t.Fatal(err)
+	}
+	params := store.FinalizeSessionParams{SessionID: "S1", Project: "p", Summary: "local summary"}
+	finalized, err := s.FinalizeSession(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorSession, err := s.GetSession("S1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetSyncState("cloud:p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := newFakeCloudTransport()
+	const id = "recreate-1947"
+	transport.manifest = &Manifest{Version: ownershipModeManifestVersion, Chunks: []ChunkEntry{{ID: id, CreatedAt: "2026-08-14T00:00:00Z"}}}
+	raw, err := json.Marshal(map[string]any{"mutations": []store.SyncMutation{chunkSessionUpsert("S1"), chunkSessionDelete("S1"), chunkSessionUpsert("S1"), chunkObservationUpsert("O2", "S1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.chunks[id] = raw
+	if _, err := NewCloudWithTransport(s, transport, "p").Import(); err != nil {
+		t.Fatal(err)
+	}
+	assertSessionConverged(t, s, "S1", "O1")
+	assertSessionConverged(t, s, "S1", "O2")
+	session, err := s.GetSession("S1")
+	if err != nil || session.Directory != priorSession.Directory || session.Project != priorSession.Project || session.OwnershipMode != priorSession.OwnershipMode || session.EndedAt == nil || priorSession.EndedAt == nil || *session.EndedAt != *priorSession.EndedAt {
+		t.Fatalf("session metadata = %+v, prior %+v, %v", session, priorSession, err)
+	}
+	prompts, err := s.RecentPrompts("p", 10)
+	if err != nil || len(prompts) != 1 || prompts[0].Content != "local prompt" {
+		t.Fatalf("prompts = %+v, %v", prompts, err)
+	}
+	again, err := s.FinalizeSession(params)
+	if err != nil || !again.AlreadyFinalized || again.SummaryID != finalized.SummaryID {
+		t.Fatalf("finalization = %+v, %v", again, err)
+	}
+	chunks, err := s.GetSyncedChunksForTarget("cloud:p")
+	if err != nil || !chunks[id] {
+		t.Fatalf("chunks = %v, %v", chunks, err)
+	}
+	after, err := s.GetSyncState("cloud:p")
+	if err != nil || after.LastPulledSeq != before.LastPulledSeq+4 {
+		t.Fatalf("state = %+v, %v", after, err)
+	}
 }
 
 func orderedMutationSummary(mutations []store.SyncMutation) string {
