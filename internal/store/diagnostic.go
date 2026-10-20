@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,15 +23,16 @@ type DiagnosticSessionEvidence struct {
 	Name          string `json:"name"`
 }
 
-// EndedSessionActivityEvidence is the read-only projection of a session that
-// ended and kept receiving activity afterwards. It intentionally reports counts
-// and timestamps only, never prompt content.
+// EndedSessionActivityEvidence is the read-only projection of a conversation
+// that kept receiving prompts after the last of its sessions ended. It
+// intentionally reports counts and timestamps only, never prompt content.
 type EndedSessionActivityEvidence struct {
-	SessionID           string `json:"session_id"`
-	Project             string `json:"project"`
-	EndedAt             string `json:"ended_at"`
-	PostEndPromptCount  int64  `json:"post_end_prompt_count"`
-	LastPostEndPromptAt string `json:"last_post_end_prompt_at"`
+	SessionID           string   `json:"session_id"`
+	Project             string   `json:"project"`
+	EndedAt             string   `json:"ended_at"`
+	PostEndPromptCount  int64    `json:"post_end_prompt_count"`
+	LastPostEndPromptAt string   `json:"last_post_end_prompt_at"`
+	SessionIDs          []string `json:"session_ids"`
 }
 
 // OrphanedObservationSessionEvidence identifies observations whose stored
@@ -208,8 +210,42 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 	return sessions, rows.Err()
 }
 
-// ListEndedSessionActivity returns sessions that have ended and kept receiving
-// prompts after their end, scoped by project when provided.
+// continuationSessionMarker separates a session id from the numeric suffix the
+// core appends when a resumed conversation opens a continuation. The same
+// marker and range rule already drive continuationSessionTx.
+const continuationSessionMarker = ":resume:"
+
+// sessionFamilyRoot returns the root session id of a conversation. The core
+// derives a continuation from the identity it was asked to register, so the
+// ancestor before the first marker is the conversation root and the range rule
+// below covers every descendant of it. An identity that does not carry the
+// marker followed by a digit is not a continuation and is its own root.
+func sessionFamilyRoot(id string) string {
+	index := strings.Index(id, continuationSessionMarker)
+	if index < 0 || index+len(continuationSessionMarker) >= len(id) {
+		return id
+	}
+	if next := id[index+len(continuationSessionMarker)]; next < '0' || next > '9' {
+		return id
+	}
+	return id[:index]
+}
+
+// sessionFamilyMember is one session row of a conversation family.
+type sessionFamilyMember struct {
+	ID      string
+	Project string
+	EndedAt *string
+}
+
+// ListEndedSessionActivity returns one entry per conversation that kept
+// receiving prompts after the last of its sessions ended, scoped by project
+// when provided.
+//
+// A conversation is one root session plus the continuations the core opened
+// from it. The baseline is the latest end across that whole family, so
+// activity a later continuation already covered does not keep the
+// conversation reported, while activity newer than the last end still is.
 //
 // The comparison runs through SQLite's datetime() so rows written by different
 // producers stay comparable: SQLite's datetime('now') and the Go formatter both
@@ -218,20 +254,76 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 // The comparison is limited to whole seconds, which matches the second-precision
 // end timestamps this store persists.
 func (s *Store) ListEndedSessionActivity(project string) ([]EndedSessionActivityEvidence, error) {
+	candidates, err := s.listEndedSessionCandidates(project)
+	if err != nil {
+		return nil, err
+	}
+
+	roots := make([]string, 0, len(candidates))
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		root := sessionFamilyRoot(candidate.ID)
+		if _, known := seen[root]; !known {
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	sort.Strings(roots)
+
+	activity := make([]EndedSessionActivityEvidence, 0, len(roots))
+	for _, root := range roots {
+		members, err := s.sessionFamilyMembers(root)
+		if err != nil {
+			return nil, err
+		}
+		baseline, open := familyBaseline(members)
+		// An open session can still accept the writes, so the conversation is
+		// not stuck and nothing is reported.
+		if open {
+			continue
+		}
+		ids := make([]string, 0, len(members))
+		for _, member := range members {
+			ids = append(ids, member.ID)
+		}
+		count, latest, err := s.countPromptsAfter(ids, baseline)
+		if err != nil {
+			return nil, err
+		}
+		// A later continuation already covered this activity.
+		if count == 0 {
+			continue
+		}
+		activity = append(activity, EndedSessionActivityEvidence{
+			SessionID:           root,
+			Project:             members[0].Project,
+			EndedAt:             baseline,
+			PostEndPromptCount:  count,
+			LastPostEndPromptAt: latest,
+			SessionIDs:          ids,
+		})
+	}
+	return activity, nil
+}
+
+// listEndedSessionCandidates returns the ended sessions that received a prompt
+// after their own end. It is a superset of the reported activity: a prompt
+// newer than the family baseline is always newer than the end of the session
+// that received it.
+func (s *Store) listEndedSessionCandidates(project string) ([]sessionFamilyMember, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT s.id, ifnull(s.project, ''), s.ended_at,
-		COUNT(p.id), ifnull(MAX(datetime(p.created_at)), '')
+	query := `SELECT s.id, ifnull(s.project, ''), s.ended_at
 		FROM sessions s
-		JOIN user_prompts p ON p.session_id = s.id
 		WHERE s.ended_at IS NOT NULL
-			AND datetime(p.created_at) > datetime(s.ended_at)`
+			AND EXISTS (SELECT 1 FROM user_prompts p
+				WHERE p.session_id = s.id AND datetime(p.created_at) > datetime(s.ended_at))`
 	args := []any{}
 	if project != "" {
 		query += ` AND s.project = ?`
 		args = append(args, project)
 	}
-	query += ` GROUP BY s.id, s.project, s.ended_at ORDER BY s.id`
+	query += ` ORDER BY s.id`
 
 	rows, err := s.queryItHook(s.db, query, args...)
 	if err != nil {
@@ -239,50 +331,34 @@ func (s *Store) ListEndedSessionActivity(project string) ([]EndedSessionActivity
 	}
 	defer func() { _ = rows.Close() }()
 
-	activity := make([]EndedSessionActivityEvidence, 0)
+	candidates := make([]sessionFamilyMember, 0)
 	for rows.Next() {
-		var ev EndedSessionActivityEvidence
-		if err := rows.Scan(&ev.SessionID, &ev.Project, &ev.EndedAt, &ev.PostEndPromptCount, &ev.LastPostEndPromptAt); err != nil {
+		var member sessionFamilyMember
+		if err := rows.Scan(&member.ID, &member.Project, &member.EndedAt); err != nil {
 			return nil, err
 		}
-		activity = append(activity, ev)
+		candidates = append(candidates, member)
 	}
-	return activity, rows.Err()
+	return candidates, rows.Err()
 }
 
-// SessionFamilyState reports whether the root session of a conversation is
-// still open and which of its continuation rows are open or closed. A root
-// that no longer exists is reported as absent rather than as open.
-type SessionFamilyState struct {
-	RootExists            bool     `json:"root_exists"`
-	RootEndedAt           *string  `json:"root_ended_at,omitempty"`
-	OpenContinuationIDs   []string `json:"open_continuation_ids"`
-	ClosedContinuationIDs []string `json:"closed_continuation_ids"`
-}
-
-// SessionFamilyState reads the root session and its continuation rows. It is
-// read-only: it never registers, ends, or reopens a session.
-func (s *Store) SessionFamilyState(root string) (SessionFamilyState, error) {
-	state := SessionFamilyState{}
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return state, nil
-	}
-
+// sessionFamilyMembers returns the root session of a conversation and every
+// continuation opened from it, in id order.
+func (s *Store) sessionFamilyMembers(root string) ([]sessionFamilyMember, error) {
+	members := make([]sessionFamilyMember, 0, 2)
 	session, err := s.GetSession(root)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
-		return state, err
+		return nil, err
 	default:
-		state.RootExists = true
-		state.RootEndedAt = session.EndedAt
+		members = append(members, sessionFamilyMember{ID: session.ID, Project: session.Project, EndedAt: session.EndedAt})
 	}
 
-	prefix := root + ":resume:"
+	prefix := root + continuationSessionMarker
 	rows, err := s.queryItHook(s.db, continuationSessionsQuery, prefix+"0", prefix+":")
 	if err != nil {
-		return state, err
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -290,15 +366,57 @@ func (s *Store) SessionFamilyState(root string) (SessionFamilyState, error) {
 		var id string
 		var endedAt *string
 		if err := rows.Scan(&id, &endedAt); err != nil {
-			return state, err
+			return nil, err
 		}
-		if endedAt == nil {
-			state.OpenContinuationIDs = append(state.OpenContinuationIDs, id)
+		members = append(members, sessionFamilyMember{ID: id, EndedAt: endedAt})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return members, rows.Close()
+}
+
+// familyBaseline returns the latest end across a conversation family and
+// whether any of its sessions is still open.
+func familyBaseline(members []sessionFamilyMember) (string, bool) {
+	baseline := ""
+	open := false
+	for _, member := range members {
+		if member.EndedAt == nil {
+			open = true
 			continue
 		}
-		state.ClosedContinuationIDs = append(state.ClosedContinuationIDs, id)
+		if *member.EndedAt > baseline {
+			baseline = *member.EndedAt
+		}
 	}
-	return state, rows.Err()
+	return baseline, open
+}
+
+// countPromptsAfter counts the prompts the given sessions received after the
+// given instant and returns the latest of them.
+func (s *Store) countPromptsAfter(sessionIDs []string, after string) (int64, string, error) {
+	if len(sessionIDs) == 0 || after == "" {
+		return 0, "", nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(sessionIDs)), ",")
+	args := make([]any, 0, len(sessionIDs)+1)
+	for _, id := range sessionIDs {
+		args = append(args, id)
+	}
+	args = append(args, after)
+
+	row := s.db.QueryRow(
+		`SELECT COUNT(*), ifnull(MAX(datetime(created_at)), '') FROM user_prompts
+			WHERE session_id IN (`+placeholders+`) AND datetime(created_at) > datetime(?)`,
+		args...,
+	)
+	var count int64
+	var latest string
+	if err := row.Scan(&count, &latest); err != nil {
+		return 0, "", err
+	}
+	return count, latest, nil
 }
 
 // ListOrphanedObservationSessionEvidence reports grouped observation references
