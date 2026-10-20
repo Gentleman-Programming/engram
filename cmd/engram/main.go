@@ -804,9 +804,11 @@ func main() {
 		return
 	}
 
-	if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
-		fatal(err)
-		return
+	if usesLocalSQLite(os.Args[1:]) {
+		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
+			fatal(err)
+			return
+		}
 	}
 
 	// Migrate orphaned databases that ended up in wrong locations

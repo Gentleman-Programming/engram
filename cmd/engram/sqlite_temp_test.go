@@ -11,6 +11,10 @@ import (
 )
 
 func TestSQLiteTempIsolation(t *testing.T) {
+	runSQLiteTempIsolation(t, "")
+}
+
+func runSQLiteTempIsolation(t *testing.T, failure string) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows in-process startup isolation")
 	}
@@ -25,13 +29,22 @@ func TestSQLiteTempIsolation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			stubRuntimeHooks(t)
 			withArgs(t, "engram", "stats")
+			if failure == "preparation" {
+				t.Setenv("ENGRAM_DATA_DIR", "relative-data")
+			}
 			oldMigrate := migrateOrphanedDatabase
 			migrateOrphanedDatabase = func(string) {}
 			t.Cleanup(func() { migrateOrphanedDatabase = oldMigrate })
 			reached := false
 			stop := new(int)
+			oldExit := exitFunc
+			exitFunc = func(code int) { t.Errorf("unexpected exit %d", code); panic(stop) }
+			t.Cleanup(func() { exitFunc = oldExit })
 			storeNew = func(cfg store.Config) (*store.Store, error) {
 				reached = true
+				if failure == "assertion" {
+					t.Fatal("forced store assertion")
+				}
 				if cfg.DataDir == filepath.Join(root, ".engram") {
 					t.Fatal("main used the home default instead of a synthetic data directory")
 				}
@@ -42,7 +55,7 @@ func TestSQLiteTempIsolation(t *testing.T) {
 			}
 			func() {
 				defer func() {
-					if v := recover(); v != stop {
+					if v := recover(); v != nil && v != stop {
 						panic(v)
 					}
 				}()
@@ -66,11 +79,24 @@ func TestSQLiteTempIsolation(t *testing.T) {
 }
 
 func TestSQLiteTempStartup(t *testing.T) {
+	runSQLiteTempStartup(t, "")
+}
+
+func runSQLiteTempStartup(t *testing.T, failure string) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows process bootstrap")
 	}
 	root := t.TempDir()
 	data := filepath.Join(root, "data")
+	if failure != "" {
+		t.Cleanup(func() {
+			for _, name := range []string{"engram.db", "engram.db-wal", "engram.db-shm"} {
+				if _, err := os.Stat(filepath.Join(data, name)); !os.IsNotExist(err) {
+					t.Errorf("rejected startup created %s: %v", name, err)
+				}
+			}
+		})
+	}
 	inherited := filepath.Join(root, "inherited")
 	if err := os.Mkdir(inherited, 0700); err != nil {
 		t.Fatal(err)
@@ -78,6 +104,9 @@ func TestSQLiteTempStartup(t *testing.T) {
 	t.Setenv("TEMP", inherited)
 	t.Setenv("TMP", inherited)
 	t.Setenv("ENGRAM_DATA_DIR", data)
+	if failure == "preparation" {
+		t.Setenv("ENGRAM_DATA_DIR", "relative-data")
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -91,13 +120,21 @@ func TestSQLiteTempStartup(t *testing.T) {
 		migrateOrphanedDatabase = oldMigrate
 		checkForUpdates = oldCheck
 	})
-	storeDefaultConfig = func() (store.Config, error) { return store.FallbackConfig(data), nil }
+	storeDefaultConfig = func() (store.Config, error) {
+		return store.FallbackConfig(data), nil
+	}
 	checkForUpdates = func(string) versioncheck.CheckResult { return versioncheck.CheckResult{} }
 	migrateOrphanedDatabase = func(string) {}
 	reached := false
 	stop := new(int)
+	oldExit := exitFunc
+	exitFunc = func(code int) { t.Errorf("unexpected exit %d", code); panic(stop) }
+	t.Cleanup(func() { exitFunc = oldExit })
 	storeNew = func(cfg store.Config) (*store.Store, error) {
 		reached = true
+		if failure == "assertion" {
+			t.Fatal("forced store assertion")
+		}
 		want := filepath.Join(data, "tmp", "sqlite")
 		if os.Getenv("TEMP") != want || os.Getenv("TMP") != want {
 			t.Errorf("SQLite opened before temp routing: TEMP=%q TMP=%q", os.Getenv("TEMP"), os.Getenv("TMP"))
@@ -117,7 +154,7 @@ func TestSQLiteTempStartup(t *testing.T) {
 	os.Args = []string{"engram", "stats"}
 	func() {
 		defer func() {
-			if v := recover(); v != stop {
+			if v := recover(); v != nil && v != stop {
 				panic(v)
 			}
 		}()
