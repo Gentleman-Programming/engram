@@ -67,6 +67,14 @@ if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
     > /dev/null
 fi
 
+# Link this Claude process to its session so MCP writes that reach the server
+# without a session_id (for example when the PreToolUse hook is cancelled) keep
+# resolving to this session across /clear, resume and fork (#1693). $PPID is the
+# Claude process that launched this hook. Best effort: it never affects startup.
+if [ -n "$SESSION_ID" ]; then
+  printf '%s' "$INPUT" | ENGRAM_HOST_PID="$PPID" engram hook claude-bind-session >/dev/null 2>&1 || true
+fi
+
 # Auto-import git-synced chunks
 if [ -f "${CWD}/.engram/manifest.json" ]; then
   (

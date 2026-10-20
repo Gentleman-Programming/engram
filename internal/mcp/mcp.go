@@ -30,6 +30,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/v3/internal/agentops"
 	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v3/internal/hostbind"
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
@@ -3785,10 +3786,49 @@ func defaultSessionID(project string) string {
 	return "manual-save-" + project
 }
 
+// hostParentPID is the host agent process that launched this MCP server. It is
+// a variable so tests can simulate the host.
+var hostParentPID = os.Getppid
+
+// resolveHostBoundSession resolves an omitted session_id through the host
+// process that launched this MCP server (#1693). The host's hooks publish which
+// session the host currently serves; reading that through our own parent keeps
+// writes bound across /clear, resume and fork, and does not depend on a
+// PreToolUse hook finishing before the host cancels it. It never guesses: only
+// a binding published for this exact host process, naming a live session of
+// the same project, resolves. Anything else reports false so the caller keeps
+// its project/directory resolution unchanged.
+func resolveHostBoundSession(s *store.Store, project string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	root, ok := hostbind.Lookup(s.DataDir(), hostParentPID())
+	if !ok {
+		return "", false
+	}
+	bound, err := s.GetSession(root)
+	if err != nil {
+		return "", false
+	}
+	wanted, _ := store.NormalizeProject(project)
+	owner, _ := store.NormalizeProject(bound.Project)
+	if wanted == "" || owner != wanted {
+		return "", false
+	}
+	id, err := s.ResolveRuntimeSessionWithOwnershipMode(bound.ID, bound.Project, bound.Directory, bound.OwnershipMode)
+	if err != nil || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
 // resolveFallbackSessionID resolves an omitted session_id without guessing
 // between concurrent runtime sessions. The working directory only narrows
 // candidates; a persisted session ID remains the sole identity.
 func resolveFallbackSessionID(s *store.Store, project string, evidence ...*store.ProjectProvenance) (string, error) {
+	if id, ok := resolveHostBoundSession(s, project); ok {
+		return id, nil
+	}
 	if s != nil {
 		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(""))
 		if err == nil {
