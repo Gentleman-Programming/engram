@@ -256,6 +256,9 @@ type sessionFamilyMember struct {
 // yields NULL and is therefore excluded instead of being counted as activity.
 // The comparison is limited to whole seconds, which matches the second-precision
 // end timestamps this store persists.
+//
+// An end instant that cannot be parsed orders nothing, so a family whose ends
+// are all unparseable has no comparable baseline and is not reported.
 func (s *Store) ListEndedSessionActivity(project string) ([]EndedSessionActivityEvidence, error) {
 	candidates, err := s.listEndedSessionCandidates(project)
 	if err != nil {
@@ -373,12 +376,12 @@ func (s *Store) sessionFamilyMembers(root string) ([]sessionFamilyMember, error)
 	for rows.Next() {
 		var member sessionFamilyMember
 		if err := rows.Scan(&member.ID, &member.Project, &member.EndedAt, &member.Open); err != nil {
-			return nil, err
+			return nil, closeRowsWithError(rows, err)
 		}
 		members = append(members, member)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, closeRowsWithError(rows, err)
 	}
 	return members, rows.Close()
 }
