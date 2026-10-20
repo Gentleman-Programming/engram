@@ -142,6 +142,78 @@ func TestSessionRecreateInvalidFutureIdentityQuarantines(t *testing.T) {
 	}
 }
 
+func TestSessionRecreateRespectsTombstoneAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name, generation string
+		cloud, survives  bool
+	}{
+		{"older", "2026-02-01", false, false},
+		{"equal", "2026-02-02", false, false},
+		{"newer", "2026-02-03", false, true},
+		{"normalized equal", "2026-02-02T00:00:00Z", false, false},
+		{"cloud older", "2026-02-01", true, true},
+		{"stale then newer", "2026-02-01", false, true},
+		{"missing generation", "", false, true},
+		{"missing delete date", "2026-02-01", false, false},
+		{"repeated delete", "2026-02-03", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			const target = "cloud:p"
+			mutation := func(date, extra string) SyncMutation {
+				return SyncMutation{Entity: SyncEntitySession, EntityKey: "S1", Op: SyncOpUpsert,
+					Payload: fmt.Sprintf(`{"id":"S1","project":"p","directory":"/p","started_at":%q,"summary":%q}`, date, extra)}
+			}
+			if err := s.ApplyPulledChunkForDomain(target, "seed", []SyncMutation{mutation("2026-01-01", "original")}, tc.cloud); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddPrompt(AddPromptParams{SessionID: "S1", Project: "p", Content: "P1"}); err != nil {
+				t.Fatal(err)
+			}
+			mutations := []SyncMutation{recreateSessionMutation(SyncOpDelete, `,"deleted_at":"2026-02-02"`), mutation(tc.generation, "incoming")}
+			if tc.name == "missing delete date" {
+				mutations[0] = recreateSessionMutation(SyncOpDelete, "")
+			}
+			if tc.name == "repeated delete" {
+				mutations = append([]SyncMutation{mutations[0]}, mutations...)
+			}
+			if tc.name == "stale then newer" {
+				mutations = append(mutations, mutation("2026-02-03", "incoming"))
+			}
+			if err := s.ApplyPulledChunkForDomain(target, "candidate", mutations, tc.cloud); err != nil {
+				t.Fatal(err)
+			}
+			session, err := s.GetSession("S1")
+			if (err == nil) != tc.survives {
+				t.Fatalf("session = %+v, %v; want survives %v", session, err, tc.survives)
+			}
+			wantStarted := tc.generation
+			if tc.name == "stale then newer" {
+				wantStarted = "2026-02-03"
+			}
+			if tc.survives && (session.Summary == nil || *session.Summary != "incoming" || (wantStarted != "" && session.StartedAt != wantStarted) || session.StartedAt == "" || session.Directory != "/p" || session.Project != "p") {
+				t.Fatalf("incoming session not applied: %+v", session)
+			}
+			prompts, err := s.RecentPrompts("p", 10)
+			if err != nil || (len(prompts) == 1) != tc.survives {
+				t.Fatalf("prompts = %+v, %v", prompts, err)
+			}
+			tombstones, err := s.ExportLocalDeleteTombstones("p")
+			if err != nil || (len(tombstones) == 0) != tc.survives {
+				t.Fatalf("active tombstones = %+v, %v", tombstones, err)
+			}
+			state, err := s.GetSyncState(target)
+			if err != nil || state.LastPulledSeq != int64(1+len(mutations)) {
+				t.Fatalf("state = %+v, %v", state, err)
+			}
+			chunks, err := s.GetSyncedChunksForTarget(target)
+			if err != nil || !chunks["candidate"] {
+				t.Fatalf("chunks = %v, %v", chunks, err)
+			}
+		})
+	}
+}
+
 func TestSessionRecreatePreservesChildrenExceptExplicitDeletes(t *testing.T) {
 	for _, cloud := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cloud=%v", cloud), func(t *testing.T) {
