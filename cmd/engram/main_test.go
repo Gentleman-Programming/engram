@@ -3318,7 +3318,8 @@ func TestDoctorHelpNamesRepairSubcommand(t *testing.T) {
 			t.Fatalf("expected doctor help block to mention %q, got: %q", want, blockText)
 		}
 	}
-	if strings.Contains(blockText, "default --dry-run") {
+	if strings.Contains(blockText, "default --dry-run") ||
+		strings.Contains(blockText, "default: --dry-run") {
 		t.Fatalf("doctor help must not advertise a default mode for all repair checks: %q", blockText)
 	}
 }
