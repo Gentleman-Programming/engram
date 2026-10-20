@@ -23,6 +23,7 @@ const (
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
+	CheckEndedSessionPostEndActivity      = "ended_session_post_end_activity"
 )
 
 // ReasonQuarantinedPulledSessionIdentity marks a finding of
@@ -52,6 +53,7 @@ type OrphanedPendingRelationsCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 type AmbiguousActiveRuntimeSessionsCheck struct{}
+type EndedSessionPostEndActivityCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -68,6 +70,112 @@ func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessio
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
 	return CheckAmbiguousActiveRuntimeSessions
+}
+func (EndedSessionPostEndActivityCheck) Code() string {
+	return CheckEndedSessionPostEndActivity
+}
+
+// continuationSessionMarker separates a root session id from the numeric
+// continuation suffix the core appends when a resumed conversation opens a
+// continuation.
+const continuationSessionMarker = ":resume:"
+
+// sessionFamilyRoot returns the root session id of a conversation. A session
+// id that does not carry the continuation marker is its own root.
+func sessionFamilyRoot(id string) string {
+	index := strings.LastIndex(id, continuationSessionMarker)
+	if index < 0 {
+		return id
+	}
+	suffix := id[index+len(continuationSessionMarker):]
+	if suffix == "" {
+		return id
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return id
+		}
+	}
+	return id[:index]
+}
+
+// endedSessionFamily groups the closed sessions of one host conversation. A
+// root and its ":resume:N" continuations share a family, so a single stuck
+// conversation is reported once instead of once per closed row.
+type endedSessionFamily struct {
+	root         string
+	project      string
+	endedAt      string
+	members      []string
+	promptCount  int64
+	lastPromptAt string
+}
+
+// EndedSessionPostEndActivityCheck warns when a host conversation kept
+// working after its Engram session ended and no open continuation can accept
+// its writes. The check is read-only: it never ends, registers, or reopens a
+// session, and it never selects one.
+func (c EndedSessionPostEndActivityCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	activity, err := scope.Store.ListEndedSessionActivity(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+
+	families := map[string]*endedSessionFamily{}
+	roots := make([]string, 0, len(activity))
+	for _, item := range activity {
+		root := sessionFamilyRoot(item.SessionID)
+		family, ok := families[root]
+		if !ok {
+			family = &endedSessionFamily{root: root, project: item.Project, endedAt: item.EndedAt}
+			families[root] = family
+			roots = append(roots, root)
+		}
+		family.members = append(family.members, item.SessionID)
+		family.promptCount += item.PostEndPromptCount
+		if item.LastPostEndPromptAt > family.lastPromptAt {
+			family.lastPromptAt = item.LastPostEndPromptAt
+		}
+	}
+	sort.Strings(roots)
+
+	findings := make([]Finding, 0)
+	for _, root := range roots {
+		family := families[root]
+		state, err := scope.Store.SessionFamilyState(root)
+		if err != nil {
+			return CheckResult{}, err
+		}
+		// An open root or an open continuation still accepts writes, so the
+		// conversation is not stuck and nothing is reported.
+		if (state.RootExists && state.RootEndedAt == nil) || len(state.OpenContinuationIDs) > 0 {
+			continue
+		}
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: c.Code() + "_no_open_continuation",
+			Message: fmt.Sprintf(
+				"Session %q ended at %s and kept receiving %d prompt(s) with no open continuation.",
+				family.root, family.endedAt, family.promptCount,
+			),
+			Why: "Writes to an ended session are denied, so the host is still working while its Engram session is closed; without an open continuation those writes cannot land.",
+			Evidence: mustJSON(map[string]any{
+				"session_id":              family.root,
+				"project":                 family.project,
+				"ended_at":                family.endedAt,
+				"post_end_prompt_count":   family.promptCount,
+				"last_post_end_prompt_at": family.lastPromptAt,
+				"closed_session_ids":      family.members,
+				"closed_continuation_ids": state.ClosedContinuationIDs,
+				"open_continuation_ids":   state.OpenContinuationIDs,
+			}),
+			SafeNextStep:         "Resume the conversation or start a new one so SessionStart can open a continuation, and update the agent plugin or hook binary if it predates the resume fix. Doctor is diagnostic-only: it never ends, registers, or reopens a session.",
+			RequiresConfirmation: false,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(activity), "families_evaluated": len(roots)}, findings), nil
 }
 
 func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

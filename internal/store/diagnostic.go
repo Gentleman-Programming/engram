@@ -22,6 +22,17 @@ type DiagnosticSessionEvidence struct {
 	Name          string `json:"name"`
 }
 
+// EndedSessionActivityEvidence is the read-only projection of a session that
+// ended and kept receiving activity afterwards. It intentionally reports counts
+// and timestamps only, never prompt content.
+type EndedSessionActivityEvidence struct {
+	SessionID           string `json:"session_id"`
+	Project             string `json:"project"`
+	EndedAt             string `json:"ended_at"`
+	PostEndPromptCount  int64  `json:"post_end_prompt_count"`
+	LastPostEndPromptAt string `json:"last_post_end_prompt_at"`
+}
+
 // OrphanedObservationSessionEvidence identifies observations whose stored
 // session reference has no matching local session. It is grouped so diagnostics
 // can report the affected reference without exposing observation payloads.
@@ -195,6 +206,99 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 		sessions = append(sessions, ev)
 	}
 	return sessions, rows.Err()
+}
+
+// ListEndedSessionActivity returns sessions that have ended and kept receiving
+// prompts after their end, scoped by project when provided.
+//
+// The comparison runs through SQLite's datetime() so rows written by different
+// producers stay comparable: SQLite's datetime('now') and the Go formatter both
+// carry UTC but not the same textual layout. A timestamp that cannot be parsed
+// yields NULL and is therefore excluded instead of being counted as activity.
+// The comparison is limited to whole seconds, which matches the second-precision
+// end timestamps this store persists.
+func (s *Store) ListEndedSessionActivity(project string) ([]EndedSessionActivityEvidence, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	query := `SELECT s.id, ifnull(s.project, ''), s.ended_at,
+		COUNT(p.id), ifnull(MAX(datetime(p.created_at)), '')
+		FROM sessions s
+		JOIN user_prompts p ON p.session_id = s.id
+		WHERE s.ended_at IS NOT NULL
+			AND datetime(p.created_at) > datetime(s.ended_at)`
+	args := []any{}
+	if project != "" {
+		query += ` AND s.project = ?`
+		args = append(args, project)
+	}
+	query += ` GROUP BY s.id, s.project, s.ended_at ORDER BY s.id`
+
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	activity := make([]EndedSessionActivityEvidence, 0)
+	for rows.Next() {
+		var ev EndedSessionActivityEvidence
+		if err := rows.Scan(&ev.SessionID, &ev.Project, &ev.EndedAt, &ev.PostEndPromptCount, &ev.LastPostEndPromptAt); err != nil {
+			return nil, err
+		}
+		activity = append(activity, ev)
+	}
+	return activity, rows.Err()
+}
+
+// SessionFamilyState reports whether the root session of a conversation is
+// still open and which of its continuation rows are open or closed. A root
+// that no longer exists is reported as absent rather than as open.
+type SessionFamilyState struct {
+	RootExists            bool     `json:"root_exists"`
+	RootEndedAt           *string  `json:"root_ended_at,omitempty"`
+	OpenContinuationIDs   []string `json:"open_continuation_ids"`
+	ClosedContinuationIDs []string `json:"closed_continuation_ids"`
+}
+
+// SessionFamilyState reads the root session and its continuation rows. It is
+// read-only: it never registers, ends, or reopens a session.
+func (s *Store) SessionFamilyState(root string) (SessionFamilyState, error) {
+	state := SessionFamilyState{}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return state, nil
+	}
+
+	session, err := s.GetSession(root)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return state, err
+	default:
+		state.RootExists = true
+		state.RootEndedAt = session.EndedAt
+	}
+
+	prefix := root + ":resume:"
+	rows, err := s.queryItHook(s.db, continuationSessionsQuery, prefix+"0", prefix+":")
+	if err != nil {
+		return state, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var id string
+		var endedAt *string
+		if err := rows.Scan(&id, &endedAt); err != nil {
+			return state, err
+		}
+		if endedAt == nil {
+			state.OpenContinuationIDs = append(state.OpenContinuationIDs, id)
+			continue
+		}
+		state.ClosedContinuationIDs = append(state.ClosedContinuationIDs, id)
+	}
+	return state, rows.Err()
 }
 
 // ListOrphanedObservationSessionEvidence reports grouped observation references
