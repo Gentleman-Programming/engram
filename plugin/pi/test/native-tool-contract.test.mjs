@@ -6,12 +6,17 @@ import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { importPluginFromSandbox, PLUGIN_ROOT, withPluginSandbox } from "./plugin-sandbox.mjs";
 
 // The runtime context these fixtures hand the plugin still points at the checkout, because the
 // plugin only ever reads `cwd`. The module it loads comes from the sandbox, so nothing under the
 // checkout is written to or removed.
 const ROOT = PLUGIN_ROOT;
+
+// This isolated test worker models a primary runtime by default, regardless of its launcher.
+// Child-role scenarios below explicitly set and restore their own marker.
+delete process.env.GENTLE_PI_AGENTS_CHILD;
 
 function deferred() {
   let resolve;
@@ -51,6 +56,27 @@ async function loadPluginHarness(sandbox, appendEntry) {
   return { registeredTools, eventHandlers };
 }
 
+test("warning fixture completes under an inherited delegated-child role", () => {
+  const env = { ...process.env, GENTLE_PI_AGENTS_CHILD: "1" };
+  // A nested runner must execute its selected test, not inherit Node's worker context.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, [
+    "--test", "--test-reporter=tap", "--test-concurrency=1", "--test-timeout=4000",
+    "--test-name-pattern=^background warning routing: tui-server$",
+    fileURLToPath(import.meta.url),
+  ], { env, encoding: "utf8", timeout: 10000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /ok 1 - background warning routing: tui-server/);
+  assert.match(result.stdout, /# tests 1\b/);
+  assert.match(result.stdout, /# pass 1\b/);
+  for (const counter of ["fail", "cancelled", "skipped"]) {
+    assert.match(result.stdout, new RegExp(`# ${counter} 0\\b`));
+  }
+});
+
 // Mode labels model documented hasUI capabilities; this is not a live RPC client test.
 for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwing-notifier", "missing-notifier", "incomplete-ui"]) {
   test(`background warning routing: ${scenario}`, async () => {
@@ -87,7 +113,7 @@ for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwin
         };
         if (["missing-notifier", "incomplete-ui"].includes(scenario)) delete ctx.ui.notify;
         const capture = eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "a sufficiently long captured prompt" }, ctx);
-        await started.promise;
+        await waitFor(started.promise, `background warning routing: ${scenario}: prompt capture did not start`);
         // Another session event must not steal the suspended capture's diagnostic UI.
         const unrelated = runtimeContext("unrelated-session");
         unrelated.hasUI = true;
@@ -160,10 +186,13 @@ for (const failure of ["shutdown", "archive", "recovery"]) {
           const recovery = calls.find(({ path }) => path === "/context/compaction");
           assert.equal(recovery.query.get("session_id"), sessionId);
           const next = await eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, owner);
-          assert.match(next.systemPrompt, failure === "archive" ? /FIRST ACTION REQUIRED/ : /already saved/);
-          assert.doesNotMatch(next.systemPrompt, /archive rejected|recovery rejected/);
+          assert.ok(next.message, "compaction guidance must be returned as a message");
+          assert.match(next.message.content, failure === "archive" ? /FIRST ACTION REQUIRED/ : /already saved/);
+          assert.doesNotMatch(next.message.content, /archive rejected|recovery rejected/);
           const consumed = await eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, owner);
           assert.doesNotMatch(consumed.systemPrompt, /FIRST ACTION REQUIRED|already saved/);
+          assert.equal(consumed.message, undefined);
+          assert.equal(next.systemPrompt, consumed.systemPrompt, "recovery must not change the stable prefix");
         }
         assert.equal(stderr.length, 0);
         assert.equal(notifications.length, 1);
@@ -2147,7 +2176,8 @@ test("resumed quit adopts core numeric identities and reload retains the persist
       assert.ok(archive, "resumed compaction must archive its summary");
       assert.equal(archive.body.session_id, effectiveID);
       const recovered = await second.eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, ctx);
-      assert.match(recovered.systemPrompt, /already saved/);
+      assert.ok(recovered.message, "resumed compaction must return a recovery message");
+      assert.match(recovered.message.content, /already saved/);
       assert.ok(entries.length);
       const third = await loadPluginHarness(sandbox, appendEntry);
       await third.eventHandlers.get("session_start")({ reason: "reload" }, ctx);
@@ -3940,6 +3970,9 @@ test("shutdown stops passive capture after registration", async () => {
       const { eventHandlers } = await loadPluginHarness(sandbox);
       const runtimeSessionId = "  exact cached Pi identity  ";
       await eventHandlers.get("session_start")({}, runtimeContext(runtimeSessionId));
+      const initialTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(runtimeSessionId));
+      assert.match(initialTurn.systemPrompt, /^base prompt\n\n## Engram Persistent Memory — Protocol/);
+      assert.equal(initialTurn.message, undefined);
       await eventHandlers.get("session_compact")(
         { compactionEntry: { summary: "current shape" }, summary: "conflicting legacy shape" },
         { cwd: ROOT, sessionManager: { getSessionId: () => { throw new Error("stale context accessed"); } } },
@@ -3961,9 +3994,19 @@ test("shutdown stops passive capture after registration", async () => {
       assert.equal(new URL(`http://test${recovery.path}`).searchParams.get("session_id"), runtimeSessionId);
       assert.doesNotMatch(otherTurn.systemPrompt, /exact-session context/);
       assert.doesNotMatch(otherTurn.systemPrompt, /already saved/);
-      assert.match(nextTurn.systemPrompt, /already saved/);
-      assert.doesNotMatch(nextTurn.systemPrompt, /FIRST ACTION REQUIRED/);
-      assert.doesNotMatch(consumedTurn.systemPrompt, /already saved/);
+      assert.ok(nextTurn.message, "owner recovery must return a custom message, not a system-prompt notice");
+      assert.deepEqual(nextTurn.message, {
+        customType: "engram-compaction-recovery",
+        content: "exact-session context\n\nCompaction recovery summary was already saved to Engram (pi) by gentle-engram. No manual mem_session_summary call is needed for this compaction. Call mem_context if you need additional recent project memory.",
+        display: false,
+      });
+      for (const turn of [otherTurn, nextTurn, consumedTurn]) {
+        assert.equal(turn.systemPrompt, initialTurn.systemPrompt, "Memory Protocol prefix stays identical before, during and after recovery");
+      }
+      assert.equal(otherTurn.message, undefined, "foreign turn must not consume or receive the notice");
+      assert.equal(consumedTurn.message, undefined, "owner receives the notice only once");
+      assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions", "/observations"]);
+      assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 1);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -4011,17 +4054,35 @@ test("structured system prompt options receive memory instructions and the one-s
       assert.match(empty.appendSystemPrompt, /^## Engram Persistent Memory — Protocol/, "empty append text gets no leading separator");
 
       await eventHandlers.get("session_compact")({ compactionEntry: { summary: "compacted summary" } }, runtimeContext(sessionId));
+      const foreignOptions = { appendSystemPrompt: "" };
+      const foreign = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: foreignOptions }, runtimeContext("foreign-append"));
+      assert.equal(foreign, undefined, "foreign structured turn receives no notice");
+      assert.equal(foreignOptions.appendSystemPrompt, empty.appendSystemPrompt);
       const recoveryOptions = { appendSystemPrompt: "" };
       const recovered = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: recoveryOptions }, runtimeContext(sessionId));
-      assert.equal(recovered, undefined);
-      assert.match(recoveryOptions.appendSystemPrompt, /## Engram Persistent Memory — Protocol[\s\S]*\n\n[\s\S]*already saved/);
-      assert.equal(recoveryOptions.appendSystemPrompt.split("already saved").length, 2, "recovery notice lands once");
+      assert.ok(recovered?.message, "structured options must return the recovery message without forcing a systemPrompt");
+      assert.deepEqual(recovered, {
+        message: {
+          customType: "engram-compaction-recovery",
+          content: "exact-session context\n\nCompaction recovery summary was already saved to Engram (pi) by gentle-engram. No manual mem_session_summary call is needed for this compaction. Call mem_context if you need additional recent project memory.",
+          display: false,
+        },
+      });
+      assert.equal(recoveryOptions.appendSystemPrompt, empty.appendSystemPrompt, "recovery leaves the Memory Protocol prefix unchanged");
 
       const consumedOptions = { appendSystemPrompt: "" };
       const consumed = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: consumedOptions }, runtimeContext(sessionId));
       assert.equal(consumed, undefined);
       assert.doesNotMatch(consumedOptions.appendSystemPrompt, /already saved/, "recovery notice is consumed");
       assert.match(consumedOptions.appendSystemPrompt, /## Engram Persistent Memory — Protocol/);
+      assert.equal(consumedOptions.appendSystemPrompt, empty.appendSystemPrompt, "next turn retains the same stable prefix");
+      assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions", "/prompts", "/sessions", "/observations"]);
+      const archive = calls.find((call) => call.path === "/observations");
+      assert.equal(archive.body.session_id, sessionId);
+      assert.equal(archive.body.content, "compacted summary");
+      const recoveryCalls = calls.filter((call) => call.path.startsWith("/context/compaction"));
+      assert.equal(recoveryCalls.length, 1);
+      assert.equal(new URL(`http://test${recoveryCalls[0].path}`).searchParams.get("session_id"), sessionId);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -4094,9 +4155,10 @@ test("compaction timeout does not repeat its archive and queues verification gui
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, ctx);
 
       assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/observations").length, 1);
-      assert.match(nextTurn.systemPrompt, /could not confirm/);
-      assert.match(nextTurn.systemPrompt, /verify/i);
-      assert.match(nextTurn.systemPrompt, /Do NOT retry/);
+      assert.ok(nextTurn.message, "unknown archive outcome must return a recovery message");
+      assert.match(nextTurn.message.content, /could not confirm/);
+      assert.match(nextTurn.message.content, /verify/i);
+      assert.match(nextTurn.message.content, /Do NOT retry/);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -4140,7 +4202,8 @@ test("ambiguous runtime identity history permanently blocks compaction writes", 
       await eventHandlers.get("session_start")({}, a);
       await eventHandlers.get("session_compact")({ summary: "repeated" });
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, a);
-      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.ok(nextTurn.message, "unsafe identity must return verification guidance");
+      assert.match(nextTurn.message.content, /did not archive/);
       assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/sessions").length, 1);
       assert.equal(calls.filter((call) => call.path.startsWith("/observations")).length, 0);
       assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 0);
@@ -4152,7 +4215,8 @@ test("ambiguous runtime identity history permanently blocks compaction writes", 
       await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(invalidIdentity));
       await eventHandlers.get("session_compact")({ summary: "unavailable identity" });
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, a);
-      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.ok(nextTurn.message, "missing identity must return verification guidance");
+      assert.match(nextTurn.message.content, /did not archive/);
       assert.equal(calls.filter((call) => call.path.startsWith("/observations")).length, 0);
       assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 0);
     });
@@ -4179,8 +4243,9 @@ test("pending compaction recovery is injected even when startup remains unavaila
       await eventHandlers.get("session_compact")({ compactionEntry: { summary: "summary" } }, ctx);
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, ctx);
 
-      assert.match(nextTurn.systemPrompt, /did not archive/);
-      assert.match(nextTurn.systemPrompt, /verify/i);
+      assert.ok(nextTurn.message, "unavailable startup must still return recovery guidance");
+      assert.match(nextTurn.message.content, /did not archive/);
+      assert.match(nextTurn.message.content, /verify/i);
     });
   } finally {
     globalThis.fetch = originalFetch;

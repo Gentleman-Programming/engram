@@ -60,7 +60,7 @@ test("both event routes verify the full ref before any npm publication", () => {
 test("a later independent publishing job cannot bypass the ref guard", () => {
 	const publishStep = `      - name: Publish to npm with provenance
         working-directory: plugin/pi
-        run: npm publish --provenance --access public`;
+        run: npm publish --provenance --access public --tag candidate`;
 	const unguardedJob = `  unguarded-publish:
     runs-on: ubuntu-latest
     steps:
@@ -86,7 +86,7 @@ test("Pi publication tests run fail-closed immediately before publishing", () =>
 	assert.match(testStep.text, /^        working-directory: plugin\/pi$/m, "the test step must run from plugin/pi");
 	assert.match(testStep.text, /^        run: npm test$/m, "the test step must run npm test");
 	assert.match(publishStep.text, /^        working-directory: plugin\/pi$/m, "the publish step must run from plugin/pi");
-	assert.match(publishStep.text, /^        run: npm publish --provenance --access public$/m, "the publish step must run the required npm publish command");
+	assert.match(publishStep.text, /^        run: npm publish --provenance --access public --tag candidate$/m, "the publish step must run the required npm publish command");
 	assert.equal(testStep.end, publishStep.index, "the test step must immediately precede the publish step");
 	assert.doesNotMatch(
 		testStep.text,

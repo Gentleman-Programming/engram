@@ -387,6 +387,23 @@ func assertToolSearchNames(t *testing.T, listed []string) {
 	}
 }
 
+// assertConditionalBootstrapGuidance verifies the emitted instruction contract,
+// not whether a model follows it or whether the hook can inspect model context.
+func assertConditionalBootstrapGuidance(t *testing.T, additionalContext string) {
+	t.Helper()
+	const want = "After loading tools, use usable prior-session context already provided by SessionStart. Only call mem_context before responding if no prior-session context was provided or it is not useful."
+	// Everything after the ToolSearch list is guidance: exact comparison also
+	// rejects an unconditional duplicate mem_context instruction appended to it.
+	_, afterSelect, found := strings.Cut(additionalContext, "select:")
+	if !found {
+		t.Fatalf("bootstrap missing ToolSearch list: %q", additionalContext)
+	}
+	_, guidance, found := strings.Cut(afterSelect, "\n")
+	if !found || strings.TrimSpace(guidance) != want {
+		t.Errorf("post-ToolSearch guidance = %q, want %q", strings.TrimSpace(guidance), want)
+	}
+}
+
 // decodeHookPayload parses hook stdout and fails loudly on malformed JSON: the
 // hook contract requires valid JSON on every path.
 func decodeHookPayload(t *testing.T, stdout string) hookPayload {
@@ -429,6 +446,7 @@ func TestBootstrapEmitsToolSearchPayload(t *testing.T) {
 		t.Error("hookSpecificOutput.additionalContext is empty - the bootstrap delivers nothing")
 	}
 	assertToolSearchNames(t, selectNames(t, payload.HookSpecificOutput.AdditionalContext))
+	assertConditionalBootstrapGuidance(t, payload.HookSpecificOutput.AdditionalContext)
 }
 
 // The marker file makes the bootstrap fire exactly once per session; a repeat

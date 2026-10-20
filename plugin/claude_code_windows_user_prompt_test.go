@@ -155,6 +155,10 @@ func TestClaudeCodeWindowsPromptBootstrapOutput(t *testing.T) {
 		t.Errorf("first message hookEventName = %q, want %q", got, "UserPromptSubmit")
 	}
 	assertToolSearchNames(t, selectNames(t, first.HookSpecificOutput.AdditionalContext))
+	assertConditionalBootstrapGuidance(t, first.HookSpecificOutput.AdditionalContext)
+	if first.SystemMessage != "" {
+		t.Errorf("bootstrap emitted terminal-only systemMessage: %q", first.SystemMessage)
+	}
 
 	secondOutput := runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, sessionID, t.TempDir(), "second message", false)
 	if got := strings.TrimSpace(secondOutput); got != "{}" {
