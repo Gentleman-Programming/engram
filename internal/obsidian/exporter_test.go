@@ -399,8 +399,8 @@ func TestDeletedObsRemoved(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadState: %v", err)
 		}
-		if got, tracked := updatedState.Files[100]; !tracked || got != filepath.Join("linked", "sensitive.md") {
-			t.Errorf("state.Files[100] = %q, tracked=%t; want tracked symlink path", got, tracked)
+		if got := updatedState.PendingRetirements[100]; len(got) != 1 || got[0] != filepath.Join("linked", "sensitive.md") {
+			t.Errorf("pending retirement = %v; want tracked symlink path", got)
 		}
 	})
 }
@@ -1215,7 +1215,7 @@ func TestExportRemovesPreviousNoteAfterRename(t *testing.T) {
 	if !fileExists(newNote) {
 		t.Errorf("expected %s to exist after the rename", newNote)
 	}
-	if got := readStateFiles(t, engRoot).Files[1]; got != "demo/manual/keep-me-renamed-1.md" {
+	if got := readStateFiles(t, engRoot).Files[1]; filepath.ToSlash(got) != "demo/manual/keep-me-renamed-1.md" {
 		t.Errorf("state path: got %q, want %q", got, "demo/manual/keep-me-renamed-1.md")
 	}
 }

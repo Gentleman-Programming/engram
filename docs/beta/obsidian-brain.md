@@ -275,7 +275,9 @@ The `--watch` flag turns the export into a long-running daemon. Use cases:
 
 Counts: how many notes were created, updated, deleted (soft-deleted obs, hard-deleted obs, obs renamed to a new path, and session/topic hubs left with no live obs), skipped (unchanged), and total hub notes regenerated.
 
-Deletions are reconciled against the sync state, so the vault keeps exactly one note per live observation. A project-scoped export (`--project`) only prunes what it can see.
+Cleanup uses tracked paths in the sync state. Renames retire the previous note even with `--project`; `files` tracks the latest successfully written note while optional `pending_retirements` records superseded paths per observation ID, including repeated renames after failed removal. Pending removals retry after note writes; currently owned live paths are protected. Scoped exports retry pending paths only for IDs present in the selected project's snapshot, including soft deletes. Hard-deleted observations and orphaned hubs require a full-scope export (`--all`), because a project snapshot cannot establish ownership of absent rows. Live hubs are retained if writing their replacement fails.
+
+Cleanup cannot recover stale files whose paths were already lost from the state by an earlier export. There is no recovery scan. Existing version-1 state files without `pending_retirements` remain supported; older exporters ignore and may discard this additive field on downgrade. Keep the state file to preserve pending cleanup; `--force` or deleting the state discards that tracking.
 
 ### Running Persistent
 
