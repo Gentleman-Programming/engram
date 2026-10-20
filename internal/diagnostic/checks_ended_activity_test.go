@@ -144,6 +144,23 @@ func TestEndedSessionPostEndActivityCheck(t *testing.T) {
 			wantPrompts:   1,
 			wantEndedAt:   "2026-10-12 22:45:00",
 		},
+		{
+			// The continuation carries an RFC3339 end and the root a SQLite one.
+			// The continuation's end is the earlier instant, but its raw text
+			// sorts after the root's, so comparing the raw strings would pick
+			// the wrong baseline and report activity the root's later end
+			// already covered.
+			name:    "mixed end timestamp formats compare as instants",
+			project: "engram",
+			sessions: []seedSession{
+				{id: "host-h", project: "engram", endedAt: "2026-10-12 23:00:00"},
+				{id: "host-h:resume:2", project: "engram", endedAt: "2026-10-12T22:00:00Z"},
+			},
+			prompts: []seedPrompt{
+				{sessionID: "host-h:resume:2", project: "engram", createdAt: "2026-10-12 22:30:00"},
+			},
+			wantStatus: StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
