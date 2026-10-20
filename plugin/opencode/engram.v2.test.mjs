@@ -768,7 +768,7 @@ for (const cached of [false, true]) {
         await assert.rejects(runtime.hooks.get('tool.execute.before')({ tool, sessionID: parent ? 'child' : root.id, input }), (error) => {
           assert.match(error.message, /could not resolve an authoritative OpenCode runtime session/)
           assert.ok(error.message.includes(category), error.message)
-          assert.doesNotMatch(error.message, /private-root|private-project|foreign\//)
+          assert.doesNotMatch(error.message, /private-root|private-project|\/private\//)
           return true
         })
         assert.deepEqual(input, { session_id: 'unchanged', project: 'keep' })
