@@ -48,6 +48,7 @@ func TestEndedSessionPostEndActivityCheck(t *testing.T) {
 		wantFindings  int
 		wantSessionID string
 		wantPrompts   int64
+		wantEndedAt   string
 	}{
 		{
 			name:    "ended root with post-end prompts and no continuation warns",
@@ -114,6 +115,35 @@ func TestEndedSessionPostEndActivityCheck(t *testing.T) {
 			},
 			wantStatus: StatusOK,
 		},
+		{
+			name:    "a later continuation that covered the activity clears the warning",
+			project: "engram",
+			sessions: []seedSession{
+				{id: "host-f", project: "engram", endedAt: "2026-10-12 22:38:06"},
+				{id: "host-f:resume:2", project: "engram", endedAt: "2026-10-12 22:45:00"},
+			},
+			prompts: []seedPrompt{
+				{sessionID: "host-f", project: "engram", createdAt: "2026-10-12 22:40:00"},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "activity newer than the latest family end is still reported",
+			project: "engram",
+			sessions: []seedSession{
+				{id: "host-g", project: "engram", endedAt: "2026-10-12 22:38:06"},
+				{id: "host-g:resume:2", project: "engram", endedAt: "2026-10-12 22:45:00"},
+			},
+			prompts: []seedPrompt{
+				{sessionID: "host-g", project: "engram", createdAt: "2026-10-12 22:40:00"},
+				{sessionID: "host-g", project: "engram", createdAt: "2026-10-12 22:50:00"},
+			},
+			wantStatus:    StatusWarning,
+			wantFindings:  1,
+			wantSessionID: "host-g",
+			wantPrompts:   1,
+			wantEndedAt:   "2026-10-12 22:45:00",
+		},
 	}
 
 	for _, tt := range tests {
@@ -148,6 +178,7 @@ func TestEndedSessionPostEndActivityCheck(t *testing.T) {
 			}
 			var evidence struct {
 				SessionID          string `json:"session_id"`
+				EndedAt            string `json:"ended_at"`
 				PostEndPromptCount int64  `json:"post_end_prompt_count"`
 			}
 			if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
@@ -155,6 +186,9 @@ func TestEndedSessionPostEndActivityCheck(t *testing.T) {
 			}
 			if evidence.SessionID != tt.wantSessionID || evidence.PostEndPromptCount != tt.wantPrompts {
 				t.Fatalf("evidence=%+v, want session_id=%q prompts=%d", evidence, tt.wantSessionID, tt.wantPrompts)
+			}
+			if tt.wantEndedAt != "" && evidence.EndedAt != tt.wantEndedAt {
+				t.Fatalf("evidence ended_at=%q, want %q", evidence.EndedAt, tt.wantEndedAt)
 			}
 		})
 	}
