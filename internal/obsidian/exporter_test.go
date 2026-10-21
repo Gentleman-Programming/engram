@@ -708,6 +708,141 @@ func TestOrgFilter(t *testing.T) {
 			t.Errorf("expected acme session hub to remain after re-export scoped to acme-corp: %s", acmeHub)
 		}
 	})
+
+	t.Run("project-scoped re-export narrowed by org retires the excluded org's stale hub", func(t *testing.T) {
+		dir := t.TempDir()
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-1", Project: "eng"},
+					{ID: "sess-2", Project: "eng"},
+				},
+				Observations: []store.Observation{
+					{
+						ID: 1, SessionID: "sess-1", Type: "bugfix",
+						Title: "Acme fix", Content: "acme fix content", Scope: "project",
+						CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+						Project: strPtr("eng"), Org: strPtr("acme-corp"),
+					},
+					{
+						ID: 2, SessionID: "sess-2", Type: "decision",
+						Title: "Globex decision", Content: "globex decision content", Scope: "project",
+						CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+						Project: strPtr("eng"), Org: strPtr("globex-inc"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		// First export is PROJECT-scoped (Project: "eng") with no org filter, so
+		// both orgs' notes and session hubs land. This exercises the !fullScope
+		// branch the empty-Project narrowing test above never reaches (#776).
+		first, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "eng"}).Export()
+		if err != nil {
+			t.Fatalf("first Export() error: %v", err)
+		}
+		if first.Created != 2 {
+			t.Fatalf("first export Created: got %d, want 2", first.Created)
+		}
+		acmeHub := dir + "/engram/_sessions/sess-1.md"
+		globexHub := dir + "/engram/_sessions/sess-2.md"
+		if !fileExists(acmeHub) || !fileExists(globexHub) {
+			t.Fatalf("expected both session hubs after project-scoped export")
+		}
+
+		// Narrow to one org WITHIN the same project. The globex note and its now
+		// orphaned session hub must both be retired even though fullScope is false.
+		second, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "eng", Org: "acme-corp"}).Export()
+		if err != nil {
+			t.Fatalf("second Export() error: %v", err)
+		}
+		globexFile := dir + "/engram/eng/decision/globex-decision-2.md"
+		if fileExists(globexFile) {
+			t.Errorf("globex note should be retired after org narrowing: %s", globexFile)
+		}
+		if fileExists(globexHub) {
+			t.Errorf("stale globex session hub should be retired after org narrowing: %s", globexHub)
+		}
+		if !fileExists(acmeHub) {
+			t.Errorf("acme session hub must remain in the selected scope: %s", acmeHub)
+		}
+		if second.Deleted != 2 {
+			t.Errorf("second export Deleted: got %d, want 2 (globex note + stale hub)", second.Deleted)
+		}
+	})
+}
+
+// TestExportPreservesForeignProjectTracking covers a StoreReader that returns two
+// live projects. The CLI prefilters rows, but the exporter interface must not
+// retire a foreign project's tracking when a later run is scoped to a different
+// project, or a subsequent export of that project would rewrite an unchanged
+// note (#776, danielgap review).
+func TestExportPreservesForeignProjectTracking(t *testing.T) {
+	dir := t.TempDir()
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{
+				{ID: "sess-a", Project: "alpha"},
+				{ID: "sess-b", Project: "beta"},
+			},
+			Observations: []store.Observation{
+				{
+					ID: 1, SessionID: "sess-a", Type: "note",
+					Title: "Alpha note", Content: "alpha content", Scope: "project",
+					CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+					Project: strPtr("alpha"),
+				},
+				{
+					ID: 2, SessionID: "sess-b", Type: "note",
+					Title: "Beta note", Content: "beta content", Scope: "project",
+					CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+					Project: strPtr("beta"),
+				},
+			},
+			Prompts: []store.Prompt{},
+		},
+	}
+
+	// First export is unscoped: both projects are tracked.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("first Export() error: %v", err)
+	}
+	betaFile := dir + "/engram/beta/note/beta-note-2.md"
+	betaBefore, err := os.ReadFile(betaFile)
+	if err != nil {
+		t.Fatalf("read beta file after first export: %v", err)
+	}
+	betaHub := dir + "/engram/_sessions/sess-b.md"
+	if !fileExists(betaHub) {
+		t.Fatalf("expected beta session hub after unscoped export: %s", betaHub)
+	}
+
+	// Second export scoped to alpha only. Beta is a live foreign-project row.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "alpha"}).Export(); err != nil {
+		t.Fatalf("scoped Export() error: %v", err)
+	}
+
+	// Beta's file contents must survive untouched...
+	betaAfter, err := os.ReadFile(betaFile)
+	if err != nil {
+		t.Fatalf("beta file must survive a scoped-to-alpha export: %v", err)
+	}
+	if string(betaAfter) != string(betaBefore) {
+		t.Errorf("beta file rewritten by a scoped-to-alpha export")
+	}
+	// ...and its live tracking must remain, or a later beta export rewrites it.
+	state, err := ReadState(dir + "/engram/.engram-sync-state.json")
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, tracked := state.Files[2]; !tracked {
+		t.Errorf("beta observation lost its tracking after a scoped-to-alpha export")
+	}
+	// The foreign project's session hub must survive the scoped run too.
+	if !fileExists(betaHub) {
+		t.Errorf("beta session hub removed by a scoped-to-alpha export: %s", betaHub)
+	}
 }
 
 // ─── Task 2.9: TestFullExportPipeline ────────────────────────────────────────
