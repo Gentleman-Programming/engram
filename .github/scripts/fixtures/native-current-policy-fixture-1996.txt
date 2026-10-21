@@ -1,0 +1,6 @@
+Current-policy native issue-validation preparation fixture.
+Fixture issue: #1996; rollout trackers: #1802 and #1810.
+This inert file does not change executable code or workflows.
+Observe automatic checks and original-event/source binding only.
+NO MERGE / NO ENQUEUE / NO CLEANUP.
+No approval revocation, manual rerun, or recovery execution is authorized.
