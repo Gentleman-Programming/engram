@@ -370,6 +370,38 @@ The Go server must provide the [compound HTTP workflow routes](../../docs/HTTP-A
 
 None of these POSTs is automatically replayed after uncertain delivery. Unknown finalization pins its acknowledged identity and blocks subsequent session-bound saves/captures or lifecycle reopening; shutdown cannot substitute legacy session end. Retry finalization only explicitly with that same host identity. A rejected retry does not resolve an earlier unknown outcome or reopen session-bound writes. Only a definitive first-attempt rejection with no prior unknown or confirmed finalization may reopen writes. Successful finalization also suppresses redundant shutdown end. Legacy `mem_session_summary` remains a separate observation-save operation, not atomic finalization. Ordinary task completion does not require finalizing a session.
 
+## Partial observation updates
+
+`mem_update` accepts optional string `find` and `replace` fields alongside the
+existing `id` and `expected_project` ownership assertion. Pi forwards supplied
+values to `PATCH /observations/{id}` without implementing replacement logic or
+replaying uncertain writes. Existing full-content and metadata updates are unchanged.
+
+```json
+{"id":42,"expected_project":"engram","find":"old name","replace":"new name"}
+```
+
+Go requires both fields together and rejects combining them with `content`, even
+`content: ""`. Matching is literal, case-sensitive, and replaces all occurrences.
+An empty `replace` deletes matching text; an empty `find`, absent match, or identical
+result is a content-only no-op. Metadata supplied with a no-op still updates.
+Omission is distinct from an explicit empty string. Go rejects an empty resulting
+body and bounds inputs and growth by its configured maximum observation byte
+length (50,000 by default), rather than truncating replacement growth.
+
+Pairing/conflict/input-bound validation rejections leave stored state unchanged.
+The tested empty-result and result-growth transaction failures also roll back;
+this is not a promise that every failure or lost acknowledgement means no write.
+Pi retains the existing redaction and error handling. A supporting running Go
+server is required; updating Pi alone does not add server capabilities.
+
+`test/mem-update.test.mjs` separates mocked registered-tool forwarding from isolated
+real Go HTTP content/history/revision and public-counter checks. Run it from the
+repository root with `node --test plugin/pi/test/mem-update.test.mjs`, then run
+`npm test` from `plugin/pi`. Use Node.js 24 and the checkout's Go toolchain/dependencies
+(or `ENGRAM_PI_TEST_SERVER_BINARY` for the prebuilt fixture); no npm install is needed.
+These checks do not establish installed-host or broader release parity.
+
 ## Observation history
 
 `mem_get_observation` accepts optional `include_history` (boolean) and
