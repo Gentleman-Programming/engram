@@ -156,6 +156,83 @@ func TestLocalExportMissingPayloadRecovery(t *testing.T) {
 	}
 }
 
+func TestLocalExportMissingPayloadRecoveryTrackedWithoutManifest(t *testing.T) {
+	source := newTestStore(t)
+	seedStoreForSync(t, source)
+	original := New(source, t.TempDir())
+	first, err := original.Export("test", "proj-a")
+	if err != nil || first.IsEmpty {
+		t.Fatalf("initial export: %+v %v", first, err)
+	}
+	payload, err := original.transport.ReadChunk(first.ChunkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracking, err := source.GetSyncedChunksForTarget(store.LocalChunkTargetKey)
+	if err != nil || !tracking[first.ChunkID] {
+		t.Fatalf("fixture must retain local tracking: %v", err)
+	}
+	before, err := source.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep local tracking, but do not copy either the manifest or payload.
+	dir := t.TempDir()
+	transport := NewFileTransport(dir)
+	manifest, err := transport.ReadManifest()
+	if err != nil || len(manifest.Chunks) != 0 {
+		t.Fatalf("fixture must have an empty manifest: %+v %v", manifest, err)
+	}
+	if _, err := transport.ReadChunk(first.ChunkID); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("fixture must have no payload: %v", err)
+	}
+	sy := New(source, dir)
+	recovered, err := sy.Export("test", "proj-a")
+	if err != nil || recovered.IsEmpty || recovered.ChunkID != first.ChunkID || recovered.SessionsExported != 1 || recovered.ObservationsExported != 1 || recovered.PromptsExported != 0 {
+		t.Fatalf("tracked payload recovery: %+v %v", recovered, err)
+	}
+	restored, err := transport.ReadChunk(first.ChunkID)
+	if err != nil || !bytes.Equal(payload, restored) {
+		t.Fatalf("restored payload differs: %v", err)
+	}
+	manifest, err = transport.ReadManifest()
+	if err != nil || len(manifest.Chunks) != 1 || manifest.Chunks[0].ID != first.ChunkID {
+		t.Fatalf("recovery must create exactly one manifest entry: %+v %v", manifest, err)
+	}
+	again, err := sy.Export("test", "proj-a")
+	if err != nil || !again.IsEmpty || again.ChunkID != "" {
+		t.Fatalf("healthy repeat: %+v %v", again, err)
+	}
+	afterManifest, err := transport.ReadManifest()
+	if err != nil || !reflect.DeepEqual(manifest, afterManifest) {
+		t.Fatalf("repeat changed or duplicated manifest: %v", err)
+	}
+	afterTracking, err := source.GetSyncedChunksForTarget(store.LocalChunkTargetKey)
+	if err != nil || !reflect.DeepEqual(tracking, afterTracking) {
+		t.Fatalf("recovery changed existing tracking: %v", err)
+	}
+	after, err := source.Export()
+	if err != nil || !sameRecoveryRecords(before, after) {
+		t.Fatalf("recovery changed source records: %v", err)
+	}
+	peer := newTestStore(t)
+	imported, err := New(peer, dir).Import()
+	if err != nil || imported.ChunksImported != 1 || imported.SessionsImported != 1 || imported.ObservationsImported != 1 || imported.PromptsImported != 0 {
+		t.Fatalf("fresh peer import: %+v %v", imported, err)
+	}
+	records, err := peer.ExportProject("proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := source.ExportProject("proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records.Sessions) != 1 || records.Sessions[0].ID != "s-proj" || len(records.Observations) != 1 || records.Observations[0].SyncID != expected.Observations[0].SyncID || records.Observations[0].Content != expected.Observations[0].Content || len(records.Prompts) != 0 {
+		t.Fatal("fresh peer lost record identity/content or default prompt consent")
+	}
+}
+
 func TestLocalExportMissingPayloadRecoveryErrors(t *testing.T) {
 	for _, failure := range []string{"write", "corrupt"} {
 		t.Run(failure, func(t *testing.T) {
