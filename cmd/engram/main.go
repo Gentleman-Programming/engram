@@ -804,6 +804,13 @@ func main() {
 		return
 	}
 
+	if usesLocalSQLite(os.Args[1:]) {
+		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
+			fatal(err)
+			return
+		}
+	}
+
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
 	owned, _ := validateSessionOwned(os.Args[2:])
@@ -3918,6 +3925,8 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
+                       repair --project P --check CODE (--plan|--dry-run|--apply)
+                       repair mutates state: only --apply writes.
   context [project] [--project PROJECT|--all] [--scope SCOPE] [--older-history]
                      Show recent context from previous sessions
   stats [--project PROJECT|--all]
@@ -3927,6 +3936,8 @@ Commands:
   import <file>      Import memories from a JSON export file
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
+  hook resolve-hook-project
+                     Inspect the absolute cwd in hook JSON on stdin without HTTP, database or binding writes
   projects list      List all projects with observation, session, and prompt counts
   projects merge --from <source> --to <canonical> (--dry-run|--apply)
                      Preview or apply a separator or Unicode normalization variant merge

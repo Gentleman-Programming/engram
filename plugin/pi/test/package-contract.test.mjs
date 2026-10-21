@@ -38,8 +38,8 @@ test("package test runner serializes files without dropping any public tests", (
 
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-test("next Pi package release is 0.4.2", () => {
-	assert.equal(pkg.version, "0.4.2");
+test("next Pi package release is 0.5.0", () => {
+	assert.equal(pkg.version, "0.5.0");
 });
 const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11", "npm:gentle-engram@0.1.12", "npm:gentle-engram@0.1.14", "npm:gentle-engram@0.1.15", "npm:gentle-engram@0.1.16", "npm:gentle-engram@0.2.0", "npm:gentle-engram@0.3.0", "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
@@ -262,7 +262,7 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 	}
 });
 
-for (const previousVersion of ["0.2.0", "0.3.0", "0.4.0", "0.4.1"]) {
+for (const previousVersion of ["0.2.0", "0.3.0", "0.4.0", "0.4.1", "0.4.2"]) {
 test(`pi-engram init upgrades ${previousVersion} without changing unrelated config and remains idempotent`, () => {
 	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-upgrade-"));
 	try {
@@ -280,13 +280,13 @@ test(`pi-engram init upgrades ${previousVersion} without changing unrelated conf
 			assert.equal(result.stderr, "");
 			assert.equal(result.stdout, [
 				`Pi agent dir: ${agentDir}`,
-				`${action} npm:gentle-engram@0.4.2 in settings.json`,
+				`${action} npm:gentle-engram@0.5.0 in settings.json`,
 				"Pi-native mem_* tools own agent writes; no Engram MCP registration is created.",
 				"Set ENGRAM_URL for an existing engram serve instance, or ENGRAM_BIN for a custom engram binary path.",
 				"",
 			].join("\n"));
 			assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), {
-				packages: ["npm:existing", "npm:gentle-engram@0.4.2"], custom: true,
+				packages: ["npm:existing", "npm:gentle-engram@0.5.0"], custom: true,
 			});
 			assert.equal(readFileSync(mcpPath, "utf8"), originalMcp);
 			if (action === "Kept") assert.equal(readFileSync(settingsPath, "utf8"), before);

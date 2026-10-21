@@ -61,6 +61,10 @@ var claudeHookOutput = func(response []byte) error {
 }
 
 func cmdHook(args []string) {
+	if len(args) == 1 && args[0] == "resolve-hook-project" {
+		cmdResolveHookProject()
+		return
+	}
 	if len(args) == 1 && (args[0] == "codex-register" || args[0] == "codex-resolve" || args[0] == "codex-session-end") {
 		cmdCodexLifecycle(args[0])
 		return
@@ -74,7 +78,7 @@ func cmdHook(args []string) {
 		return
 	}
 	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
-		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|codex-pre-tool-use|codex-user-prompt-submit")
+		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
 		exitFunc(1)
 		return
 	}

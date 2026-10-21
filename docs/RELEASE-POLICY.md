@@ -43,7 +43,7 @@ archives/signatures; source/build provenance does not establish runtime compatib
 For a separately authorized release:
 
 1. Review the exact source commit, source identity and artifact digests. Tag a **new reviewed
-   commit containing these guards and the separately reviewed #1924 preparation**. Tag-triggered
+   commit containing these guards and the #1924 preparation after review of the combined candidate**. Tag-triggered
    workflows come from the tagged commit: these changes do not retroactively gate older tags
    or the old #1924 commit. Keep core and Pi SemVer streams independent.
 2. Publish Pi through the existing guarded `publish-pi.yml`, which retains provenance/public
@@ -54,8 +54,9 @@ For a separately authorized release:
    Missing versions, transport/HTTP/JSON failures and mismatched required `startupPolicy` or
    declared `sessionOwned` metadata stop core publication. There are no retries, redirects,
    private npm config reads or configurable registry endpoints. Startup-only source contracts
-   remain supported when `sessionOwned` is absent. Current source 0.4.2 requires owned metadata;
-   public 0.4.2 lacks that contract and must fail until separate version preparation is merged.
+   remain supported when `sessionOwned` is absent. Current source and installer pin select 0.5.0
+   and require owned metadata; public 0.4.2 lacks that contract and is not a compatible substitute.
+   Source preparation does not establish public availability of 0.5.0.
    This is rejection-only availability evidence, **not** protocol, source-byte identity,
    published-content integrity or permission approval.
 4. Core GoReleaser still performs its existing release and automatic Homebrew tap behavior.

@@ -626,8 +626,17 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 	// Generate chunk ID from content hash
 	chunkID := chunkcodec.ChunkID(chunkJSON)
 
-	// Check if this exact chunk already exists
-	if _, exists := knownChunks[chunkID]; exists {
+	// Tracking and manifest references do not prove the payload is available.
+	// Restore only the current content-addressed chunk when its bytes are missing.
+	payloadAvailable := false
+	if knownChunks[chunkID] {
+		_, payloadErr := sy.transport.ReadChunk(chunkID)
+		if payloadErr != nil && !errors.Is(payloadErr, ErrChunkNotFound) {
+			return nil, fmt.Errorf("read chunk %s: %w", chunkID, payloadErr)
+		}
+		payloadAvailable = payloadErr == nil
+	}
+	if payloadAvailable {
 		if !locallySyncedChunks[chunkID] {
 			if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
 				return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
@@ -646,16 +655,27 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 		Prompts:   len(chunk.Prompts),
 	}
 
-	// Write chunk via transport
+	// Retain existing metadata when restoring a referenced payload.
+	inManifest := false
+	for _, existing := range manifest.Chunks {
+		if existing.ID == chunkID {
+			entry = existing
+			inManifest = true
+			break
+		}
+	}
+
+	// Write chunk via transport before acknowledging or reconciling tracking.
 	if err := sy.transport.WriteChunk(chunkID, chunkJSON, entry); err != nil {
 		return nil, fmt.Errorf("write chunk: %w", err)
 	}
 
-	// Update manifest
-	manifest.Chunks = append(manifest.Chunks, entry)
-
-	if err := sy.writeManifest(manifest); err != nil {
-		return nil, fmt.Errorf("write manifest: %w", err)
+	// A restored payload already has a manifest entry; never duplicate it.
+	if !inManifest {
+		manifest.Chunks = append(manifest.Chunks, entry)
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
 	}
 
 	// Record this chunk as synced in the local DB

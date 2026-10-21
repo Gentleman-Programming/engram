@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -16,13 +17,29 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "clear PI_CODING_AGENT: %v\n", err)
 		os.Exit(1)
 	}
-	dir, err := os.MkdirTemp("", "engram-hostbind-test-")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create host binding dir: %v\n", err)
-		os.Exit(1)
+	// Test subprocesses must never recover a developer's drive-root database.
+	// Migration dispatch assertions install their own seam.
+	migrateOrphanedDatabase = func(string) {}
+
+	// Unrelated CLI subprocesses may deliberately have no writable temp root.
+	// Retain the suite's temp root before individual tests change their env.
+	tempRoot := os.TempDir()
+	var dir string
+	var once sync.Once
+	hostBindingDataDir = func() string {
+		once.Do(func() {
+			var err error
+			dir, err = os.MkdirTemp(tempRoot, "engram-hostbind-test-")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "create host binding dir: %v\n", err)
+				os.Exit(1)
+			}
+		})
+		return dir
 	}
-	hostBindingDataDir = func() string { return dir }
 	code := m.Run()
-	_ = os.RemoveAll(dir)
+	if dir != "" {
+		_ = os.RemoveAll(dir)
+	}
 	os.Exit(code)
 }
