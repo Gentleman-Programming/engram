@@ -504,29 +504,22 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		result.HubsCreated++
 	}
 
-	// A hub is in the exported scope when some row the store returned for this
-	// run (project rows, any org) belongs to it. Anything absent is a foreign
-	// project's hub and must survive a project-scoped run untouched (#776).
+	// A session hub belongs to exactly one project, so on a project-scoped run
+	// only the sessions this run actually returned (present) may be reconciled;
+	// a foreign project's session hub (absent from scopedSessions) must survive
+	// untouched (#776).
 	scopedSessions := make(map[string]bool)
-	scopedTopics := make(map[string]bool)
 	for _, obs := range data.Observations {
-		if !present[obs.ID] {
-			continue
-		}
-		if obs.SessionID != "" {
+		if present[obs.ID] && obs.SessionID != "" {
 			scopedSessions[obs.SessionID] = true
-		}
-		if prefix := obsTopicPrefix(obs); prefix != "" {
-			scopedTopics[prefix] = true
 		}
 	}
 
-	// ── Retire hubs that no longer reference a live observation ───────────────
-	// A session or topic still returned by the store but whose notes were all
-	// soft deleted (issue #1900) or org excluded (#776) is never rewritten
-	// above, so its hub lingers as an orphan. Prune hubs inside the exported
-	// scope; a foreign project's hub (absent from scoped*) stays. Like the
-	// reconciliation above, a hard-deleted session — gone from the store — is
+	// ── Retire session hubs that no longer reference a live observation ───────
+	// A session still returned by the store but whose notes were all soft
+	// deleted (issue #1900) or org excluded (#776) leaves an orphan hub. Prune
+	// within the exported scope; a foreign project's hub (absent from
+	// scopedSessions) stays. A hard-deleted session — gone from the store — is
 	// only reachable here on a full-scope run.
 	for sessionID, relPath := range state.SessionHubs {
 		if !fullScope && !scopedSessions[sessionID] {
@@ -542,8 +535,13 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		result.Deleted++
 		delete(state.SessionHubs, sessionID)
 	}
+	// Topic hubs are shared across projects: a topic aggregates notes from any
+	// project, so a project-scoped run — which never sees other projects' rows —
+	// cannot tell whether a topic hub is still referenced elsewhere. Only a full
+	// export may retire one; a scoped run leaves every topic hub intact so a
+	// shared hub other projects' notes still link to is never orphaned (#776).
 	for prefix, relPath := range state.TopicHubs {
-		if !fullScope && !scopedTopics[prefix] {
+		if !fullScope {
 			continue
 		}
 		if ShouldCreateTopicHub(liveTopicCounts[prefix]) {

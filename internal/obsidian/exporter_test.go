@@ -845,6 +845,65 @@ func TestExportPreservesForeignProjectTracking(t *testing.T) {
 	}
 }
 
+// TestScopedExportPreservesSharedTopicHub covers the cross-project nature of
+// topic hubs: a topic aggregates notes from any project, so a project-scoped
+// export — which only sees its own project's rows — must never prune a topic
+// hub that another project's notes still depend on (#776, danielgap review).
+func TestScopedExportPreservesSharedTopicHub(t *testing.T) {
+	dir := t.TempDir()
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{
+				{ID: "sess-a", Project: "alpha"},
+				{ID: "sess-b", Project: "beta"},
+			},
+			Observations: []store.Observation{
+				{
+					ID: 1, SessionID: "sess-a", Type: "note",
+					Title: "Alpha deploy", Content: "alpha content", Scope: "project",
+					CreatedAt: "2026-01-01T10:00:00Z", UpdatedAt: "2026-01-01T10:00:00Z",
+					Project: strPtr("alpha"), TopicKey: strPtr("deploy"),
+				},
+				{
+					ID: 2, SessionID: "sess-b", Type: "note",
+					Title: "Beta deploy", Content: "beta content", Scope: "project",
+					CreatedAt: "2026-01-02T10:00:00Z", UpdatedAt: "2026-01-02T10:00:00Z",
+					Project: strPtr("beta"), TopicKey: strPtr("deploy"),
+				},
+			},
+			Prompts: []store.Prompt{},
+		},
+	}
+
+	// Full export: alpha and beta share the "deploy" topic, so its hub exists
+	// (two references clear the creation threshold).
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export(); err != nil {
+		t.Fatalf("first Export() error: %v", err)
+	}
+	state, err := ReadState(dir + "/engram/.engram-sync-state.json")
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	topicHub, ok := state.TopicHubs["deploy"]
+	if !ok {
+		t.Fatalf("expected a shared topic hub for \"deploy\" after full export")
+	}
+	topicHubPath := dir + "/engram/" + topicHub
+	if !fileExists(topicHubPath) {
+		t.Fatalf("expected topic hub file after full export: %s", topicHubPath)
+	}
+
+	// Scope to alpha. Only alpha's "deploy" note is live this run (one
+	// reference, below the hub threshold), but beta's note still links the
+	// shared hub, so it must survive.
+	if _, err := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "alpha"}).Export(); err != nil {
+		t.Fatalf("scoped Export() error: %v", err)
+	}
+	if !fileExists(topicHubPath) {
+		t.Errorf("shared topic hub pruned by a scoped-to-alpha export: %s", topicHubPath)
+	}
+}
+
 // ─── Task 2.9: TestFullExportPipeline ────────────────────────────────────────
 
 func TestFullExportPipeline(t *testing.T) {
