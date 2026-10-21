@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -44,9 +45,10 @@ func TestTokenBudget(t *testing.T) {
 		{"eager_schemas.agent", eagerSchemaRunes(t)},
 		{"server_instructions.agent", utf8.RuneCountInString(buildServerInstructions(ProfileAgent))},
 	}
+	tools := eagerSchemaToolRunes(t)
 
 	if *updateTokenBudgets {
-		writeTokenBudgets(t, measured)
+		writeTokenBudgets(t, measured, tools)
 		return
 	}
 
@@ -62,6 +64,75 @@ func TestTokenBudget(t *testing.T) {
 				measurement.name, measurement.runes, budget)
 		}
 	}
+
+	// A tool registered in the agent profile without a budget entry would
+	// otherwise opt out of the ratchet silently: the aggregate could stay flat
+	// while a new tool paid for itself with a smaller one, and nothing would
+	// identify or acknowledge the new tool.
+	for _, tool := range tools {
+		entry := toolBudgetKey(tool.name)
+		budget, ok := budgets[entry]
+		if !ok {
+			t.Errorf("agent tool %q is registered without a token budget entry (%q) — regenerate with: go test ./internal/mcp -run TestTokenBudget -update",
+				tool.name, entry)
+			continue
+		}
+		if tool.runes > budget {
+			t.Errorf("agent tool %q is %d runes, over its pinned budget of %d — trim the tool or raise the budget deliberately",
+				tool.name, tool.runes, budget)
+		}
+	}
+
+	// The other direction: an entry for a tool that is no longer registered
+	// would keep a stale budget line alive and hide the removal.
+	for name := range budgets {
+		if !strings.HasPrefix(name, toolBudgetPrefix) {
+			continue
+		}
+		toolName := strings.TrimPrefix(name, toolBudgetPrefix)
+		if _, ok := tools[toolName]; !ok {
+			t.Errorf("token budget %q has no registered agent tool %q — regenerate with: go test ./internal/mcp -run TestTokenBudget -update",
+				name, toolName)
+		}
+	}
+}
+
+// toolBudgetPrefix marks the per-tool budget entries in the baseline.
+const toolBudgetPrefix = "eager_schemas.agent.tool."
+
+// toolBudgetKey returns the baseline key of one agent tool.
+func toolBudgetKey(toolName string) string { return toolBudgetPrefix + toolName }
+
+// toolMeasurement is one registered agent tool and its current size.
+type toolMeasurement struct {
+	name  string
+	runes int
+}
+
+// eagerSchemaToolRunes measures each registered agent tool on its own. The
+// per-tool size is the tool definition as the SDK marshals it, which is what
+// the tool contributes to the handshake payload; the aggregate above measures
+// the payload as delivered, so the two do not have to add up exactly.
+func eagerSchemaToolRunes(t *testing.T) map[string]toolMeasurement {
+	t.Helper()
+
+	srv := NewServerWithConfig(newMCPTestStore(t), MCPConfig{}, ProfileAgent)
+	registered := srv.ListTools()
+	tools := make([]mcppkg.Tool, 0, len(registered))
+	for _, tool := range registered {
+		tools = append(tools, tool.Tool)
+	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+
+	measured := make(map[string]toolMeasurement, len(tools))
+	for _, tool := range tools {
+		raw, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatalf("marshal tool %s: %v", tool.Name, err)
+		}
+		measured[tool.Name] = toolMeasurement{name: tool.Name, runes: utf8.RuneCountInString(string(raw))}
+	}
+	return measured
 }
 
 // eagerSchemaRunes measures the tools/list payload an agent session receives
@@ -101,12 +172,15 @@ func readTokenBudgets(t *testing.T) map[string]int {
 }
 
 // writeTokenBudgets rewrites the pinned baseline from the current code.
-func writeTokenBudgets(t *testing.T, measured []tokenMeasurement) {
+func writeTokenBudgets(t *testing.T, measured []tokenMeasurement, tools map[string]toolMeasurement) {
 	t.Helper()
 
-	budgets := make(map[string]int, len(measured))
+	budgets := make(map[string]int, len(measured)+len(tools))
 	for _, measurement := range measured {
 		budgets[measurement.name] = measurement.runes
+	}
+	for _, tool := range tools {
+		budgets[toolBudgetKey(tool.name)] = tool.runes
 	}
 	raw, err := json.MarshalIndent(budgets, "", "  ")
 	if err != nil {
