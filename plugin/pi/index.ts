@@ -2068,6 +2068,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     scope: optionalString("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
     max_bytes: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum context output size in bytes; must be a positive integer; enforced by Engram core" })),
     compact: optionalBoolean("Use Engram core's compact context formatting"),
+    older_history: optionalBoolean("Include a bounded Older History overview with counts and sampled titles outside the recent window"),
   }),
   mem_stats: Type.Object({
     project: optionalString("Project to echo in UI chrome"),
@@ -2301,6 +2302,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         scope: params.scope,
         max_bytes: params.max_bytes,
         compact: params.compact,
+        older_history: params.older_history,
       })}`);
     case "mem_stats":
       return fetch(`/stats${queryString({ all_projects: true })}`);
