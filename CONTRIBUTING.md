@@ -210,10 +210,13 @@ unassignments, historical scans or required-check/settings changes.
 
 This is a convenience, **not a replacement for approved, assigned ownership before
 implementation**. Required validation and refresh publishers remain independent;
-rerun native PR validation after assignment changes. The workflow uses only a
-trusted event base-SHA helper, never PR-head code or candidate bootstrap. It becomes
-available only after integration on the trusted base. A real fork run remains
-pending until then; mocked tests do not establish live token/event behavior.
+rerun native PR validation after assignment changes. In this trusted
+`pull_request_target` workflow, `github.workflow_sha` supplies the helper from the
+executing workflow revision even when the historical PR base lacks it, never
+PR-head code or candidate bootstrap. `workflow_sha` is not a universal trust
+marker. This correction takes effect only after integration on the trusted
+branch. Local tests do not establish hosted old-base, token or event behavior;
+a real fork run remains pending.
 
 Runs are serialized repository-wide with cancellation disabled for running jobs.
 GitHub may replace/coalesce pending runs: this is best-effort scheduling, not a

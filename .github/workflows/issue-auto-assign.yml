@@ -19,10 +19,10 @@ jobs:
       issues: write
       pull-requests: read
     steps:
-      - name: Load trusted base helper
+      - name: Load trusted workflow helper
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
           sparse-checkout: .github/scripts/issue-auto-assign.mjs
           sparse-checkout-cone-mode: false

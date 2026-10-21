@@ -112,6 +112,30 @@ test('summary failure fails automation; untrusted text is never rendered', async
   await f.run(); assert.equal(f.failures.length, 1);
 });
 
+test('old-base checkout loads the trusted workflow helper without selecting PR head', () => {
+  const yaml = readFileSync(new URL('../workflows/issue-auto-assign.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const workflowSha = 'a'.repeat(40);
+  const oldBaseSha = 'b'.repeat(40);
+  const untrustedHeadSha = 'c'.repeat(40);
+  const contextRefs = {
+    'github.workflow_sha': workflowSha,
+    'github.event.pull_request.base.sha': oldBaseSha,
+    'github.event.pull_request.head.sha': untrustedHeadSha,
+  };
+  const helper = '.github/scripts/issue-auto-assign.mjs';
+  const filesByRevision = new Map([
+    [workflowSha, new Set([helper])],
+    [oldBaseSha, new Set()],
+    [untrustedHeadSha, new Set([helper])],
+  ]);
+  const expression = yaml.match(/^          ref: \$\{\{ ([\w.]+) \}\}$/m)?.[1];
+  assert.ok(Object.hasOwn(contextRefs, expression), 'checkout expression must resolve in the event fixture');
+  const checkoutSha = contextRefs[expression];
+  assert.ok(filesByRevision.get(checkoutSha)?.has(helper), 'selected revision must supply the helper even when the historical base lacks it');
+  assert.notEqual(checkoutSha, untrustedHeadSha, 'PR head helper must never be selected');
+  assert.equal(checkoutSha, workflowSha, 'helper must come from the trusted executing pull_request_target workflow');
+});
+
 test('workflow trust, permissions, serialization and executable github-script boundary', async () => {
   const yaml = readFileSync(new URL('../workflows/issue-auto-assign.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(yaml, /pull_request_target:\s*\n\s*types: \[opened, edited, reopened, ready_for_review\]/);
@@ -121,10 +145,10 @@ test('workflow trust, permissions, serialization and executable github-script bo
     [['contents', 'read'], ['issues', 'write'], ['pull-requests', 'read']]);
   assert.match(yaml, /actions\/checkout@d23441a48e516b6c34aea4fa41551a30e30af803/);
   assert.match(yaml, /actions\/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd/);
-  assert.match(yaml, /ref: \$\{\{ github.event.pull_request.base.sha \}\}/);
+  assert.match(yaml, /ref: \$\{\{ github.workflow_sha \}\}/);
   assert.match(yaml, /persist-credentials: false/);
   assert.match(yaml, /sparse-checkout: \.github\/scripts\/issue-auto-assign.mjs/);
-  assert.doesNotMatch(yaml, /head\.sha|workflow_sha|secrets\.|run:|checks:|actions: write/);
+  assert.doesNotMatch(yaml, /github\.event\.pull_request\.base\.sha|pull_request\.head|head\.sha|secrets\.|run:|checks:|actions: write/);
   const script = yaml.split('          script: |\n')[1].split('\n').map(line => line.replace(/^            /, '')).join('\n');
   const execute = new (Object.getPrototypeOf(async function() {}).constructor)('github', 'context', 'core', 'load',
     script.replace(/await import\([^\n]+\)/, 'await load()'));
