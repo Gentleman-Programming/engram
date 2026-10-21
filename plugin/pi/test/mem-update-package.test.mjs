@@ -8,6 +8,10 @@ import { test } from "node:test";
 import { PLUGIN_ROOT } from "./plugin-sandbox.mjs";
 
 const reason = "requires the Engram Go checkout or ENGRAM_PI_TEST_SERVER_BINARY";
+const repositoryFixtures = [
+  "go.mod", "internal/server/server.go", "internal/store/store.go",
+  "plugin/pi/test/support/real-server/main.go",
+];
 
 function scenario(run) {
   const dir = mkdtempSync(join(tmpdir(), "engram-update-package-"));
@@ -47,14 +51,14 @@ fsp.mkdtemp = (prefix, ...args) => {
 };
 syncBuiltinESMExports();
 `);
-    const execute = (root, binary) => {
+    const execute = (root, binary, selection = ["test/mem-update.test.mjs"]) => {
       writeFileSync(calls, JSON.stringify({ builds: [], sandboxes: [] }));
       const env = { ...process.env, ENGRAM_BUILD_CALLS: calls, TEMP: temp, TMP: temp, TMPDIR: temp };
       delete env.NODE_TEST_CONTEXT;
       delete env.ENGRAM_PI_TEST_SERVER_BINARY;
       if (binary !== undefined) env.ENGRAM_PI_TEST_SERVER_BINARY = binary;
       const result = spawnSync(process.execPath, ["--import", pathToFileURL(hook).href,
-        "--test", "--test-reporter=tap", "test/mem-update.test.mjs"],
+        "--test", "--test-reporter=tap", ...selection],
       { cwd: root, env, encoding: "utf8", timeout: 60000, maxBuffer: 4000000 });
       assert.ifError(result.error);
       assert.equal(result.signal, null);
@@ -101,8 +105,38 @@ test("packaged mem_update configured invalid binary fails real tests without Go 
   });
 });
 
+for (const missing of repositoryFixtures) {
+  test(`partial checkout mem_update skips build-failure scenario without ${missing}`, () => {
+    scenario(({ pkg, temp, execute }) => {
+      const root = join(pkg, "../..");
+      for (const fixture of repositoryFixtures) {
+        const path = join(root, fixture);
+        if (fixture === missing) {
+          // The consumer already has an unrelated go.mod; remove only this fixture-owned file.
+          if (existsSync(path)) rmSync(path);
+        } else {
+          mkdirSync(join(path, ".."), { recursive: true });
+          writeFileSync(path, "fixture availability sentinel\n");
+        }
+      }
+      const result = execute(pkg, undefined, [
+        "--test-name-pattern=^checkout mem_update preserves Go build failure sentinel without skipping$",
+        "test/mem-update-package.test.mjs",
+      ]);
+      assert.equal(result.status, 0, result.stdout);
+      for (const [name, count] of Object.entries({ tests: 1, pass: 0, fail: 0, skipped: 1, cancelled: 0 })) {
+        assert.match(result.stdout, new RegExp(`^# ${name} ${count}$`, "m"));
+      }
+      assert.ok(result.stdout.includes(`ok 1 - checkout mem_update preserves Go build failure sentinel without skipping # SKIP ${reason}`));
+      assert.deepEqual(result.builds, []);
+      assert.deepEqual(result.sandboxes, []);
+      assert.deepEqual(readdirSync(temp), []);
+    });
+  });
+}
+
 test("checkout mem_update preserves Go build failure sentinel without skipping", {
-  skip: !existsSync(join(PLUGIN_ROOT, "../../internal/server/server.go")),
+  skip: repositoryFixtures.every(path => existsSync(join(PLUGIN_ROOT, "../..", path))) ? false : reason,
 }, () => {
   scenario(({ temp, execute }) => {
     const result = execute(PLUGIN_ROOT);
