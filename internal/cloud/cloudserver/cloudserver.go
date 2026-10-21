@@ -86,8 +86,8 @@ type CloudServer struct {
 	syncStatus          dashboard.SyncStatusProvider
 	listenAndServe      func(addr string, handler http.Handler) error
 	// version is the optional running build identifier surfaced in the
-	// dashboard chrome (Layout footer + LoginPage). Empty string keeps the
-	// chrome unchanged so un-versioned local builds render byte-identical.
+	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
+	// displayed as "version unknown" on both surfaces.
 	version string
 }
 
@@ -191,7 +191,7 @@ func WithMaxPushBodyBytes(limit int64) Option {
 // reached us ("v1.20.3" and "1.20.3" both display as "v1.20.3"), while a
 // non-semver build identifier such as "dev" is preserved as-is so a local
 // build is never mislabelled "vdev". Empty and whitespace-only values stay
-// empty so the chrome renders byte-identical for an un-versioned build.
+// empty; the chrome presents those builds as "version unknown".
 func WithVersion(version string) Option {
 	return func(s *CloudServer) {
 		s.version = displayVersion(version)
@@ -200,7 +200,10 @@ func WithVersion(version string) Option {
 
 // displayVersion maps a raw build identifier onto its dashboard display form.
 func displayVersion(version string) string {
-	trimmed := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	trimmed := strings.TrimSpace(version)
+	if len(trimmed) > 1 && trimmed[0] == 'v' && trimmed[1] >= '0' && trimmed[1] <= '9' {
+		trimmed = trimmed[1:]
+	}
 	if trimmed == "" {
 		return ""
 	}

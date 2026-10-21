@@ -5,8 +5,7 @@ package dashboard
 // (integrated dashboard uses ENGRAM_CLOUD_TOKEN, not user/password credentials).
 // version is the optional, display-ready build identifier rendered verbatim
 // (e.g. "v1.20.3" for a semver build, "dev" for an un-versioned local build).
-// Empty version omits the marker so the chrome stays byte-identical without a
-// build id.
+// Empty version displays "version unknown", as in the dashboard layout.
 templ LoginPage(errorMsg string, next string, version string) {
 	<!DOCTYPE html>
 	<html lang="en" data-theme="dark">
@@ -57,11 +56,9 @@ templ LoginPage(errorMsg string, next string, version string) {
 						</form>
 					</section>
 				</main>
-if version != "" {
-						<div class="login-footer">
-							<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · { version }</small>
-						</div>
-					}
+				<div class="login-footer">
+					<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY{ versionMarker(version) }</small>
+				</div>
 			</div>
 		</body>
 	</html>

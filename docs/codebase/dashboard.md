@@ -28,6 +28,12 @@ internal/cloud/cloudstore
   Postgres read model + controls + audit log
 ```
 
+The dashboard and login footers show the running server build identifier. Numeric
+build identifiers normalize to one leading `v` (`1.20.3` and `v1.20.3` both show
+`v1.20.3`); other identifiers such as `dev`, `version-test`, and `v` are preserved
+after trimming surrounding whitespace. Missing identifiers show ` · version unknown`
+on both pages, including the login page before authentication.
+
 ## Key files
 
 | File | Responsibility |

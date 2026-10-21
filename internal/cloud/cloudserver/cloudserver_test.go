@@ -2384,6 +2384,8 @@ func TestWithVersionProducesDisplayLabel(t *testing.T) {
 		{name: "bare semver gains one v", in: "3.0.0", want: "v3.0.0"},
 		{name: "surrounding whitespace is trimmed", in: "  v1.20.3-rc.1  ", want: "v1.20.3-rc.1"},
 		{name: "dev stays dev", in: "dev", want: "dev"},
+		{name: "nonnumeric leading v is preserved", in: "version-test", want: "version-test"},
+		{name: "single v is preserved", in: "v", want: "v"},
 		{name: "empty stays empty", in: "", want: ""},
 		{name: "only whitespace stays empty", in: "   ", want: ""},
 	}

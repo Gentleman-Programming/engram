@@ -50,12 +50,8 @@ func TestLayoutRendersVersionInFooterWhenMountConfigVersionSet(t *testing.T) {
 	}
 }
 
-// TestLayoutOmitsVersionWhenMountConfigVersionEmpty asserts that the zero
-// value of MountConfig.Version keeps the footer byte-identical to the
-// pre-#1657 render — empty version = omit rendering. This protects operators
-// running an un-versioned binary (e.g. local `go run`) from gaining an empty
-// " · v" marker.
-func TestLayoutOmitsVersionWhenMountConfigVersionEmpty(t *testing.T) {
+// An unset build identifier must be explicit in the dashboard footer.
+func TestLayoutShowsUnknownWhenMountConfigVersionEmpty(t *testing.T) {
 	mux := http.NewServeMux()
 	Mount(mux, MountConfig{
 		RequireSession: func(r *http.Request) error {
@@ -67,7 +63,7 @@ func TestLayoutOmitsVersionWhenMountConfigVersionEmpty(t *testing.T) {
 		IsAdmin:        func(_ *http.Request) bool { return false },
 		Store:          parityStoreStub{},
 		GetDisplayName: func(_ *http.Request) string { return "operator" },
-		// Version intentionally zero — must NOT render a `v` marker.
+		// Version intentionally zero.
 	})
 
 	rec := httptest.NewRecorder()
@@ -76,19 +72,8 @@ func TestLayoutOmitsVersionWhenMountConfigVersionEmpty(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, " · v") || strings.Contains(body, "·v") {
-		t.Errorf("expected empty MountConfig.Version to omit the ` · v` marker, body=%q", body)
-	}
-	// Existing marker must still be present (this is the regression guard —
-	// the version addition must not remove the existing chrome copy).
-	if !strings.Contains(body, "ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY") {
-		t.Errorf("expected baseline footer copy in body, body=%q", body)
-	}
-	// The empty-version footer must be byte-identical to the pre-#1657 render:
-	// the canonical copy ends the <small> exactly, with no separator left
-	// behind by the version marker conditional.
-	if !strings.Contains(body, "ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY</small>") {
-		t.Errorf("expected the canonical footer copy to end the <small> exactly, body=%q", body)
+	if !strings.Contains(body, "<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · version unknown</small>") {
+		t.Errorf("expected full footer with unknown version, body=%q", body)
 	}
 }
 
@@ -162,9 +147,8 @@ func TestChromeRendersNonSemverVersionAsIs(t *testing.T) {
 	}
 }
 
-// TestLoginPageOmitsVersionWhenMountConfigVersionEmpty is the T3 negative
-// case. Empty Version must not produce an empty ` · v` marker.
-func TestLoginPageOmitsVersionWhenMountConfigVersionEmpty(t *testing.T) {
+// The login footer must remain visible even without a build identifier.
+func TestLoginPageShowsUnknownWhenMountConfigVersionEmpty(t *testing.T) {
 	mux := http.NewServeMux()
 	Mount(mux, MountConfig{
 		RequireSession: func(r *http.Request) error { return errUnauthorized },
@@ -178,7 +162,7 @@ func TestLoginPageOmitsVersionWhenMountConfigVersionEmpty(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, " · v") || strings.Contains(body, "·v") {
-		t.Errorf("expected empty MountConfig.Version to omit the ` · v` marker, body=%q", body)
+	if !strings.Contains(body, "<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · version unknown</small>") {
+		t.Errorf("expected full footer with unknown version, body=%q", body)
 	}
 }

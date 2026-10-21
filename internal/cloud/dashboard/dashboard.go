@@ -57,20 +57,15 @@ type MountConfig struct {
 	// Version is the display-ready running server build identifier, rendered
 	// verbatim in the dashboard chrome (e.g. "v1.20.3" for a semver build,
 	// "dev" for an un-versioned local build). cloudserver.WithVersion()
-	// produces this shape. Optional: when empty the chrome omits the version
-	// marker entirely, so unset keeps current rendering byte-identical.
+	// produces this shape. When empty the chrome shows "version unknown".
 	Version string
 }
 
 // versionMarker renders the chrome suffix for a build identifier, separator
-// included. It returns an empty string when there is no version to show so the
-// footer stays byte-identical to the un-versioned render instead of gaining a
-// stray separator. Keeping the separator here rather than as template literal
-// text is deliberate: templ turns the newline before a conditional into a
-// trailing space, which would leak into the empty case.
+// included. Missing build identifiers are explicit on both chrome surfaces.
 func versionMarker(version string) string {
 	if version == "" {
-		return ""
+		return " · version unknown"
 	}
 	return " · " + version
 }
