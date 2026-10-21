@@ -1,0 +1,28 @@
+name: Issue Status Fallback
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  ensure-review-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add review status only when missing
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const issue = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            };
+            const { data } = await github.rest.issues.get(issue);
+            if (data.labels.some((label) => label.name.startsWith('status:'))) return;
+            await github.rest.issues.addLabels({
+              ...issue,
+              labels: ['status:needs-review'],
+            });

@@ -23,6 +23,12 @@ Use the correct template:
 
 Search existing issues for a canonical tracker before opening a new one. Fill in all required fields; report symptoms, impact, release context, and logs without having to diagnose the root cause. Your issue receives `status:needs-review`.
 
+For newly opened issues that bypass the forms (for example, through the CLI or API),
+the Issue Status Fallback workflow checks current labels and adds only
+`status:needs-review` when no `status:*` label exists. It preserves all existing
+labels and does not infer type, approval, priority, or effort. It does not backfill
+existing issues or respond to later label removals.
+
 ### Step 2: Investigation and Proportional Approval
 
 A maintainer triages the report and assigns a real investigator/owner. Keep evidence on the canonical issue; cluster duplicates only when their root cause and affected contract match, not just their symptoms. Move useful occurrence evidence there before duplicate closure.
