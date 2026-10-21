@@ -3928,7 +3928,7 @@ Commands:
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
   hook resolve-hook-project
-                     Inspect the cwd in hook JSON on stdin without HTTP, database or binding writes
+                     Inspect the absolute cwd in hook JSON on stdin without HTTP, database or binding writes
   projects list      List all projects with observation, session, and prompt counts
   projects merge --from <source> --to <canonical> (--dry-run|--apply)
                      Preview or apply a separator or Unicode normalization variant merge

@@ -24,7 +24,7 @@
 
 ### Client-local project inspection
 
-`engram hook resolve-hook-project` reads existing hook JSON from stdin and uses its exact lowercase `cwd` field to inspect the local filesystem. Other hook fields are ignored. It prints canonical `project`, `project_source` and `project_path` JSON, or `{}` when input or identity is unusable. Malformed input, duplicate `cwd`, inaccessible directories, ambiguity and invalid/unbound Git identities never fall back to an HTTP lookup. Malformed Git metadata in the cwd, its ancestors or a promoted child is not treated as a plain directory. Readable non-Git directories retain basename resolution.
+`engram hook resolve-hook-project` reads existing hook JSON from stdin and uses its exact lowercase `cwd` field to inspect the local filesystem. The `cwd` must be an absolute path; relative paths return `{}`. Other hook fields are ignored. It prints canonical `project`, `project_source` and `project_path` JSON, or `{}` when input or identity is unusable. Malformed input, duplicate `cwd`, inaccessible directories, ambiguity and invalid/unbound Git identities never fall back to an HTTP lookup. Malformed Git metadata in the cwd, its ancestors or a promoted child is not treated as a plain directory. Readable non-Git directories retain basename resolution.
 
 Inspection does not open the database, initialize global configuration, create Git bindings or register sessions. Existing config and repository bindings remain authoritative. The standalone action shares the native Codex prompt's 1.5-second inspection budget; internal callers can instead pass their remaining context to the shared Go inspector. This helper alone does not change the registration hooks or repair already misattributed sessions.
 

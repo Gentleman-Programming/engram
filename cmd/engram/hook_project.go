@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"unicode/utf8"
 
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
@@ -20,7 +21,7 @@ func cmdResolveHookProject() {
 	output := map[string]string{}
 	input, err := io.ReadAll(os.Stdin)
 	if err == nil {
-		if cwd, ok := hookProjectCWD(input); ok {
+		if cwd, ok := hookProjectCWD(input); ok && filepath.IsAbs(cwd) {
 			if result, err := projectpkg.InspectLocalProject(ctx, cwd); err == nil {
 				output["project"] = result.Project
 				output["project_source"] = result.Source

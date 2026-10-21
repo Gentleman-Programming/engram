@@ -28,7 +28,7 @@ func TestHookResolveHookProject(t *testing.T) {
 	defer trap.Close()
 
 	for _, name := range []string{
-		"configured", "unicode-config", "non-git", "bound-git", "linked-worktree",
+		"configured", "unicode-config", "non-git", "relative-cwd", "relative-dot-cwd", "bound-git", "linked-worktree",
 		"unbound-git", "unbound-child", "ambiguous", "invalid-config", "missing-directory", "file-directory",
 		"broken-gitfile", "broken-git-directory", "broken-git-child", "broken-git-descendant",
 		"malformed-json", "invalid-utf8", "missing-cwd", "null-cwd", "number-cwd", "blank-cwd", "nul-cwd", "wrong-case-cwd", "duplicate-cwd",
@@ -55,6 +55,14 @@ func TestHookResolveHookProject(t *testing.T) {
 				wantSource = "config"
 			case "non-git":
 				wantProject, wantSource = "non-git", "dir_basename"
+			case "relative-cwd":
+				cwd = "sub/dir"
+				if err := os.MkdirAll(filepath.Join(root, "sub", "dir"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "relative-dot-cwd":
+				hookProjectFixtureConfig(t, root, "ambient-project")
+				cwd = "."
 			case "bound-git", "linked-worktree", "unbound-git":
 				hookProjectFixtureGit(t, env, "init", "-q", cwd)
 				hookProjectFixtureGit(t, env, "-C", cwd, "remote", "add", "origin", "https://example.invalid/canonical-bound.git")
