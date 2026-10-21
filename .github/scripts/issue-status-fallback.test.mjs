@@ -6,7 +6,7 @@ const workflow = () => fs.readFileSync('.github/workflows/issue-status-fallback.
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Execute the actual github-script body, not a separate implementation of its policy.
-async function runWorkflow(currentLabels, { eventLabels = [], readError, writeError } = {}) {
+async function runWorkflow(currentLabels, { eventLabels = [], body = null, eventBody = null, readError, writeError } = {}) {
   const source = workflow();
   const script = source.match(/          script: \|\r?\n([\s\S]+)$/)?.[1];
   assert.ok(script, 'workflow contains an executable github-script body');
@@ -15,7 +15,7 @@ async function runWorkflow(currentLabels, { eventLabels = [], readError, writeEr
   const context = {
     repo: { owner: 'example', repo: 'engram' },
     issue: { number: 42 },
-    payload: { issue: { labels: eventLabels.map((name) => ({ name })) } },
+    payload: { issue: { body: eventBody, title: 'Bug feature documentation question', labels: eventLabels.map((name) => ({ name })) } },
   };
   const github = {
     rest: {
@@ -23,7 +23,7 @@ async function runWorkflow(currentLabels, { eventLabels = [], readError, writeEr
         async get(args) {
           calls.push(['get', args]);
           if (readError) throw readError;
-          return { data: { labels: currentLabels.map((name) => ({ name })) } };
+          return { data: { body, labels: currentLabels.map((name) => ({ name })) } };
         },
         async addLabels(args) {
           calls.push(['addLabels', args]);
@@ -43,6 +43,67 @@ async function runWorkflow(currentLabels, { eventLabels = [], readError, writeEr
 }
 
 const issue = { owner: 'example', repo: 'engram', issue_number: 42 };
+
+// Required field labels are metadata, not a classification of the answers.
+const signatures = {
+  bug: ['Existing Issue Search', '📝 Observed Consequence', '🔄 Steps to Reproduce', '✅ Expected Behavior', '❌ Actual Behavior', 'Operating System', 'Release Version (Report Context)', 'Agent / Client'],
+  feature: ['Existing Issue Search', '🔍 Observed Consequence', '💡 Desired Outcome', '📦 Affected Area', 'Release Context'],
+  docs: ['Existing Issue Search', '📄 Documentation Reference', '📄 Which Document?', '🔍 Observed Consequence', 'Release Context'],
+  question: ['Existing Issue Search', 'Question', 'Why does this need issue tracking?', 'Affected Area', 'Release Context'],
+};
+const formBody = (type) => signatures[type].map((heading) => `### ${heading}\n\nAnswer`).join('\n\n');
+
+async function expectPolicy(initial, body, additions, options = {}) {
+  const result = await runWorkflow([...initial], { body, ...options });
+  assert.equal(result.error, options.writeError ?? options.readError);
+  assert.deepEqual(result.calls, [
+    ['get', issue],
+    ...(!options.readError && additions.length ? [['addLabels', { ...issue, labels: additions }]] : []),
+  ]);
+  assert.deepEqual(result.labels, options.writeError || options.readError ? initial : [...initial, ...additions]);
+  assert.deepEqual(result.originalLabels, initial);
+}
+
+test('recovers each current form type independently of status and preserves labels', async () => {
+  for (const type of Object.keys(signatures)) {
+    for (const status of [[], ['status:approved']]) {
+      await expectPolicy([...status, 'help wanted'], formBody(type), [...(status.length ? [] : ['status:needs-review']), `type:${type}`]);
+    }
+    await expectPolicy(['type:custom', 'priority:high'], formBody(type), ['status:needs-review']);
+    await expectPolicy(['type:custom', 'status:blocked'], formBody(type), []);
+  }
+});
+
+test('uses only current body and accepts ordinary Markdown line endings', async () => {
+  await expectPolicy(['status:approved'], formBody('docs').replaceAll('\n', '\r\n'), ['type:docs'], { eventBody: formBody('bug') });
+  await expectPolicy(['status:approved'], null, [], { eventBody: formBody('bug') });
+});
+
+test('unknown incomplete ambiguous and fenced structures do not infer types', async () => {
+  for (const body of [null, '', 'bug documentation feature question', '### Question', formBody('bug') + '\n' + formBody('docs'), '```markdown\n' + formBody('bug') + '\n```', '~~~~markdown\n' + formBody('docs') + '\n~~~~']) {
+    await expectPolicy([], body, ['status:needs-review']);
+  }
+  for (const type of Object.keys(signatures)) {
+    for (const missing of signatures[type]) {
+      await expectPolicy(['status:approved'], formBody(type).replace(`### ${missing}\n`, ''), []);
+    }
+  }
+  await expectPolicy(['status:approved'], formBody('bug') + '\n```\n' + formBody('docs') + '\n```', ['type:bug']);
+});
+
+test('type recovery API failures preserve input and propagate', async () => {
+  await expectPolicy(['status:approved'], formBody('bug'), [], { readError: new Error('read denied') });
+  await expectPolicy(['status:approved'], formBody('bug'), ['type:bug'], { writeError: new Error('write denied') });
+});
+
+test('signatures remain aligned with required fields of current forms', () => {
+  const files = { bug: 'bug_report', feature: 'feature_request', docs: 'docs_improvement', question: 'tracked_question' };
+  for (const [type, file] of Object.entries(files)) {
+    const source = fs.readFileSync(`.github/ISSUE_TEMPLATE/${file}.yml`, 'utf8');
+    const required = source.split(/\r?\n  - type:/).slice(1).filter((block) => /required: true/.test(block)).map((block) => block.match(/      label: (.+)/)[1].replace(/^"|"$/g, ''));
+    assert.deepEqual(signatures[type], required);
+  }
+});
 
 test('adds only the review status when current labels have no status', async () => {
   for (const initial of [[], ['type:bug', 'priority:high', 'help wanted']]) {

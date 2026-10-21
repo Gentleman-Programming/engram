@@ -23,11 +23,16 @@ Use the correct template:
 
 Search existing issues for a canonical tracker before opening a new one. Fill in all required fields; report symptoms, impact, release context, and logs without having to diagnose the root cause. Your issue receives `status:needs-review`.
 
-For newly opened issues that bypass the forms (for example, through the CLI or API),
-the Issue Status Fallback workflow checks current labels and adds only
-`status:needs-review` when no `status:*` label exists. It preserves all existing
-labels and does not infer type, approval, priority, or effort. It does not backfill
-existing issues or respond to later label removals.
+For newly opened issues, the Issue Status Fallback workflow reads current API
+labels and body. It adds `status:needs-review` only when no `status:*` exists.
+Independently, when no `type:*` exists, it recovers `type:bug`, `type:feature`,
+`type:docs`, or `type:question` only if the body uniquely contains a current form's
+required field headings (outside fenced code). Unknown, incomplete, or ambiguous
+structures remain for triage; titles and answer prose are never classifiers.
+All existing labels are preserved, including existing types and statuses.
+It does not infer approval, priority, or effort, backfill existing issues, or
+respond to edits or later label removals. The API read and additive write are
+not atomic. This fallback does not diagnose why native form labels were missing.
 
 ### Step 2: Investigation and Proportional Approval
 
