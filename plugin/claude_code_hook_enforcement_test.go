@@ -165,6 +165,45 @@ func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
 	t.Fatal("no portable PreToolUse hook delegates to engram hook claude-pre-tool-use")
 }
 
+// Configuration contract only: Claude Code >= 2.1.295 owns enforcement of
+// onFailure when the authoritative pre-write hook cannot complete successfully.
+func TestClaudePreToolUseMutatingHooksBlockOnFailure(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("cannot read hooks.json: %v", err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command   string `json:"command"`
+				OnFailure string `json:"onFailure"`
+				Timeout   int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("cannot parse hooks.json: %v", err)
+	}
+	found := 0
+	for groupIndex, group := range manifest.Hooks["PreToolUse"] {
+		for hookIndex, hook := range group.Hooks {
+			if hook.Command != "engram hook claude-pre-tool-use" {
+				continue
+			}
+			found++
+			if hook.OnFailure != "block" {
+				t.Errorf("PreToolUse[%d].hooks[%d] onFailure = %q, want block so failed rebinding cannot permit a write", groupIndex, hookIndex, hook.OnFailure)
+			}
+			if hook.Timeout != 5 {
+				t.Errorf("PreToolUse[%d].hooks[%d] timeout = %d, want 5", groupIndex, hookIndex, hook.Timeout)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("no authoritative mutating PreToolUse hook found")
+	}
+}
+
 func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "hooks", "hooks.json"))
