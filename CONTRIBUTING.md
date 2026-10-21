@@ -117,11 +117,41 @@ current repository; qualified-only links do not expand discovery or rerun routin
 
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
+### Linked Issue Assignment
+
+The independent **Linked Issue Assignment** metadata workflow handles PR opening,
+body edits, reopening and ready-for-review events. It fetches the current PR and
+assigns its human author (never the event actor) to open, `status:approved`,
+unassigned issues referenced by bare `Closes #N`, `Fixes #N` or `Resolves #N`.
+References are case-insensitive and deduplicated; plain numbers, qualified
+references and URLs are ignored. Drafts, bots and references to PRs are skipped.
+Existing assignees are always preserved; there are no comments, labels, approvals,
+unassignments, historical scans or required-check/settings changes.
+
+This is a convenience, **not a replacement for approved, assigned ownership before
+implementation**. Required validation and refresh publishers remain independent;
+rerun native PR validation after assignment changes. The workflow uses only a
+trusted event base-SHA helper, never PR-head code or candidate bootstrap. It becomes
+available only after integration on the trusted base. A real fork run remains
+pending until then; mocked tests do not establish live token/event behavior.
+
+Runs are serialized repository-wide with cancellation disabled for running jobs.
+GitHub may replace/coalesce pending runs: this is best-effort scheduling, not a
+FIFO queue or a guarantee that every event runs. Issues are reread before writes
+and assignments verified afterwards, with assignments/skips in the run summary
+and API/verification errors failing automation. Partial progress is possible.
+Manual changes between the final read and write still race: GitHub provides no
+atomic conditional assignment. Inspect current ownership before retrying a failed
+run; automation never removes an existing assignee.
+
+Run `node --test .github/scripts/issue-auto-assign.test.mjs` for local reference,
+eligibility, race, failure and trusted-workflow contract regressions.
+
 ### Existing PR Transition
 
 The original #1293 audit found 23 open PRs needing migration; that is a historical snapshot, not a permanent count. Activation does not wait for the whole backlog to be remediated. Review existing PRs when they become active again or before merge: confirm proportional evidence, replace outdated approval where needed, and assign a real owner. Close obsolete work through normal maintainer review. Do not assign a placeholder solely to turn CI green.
 
-**Every PR, including existing PRs, must comply before merge.** There is no date cutoff, silent grandfathering, or automatic assignment. Re-run native PR validation after issue approval/assignment changes before merging; an old green check is not current readiness evidence.
+**Every PR, including existing PRs, must comply before merge.** There is no date cutoff or silent grandfathering; automatic assignment is limited to the eligible event-driven convenience above, not backlog migration. Re-run native PR validation after issue approval/assignment changes before merging; an old green check is not current readiness evidence.
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
