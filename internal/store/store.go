@@ -220,25 +220,29 @@ type ObservationVersion struct {
 
 type SearchResult struct {
 	Observation
-	Rank float64 `json:"rank"`
+	Rank          float64  `json:"rank"`
+	Similarity    *float64 `json:"similarity,omitempty"`
+	RetrievalMode string   `json:"retrieval_mode,omitempty"`
 }
 
 // SearchPreviewResult is the bounded result shape used by preview-only callers.
 // Content is deliberately excluded so those callers do not hydrate full bodies.
 type SearchPreviewResult struct {
-	ID          int64   `json:"id"`
-	SyncID      string  `json:"sync_id"`
-	Type        string  `json:"type"`
-	Title       string  `json:"title"`
-	Preview     string  `json:"preview"`
-	Truncated   bool    `json:"truncated"`
-	Project     *string `json:"project,omitempty"`
-	TopicKey    *string `json:"topic_key,omitempty"`
-	Scope       string  `json:"scope"`
-	ReviewAfter *string `json:"review_after,omitempty"`
-	Pinned      bool    `json:"-"`
-	CreatedAt   string  `json:"created_at"`
-	Rank        float64 `json:"rank"`
+	Similarity    *float64 `json:"similarity,omitempty"`
+	RetrievalMode string   `json:"retrieval_mode,omitempty"`
+	ID            int64    `json:"id"`
+	SyncID        string   `json:"sync_id"`
+	Type          string   `json:"type"`
+	Title         string   `json:"title"`
+	Preview       string   `json:"preview"`
+	Truncated     bool     `json:"truncated"`
+	Project       *string  `json:"project,omitempty"`
+	TopicKey      *string  `json:"topic_key,omitempty"`
+	Scope         string   `json:"scope"`
+	ReviewAfter   *string  `json:"review_after,omitempty"`
+	Pinned        bool     `json:"-"`
+	CreatedAt     string   `json:"created_at"`
+	Rank          float64  `json:"rank"`
 }
 
 // State returns the virtual lifecycle state derived from review_after.
@@ -291,11 +295,12 @@ type TimelineResult struct {
 }
 
 type SearchOptions struct {
-	Type      string `json:"type,omitempty"`
-	Project   string `json:"project,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-	MatchMode string `json:"match_mode,omitempty"` // "all" (default) | "any"
+	SearchMode string `json:"search_mode,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Project    string `json:"project,omitempty"`
+	Scope      string `json:"scope,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	MatchMode  string `json:"match_mode,omitempty"` // "all" (default) | "any"
 }
 
 type AddObservationParams struct {
@@ -855,6 +860,7 @@ func (d *ExportData) UnmarshalJSON(data []byte) error {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
+	EmbeddingProvider    SemanticProvider
 	DataDir              string
 	MaxObservationLength int
 	MaxContextResults    int
@@ -5714,6 +5720,12 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 // SearchContext searches observations while honoring cancellation from the
 // caller, including while materializing rows.
 func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
+	if err := validateSearchMode(opts); err != nil {
+		return nil, err
+	}
+	if opts.SearchMode == "semantic" {
+		return s.searchSemantic(ctx, query, opts)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -5866,6 +5878,12 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 // SearchPreviewsContext searches using the same ranking and filters as
 // SearchContext while selecting only a bounded Unicode-safe content preview.
 func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts SearchOptions) ([]SearchPreviewResult, error) {
+	if err := validateSearchMode(opts); err != nil {
+		return nil, err
+	}
+	if opts.SearchMode == "semantic" {
+		return s.semanticPreviews(ctx, query, opts)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
