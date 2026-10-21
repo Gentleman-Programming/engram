@@ -47,8 +47,8 @@ func TestRuntimeContractCurrentAgentSurface(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &contract); err != nil {
 		t.Fatal(err)
 	}
-	if len(contract.Operations) != 22 {
-		t.Errorf("default Pi operations = %d, want 22", len(contract.Operations))
+	if len(contract.Operations) != 23 {
+		t.Errorf("default Pi operations = %d, want 23", len(contract.Operations))
 	}
 	for _, name := range []string{"mem_delete", "mem_stats", "mem_timeline"} {
 		if _, exists := contract.Operations[name]; exists {

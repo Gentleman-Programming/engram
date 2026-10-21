@@ -164,7 +164,7 @@ Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipb
 
 | Component | What it does |
 | :--- | :--- |
-| **[MCP tools](DOCS.md#mcp-tools-26-tools)** | Save, search, timeline, session, review, and diagnosis tools for your agent |
+| **[MCP tools](DOCS.md#mcp-tools-27-tools)** | Save, search, timeline, session, review, and diagnosis tools for your agent |
 | **[HTTP API](DOCS.md#http-api-endpoints)** | The same memory over local HTTP endpoints; [compound agent workflows](docs/HTTP-AGENT-WORKFLOWS.md) |
 | **[Doctor](docs/DOCTOR.md)** | `engram doctor` — read-only operational diagnostics |
 | **[Conflict surfacing](docs/AGENT-SETUP.md#conflict-surfacing-automatic)** | Flags related or conflicting memories so the agent can judge them |

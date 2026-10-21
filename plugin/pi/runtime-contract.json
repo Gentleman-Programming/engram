@@ -2,7 +2,7 @@
   "contract_id": "engram.pi-http-runtime/v1",
   "revision": 1,
   "status": "pi-http-server-contract",
-  "digest": "4bf32703e111162b24073d090bec1c15c9120708587000bf595a07264e768672",
+  "digest": "0af9af176928e98562ab1396d3196efe582dd5d1c5d2c5f8f546ab4ed609810f",
   "operations": {
     "mem_capture_passive": {
       "kind": "http",
@@ -168,6 +168,16 @@
           "method": "GET",
           "path": "/search",
           "server_contract": "search/v1"
+        }
+      ]
+    },
+    "mem_search_prompts": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/prompts/search",
+          "server_contract": "prompt-search/v1"
         }
       ]
     },
