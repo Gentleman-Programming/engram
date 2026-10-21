@@ -260,6 +260,8 @@ gh pr create --repo <canonical-owner>/<canonical-repo> \
 #     --add-label "type:feature"
 ```
 
+The `--head <owner>:<branch>` form supports user-owned forks only; GitHub CLI does not support an organization as `<owner>`. For an organization-owned fork, use GitHub's web pull-request flow and explicitly select the canonical base repository and branch, the fork, and the head branch before submitting.
+
 ## Forks, Remotes, and Publication
 
 A pull request targets the canonical repository. A fork is where the branch lives, not where the pull request opens.

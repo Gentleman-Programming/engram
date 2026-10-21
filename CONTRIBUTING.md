@@ -82,6 +82,8 @@ gh pr create --repo <canonical-owner>/<canonical-repo> \
   --title "feat(scope): description" --body-file pull_request_body.md
 ```
 
+The `--head <owner>:<branch>` form supports user-owned forks only; GitHub CLI does not support an organization as `<owner>`. For an organization-owned fork, use GitHub's web pull-request flow and explicitly select the canonical base repository and branch, the fork, and the head branch before submitting.
+
 #### Authorizations are separate
 
 | Action | Who performs it |
