@@ -9685,7 +9685,7 @@ func (s *Store) PreviewExplicitProjectMerge(source, canonical string) (*Explicit
 	// Preserve the exact trimmed legacy spelling for SQL selection. Case and
 	// Unicode variants may normalize to the target but identify distinct rows.
 	if canonical == "" || normalizedSource == "" || strings.TrimSpace(source) == canonical || !mergeProjectEligible(normalizedSource, canonical, true) {
-		return nil, fmt.Errorf("source project %q must be a distinct separator variant or Unicode normalization variant of canonical project %q", source, canonical)
+		return nil, fmt.Errorf("source project %q must be a distinct legacy case, separator or Unicode normalization variant of canonical project %q", source, canonical)
 	}
 	name := strings.TrimSpace(source)
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})

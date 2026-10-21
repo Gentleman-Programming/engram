@@ -1910,13 +1910,15 @@ func TestProjectsMergeRejectsInvalidPairsWithoutMutation(t *testing.T) {
 			cfg := testConfig(t)
 			mustSeedObservation(t, cfg, "invalid-session", "acmeapi", "note", "invalid-note", "content", "project")
 			oldExit := exitFunc
-			exitFunc = func(code int) { panic("exit") }
+			exitFunc = func(code int) { panic(exitCode(code)) }
 			t.Cleanup(func() { exitFunc = oldExit })
 			for _, mode := range []string{"--dry-run", "--apply"} {
 				withArgs(t, "engram", "projects", "merge", "--from", tc.from, "--to", tc.to, mode)
-				_, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
-				if recovered == nil || !strings.Contains(stderr, "distinct separator variant") {
-					t.Fatalf("%s: stderr=%q panic=%v", mode, stderr, recovered)
+				stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+				canonical, _ := store.NormalizeProject(tc.to)
+				want := fmt.Sprintf("engram: source project %q must be a distinct legacy case, separator or Unicode normalization variant of canonical project %q\n", tc.from, canonical)
+				if recovered != exitCode(1) || stdout != "" || stderr != want {
+					t.Fatalf("%s: stdout=%q stderr=%q exit=%v", mode, stdout, stderr, recovered)
 				}
 				s, err := store.New(cfg)
 				if err != nil {
