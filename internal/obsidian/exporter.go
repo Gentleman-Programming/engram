@@ -238,6 +238,13 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		if obs.DeletedAt != nil {
 			continue // handled by the deleted-observation loop above
 		}
+		// Only reconcile rows inside the project scope upstream already owns.
+		// A foreign-project row (absent from present) keeps its tracking so a
+		// later export of that project never rewrites an unchanged note —
+		// project scoping is handled by present/fullScope, org is handled here.
+		if !present[obs.ID] {
+			continue
+		}
 		relPath, tracked := state.Files[obs.ID]
 		if !tracked || e.matchesFilters(obs) {
 			continue
@@ -497,32 +504,57 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		result.HubsCreated++
 	}
 
+	// A hub is in the exported scope when some row the store returned for this
+	// run (project rows, any org) belongs to it. Anything absent is a foreign
+	// project's hub and must survive a project-scoped run untouched (#776).
+	scopedSessions := make(map[string]bool)
+	scopedTopics := make(map[string]bool)
+	for _, obs := range data.Observations {
+		if !present[obs.ID] {
+			continue
+		}
+		if obs.SessionID != "" {
+			scopedSessions[obs.SessionID] = true
+		}
+		if prefix := obsTopicPrefix(obs); prefix != "" {
+			scopedTopics[prefix] = true
+		}
+	}
+
 	// ── Retire hubs that no longer reference a live observation ───────────────
-	// A session or topic whose observations were all deleted is never rewritten
-	// above, so its hub stayed in the vault as an orphan (issue #1900).
-	if fullScope {
-		for sessionID, relPath := range state.SessionHubs {
-			if liveSessionCounts[sessionID] > 0 {
-				continue
-			}
-			if err := e.removeExportFile(engRoot, relPath); err != nil {
-				result.Errors = append(result.Errors, err)
-				continue
-			}
-			result.Deleted++
-			delete(state.SessionHubs, sessionID)
+	// A session or topic still returned by the store but whose notes were all
+	// soft deleted (issue #1900) or org excluded (#776) is never rewritten
+	// above, so its hub lingers as an orphan. Prune hubs inside the exported
+	// scope; a foreign project's hub (absent from scoped*) stays. Like the
+	// reconciliation above, a hard-deleted session — gone from the store — is
+	// only reachable here on a full-scope run.
+	for sessionID, relPath := range state.SessionHubs {
+		if !fullScope && !scopedSessions[sessionID] {
+			continue
 		}
-		for prefix, relPath := range state.TopicHubs {
-			if ShouldCreateTopicHub(liveTopicCounts[prefix]) {
-				continue
-			}
-			if err := e.removeExportFile(engRoot, relPath); err != nil {
-				result.Errors = append(result.Errors, err)
-				continue
-			}
-			result.Deleted++
-			delete(state.TopicHubs, prefix)
+		if liveSessionCounts[sessionID] > 0 {
+			continue
 		}
+		if err := e.removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, err)
+			continue
+		}
+		result.Deleted++
+		delete(state.SessionHubs, sessionID)
+	}
+	for prefix, relPath := range state.TopicHubs {
+		if !fullScope && !scopedTopics[prefix] {
+			continue
+		}
+		if ShouldCreateTopicHub(liveTopicCounts[prefix]) {
+			continue
+		}
+		if err := e.removeExportFile(engRoot, relPath); err != nil {
+			result.Errors = append(result.Errors, err)
+			continue
+		}
+		result.Deleted++
+		delete(state.TopicHubs, prefix)
 	}
 
 	// ── Persist updated state ─────────────────────────────────────────────────
