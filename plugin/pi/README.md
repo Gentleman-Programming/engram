@@ -606,6 +606,83 @@ Run it again when new chunks are published and you want to import them. Opening 
 
 `test/real-agent-workflows.test.mjs` runs its seven tests from an Engram Go checkout or with `ENGRAM_PI_TEST_SERVER_BINARY` pointing to the prebuilt test server. Without either resource (for example, in the published npm package), this source-only suite explicitly skips before creating a sandbox or attempting `go build`. Go build failures in a checkout and invalid configured binaries still fail; they are not skips. This does not make other repository-dependent test suites runnable from the published package.
 
+## Opt-in installed-host lifecycle journey
+
+From the repository root, with Node.js 24, Go from `go.mod`, cached Go dependencies,
+and an already installed Pi host:
+
+```bash
+ENGRAM_PI_LIFECYCLE_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js \
+  node --test plugin/pi/test/native-host-lifecycle.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:ENGRAM_PI_LIFECYCLE_CLI = 'C:\path\to\pi-coding-agent\dist\bundle\cli.js'
+node --test plugin/pi/test/native-host-lifecycle.test.mjs
+Remove-Item Env:ENGRAM_PI_LIFECYCLE_CLI
+```
+
+Without that variable the journey explicitly skips, including during `npm test`;
+ordinary mocked and real-HTTP tests do not establish installed-host conformance.
+An invalid configured CLI or unavailable cached build dependency fails rather than
+silently skipping. The harness installs nothing (`GOPROXY=off`, `GOTOOLCHAIN=local`).
+
+This journey launches two actual RPC host processes in one disposable project,
+loads this checkout's extension explicitly, and uses a temporary real Go
+HTTP/SQLite server via `test/support/real-server`. That server is a test entry point,
+not proof of production CLI startup. Only the OpenAI-compatible loopback provider
+is synthetic: its tool decisions, acknowledgements and summary text are scripted.
+Pi itself dispatches registered memory tools, runs default compaction, persists
+session files and reopens those exact files. No callbacks or ownership rows are
+seeded. This is lifecycle evidence, not model-quality or external-provider proof.
+
+Checks cover distinct initial owners, interleaved markers after compaction and
+resume, Go-confirmed continuation mappings, and refusal after native finalization
+without cross-owner effects. Public observation/session reads and before/after
+statistics are asserted. Configuration, credentials and session storage are isolated;
+no personal settings, sessions or provider credentials are copied. Discovered
+extensions, MCP, skills, templates, themes and context files are disabled.
+
+The test emits a JSON diagnostic with commands, versions/revision, public
+readbacks, RPC records, child exit statuses and stderr. Capture the test runner's
+stdout/stderr and exit code for evidence. Its `.pi-lifecycle-*` directory is created
+inside the checkout and removed in `finally`; each retained child must exit cleanly
+on EOF. Forced cleanup is a failure, not PASS. The intentional post-finalization refusal
+must produce the exact closing-session diagnostic; any other companion warning
+fails the journey. No external model calls, package installation, production data,
+global configuration edits or publication occur.
+
+### Observed local evidence for #1534
+
+The installed-host invocation above passed on Pi 1.3.0, Node v24.14.0 and
+Go go1.26.4 windows/amd64, against checkout base
+`ace0dd65d75cb3a0330016c24e1780696cfd11da` and the candidate test files.
+The final focused run reported **1 passed, 0 failed, 0 skipped**.
+The normal `cd plugin/pi && npm test` suite also exited 0: **581 passed,
+0 failed, 2 skipped** (583 total). Its skips were this opt-in installed-host
+journey (executed separately above) and the packaged prebuilt-server scenario
+requiring `ENGRAM_PI_TEST_SERVER_BINARY`. Neither skip is represented as PASS.
+`node --check` passed for both new modules, and `git diff --check` passed.
+
+| Evidence | Observed result |
+|---|---|
+| Initial runtime A | `01a16028-062b-707d-a2be-c70c55af31b0` |
+| Initial runtime B | `01a16028-078a-7123-b97b-91416df24899` |
+| After resume | Same Pi IDs; Go-confirmed effective IDs ended in `:resume:2` for each owner |
+| Host transitions | Two default compactions; both exact session files reopened by new processes |
+| Public readbacks | Nine distinct accepted markers under their expected root/continuation owners |
+| Refusal | `A-rejected` absent; observation rows and public stats unchanged; B subsequently saved successfully |
+| Provider | 24 loopback requests, including two summary requests; no external provider |
+| Cleanup | Four Pi processes and the Go server exited 0, no forced termination or cleanup errors |
+
+The only companion warning was the explicitly asserted closing-session refusal.
+Earlier development runs exposed fixture command selection after recovery and
+incorrect parallel cleanup; the final run includes both corrections. This is one
+installed Windows/Pi baseline, not certification of every supported host version,
+production CLI startup, model quality, external providers or other integrations.
+
 ## Requirements
 
 - Pi coding agent with npm package support.
