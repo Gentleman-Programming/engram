@@ -7,6 +7,9 @@ import { createPluginSandbox, importPluginFromSandbox } from "../plugin/pi/test/
 const root = fileURLToPath(new URL("../", import.meta.url));
 const help = `Usage: node tools/release-candidate.mjs --core-ref refs/tags/vSEMVER --pi-ref refs/tags/pi-vSEMVER
 
+Full refs define an ordered pair of independent strict SemVer versions.
+Go JSON version means core; piVersion means Pi. Identity is metadata only,
+not remote tag/source/digest verification or compatibility proof.
 Rejection-only checker: validates metadata through the live Go exporter and
 unchanged Pi release guard, then captures actual sandbox tool registrations.
 The sandbox TypeBox stub is registration-only, not JSON-schema equivalence proof.
@@ -43,7 +46,6 @@ function argumentsFor(args) {
 function goFailure(stderr) {
   if (/invalid core-ref/.test(stderr)) return "Invalid core-ref: expected a full strict SemVer ref.";
   if (/invalid pi-ref/.test(stderr)) return "Invalid pi-ref: expected a full strict SemVer ref.";
-  if (/core and Pi versions must match exactly/.test(stderr)) return "Core and Pi versions must match exactly.";
   if (/package name must be gentle-engram/.test(stderr)) return "Package name must be gentle-engram.";
   if (/package version must match candidate version/.test(stderr)) return "Package version must match candidate version.";
   if (/installer pin must match candidate version exactly/.test(stderr)) return "Installer pin must match candidate version exactly.";
@@ -82,7 +84,7 @@ async function check(refs) {
     let document;
     try { document = JSON.parse(exported.stdout); } catch { reject("Malformed Go contract export; candidate rejected."); }
     const contract = document?.contract;
-    if (typeof document?.version !== "string" || contract?.contract_id !== "engram.agent-contract/v1" || contract.revision !== 1 || contract.profile !== "agent" || !contract.operations || typeof contract.operations !== "object" || Array.isArray(contract.operations)) {
+    if (typeof document?.version !== "string" || typeof document?.piVersion !== "string" || document.version !== refs["--core-ref"].slice("refs/tags/v".length) || document.piVersion !== refs["--pi-ref"].slice("refs/tags/pi-v".length) || contract?.contract_id !== "engram.agent-contract/v1" || contract.revision !== 1 || contract.profile !== "agent" || !contract.operations || typeof contract.operations !== "object" || Array.isArray(contract.operations)) {
       reject("Unknown or malformed Go contract export; candidate rejected.");
     }
     const goNames = toolNames(Object.keys(contract.operations)).sort();

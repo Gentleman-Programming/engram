@@ -23,14 +23,15 @@ import (
 const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref refs/tags/pi-vSEMVER [-root directory]
 
 -core-ref  Required full core tag ref with strict SemVer.
--pi-ref    Required full Pi tag ref with the exact same version.
+-pi-ref    Required full Pi tag ref with independent strict SemVer.
 -root      Candidate metadata directory (default: current directory).
 -pi-tarball Optional local .tgz to validate against candidate package contents.
 -h, --help Show this help.
 
 Reads plugin/pi/package.json and internal/setup/setup.go without writes.
-Emits one JSON object containing version and the live Go-owned contract.
-With -pi-tarball emits version, validation=local-package-only, and file count.
+Emits version (core), piVersion (Pi), and the live Go-owned contract.
+With -pi-tarball emits both versions, validation=local-package-only, and file count.
+Refs define an ordered metadata pair, not remote tags or compatibility proof.
 Only literal package file/directory allowlists are supported, up to 4096 files
 and 64 MiB. No archive extraction; links and unexpected/missing content reject.
 Export/validator success is not Pi parity or release approval.
@@ -79,10 +80,7 @@ func run(args []string, output io.Writer) error {
 	if !ok {
 		return errors.New("invalid pi-ref: expected refs/tags/pi-v<strict-semver>")
 	}
-	if version != piVersion {
-		return errors.New("core and Pi versions must match exactly")
-	}
-	if err := validateMetadata(*root, version); err != nil {
+	if err := validateMetadata(*root, piVersion); err != nil {
 		return err
 	}
 	tarballProvided := false
@@ -92,15 +90,16 @@ func run(args []string, output io.Writer) error {
 		}
 	})
 	if tarballProvided {
-		count, err := validatePackage(*root, version, *tarball)
+		count, err := validatePackage(*root, piVersion, *tarball)
 		if err != nil {
 			return err
 		}
 		result, err := json.Marshal(struct {
 			Version    string `json:"version"`
+			PiVersion  string `json:"piVersion"`
 			Validation string `json:"validation"`
 			Files      int    `json:"files"`
-		}{version, "local-package-only", count})
+		}{version, piVersion, "local-package-only", count})
 		if err != nil {
 			return err
 		}
@@ -113,9 +112,10 @@ func run(args []string, output io.Writer) error {
 	}
 	// Marshal before writing so validation/encoding failures cannot leak stdout.
 	result, err := json.Marshal(struct {
-		Version  string          `json:"version"`
-		Contract json.RawMessage `json:"contract"`
-	}{version, contract})
+		Version   string          `json:"version"`
+		PiVersion string          `json:"piVersion"`
+		Contract  json.RawMessage `json:"contract"`
+	}{version, piVersion, contract})
 	if err != nil {
 		return fmt.Errorf("cannot encode candidate export: %w", err)
 	}

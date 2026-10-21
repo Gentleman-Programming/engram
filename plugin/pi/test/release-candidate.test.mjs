@@ -70,7 +70,7 @@ for (const [label, args, diagnostic] of [
   ["Pi ref must be full", ["--core-ref", coreRef, "--pi-ref", `pi-v${metadata.version}`], /pi-ref|full.*ref/i],
   ["strict SemVer rejects leading zeros", ["--core-ref", "refs/tags/v01.2.3", "--pi-ref", "refs/tags/pi-v01.2.3"], /semver|core-ref|invalid/i],
   ["strict SemVer rejects numeric prerelease zeros", ["--core-ref", "refs/tags/v1.2.3-01", "--pi-ref", "refs/tags/pi-v1.2.3-01"], /semver|core-ref|invalid/i],
-  ["versions must match exactly", ["--core-ref", coreRef, "--pi-ref", "refs/tags/pi-v99.0.0"], /match|equal|version/i],
+  ["Pi manifest must match selected Pi version", ["--core-ref", coreRef, "--pi-ref", "refs/tags/pi-v99.0.0"], /Package version must match candidate version/],
   ["positional arguments are rejected", ["--core-ref", coreRef, "--pi-ref", piRef, "unexpected"], /positional|unexpected|argument/i],
 ]) {
   test(`release candidate: ${label}; source unchanged`, async () => rejected(args, diagnostic));
@@ -112,6 +112,13 @@ test("current source remains rejected despite matching ProfileAgent registration
   assert.match(result.stderr, /even matching inventories remain rejected/);
   assert.match(result.stderr, /suite orchestration and pack\/tarball validation are deferred, not passed/);
   assert.deepEqual((await readdir(root)).filter((name) => name.startsWith(".release-candidate-")), disposableBefore);
+});
+
+test("independent core/Pi pair reaches semantic blockers and still rejects", async () => {
+  const result = await rejected(["--core-ref", "refs/tags/v3.0.0", "--pi-ref", piRef], /Candidate rejected \(rejection-only checker; no release approval\)/);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /JSON-schema equivalence is unproven/);
+  assert.match(result.stderr, /even matching inventories remain rejected/);
 });
 
 test("legacy pi-v guard still accepts the matching Pi-only ref", async () => {

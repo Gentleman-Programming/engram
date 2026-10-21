@@ -109,7 +109,7 @@ func TestReleaseCandidateAcceptsCanonicalVersionsAndExportsLiveContract(t *testi
 			if err := json.Unmarshal([]byte(out), &result); err != nil {
 				t.Fatalf("single JSON object: %v: %q", err, out)
 			}
-			if len(result) != 2 {
+			if len(result) != 3 {
 				t.Fatalf("unexpected envelope fields: %s", out)
 			}
 			var gotVersion string
@@ -130,6 +130,37 @@ func TestReleaseCandidateAcceptsCanonicalVersionsAndExportsLiveContract(t *testi
 			}
 			if !bytes.Equal(got, want) {
 				t.Fatal("export differs from live Go AgentContractJSON")
+			}
+		})
+	}
+}
+
+func TestReleaseCandidateIndependentPair(t *testing.T) {
+	for _, pair := range [][2]string{{"3.0.0", "0.5.0"}, {"1.2.3+a", "1.2.3+b"}} {
+		t.Run(pair[0]+"/"+pair[1], func(t *testing.T) {
+			root := candidateFixture(t, pair[1])
+			args := []string{"-core-ref", "refs/tags/v" + pair[0], "-pi-ref", "refs/tags/pi-v" + pair[1]}
+			out, diagnostic, code := candidateRun(t, root, args...)
+			live, err := mcp.AgentContractJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := json.Marshal(struct {
+				Version   string          `json:"version"`
+				PiVersion string          `json:"piVersion"`
+				Contract  json.RawMessage `json:"contract"`
+			}{pair[0], pair[1], live})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code != 0 || diagnostic != "" || out != string(want)+"\n" {
+				t.Fatalf("exit=%d stdout=%q stderr=%q want=%s", code, out, diagnostic, want)
+			}
+			// Matching core metadata is insufficient: the installer must select Pi.
+			candidateWrite(t, root, "internal/setup/setup.go", "package setup\nconst piGentleEngramPackage = \"npm:gentle-engram@"+pair[0]+"\"\n")
+			out, diagnostic, code = candidateRun(t, root, args...)
+			if code != 1 || out != "" || diagnostic != "installer pin must match candidate version exactly\nexit status 1\n" {
+				t.Fatalf("wrong companion: exit=%d stdout=%q stderr=%q", code, out, diagnostic)
 			}
 		})
 	}
@@ -175,8 +206,8 @@ func TestReleaseCandidateRejectsInvalidInputs(t *testing.T) {
 		{name: "missing refs", diagnostic: "core-ref and pi-ref are required"},
 		{name: "missing core", args: []string{"-pi-ref", "refs/tags/pi-v1.2.3"}, diagnostic: "core-ref and pi-ref are required"},
 		{name: "missing pi", args: []string{"-core-ref", "refs/tags/v1.2.3"}, diagnostic: "core-ref and pi-ref are required"},
-		{name: "different versions", args: []string{"-core-ref", "refs/tags/v1.2.3", "-pi-ref", "refs/tags/pi-v1.2.4"}, diagnostic: "core and Pi versions must match exactly"},
-		{name: "different build metadata", args: []string{"-core-ref", "refs/tags/v1.2.3+a", "-pi-ref", "refs/tags/pi-v1.2.3+b"}, diagnostic: "core and Pi versions must match exactly"},
+		{name: "Pi manifest mismatch", args: []string{"-core-ref", "refs/tags/v1.2.3", "-pi-ref", "refs/tags/pi-v1.2.4"}, diagnostic: "package version must match candidate version"},
+		{name: "Pi manifest build metadata mismatch", args: []string{"-core-ref", "refs/tags/v1.2.3+a", "-pi-ref", "refs/tags/pi-v1.2.3+b"}, diagnostic: "package version must match candidate version"},
 		{name: "package name", file: "plugin/pi/package.json", content: `{"name":"other","version":"1.2.3"}`, diagnostic: "package name must be gentle-engram"},
 		{name: "package version", file: "plugin/pi/package.json", content: `{"name":"gentle-engram","version":"1.2.4"}`, diagnostic: "package version must match candidate version"},
 		{name: "malformed package", file: "plugin/pi/package.json", content: `{`, diagnostic: "invalid plugin/pi/package.json"},

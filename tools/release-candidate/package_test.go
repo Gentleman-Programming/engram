@@ -66,7 +66,7 @@ func packageArchive(t *testing.T, entries []packedEntry) []byte {
 }
 
 func TestPiPackageTarballCLI(t *testing.T) {
-	cases := []string{"valid", "matching large manifest integer", "changed large manifest integer", "legacy regular file type", "empty tarball argument", "wrong name", "wrong version", "changed manifest", "missing asset", "changed asset", "extra file", "duplicate", "traversal", "absolute", "symlink", "hardlink", "malformed gzip", "truncated gzip", "truncated tar", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers", "gzip checksum", "trailing data", "source changed", "missing tarball", "unsupported allowlist", "missing declared source", "missing runtime declaration"}
+	cases := []string{"valid", "independent versions", "matching large manifest integer", "changed large manifest integer", "legacy regular file type", "empty tarball argument", "wrong name", "wrong version", "changed manifest", "missing asset", "changed asset", "extra file", "duplicate", "traversal", "absolute", "symlink", "hardlink", "malformed gzip", "truncated gzip", "truncated tar", "missing tar end markers", "one tar end block", "zero-filled file without tar end markers", "gzip checksum", "trailing data", "source changed", "missing tarball", "unsupported allowlist", "missing declared source", "missing runtime declaration"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root, entries := packageFixture(t)
@@ -184,12 +184,17 @@ func TestPiPackageTarballCLI(t *testing.T) {
 				tarball = ""
 			}
 			args := append(candidateRefs("1.2.3"), "-pi-tarball", tarball)
+			coreVersion := "1.2.3"
+			if name == "independent versions" {
+				coreVersion = "3.0.0"
+				args[1] = "refs/tags/v" + coreVersion
+			}
 			out, diagnostic, code := candidateRun(t, root, args...)
-			if name == "valid" || name == "legacy regular file type" || name == "matching large manifest integer" {
+			if name == "valid" || name == "independent versions" || name == "legacy regular file type" || name == "matching large manifest integer" {
 				if code != 0 || diagnostic != "" {
 					t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, diagnostic)
 				}
-				if out != "{\"version\":\"1.2.3\",\"validation\":\"local-package-only\",\"files\":10}\n" {
+				if out != "{\"version\":\""+coreVersion+"\",\"piVersion\":\"1.2.3\",\"validation\":\"local-package-only\",\"files\":10}\n" {
 					t.Fatalf("unexpected success: %q", out)
 				}
 			} else if code != 1 || out != "" || diagnostic != "Pi package tarball validation failed\nexit status 1\n" {
