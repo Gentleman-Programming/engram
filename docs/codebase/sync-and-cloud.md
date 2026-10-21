@@ -91,6 +91,13 @@ data.
 
 ### Opaque session identities and historical compatibility
 
+Direct `CloudStore.WriteChunk` and mutation-batch ingestion reject a session
+DELETE whose nonblank payload ID differs byte-for-byte from its entity key,
+before persisting any part of the chunk or batch. Matching padded IDs remain
+valid; sparse legacy session DELETE payloads retain the existing key fallback.
+Other entity DELETE validation is unchanged. This is producer validation, not
+historical startup repair.
+
 Nonblank session IDs are opaque, byte-exact identifiers. In the same project,
 `session` and ` session ` identify different sessions. Cloud chunk and mutation
 ingestion must retain those IDs, their observation/prompt `session_id` values,

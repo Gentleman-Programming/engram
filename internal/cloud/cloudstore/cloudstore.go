@@ -469,18 +469,18 @@ func materializeChunkMutation(project string, mutation store.SyncMutation) (*Mut
 		}
 	}
 	entry := MutationEntry{Project: strings.TrimSpace(project), Entity: entity, EntityKey: entityKey, Op: op, Payload: payload}
-	if op == store.SyncOpUpsert {
-		if err := validateMaterializedChunkUpsert(entry); err != nil {
-			return nil, fmt.Errorf("invalid %s upsert payload: %w", entity, err)
+	if op == store.SyncOpUpsert || (entity == store.SyncEntitySession && op == store.SyncOpDelete) {
+		if err := validateMaterializedChunkPayload(entry); err != nil {
+			return nil, fmt.Errorf("invalid %s %s payload: %w", entity, op, err)
 		}
 	}
 	return &entry, nil
 }
 
-// validateMaterializedChunkUpsert rejects malformed typed upsert payloads before
-// either direct chunk uploads or mutation-push chunks can materialize them.
-func validateMaterializedChunkUpsert(entry MutationEntry) error {
-	if strings.TrimSpace(string(entry.Payload)) == "null" {
+// validateMaterializedChunkPayload rejects malformed typed upserts and inconsistent
+// session delete identities before either producer path can materialize them.
+func validateMaterializedChunkPayload(entry MutationEntry) error {
+	if entry.Op == store.SyncOpUpsert && strings.TrimSpace(string(entry.Payload)) == "null" {
 		return errors.New("payload must be a JSON object")
 	}
 	var identity, field string
