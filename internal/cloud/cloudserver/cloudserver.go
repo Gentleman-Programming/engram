@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/semver"
+
 	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
@@ -201,18 +203,13 @@ func WithVersion(version string) Option {
 // displayVersion maps a raw build identifier onto its dashboard display form.
 func displayVersion(version string) string {
 	trimmed := strings.TrimSpace(version)
-	if len(trimmed) > 1 && trimmed[0] == 'v' && trimmed[1] >= '0' && trimmed[1] <= '9' {
-		trimmed = trimmed[1:]
-	}
-	if trimmed == "" {
-		return ""
-	}
-	// Only a semver-shaped identifier earns the "v" prefix; tags such as "dev"
-	// are legitimate build identifiers and must render as themselves (#1657).
-	if trimmed[0] < '0' || trimmed[0] > '9' {
+	if semver.IsValid(trimmed) {
 		return trimmed
 	}
-	return "v" + trimmed
+	if semver.IsValid("v" + trimmed) {
+		return "v" + trimmed
+	}
+	return trimmed
 }
 
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {

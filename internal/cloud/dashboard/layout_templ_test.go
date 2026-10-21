@@ -147,6 +147,72 @@ func TestChromeRendersNonSemverVersionAsIs(t *testing.T) {
 	}
 }
 
+func TestChromeErrorPathsPreserveVersion(t *testing.T) {
+	for _, version := range []string{"v1.2.3-rc.1+build.7", ""} {
+		t.Run("version="+version, func(t *testing.T) {
+			for _, login := range []bool{true, false} {
+				name := "session not found"
+				if login {
+					name = "invalid login token"
+				}
+				t.Run(name, func(t *testing.T) {
+					validated, created := 0, 0
+					mux := http.NewServeMux()
+					Mount(mux, MountConfig{
+						RequireSession: func(r *http.Request) error {
+							if r.URL.Query().Get("auth") == "ok" {
+								return nil
+							}
+							return errUnauthorized
+						},
+						IsAdmin: func(_ *http.Request) bool { return false },
+						Store:   parityStoreStub{},
+						Version: version,
+						ValidateLoginToken: func(token string) error {
+							validated++
+							if token != "wrong" {
+								t.Errorf("validated token = %q, want wrong", token)
+							}
+							return errUnauthorized
+						},
+						CreateSessionCookie: func(http.ResponseWriter, *http.Request, string) error {
+							created++
+							return nil
+						},
+					})
+					req := httptest.NewRequest(http.MethodGet, "/dashboard/browser/sessions/%20?auth=ok", nil)
+					status, content := http.StatusNotFound, "Session Not Found"
+					if login {
+						req = httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=wrong"))
+						req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+						status, content = http.StatusOK, "invalid token"
+					}
+					rec := httptest.NewRecorder()
+					mux.ServeHTTP(rec, req)
+					body := rec.Body.String()
+					if rec.Code != status || !strings.Contains(body, content) {
+						t.Fatalf("status=%d, want %d with %q; body=%q", rec.Code, status, content, body)
+					}
+					label := version
+					if label == "" {
+						label = "version unknown"
+					}
+					footer := "<small>ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY · " + label + "</small>"
+					if strings.Count(body, footer) != 1 || strings.Count(body, " · "+label+"</small>") != 1 {
+						t.Errorf("expected exactly one canonical footer %q; body=%q", footer, body)
+					}
+					if created != 0 || len(rec.Header().Values("Set-Cookie")) != 0 || rec.Header().Get("Location") != "" {
+						t.Errorf("unexpected session creation or redirect: created=%d headers=%v", created, rec.Header())
+					}
+					if login && validated != 1 {
+						t.Errorf("token validation calls=%d, want 1", validated)
+					}
+				})
+			}
+		})
+	}
+}
+
 // The login footer must remain visible even without a build identifier.
 func TestLoginPageShowsUnknownWhenMountConfigVersionEmpty(t *testing.T) {
 	mux := http.NewServeMux()
