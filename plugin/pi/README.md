@@ -400,6 +400,10 @@ real Go HTTP content/history/revision and public-counter checks. Run it from the
 repository root with `node --test plugin/pi/test/mem-update.test.mjs`, then run
 `npm test` from `plugin/pi`. Use Node.js 24 and the checkout's Go toolchain/dependencies
 (or `ENGRAM_PI_TEST_SERVER_BINARY` for the prebuilt fixture); no npm install is needed.
+Without either fixture resource, the two real-server tests skip before creating a
+sandbox or building Go; both mocked tests still run in the packaged module.
+An invalid configured binary or a checkout Go build failure remains a failure,
+not a skip. `test/mem-update-package.test.mjs` protects these package boundaries.
 These checks do not establish installed-host or broader release parity.
 
 ## Observation history

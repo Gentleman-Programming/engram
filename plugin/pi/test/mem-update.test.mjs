@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
+
+const repositoryRoot = join(PLUGIN_ROOT, "../..");
+const repositoryFixtureAvailable = [
+  "go.mod", "internal/server/server.go", "internal/store/store.go",
+  "plugin/pi/test/support/real-server/main.go",
+].every(path => existsSync(join(repositoryRoot, path)));
+const realServerSkip = !process.env.ENGRAM_PI_TEST_SERVER_BINARY && !repositoryFixtureAvailable
+  ? "requires the Engram Go checkout or ENGRAM_PI_TEST_SERVER_BINARY" : false;
 
 async function harness(sandbox) {
   const tools = new Map();
@@ -114,7 +123,7 @@ test("mem_update legacy full-content metadata and omission forwarding", async (t
 
 // Same isolated server/EOF lifecycle as real-agent-workflows.test.mjs. No user store is opened.
 for (const mode of ["legacy", "find/replace"]) {
-test(`mem_update real Go HTTP ${mode} mutation semantics`, async (t) => {
+test(`mem_update real Go HTTP ${mode} mutation semantics`, { skip: realServerSkip }, async (t) => {
   await withPluginSandbox("engram-update-real-", async ({ dir, sandbox }) => {
     const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "ENGRAM_HTTP_TOKEN", "ENGRAM_DATA_DIR", "ENGRAM_CLOUD_AUTOSYNC", "HOME"];
     const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
@@ -122,7 +131,7 @@ test(`mem_update real Go HTTP ${mode} mutation semantics`, async (t) => {
     const executable = process.env.ENGRAM_PI_TEST_SERVER_BINARY ?? join(dir, process.platform === "win32" ? "server.exe" : "server");
     if (!process.env.ENGRAM_PI_TEST_SERVER_BINARY) {
       const build = spawnSync("go", ["build", "-o", executable, "./plugin/pi/test/support/real-server"],
-        { cwd: join(PLUGIN_ROOT, "../.."), encoding: "utf8", timeout: 60000 });
+        { cwd: repositoryRoot, encoding: "utf8", timeout: 60000 });
       assert.ifError(build.error);
       assert.equal(build.status, 0, build.stderr);
     }
