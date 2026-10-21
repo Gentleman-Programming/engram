@@ -269,18 +269,19 @@ A pull request targets the canonical repository. A fork is where the branch live
 | `origin` | your fork | your branches |
 | `upstream` | the canonical repository | the canonical `main` |
 
-A fork's default branch is not kept current for you. Branch from `upstream/main` so the diff applies cleanly, and push to `origin` so the branch is where the pull request can read it from.
+After `git fetch upstream`, branching from `upstream/main` uses the current canonical `main`; this workflow does not require synchronizing your fork's `main`. Branching from a stale local or fork `main` instead may omit recent canonical changes, but does not necessarily produce an unclean diff.
 
 ### Authorizations are separate
 
 | Action | Who performs it |
 |--------|-----------------|
-| Create a fork and push branches to it | you, once authorized to use your fork |
+| Create or use a fork | you, once authorized to create or use that fork |
+| Push commits to a branch in your fork | you, once separately authorized to push those commits there |
 | Open or update a pull request in the canonical repository | you, once authorized to publish there |
 | Apply the `type:*` label to a pull request in the canonical repository | a maintainer with triage access |
 | Merge a pull request | a maintainer |
 
-Being authorized to open a pull request is not authorization to label it or to merge it. Request the specific action you need.
+Request the specific action you need. Authorization to create or use a fork does not authorize pushing commits to it. Being authorized to open a pull request is not authorization to label it or to merge it.
 
 ### When a push to the canonical repository is rejected
 
@@ -299,6 +300,6 @@ Both are the controls working as designed.
 
 A dependent pull request is a second pull request whose base branch is another contributor's branch. **This repository has no validated procedure for delivering one from a fork, so treat it as requiring maintainer guidance rather than something to work around.**
 
-Two constraints are already known. The base branch has to live where the upstream pull request can read it, which for a fork means the fork itself, and the base branch has to be merged before the dependent pull request can merge, because the dependent pull request's diff is computed against it. Everything past those two constraints — who may create the base branch, which repository owns it, and how a maintainer sequences the merges — is a maintainer decision that this skill does not make for you.
+For a pull request targeting the canonical repository, the base branch must exist in the canonical repository. A fork-only branch can supply the head, not the base. Targeting a fork instead is a distinct, unvalidated workflow requiring maintainer guidance. The diff is computed against the selected base, but that alone does not require the parent pull request to merge first. Who may create the canonical base branch and how to sequence merges are maintainer workflow decisions that this skill does not make for you.
 
-Ask before you start one. Do not open a dependent pull request against a branch that does not exist upstream, and do not treat being able to push a branch to your fork as making it a valid base.
+Ask before you start one. For a pull request targeting the canonical repository, do not use a base branch that does not exist in that repository. Pushing a branch to your fork does not make it a valid base for that pull request.

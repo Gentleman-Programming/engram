@@ -72,7 +72,7 @@ git push -u origin feat/1821-short-description
 
 A plain `git clone` of your fork gives that clone only `origin`; forking on the GitHub web interface changes nothing in a local clone. `gh repo fork --clone` sets both up — the fork becomes `origin` and the previous `origin` is renamed to `upstream` — and `gh repo fork --remote` does the same in an existing clone. If `upstream` is absent, add it before running `git fetch upstream`; the failure is `fatal: 'upstream' does not appear to be a git repository`.
 
-A fork's default branch is not kept current for you. Branching from a local `main` that has fallen behind produces a diff that does not apply cleanly.
+After `git fetch upstream`, branching from `upstream/main` uses the current canonical `main`; this workflow does not require synchronizing your fork's `main`. Branching from a stale local or fork `main` instead may omit recent canonical changes, but does not necessarily produce an unclean diff.
 
 Open the pull request against the canonical repository explicitly, so the destination is never inferred from the clone you happen to be in:
 
@@ -86,12 +86,13 @@ gh pr create --repo <canonical-owner>/<canonical-repo> \
 
 | Action | Who performs it |
 |--------|-----------------|
-| Create a fork and push branches to it | you, once you are authorized to use your fork |
+| Create or use a fork | you, once authorized to create or use that fork |
+| Push commits to a branch in your fork | you, once separately authorized to push those commits there |
 | Open or update a pull request in the canonical repository | you, once you are authorized to publish there |
 | Apply the `type:*` label to a pull request in the canonical repository | a maintainer with triage access. A contributor without it receives `does not have the correct permissions to execute AddLabelsToLabelable`; that is a maintainer step, not something to retry |
 | Merge a pull request | a maintainer |
 
-Request the specific action you need. Being authorized to open a pull request is not authorization to label it or to merge it.
+Request the specific action you need. Authorization to create or use a fork does not authorize pushing commits to it. Being authorized to open a pull request is not authorization to label it or to merge it.
 
 #### When a push to the canonical repository is rejected
 
@@ -110,9 +111,9 @@ Both are the controls working as designed.
 
 A dependent pull request is a second pull request whose base branch is another contributor's branch. **This repository has no validated procedure for delivering one from a fork, so treat it as requiring maintainer guidance rather than something to work around.**
 
-Two constraints are already known. The base branch has to live where the upstream pull request can read it, which for a fork means the fork itself, and the base branch has to be merged before the dependent pull request can merge, because the dependent pull request's diff is computed against it. Everything past those two constraints — who may create the base branch, which repository owns it, and how a maintainer sequences the merges — is a maintainer decision that this guide does not make for you.
+For a pull request targeting the canonical repository, the base branch must exist in the canonical repository. A fork-only branch can supply the head, not the base. Targeting a fork instead is a distinct, unvalidated workflow requiring maintainer guidance. The diff is computed against the selected base, but that alone does not require the parent pull request to merge first. Who may create the canonical base branch and how to sequence merges are maintainer workflow decisions that this guide does not make for you.
 
-Ask before you start one. Do not open a dependent pull request against a branch that does not exist upstream, and do not treat being able to push a branch to your fork as making it a valid base.
+Ask before you start one. For a pull request targeting the canonical repository, do not use a base branch that does not exist in that repository. Pushing a branch to your fork does not make it a valid base for that pull request.
 
 ### Step 4: Automated PR Checks
 
