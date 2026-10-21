@@ -108,7 +108,7 @@ If the binary is missing, Pi-native local server startup reports an error withou
 
 `mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Automatic Git detection stores the first normalized remote/root label in private shared Git metadata, so remote renames, linked worktrees, and repository moves keep using that label. If that binding is corrupt or cannot be written, detection fails closed; set `.engram/config.json` to the intended project rather than relying on the current remote name. Global local/cloud `project_id` propagation and alias migration remain deferred. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
 
-MCP also exposes deferred `mem_judge_many` (ordered per-item decisions) and `mem_session_finalize` (atomic caller-authored summary plus close). Finalize requires an existing exact session and matching project ownership; retries are local-only. These tools do not change the native Pi/HTTP wrappers or host lifecycle hooks. See [the MCP reference](../DOCS.md#mcp-tools-26-tools).
+MCP also exposes deferred `mem_judge_many` (ordered per-item decisions) and `mem_session_finalize` (atomic caller-authored summary plus close). Finalize requires an existing exact session and matching project ownership; retries are local-only. These tools do not change the native Pi/HTTP wrappers or host lifecycle hooks. See [the MCP reference](../DOCS.md#mcp-tools-27-tools).
 
 Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
 
@@ -276,7 +276,7 @@ engram serve &
 
 > **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and the global `opencode.json(c)` selected as described above. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
 
-**Alternative: Manual MCP-only setup** (no plugin, all 26 tools by default):
+**Alternative: Manual MCP-only setup** (no plugin, all 27 tools by default):
 
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` on all platforms, or project-level):
 
@@ -334,7 +334,7 @@ When the plugin is already installed, `engram setup claude-code` runs `claude pl
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
-**Option C: Bare MCP** — all 26 tools by default, no session management:
+**Option C: Bare MCP** — all 27 tools by default, no session management:
 
 Use Claude CLI to register the user-scope server (replace the placeholder with the absolute Engram executable path):
 

@@ -145,7 +145,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 
 | Feature | Bare MCP | Plugin + setup |
 |---------|----------|----------------|
-| MCP tools available | 23 default (`engram mcp`) | 19 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 27 default (`engram mcp`) | 23 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
