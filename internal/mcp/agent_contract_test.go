@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -239,10 +240,18 @@ func TestAgentContractConsolidationPreservesUpstreamRegistration(t *testing.T) {
 		t.Fatalf("consolidation safety annotations drifted: %#v", annotations)
 	}
 	semantics := operation["semantics"].(map[string]any)
-	wantDifference := "mem_consolidate is Go/MCP-only; Pi has no recipe or dispatch for this operation"
 	differences := semantics["pi_differences"].([]any)
-	if !slices.Contains(differences, any(wantDifference)) {
-		t.Fatalf("consolidation silently claims Pi support: %#v", differences)
+	for _, fact := range []string{
+		"Pi projects HTTP status, flat errors and optional replacement plans into native error metadata",
+		"Go owns the opaque fingerprint and confirmation validation",
+		"Pi does not auto-confirm replacement previews or replay uncertain POSTs",
+	} {
+		if !slices.ContainsFunc(differences, func(value any) bool {
+			difference, ok := value.(string)
+			return ok && strings.Contains(difference, fact)
+		}) {
+			t.Errorf("consolidation projection missing %q: %#v", fact, differences)
+		}
 	}
 }
 
