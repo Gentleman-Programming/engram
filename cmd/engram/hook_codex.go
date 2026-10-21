@@ -70,11 +70,7 @@ func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func()
 	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
 	defer cancel()
 	_, client := hookEndpointClient(baseURL)
-	var authority json.RawMessage
-	if !codexJSON(ctx, client, http.MethodGet, baseURL+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
-		return fallback
-	}
-	project, authorized := codexProjectAuthority(authority)
+	project, authorized := codexHookProject(ctx, client, baseURL, in.SessionID, in.CWD)
 	if !authorized {
 		return fallback
 	}
@@ -293,11 +289,7 @@ func runCodexLifecycleResult(ctx context.Context, action string, data []byte, ba
 		return "", failure
 	}
 	_, client := hookEndpointClient(base)
-	var authority json.RawMessage
-	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
-		return "", failure
-	}
-	project, ok := codexProjectAuthority(authority)
+	project, ok := codexHookProject(ctx, client, base, in.SessionID, in.CWD)
 	if !ok {
 		return "", failure
 	}
@@ -310,6 +302,30 @@ func runCodexLifecycleResult(ctx context.Context, action string, data []byte, ba
 		_ = codexRuntimeAt(ctx, client, base, in.SessionID, in.CWD, project, "end")
 	}
 	return "", failure
+}
+
+// codexHookProject selects identity without changing runtime scope semantics.
+// A known project-owned session keeps its owner even after cwd changes. Shared
+// sessions retain caller-project permissions, requiring usable client evidence;
+// a failed inspection never falls back to the persisted owner. Runtime conflict
+// handling still performs its own authoritative lookup before its one retry.
+func codexHookProject(ctx context.Context, client *http.Client, base, host, cwd string) (string, bool) {
+	if hookUsesClientProject() {
+		owner, known, err := hookSessionOwnerProject(ctx, client, base, host)
+		if err != nil {
+			return "", false
+		}
+		if known && owner.OwnershipMode == "project_owned" {
+			return owner.Project, true
+		}
+		project, err := hookResolveCwdProject(ctx, client, base, cwd)
+		return project, err == nil
+	}
+	var authority json.RawMessage
+	if !codexJSON(ctx, client, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil, &authority) {
+		return "", false
+	}
+	return codexProjectAuthority(authority)
 }
 
 // hookEndpointClient shares endpoint selection across native hooks. Explicit TCP

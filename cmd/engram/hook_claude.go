@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 // claudeEngramWriteAndSessionTools is the complete set of Engram MCP tools
@@ -278,11 +280,26 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 	}
 }
 
-// hookResolveCwdProject derives the project for a first registration from the
-// hook cwd. A resolution failure the server explains (ambiguous directory,
-// transition conflict, invalid name) becomes a denial naming that cause
-// instead of the generic unconfirmed message.
+// hookUsesClientProject inspects the original environment, not the synthesized
+// transport URL: a loopback SSH tunnel is external, a port/socket default is not.
+func hookUsesClientProject() bool {
+	return strings.TrimSpace(os.Getenv("ENGRAM_URL")) != ""
+}
+
+// hookResolveCwdProject derives first-registration identity on the client when
+// explicitly connected to an external endpoint. Local defaults retain server
+// resolution. Both paths share the caller's existing confirmation deadline.
 func hookResolveCwdProject(ctx context.Context, client *http.Client, base, cwd string) (string, error) {
+	if hookUsesClientProject() {
+		result, err := projectpkg.InspectLocalProject(ctx, cwd)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", errHookSessionUnconfirmed
+		}
+		return result.Project, nil
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil)
 	if err != nil {
 		return "", errHookSessionUnconfirmed

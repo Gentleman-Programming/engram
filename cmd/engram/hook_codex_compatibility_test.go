@@ -47,7 +47,7 @@ func TestCodexGuardCoreCompatibility(t *testing.T) {
 				}
 			}))
 			defer endpoint.Close()
-			t.Setenv("ENGRAM_URL", endpoint.URL)
+			useLegacyLocalHookEndpoint(t, endpoint.URL)
 			input := `{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"forged"}}`
 			output := string(guardCodexPreToolUse([]byte(input)))
 			if requests != tc.requests {
@@ -73,7 +73,7 @@ func TestCodexGuardCoreCompatibility(t *testing.T) {
 func TestCodexGuardConnectionFailureIsNotCompatibility(t *testing.T) {
 	endpoint := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	endpoint.Close()
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	output := string(guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`)))
 	if !strings.Contains(output, `"permissionDecision":"deny"`) || strings.Contains(output, "Upgrade") {
 		t.Fatal(output)

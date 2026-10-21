@@ -37,7 +37,7 @@ func TestHookSessionConfirmationConfiguredTimeout(t *testing.T) {
 				stdout, stderr := captureOutput(t, func() {
 					synctest.Test(t, func(t *testing.T) {
 						t.Setenv("ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT", tc.value)
-						t.Setenv("ENGRAM_URL", "http://hook.test")
+						useLegacyLocalHookEndpoint(t, "http://127.0.0.1:7437")
 						t.Setenv("PI_CODING_AGENT", "")
 						oldTransport, oldStdin, oldOutput, oldExit := http.DefaultTransport, os.Stdin, claudeHookOutput, exitFunc
 						t.Cleanup(func() {
