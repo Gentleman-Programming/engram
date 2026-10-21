@@ -220,7 +220,8 @@ update docs                      ← no conventional commit format
 ```bash
 # Identify the remotes before publishing. origin must be your fork and upstream
 # the canonical repository; verify with git remote -v before pushing anything.
-# If your clone has no upstream remote yet, add the canonical repository first:
+# A plain clone of your fork has only origin, and forking on the GitHub web
+# interface changes nothing in a local clone. If upstream is absent, add it:
 git remote add upstream <canonical-repository-url>
 # Ensure origin points at your fork:
 git remote set-url origin <your-fork-url>
@@ -252,8 +253,11 @@ gh pr create --repo <canonical-owner>/<canonical-repo> \
 # The type:* label needs triage access to the canonical repository. A contributor
 # without it gets "does not have the correct permissions to execute
 # AddLabelsToLabelable": ask a maintainer to apply it, and do not retry.
-#   Maintainer step (not a contributor step):
-#   gh pr edit <pr-number> --add-label "type:feature"
+#   Maintainer step (not a contributor step). Name the repository explicitly:
+#   with both remotes present, GitHub CLI resolves a bare pull request number
+#   against its configured default repository, which may be the fork.
+#   gh pr edit <pr-number> --repo <canonical-owner>/<canonical-repo> \
+#     --add-label "type:feature"
 ```
 
 ## Forks, Remotes, and Publication

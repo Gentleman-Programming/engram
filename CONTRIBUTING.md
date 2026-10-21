@@ -70,7 +70,7 @@ git checkout -b feat/1821-short-description upstream/main
 git push -u origin feat/1821-short-description
 ```
 
-A clone that only has `origin` cannot run `git fetch upstream` at all, so add the remote first: the failure is `fatal: 'upstream' does not appear to be a git repository`. A fork created from the GitHub web interface already carries both remotes; a clone made some other way usually carries only `origin`.
+A plain `git clone` of your fork gives that clone only `origin`; forking on the GitHub web interface changes nothing in a local clone. `gh repo fork --clone` sets both up — the fork becomes `origin` and the previous `origin` is renamed to `upstream` — and `gh repo fork --remote` does the same in an existing clone. If `upstream` is absent, add it before running `git fetch upstream`; the failure is `fatal: 'upstream' does not appear to be a git repository`.
 
 A fork's default branch is not kept current for you. Branching from a local `main` that has fallen behind produces a diff that does not apply cleanly.
 
