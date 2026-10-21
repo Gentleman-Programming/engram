@@ -4,3 +4,4 @@ Stage: H0 baseline only
 Trusted base: 9739f234d5f6035e601998c4fbbbcec6c61a4575
 NO MERGE / NO ENQUEUE
 Retain this fixture; H1 requires separate authorization.
+Stage: H1 sequential head transition.
