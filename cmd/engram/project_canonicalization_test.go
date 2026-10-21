@@ -8,6 +8,17 @@ import (
 )
 
 func TestProjectsMergeCanonicalization(t *testing.T) {
+	for _, tc := range []struct{ name, source string }{
+		{"exact spelling", "Acme-api"},
+		{"surrounding whitespace", " \tAcme-api \t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testProjectsMergeCanonicalization(t, tc.source)
+		})
+	}
+}
+
+func testProjectsMergeCanonicalization(t *testing.T, source string) {
 	cfg := testConfig(t)
 	mustSeedObservation(t, cfg, "legacy-session", "acme-api", "note", "legacy-note", "content", "project")
 	s, err := store.New(cfg)
@@ -29,7 +40,7 @@ func TestProjectsMergeCanonicalization(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	withArgs(t, "engram", "projects", "merge", "--from", "Acme-api", "--to", "acme-api", "--dry-run")
+	withArgs(t, "engram", "projects", "merge", "--from", source, "--to", "acme-api", "--dry-run")
 	out, stderr := captureOutput(t, func() { cmdProjects(cfg) })
 	want := "[dry-run] Source \"Acme-api\" -> target \"acme-api\": observations 1, sessions 1, prompts 0. Sync identity changes: false. No changes made. Point-in-time preview; apply revalidates and counts may differ.\n"
 	if out != want || stderr != "" {
@@ -39,13 +50,22 @@ func TestProjectsMergeCanonicalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PreviewExplicitProjectMerge("Acme-api", "acme-api"); err != nil {
-		t.Fatalf("dry-run changed source: %v", err)
+	previewed, err := s.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.ExportedAt, previewed.ExportedAt = "", ""
+	previewPending, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, previewed) || !reflect.DeepEqual(pendingBefore, previewPending) {
+		t.Fatal("dry-run changed records or journal")
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	withArgs(t, "engram", "projects", "merge", "--from", "Acme-api", "--to", "acme-api", "--apply")
+	withArgs(t, "engram", "projects", "merge", "--from", source, "--to", "acme-api", "--apply")
 	out, stderr = captureOutput(t, func() { cmdProjects(cfg) })
 	want = "Merged source \"Acme-api\" into target \"acme-api\": observations 1, sessions 1, prompts 0. Sync identity may also change.\n"
 	if out != want || stderr != "" {
@@ -82,11 +102,11 @@ func TestProjectsMergeCanonicalization(t *testing.T) {
 		t.Fatal("local merge changed journal")
 	}
 	oldExit := exitFunc
-	exitFunc = func(code int) { panic(code) }
+	exitFunc = func(code int) { panic(exitCode(code)) }
 	t.Cleanup(func() { exitFunc = oldExit })
-	withArgs(t, "engram", "projects", "merge", "--from", "Acme-api", "--to", "acme-api", "--apply")
+	withArgs(t, "engram", "projects", "merge", "--from", source, "--to", "acme-api", "--apply")
 	out, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
-	if recovered == nil || out != "" || stderr == "" {
+	if recovered != exitCode(1) || out != "" || stderr != "engram: source project \"Acme-api\" does not exist\n" {
 		t.Fatalf("repeat stdout=%q stderr=%q exit=%v", out, stderr, recovered)
 	}
 	repeated, err := s.Export()
