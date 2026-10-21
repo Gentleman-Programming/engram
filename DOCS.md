@@ -232,6 +232,37 @@ Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enr
 
 ## HTTP API Endpoints
 
+### Local caller trust and ownership policy
+
+The local store supports one user with trusted local clients and processes. It does not promise isolation between mutually untrusted clients or projects. Loopback TCP alone does not authenticate callers; the optional Unix socket is a transport choice, not a project permission model.
+
+Keep these boundaries separate:
+
+| Boundary | Supported authority |
+| --- | --- |
+| Standalone local HTTP | `ENGRAM_HTTP_TOKEN` provides selective instance-level authentication on wrapped routes, not project authorization. In particular, observation DELETE requires a matching Bearer credential when configured; observation PATCH is not gated by that selective wrapper, even when the token is configured. Other handler validation still applies. |
+| Session-owned local HTTP | The private child-lifetime token configured by `SetSessionOwnedToken` authenticates the entire handler, including PATCH and health. This is separate from standalone selective-token protection. |
+| Native MCP | Tool profiles select registered capabilities: `mem_update` is in `agent`, `mem_delete` is in `admin`, and legacy `all` retains both. Profiles are not per-project grants, and hiding tools is not a security boundary. |
+| Cloud | Authenticated principals and server-enforced project grants or legacy allowlists belong to the separate cloud server boundary. They do not establish local tenant isolation. |
+
+For HTTP observation PATCH/DELETE and native MCP `mem_update`/`mem_delete`, caller-supplied `expected_project` is an ownership-consistency assertion, not authentication or a permission grant. It is normalized and checked atomically against the stored owner. Do not manufacture a missing assertion by reading the target record. Neither cwd, the MCP process project, nor a model-authored owner assertion establishes an authenticated project identity.
+
+Deliberate cross-project maintenance by observation ID remains supported with a matching normalized owner, including administrative MCP deletion. Changing cwd must not silently redefine ownership or introduce a new permission rule. Personal/global scope does not bypass owner checks.
+
+Representative observation-mutation outcomes:
+
+- Missing, blank, or invalid owner assertions are rejected (HTTP `400`).
+- A normalized owner mismatch is rejected (HTTP `409` or MCP tool error) without an owner-mismatched mutation.
+- A matching owner can permit MCP update/delete even with an unrelated or ambiguous process project; it does not bypass other operation validation.
+- Standalone DELETE with a configured token rejects missing/wrong credentials with `401` before mutation; correct credentials still require the owner assertion.
+- Session-owned HTTP rejects missing/wrong private credentials at the outer boundary, including for PATCH and health.
+
+These examples do not imply identical HTTP/MCP responses or universal rollback after every possible failure. Each operation retains its existing validation, lookup, ownership, and post-mutation failure precedence.
+
+Broader standalone HTTP authentication requires a separately scoped hardening change with an affected-route/client inventory, compatibility and migration plan, and explicit error-precedence rules. Regression coverage must preserve owner-rejection side effects, deliberate cross-project maintenance, standalone versus session-owned authentication boundaries, and profile compatibility unless a change is explicitly approved. This policy does not introduce RBAC or project identities.
+
+Policy decision: [#1580](https://github.com/Gentleman-Programming/engram/issues/1580#issuecomment-6325244866).
+
 ### Explicit project selection inside HOME repositories
 
 When HOME itself is a Git repository, capture from an untracked descendant requires an explicit project designation. This includes new dotfiles folders: folder names alone are not project intent. HOME itself, subfolders containing Git-index-tracked files, nested independent repositories, and ordinary non-HOME monorepos retain normal detection.
