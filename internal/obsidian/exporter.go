@@ -92,6 +92,31 @@ func (e *Exporter) stateFilePath() string {
 	return filepath.Join(e.engramRoot(), ".engram-sync-state.json")
 }
 
+// matchesFilters reports whether obs is in scope for the current export's
+// Project and Org filters (#776). An empty filter matches everything for that
+// axis; a nil field on the observation is treated as the empty value.
+func (e *Exporter) matchesFilters(obs store.Observation) bool {
+	if e.config.Project != "" {
+		proj := ""
+		if obs.Project != nil {
+			proj = *obs.Project
+		}
+		if proj != e.config.Project {
+			return false
+		}
+	}
+	if e.config.Org != "" {
+		org := ""
+		if obs.Org != nil {
+			org = *obs.Org
+		}
+		if org != e.config.Org {
+			return false
+		}
+	}
+	return true
+}
+
 // Export performs a full or incremental export from the store to the vault.
 // It returns an ExportResult summarizing what happened.
 func (e *Exporter) Export() (*ExportResult, error) {
@@ -203,6 +228,24 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 	}
 
+	// ── Handle filter exclusions: retire notes that no longer match (#776) ────
+	// The exporter mirrors the selected Project/Org filters, so a previously
+	// tracked observation that drops out of scope (e.g. a narrower --org on a
+	// later run) must lose its note too. Route the drop through the same
+	// retirement reconciliation as deletes so the removal is ownership-checked
+	// and confined to the export root.
+	for _, obs := range data.Observations {
+		if obs.DeletedAt != nil {
+			continue // handled by the deleted-observation loop above
+		}
+		relPath, tracked := state.Files[obs.ID]
+		if !tracked || e.matchesFilters(obs) {
+			continue
+		}
+		state.PendingRetirements[obs.ID] = append(state.PendingRetirements[obs.ID], relPath)
+		delete(state.Files, obs.ID)
+	}
+
 	// ── Build session map for hub generation ─────────────────────────────────
 	sessionMap := make(map[string]store.Session)
 	for _, s := range data.Sessions {
@@ -233,15 +276,9 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 
-		// Project filter
-		if e.config.Project != "" {
-			proj := ""
-			if obs.Project != nil {
-				proj = *obs.Project
-			}
-			if proj != e.config.Project {
-				continue
-			}
+		// Project and org filters (#776)
+		if !e.matchesFilters(obs) {
+			continue
 		}
 
 		project := "unknown"
