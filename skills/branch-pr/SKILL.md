@@ -220,6 +220,11 @@ update docs                      ← no conventional commit format
 ```bash
 # Identify the remotes before publishing. origin must be your fork and upstream
 # the canonical repository; verify with git remote -v before pushing anything.
+# If your clone has no upstream remote yet, add the canonical repository first:
+git remote add upstream <canonical-repository-url>
+# Ensure origin points at your fork:
+git remote set-url origin <your-fork-url>
+git remote -v
 git fetch upstream
 
 # Branch from the canonical main, not from a local main that may be stale.
@@ -247,7 +252,8 @@ gh pr create --repo <canonical-owner>/<canonical-repo> \
 # The type:* label needs triage access to the canonical repository. A contributor
 # without it gets "does not have the correct permissions to execute
 # AddLabelsToLabelable": ask a maintainer to apply it, and do not retry.
-gh pr edit <pr-number> --add-label "type:feature"
+#   Maintainer step (not a contributor step):
+#   gh pr edit <pr-number> --add-label "type:feature"
 ```
 
 ## Forks, Remotes, and Publication
@@ -284,3 +290,11 @@ Both are the controls working as designed.
 - Do not retry the push, silently switch the destination, use an exempt branch namespace, fabricate checks, or change the ruleset.
 - Push the branch to your fork and open the pull request from there.
 - If neither the fork nor the label step is authorized for your account, stop and ask a maintainer for an authorized route, and record the rejection on the issue as evidence.
+
+### Dependent pull requests
+
+A dependent pull request is a second pull request whose base branch is another contributor's branch. **This repository has no validated procedure for delivering one from a fork, so treat it as requiring maintainer guidance rather than something to work around.**
+
+Two constraints are already known. The base branch has to live where the upstream pull request can read it, which for a fork means the fork itself, and the base branch has to be merged before the dependent pull request can merge, because the dependent pull request's diff is computed against it. Everything past those two constraints — who may create the base branch, which repository owns it, and how a maintainer sequences the merges — is a maintainer decision that this skill does not make for you.
+
+Ask before you start one. Do not open a dependent pull request against a branch that does not exist upstream, and do not treat being able to push a branch to your fork as making it a valid base.
