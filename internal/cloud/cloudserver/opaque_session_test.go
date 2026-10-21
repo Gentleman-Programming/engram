@@ -39,12 +39,16 @@ func opaqueCloud(t *testing.T) (*cloudstore.CloudStore, cloud.Config) {
 	}
 	schema := fmt.Sprintf("opaque_%d", time.Now().UnixNano())
 	if _, err = db.Exec("CREATE SCHEMA " + schema); err != nil {
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("close schema connection after create failure: %v", closeErr)
+		}
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_, err := db.Exec("DROP SCHEMA " + schema + " CASCADE")
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("close schema connection: %v", closeErr)
+		}
 		if err != nil {
 			t.Error(err)
 		}
@@ -57,7 +61,11 @@ func opaqueCloud(t *testing.T) (*cloudstore.CloudStore, cloud.Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cs.Close() })
+	t.Cleanup(func() {
+		if err := cs.Close(); err != nil {
+			t.Errorf("close cloud store: %v", err)
+		}
+	})
 	return cs, cfg
 }
 func opaqueJSON(t *testing.T, v any) []byte {
@@ -86,6 +94,10 @@ func opaqueLocal(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close local store: %v", err)
+		}
+	})
 	return s
 }

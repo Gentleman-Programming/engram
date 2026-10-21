@@ -33,7 +33,11 @@ func TestOpaqueSessionRestartDoesNotInventAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { reopened.Close() })
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened cloud store: %v", err)
+		}
+	})
 	after, err := reopened.KnownSessionIDs(context.Background(), "opaque")
 	if err != nil {
 		t.Fatal(err)

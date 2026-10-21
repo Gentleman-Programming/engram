@@ -16,7 +16,11 @@ func TestLocalChunkRoundTripPreservesOpaqueSessions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { s.Close() })
+		t.Cleanup(func() {
+			if err := s.Close(); err != nil {
+				t.Errorf("close local store: %v", err)
+			}
+		})
 		return s
 	}
 	source, destination := newStore(), newStore()
