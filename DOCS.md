@@ -1560,7 +1560,9 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 
 ### mem_merge_projects
 
-**Admin tool.** Merge explicitly named case/trim or corresponding `-`/`_` separator variants into a canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. For example, `foo-bar` may merge into `foo_bar`, but unrelated names are rejected. Sources must exist; the CLI trims surrounding whitespace from `--from`, then selects only that exact stored spelling and rejects an already-canonical source. Observations, sessions, prompts, pending sync identity, and enrollment migrate together. A no-op reports that no records moved.
+**Admin tool.** Merge explicitly named case/trim or corresponding `-`/`_` separator variants into a canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. For example, `foo-bar` may merge into `foo_bar`, but unrelated names are rejected. Sources must exist. If `from` already names the canonical target, `mem_merge_projects` succeeds without moving records and reports `No records moved`; it does not reject that source. Observations, sessions, prompts, pending sync identity, and enrollment migrate together.
+
+By contrast, the CLI preview rejects an already-canonical source. The CLI trims surrounding whitespace from `--from`, then selects only that exact stored spelling.
 
 ### mem_current_project
 
