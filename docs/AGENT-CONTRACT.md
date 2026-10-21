@@ -119,10 +119,12 @@ uses the resolved current project when omitted, and never marks globally. The
 current MCP branch still ignores that argument for this action; Pi accepts it.
 No review handler behavior is changed by exporting this foundation.
 
-Known differences also include save conflict-candidate output, topic-key
-computation, history/cursors, literal `find/replace`, session ownership, and
-project/personal-scope selection. Resolve them and add shared behavioral vectors
-before asserting MCP/Pi semantic parity. Schema/digest equality alone cannot
+Known differences include save conflict-candidate output, native HTTP result/error
+envelopes, host-owned session attribution, and project/personal-scope selection.
+Pi already forwards topic-key suggestions, history/cursors, `older_history`, and
+literal `find/replace` to Go; their presence is not proof of identical transports.
+Resolve remaining differences and add shared behavioral vectors before asserting
+MCP/Pi semantic parity. Schema/digest equality alone cannot
 prove effects, error handling, or transport acknowledgement behavior.
 
 An error is not universally proof of rollback: reloads may fail after pin/review
@@ -138,13 +140,20 @@ The generator tests exercise its public binary against isolated filesystem state
 The current baseline includes upstream `mem_consolidate`. Metadata registration
 preserves its required schema, destructive annotations, preview/confirmation
 rules, and existing runtime queue; it does not invoke the handler or open a store.
-This operation remains Go/MCP-only: no Pi recipe or dispatch is added.
+Pi already dispatches this operation over HTTP, preserving error codes and
+replacement plans in native error metadata. Go owns the opaque fingerprint;
+Pi never auto-confirms a replacement preview or replays an uncertain POST.
 
 The agent and admin profiles share exactly `mem_judge_many` and
 `mem_session_finalize`. The four admin-only tools (`mem_delete`, `mem_stats`,
 `mem_timeline`, and `mem_merge_projects`) remain excluded from this artifact.
-The two shared operations are also Go/MCP-only; this foundation adds no Pi
-recipes or dispatch and does not change existing Pi summary/end behavior.
+Pi already dispatches both shared operations over HTTP. Batch judgment sends one
+request, preserves ordered partial outcomes, and leaves omitted shared provenance
+empty rather than injecting the host ID; it adds no client loop or uncertain replay.
+Finalization requires confirmed current host/effective-session ownership, injects
+the exact identity and owner, and accepts no model session ID. Unknown delivery
+pins that identity and blocks lifecycle reopening; retries must be explicit with
+the same host identity, never automatic replay or substitution of legacy end.
 
 `mem_judge_many` processes 1..32 caller-authored judgments in submitted order.
 Per-item failures do not stop later items or roll back successful items; retries
@@ -155,6 +164,12 @@ original summary identity without writes, even when valid retry text differs.
 Its retry journal is not synced/exported; separately ended or imported ended
 sessions without that journal reject. Neither operation promises remote
 visibility or treats a lost acknowledgement as proof of rollback.
+
+These corrections describe already-landed adapters, not changed Go guarantees or
+new compatibility permissions; revision stays `1` and status stays `mcp-foundation`.
+Only the six corrected `pi_differences` arrays and the derived digest change.
+See [the projection audit](PI-TOOL-PROJECTIONS.md) for source/test evidence and the
+intentional canonical-`cwd` decision (MCP retains its `directory` alias).
 
 Review the small registration seam and Go metadata first, then the tests and
 generated JSON. No Pi tool inventory or HTTP route is changed. Follow-up work is
