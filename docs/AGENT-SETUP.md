@@ -334,7 +334,7 @@ When the plugin is already installed, `engram setup claude-code` runs `claude pl
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
-**Option C: Bare MCP** — all 27 tools by default, no session management:
+**Option C: Bare MCP** — 23 agent-profile tools, no session management:
 
 Use Claude CLI to register the user-scope server (replace the placeholder with the absolute Engram executable path):
 
