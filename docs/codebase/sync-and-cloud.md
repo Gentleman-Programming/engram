@@ -96,7 +96,15 @@ Nonblank session IDs are opaque, byte-exact identifiers. In the same project,
 ingestion must retain those IDs, their observation/prompt `session_id` values,
 and session-index keys unchanged. Trimming is a blank check, not an identity
 transformation. Generated observation, prompt and relation keys keep their
-existing normalization rules.
+existing normalization rules. Chunk replay retains exact session keys in dependency
+matching and typed mutation synthesis, including repeated imports. This shared
+import path also preserves the same IDs in local Git chunks.
+
+Dashboard session maps and observation/prompt references preserve those bytes too.
+Session, observation and prompt detail routes use the decoded session path segment
+unchanged, so `%20session%20` does not look up `session`. Project grants and generated
+child IDs keep their existing normalization. A mismatched historical session key
+and payload ID is an explicit dashboard load error, not a guessed association.
 
 A supplied session mutation key must exactly match its payload ID. In particular,
 a historical key `session` paired with payload ID ` session ` is inconsistent,

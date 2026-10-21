@@ -552,8 +552,8 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 // R5-6: use r.Clone to avoid mutating shared request state when delegating to handleBrowserSessions.
 func (h *handlers) handleBrowserSessionDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
-	if sessionID == "" {
+	sessionID := r.PathValue("sessionID")
+	if strings.TrimSpace(sessionID) == "" {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session Detail", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Session Not Found", "No dashboard data exists for that session identifier.")))
 		return
 	}
@@ -934,8 +934,8 @@ func (h *handlers) handleAdminSyncToggleForm(w http.ResponseWriter, r *http.Requ
 func (h *handlers) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
-	if project == "" || sessionID == "" || len(sessionID) > 128 {
+	sessionID := r.PathValue("sessionID")
+	if project == "" || strings.TrimSpace(sessionID) == "" || len(sessionID) > 128 {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Session Not Found", "Invalid session identifier.")))
 		return
 	}
@@ -960,9 +960,9 @@ func (h *handlers) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
+	sessionID := r.PathValue("sessionID")
 	syncID := strings.TrimSpace(r.PathValue("syncID"))
-	if project == "" || sessionID == "" || syncID == "" || len(syncID) > 128 {
+	if project == "" || strings.TrimSpace(sessionID) == "" || syncID == "" || len(syncID) > 128 {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Observation", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Observation Not Found", "Invalid observation identifier.")))
 		return
 	}
@@ -987,9 +987,9 @@ func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Reques
 func (h *handlers) handlePromptDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
+	sessionID := r.PathValue("sessionID")
 	syncID := strings.TrimSpace(r.PathValue("syncID"))
-	if project == "" || sessionID == "" || syncID == "" || len(syncID) > 128 {
+	if project == "" || strings.TrimSpace(sessionID) == "" || syncID == "" || len(syncID) > 128 {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Prompt", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Prompt Not Found", "Invalid prompt identifier.")))
 		return
 	}
