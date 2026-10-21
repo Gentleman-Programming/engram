@@ -3,7 +3,7 @@
 // packages for every later build, test, or manual run in the same clone, and makes a test's
 // result depend on whether it had already run. Instead every fixture copies the plugin into a
 // throwaway directory that owns its own `node_modules`, and deletes the whole directory after.
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,7 +19,7 @@ export const RUNTIME_STUB_MARKER = "engram-pi test runtime stub";
 
 export const PLUGIN_ROOT = ROOT;
 
-export async function createPluginSandbox(parent, { controlledDelay } = {}) {
+export async function createPluginSandbox(parent, { controlledDelay, realTypeBox = false } = {}) {
   const sandbox = join(parent, "plugin");
   await mkdir(sandbox, { recursive: true });
   for (const file of PLUGIN_SOURCES) {
@@ -68,6 +68,14 @@ export class Text { constructor(text) { this.text = text; } }
 `,
   );
 
+  if (realTypeBox) {
+    // Fixed checkout-local test dependency only: no ancestor/global resolution or override.
+    const dependency = join(ROOT, "node_modules", "typebox");
+    const manifest = JSON.parse(await readFile(join(dependency, "package.json"), "utf8"));
+    if (manifest.name !== "typebox" || manifest.version !== "1.3.34") throw new Error("Real test TypeBox unavailable");
+    await cp(dependency, join(modules, "typebox"), { recursive: true });
+    return sandbox;
+  }
   await mkdir(join(modules, "typebox"), { recursive: true });
   await writeFile(
     join(modules, "typebox", "package.json"),

@@ -10,6 +10,34 @@ Pi's native inventory matches Go's `ProfileAgent`; input and output envelopes ar
 - Optional fields preserve omission except documented Pi defaults; `false` and zero are not omission. Pi's `mem_context.max_bytes` and consolidation IDs use bounded integer schemas; batch confidence uses [0,1]. These schemas do not replace Go's validation.
 - Pi renders HTTP data through a text result and `details.data`; MCP uses its tool-result text/project envelopes. Labels, status summaries, MCP annotations, descriptions, and defer-loading metadata are transport/presentation information, not authorization.
 
+## Real-schema diagnostic
+
+With Node.js 24, run `npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi`,
+then `node tools/pi-schema-diagnostic.mjs` from the repository root (`--help` is
+the only option). The fixed local test-only TypeBox dependency supplies actual
+serialized registration schemas in a disposable sandbox; no Pi SDK is assumed.
+The command reads `docs/contracts/agent-contract-v1.json`, never regenerates it.
+Baseline freshness belongs to the separate Go generator check, not this diagnostic.
+
+Completed diagnostics go to stdout with an explicit diagnostic-only/not-parity/
+not-release-approval heading, a difference count and sorted tool/JSON-pointer paths.
+Each line shows Go and Pi JSON values; `<missing>` marks absence. Inventory and
+duplicate registration lines use `/registrations`; every duplicate schema is compared.
+Object key order is ignored; arrays retain order. No constraint, host mapping or
+known capability gap is allowlisted, including integer/number and required/optional
+differences. Missing fields report their complete subtree, not an inferred equivalent.
+This is literal structure, not semantic equivalence (even descriptions can differ).
+
+Exit 0 means no structural differences or help, **never a parity certificate**;
+exit 1 means differences (expected for current source); exit 2 means unsupported
+arguments or unavailable/invalid baseline, real TypeBox, capture or cleanup.
+Failures leave stdout empty and emit one fixed stderr line, without imported error
+text/private paths. No partial report is emitted before cleanup completes. There
+are no path/dependency overrides, network access, writes to source/dependencies,
+capability changes or publication actions. Tests assert the diagnostic behavior;
+they do not require current schemas to match. The rejection-only release checker
+and candidate publisher safeguards remain independent and unchanged.
+
 ## Field audit
 
 Fields listed below record the Pi input surface and its current MCP/HTTP differences. They do not assert identical schemas, defaults or response envelopes across transports. “Runtime-injected” means the host owns the value; it must not be recovered from a model-supplied session ID. “Transport-specific” describes a deliberately different adapter envelope. “Semantic” identifies a restriction or canonical-input choice. “Accidental loss” is an outstanding capability gap, not an approved design exemption.
