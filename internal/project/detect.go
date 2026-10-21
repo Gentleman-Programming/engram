@@ -585,14 +585,10 @@ func detectGitWorktreeDirContext(parent context.Context, dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// scanChildren scans dir at depth=1 for git repositories, skipping noise dirs,
+// scanChildrenContext scans dir at depth=1 for git repositories, skipping noise dirs,
 // hidden dirs, enforcing a 200ms timeout, and
 // short-circuiting as soon as more than one repository is found.
 // Returns the list of found git-repo paths and a boolean indicating timeout.
-func scanChildren(dir string) (repos []string, timedOut bool) {
-	return scanChildrenContext(context.Background(), dir)
-}
-
 func scanChildrenContext(ctx context.Context, dir string) (repos []string, timedOut bool) {
 	deadline := childScanNow().Add(childScanTimeout)
 	directory, err := os.Open(dir)
