@@ -10,14 +10,18 @@ From the repository, using a local Go toolchain and existing authorized caches:
 
 ```sh
 node tools/release-candidate.mjs --help
-node tools/release-candidate.mjs --core-ref refs/tags/v0.4.2 --pi-ref refs/tags/pi-v0.4.2
+node tools/release-candidate.mjs --core-ref refs/tags/v3.0.0 --pi-ref refs/tags/pi-v0.5.0
 ```
 
-The second command is a diagnostic example using current source metadata, not
-selection of a public version or creation/verification of remote tags. It is
-expected to fail, with blockers on stderr and no success JSON on stdout.
-Both full refs are mandatory. Strict SemVer, exact version equality, package
-name/version and the installer pin are checked by the live Go validator/exporter.
+The second command is an illustrative independent pair, not a public release
+selection or creation/verification of remote tags. Candidate metadata must match
+the selected Pi version; this example does not assert current metadata matches.
+It is expected to fail, with blockers on stderr and no success JSON on stdout.
+Both full refs are mandatory and define an explicit ordered core/Pi pair. Each
+version must independently satisfy strict SemVer; equality is not required.
+Package name/version and the installer pin are checked against the Pi version
+by the live Go validator/exporter. Pair identity is metadata only, not proof of
+remote tag existence, source/digest identity or runtime compatibility.
 There are no skip, bypass, root, proof, status override or publication options.
 
 ## What this slice checks
@@ -47,13 +51,24 @@ semantic equivalence and do not change the rejection-only outcome.
 The Go contract remains `mcp-foundation` with declared Pi differences. These are
 honest source rejection reasons, not failures to be bypassed for a release.
 
+## Separate real-schema diagnostic
+
+`node tools/pi-schema-diagnostic.mjs` captures real serialized TypeBox schemas
+against the existing committed Go contract without regenerating it. First run
+`npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi` (Node.js 24).
+See [diagnostic output/exit semantics](PI-TOOL-PROJECTIONS.md#real-schema-diagnostic).
+Differences are expected, not an added strict parity/release gate. Even zero
+structural differences is not semantic proof or release approval. Baseline freshness
+is checked separately by Go; this command does not establish it. The release checker
+above still uses its default registration-only stub and always rejects candidates.
+
 ## Separate local package validation
 
 A standalone command validates the local npm tarball, **not release eligibility**:
 
 ```sh
 node tools/validate-pi-package.mjs --help
-node tools/validate-pi-package.mjs --core-ref refs/tags/v0.4.2 --pi-ref refs/tags/pi-v0.4.2
+node tools/validate-pi-package.mjs --core-ref refs/tags/v3.0.0 --pi-ref refs/tags/pi-v0.5.0
 ```
 
 Run from the candidate repository root (the current directory). As above, these
@@ -80,11 +95,15 @@ tokens without float64 rounding: `1` and `1.0`, for example, differ.
 The Go helper also accepts an already packed local archive:
 
 ```sh
-go run ./tools/release-candidate -core-ref refs/tags/v0.4.2 -pi-ref refs/tags/pi-v0.4.2 -pi-tarball /path/to/candidate.tgz
+go run ./tools/release-candidate -core-ref refs/tags/v3.0.0 -pi-ref refs/tags/pi-v0.5.0 -pi-tarball /path/to/candidate.tgz
 ```
 
-Its opt-in result contains `version`, `validation: "local-package-only"` and
-`files`; without `-pi-tarball`, the existing live contract export is unchanged.
+Both Go JSON results contain legacy `version` (the core version) and `piVersion`
+(the independently selected Pi version). Without `-pi-tarball`, `contract` is the
+live Go contract. With it, `validation: "local-package-only"` and `files` describe
+local archive validation. The manifest, installer pin and packed archive bind to
+`piVersion`, never the core `version`; Node uses it for the tarball filename and
+checks both returned identity fields. Existing equal-version pairs remain valid.
 Neither result is semantic proof or release approval.
 
 The standalone Node command exits zero with exactly
@@ -101,6 +120,8 @@ versions, tags, workflows or publishers are modified.
 The original Node rejection-only checker does **not** run this command and still
 always rejects candidates. Package validation does not establish tool/schema
 parity, runtime compatibility, passing suites or complete semantic evidence.
+
+Promotion to `latest` remains manual and requires separate authorization.
 
 ## Safety and deferred work
 

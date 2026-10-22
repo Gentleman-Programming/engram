@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1321,7 +1322,7 @@ func TestChildScan_ContinuesPastNoiseUntilSecondRepository(t *testing.T) {
 		return []os.DirEntry{entry}, nil
 	}
 
-	repos, timedOut := scanChildren(parent)
+	repos, timedOut := scanChildrenContext(context.Background(), parent)
 	if timedOut {
 		t.Fatal("bounded scan unexpectedly timed out")
 	}

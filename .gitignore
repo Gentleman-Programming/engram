@@ -5,6 +5,9 @@
 /cmd/engram/engram
 *.exe
 
+# Generated release output (repository root only)
+/dist/
+
 # Database
 *.db
 *.db-wal

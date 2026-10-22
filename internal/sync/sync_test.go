@@ -2094,6 +2094,10 @@ func TestExportErrors(t *testing.T) {
 		hash := sha256.Sum256(chunkJSON)
 		chunkID := hex.EncodeToString(hash[:])[:8]
 
+		// A healthy known-ID no-op requires payload bytes, not only a reference.
+		if err := sy.transport.WriteChunk(chunkID, chunkJSON, ChunkEntry{ID: chunkID}); err != nil {
+			t.Fatalf("write known chunk payload: %v", err)
+		}
 		writeManifestFile(t, sy.syncDir, &Manifest{
 			Version: 1,
 			Chunks: []ChunkEntry{{

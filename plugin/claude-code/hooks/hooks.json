@@ -8,6 +8,7 @@
           {
             "type": "command",
             "command": "engram hook claude-pre-tool-use",
+            "onFailure": "block",
             "timeout": 5
           }
         ]
@@ -22,6 +23,17 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\"",
             "timeout": 10,
             "statusMessage": "Loading engram memory..."
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|clear|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engram",
+            "args": ["hook", "claude-bind-session"],
+            "timeout": 5
           }
         ]
       },

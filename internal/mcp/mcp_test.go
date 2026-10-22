@@ -2840,7 +2840,7 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 	}
 
 	expectedTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_save", "mem_search", "mem_search_prompts", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update",          // skills explicitly say "use mem_update when you have an exact ID to correct"

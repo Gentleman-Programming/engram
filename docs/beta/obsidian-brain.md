@@ -196,6 +196,8 @@ The wikilinks at the bottom are what give the graph view its connections. Obsidi
 
 ### Hub Notes
 
+Hub generation includes only successfully written or skipped notes, not notes whose export failed. Existing hubs remain tracked while their observations are live, even when note or hub writes fail.
+
 **Session hubs** (in `_sessions/`) — one per session, contains backlinks to every observation captured in that session. Open one to see the full chronological story of a work session.
 
 **Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `architecture/obsidian-plugin/*` observations cluster under `_topics/architecture--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).
@@ -273,7 +275,11 @@ The `--watch` flag turns the export into a long-running daemon. Use cases:
 2026/04/06 23:29:29 [2026-04-06T21:29:29Z] sync: created=5 updated=2 deleted=0 skipped=1731 hubs=279
 ```
 
-Counts: how many notes were created, updated, deleted (soft-deleted obs), skipped (unchanged), and total hub notes regenerated.
+Counts: how many notes were created, updated, deleted (soft-deleted obs, hard-deleted obs, obs renamed to a new path, and session/topic hubs left with no live obs), skipped (unchanged), and total hub notes regenerated.
+
+Cleanup uses tracked paths in the sync state. Renames retire the previous note even with `--project`; `files` tracks the latest successfully written note while optional `pending_retirements` records superseded paths per observation ID, including repeated renames after failed removal. Pending removals retry after note writes; currently owned live paths are protected, including filesystem aliases such as case-only renames on case-insensitive volumes. Scoped exports retry pending paths only for IDs present in the selected project's snapshot, including soft deletes. Hard-deleted observations and orphaned hubs require a full-scope export (`--all`), because a project snapshot cannot establish ownership of absent rows. Live hubs are retained if writing their replacement fails.
+
+Cleanup cannot recover stale files whose paths were already lost from the state by an earlier export. There is no recovery scan. Existing version-1 state files without `pending_retirements` remain supported; older exporters ignore and may discard this additive field on downgrade. Keep the state file to preserve pending cleanup; `--force` or deleting the state discards that tracking.
 
 ### Running Persistent
 

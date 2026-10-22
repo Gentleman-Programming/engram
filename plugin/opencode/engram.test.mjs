@@ -1841,3 +1841,19 @@ test("OpenCode host bindings survive real server persistence and replace ended r
   }
   if (shutdownError) throw shutdownError
 })
+
+for (const projectID of [PROJECT_ID, 'global', 'foreign']) {
+  test(`V1 runtime ownership remains project equality for ${projectID}`, async (t) => {
+    const runtime = await createRuntime(t, { sessionGet: async () => sdkResult({ id: 'root', projectID, location: { directory: '/work/engram' } }) })
+    const output = { args: { session_id: 'unchanged' } }
+    const pending = runtime.before({ tool: 'mem_save', sessionID: 'root' }, output)
+    if (projectID === PROJECT_ID) {
+      await pending
+      assert.equal(output.args.session_id, 'root')
+    } else {
+      await assert.rejects(pending, RESOLUTION_ERROR)
+      assert.deepEqual(output.args, { session_id: 'unchanged' })
+      assert.deepEqual(runtime.registeredIDs, [])
+    }
+  })
+}

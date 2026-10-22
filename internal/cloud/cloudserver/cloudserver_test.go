@@ -2367,3 +2367,42 @@ func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) 
 		})
 	}
 }
+
+// TestWithVersionProducesDisplayLabel pins the display mapping owned by
+// WithVersion. MountConfig.Version is rendered verbatim by the dashboard
+// chrome, so the option has to hand over an already display-ready identifier:
+// a semver build carries exactly one "v" regardless of the shape ldflags or
+// debug.ReadBuildInfo supplied, while a non-semver build identifier such as
+// "dev" must survive untouched (#1657).
+func TestWithVersionProducesDisplayLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "leading v is kept exactly once", in: "v3.0.0", want: "v3.0.0"},
+		{name: "bare semver gains one v", in: "3.0.0", want: "v3.0.0"},
+		{name: "surrounding whitespace is trimmed", in: "  v1.20.3-rc.1  ", want: "v1.20.3-rc.1"},
+		{name: "numeric leading identifier is preserved", in: "123abc", want: "123abc"},
+		{name: "prefixed invalid identifier is preserved", in: "v123abc", want: "v123abc"},
+		{name: "invalid identifier whitespace is trimmed", in: " 123abc \t", want: "123abc"},
+		{name: "prerelease and build gain prefix", in: "1.2.3-rc.1+build.7", want: "v1.2.3-rc.1+build.7"},
+		{name: "invalid prerelease is preserved", in: "1.2.3-01", want: "1.2.3-01"},
+		{name: "invalid build is preserved", in: "1.2.3+", want: "1.2.3+"},
+		{name: "abbreviated major gains prefix", in: "1", want: "v1"},
+		{name: "abbreviated minor stays valid", in: "v1.2", want: "v1.2"},
+		{name: "dev stays dev", in: "dev", want: "dev"},
+		{name: "nonnumeric leading v is preserved", in: "version-test", want: "version-test"},
+		{name: "single v is preserved", in: "v", want: "v"},
+		{name: "empty stays empty", in: "", want: ""},
+		{name: "only whitespace stays empty", in: "   ", want: ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{}, fakeAuth{}, 0, WithVersion(tt.in))
+			if srv.version != tt.want {
+				t.Fatalf("CloudServer.version = %q, want %q (input=%q)", srv.version, tt.want, tt.in)
+			}
+		})
+	}
+}

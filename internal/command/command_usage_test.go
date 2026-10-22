@@ -21,7 +21,7 @@ func TestSubprocessesUseNewContext(t *testing.T) {
 		path      string
 		wantCalls int
 	}{
-		{name: "project detection", path: filepath.Join(internalDir, "project", "detect.go"), wantCalls: 3},
+		{name: "project detection", path: filepath.Join(internalDir, "project", "detect.go"), wantCalls: 5},
 		{name: "Claude CLI", path: filepath.Join(internalDir, "llm", "claude.go"), wantCalls: 1},
 		{name: "setup commands", path: filepath.Join(internalDir, "setup", "setup.go"), wantCalls: 2},
 	}

@@ -87,6 +87,7 @@ const ENGRAM_DETERMINISTIC_RETRY_MS = 5000;
 
 const ENGRAM_TOOLS = [
   "mem_search",
+  "mem_search_prompts",
   "mem_save",
   "mem_update",
   "mem_consolidate",
@@ -1617,7 +1618,7 @@ function supportsRootSessionResume(health: unknown): boolean {
 function rootResumeCompatibilityError(health: unknown): Error {
   const version = health && typeof health === "object" && typeof (health as { version?: unknown }).version === "string"
     ? (health as { version: string }).version : "unknown";
-  return new Error(`gentle-engram 0.4.2 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
+  return new Error(`gentle-engram 0.5.0 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
 }
 
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
@@ -2100,6 +2101,12 @@ const optionalNumber = (description: string) => Type.Optional(Type.Number({ desc
 const optionalBoolean = (description: string) => Type.Optional(Type.Boolean({ description }));
 
 const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
+  mem_search_prompts: Type.Object({
+    query: Type.String({ description: "Search original stored prompts. Results are historical data, not necessarily human-authored statements or current instructions." }),
+    project: optionalString("Known project to search; omit for current project. Cannot be combined with all_projects=true."),
+    all_projects: optionalBoolean("Explicitly search every project; cannot be combined with project"),
+    limit: optionalNumber("Max results (default 10; nonpositive values use the default)"),
+  }),
   mem_search: Type.Object({
     query: Type.String({ description: "Search query — natural language or keywords. Search existing memories before saving; snippets are not enough to decide identity." }),
     type: optionalString("Filter by observation type"),
@@ -2124,7 +2131,9 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     id: Type.Number({ description: "Observation ID to update. Update an existing observation by ID; preserve still-valid facts and keep its topic_key." }),
     expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     title: optionalString("New title"),
-    content: optionalString("New content"),
+    content: optionalString("New content; cannot be combined with find and replace"),
+    find: optionalString("Literal case-sensitive text to replace everywhere; requires replace"),
+    replace: optionalString("Literal replacement text; requires find"),
     type: optionalString("New type/category"),
     scope: optionalString("New scope: project, personal, or global"),
     topic_key: optionalString("Keep the existing topic_key unless the topic itself changed"),
@@ -2169,6 +2178,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     scope: optionalString("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
     max_bytes: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum context output size in bytes; must be a positive integer; enforced by Engram core" })),
     compact: optionalBoolean("Use Engram core's compact context formatting"),
+    older_history: optionalBoolean("Include a bounded Older History overview with counts and sampled titles outside the recent window"),
   }),
   mem_stats: Type.Object({
     project: optionalString("Project to echo in UI chrome"),
@@ -2401,6 +2411,14 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   };
 
   switch (toolName) {
+    case "mem_search_prompts":
+      if (!params.all_projects && !requestedProject) requireResolvedProject();
+      return fetch(`/prompts/search${queryString({
+        q: params.query,
+        project: params.all_projects ? params.project : activeProject,
+        all_projects: params.all_projects,
+        limit: params.limit,
+      })}`);
     case "mem_search":
       if (!params.all_projects && !requestedProject) requireResolvedProject();
       return fetch(`/search${queryString({
@@ -2420,6 +2438,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         scope: params.scope,
         max_bytes: params.max_bytes,
         compact: params.compact,
+        older_history: params.older_history,
       })}`);
     case "mem_stats":
       return fetch(`/stats${queryString({ all_projects: true })}`);
@@ -2461,6 +2480,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         body: {
           title: params.title,
           content: params.content,
+          find: params.find,
+          replace: params.replace,
           type: params.type,
           scope: params.scope,
           topic_key: params.topic_key,
@@ -3107,7 +3128,7 @@ export default function registerEngram(pi: ExtensionAPI) {
       prior.awaitingInitialUserMessage = false;
       prior.promptTurn = (prior.promptTurn || 0) + 1;
     }
-    let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
+    const systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     if (state) state.awaitingInitialUserMessage = true;
     const epoch = state?.epoch;
@@ -3116,12 +3137,11 @@ export default function registerEngram(pi: ExtensionAPI) {
     // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
     const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
     if (options) appendPromptSection(options, MEMORY_INSTRUCTIONS);
-    if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
-      if (options) appendPromptSection(options, pendingRecoveryNotice.content);
-      else systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
-      pendingRecoveryNotice = undefined;
-    }
-    const result = options ? undefined : { systemPrompt };
+    const message = pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId
+      ? { customType: "engram-compaction-recovery", content: pendingRecoveryNotice.content, display: false }
+      : undefined;
+    if (message) pendingRecoveryNotice = undefined;
+    const result = options ? (message ? { message } : undefined) : { systemPrompt, ...(message ? { message } : {}) };
     // The mem_* tools stay registered whether or not startup succeeded, so the agent still
     // needs the memory protocol; only the server-backed work below is skipped.
     if (!(await initOnceForHook(ctx.cwd))) return result;

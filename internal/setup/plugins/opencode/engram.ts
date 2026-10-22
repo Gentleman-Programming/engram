@@ -372,6 +372,7 @@ export function shouldNudgeForObservations(
 // capture. A symbol keeps it out of the V1 hook names OpenCode enumerates.
 const CAPTURE_PROMPT = Symbol("engram.capturePrompt")
 const DELIVER_WARNING = Symbol("engram.deliverWarning")
+const REVOKE_GLOBAL_AUTHORITY = Symbol("engram.revokeGlobalAuthority")
 type CapturePrompt = (sourceSessionID: string, content: string, sourceInboxID?: string) => Promise<void>
 type DeliverWarning = (append: (text: string) => boolean) => void
 
@@ -382,7 +383,10 @@ type EngramHooks = {
 } & { [key: string]: (...args: unknown[]) => unknown } & {
   [CAPTURE_PROMPT]: CapturePrompt
   [DELIVER_WARNING]: DeliverWarning
+  [REVOKE_GLOBAL_AUTHORITY]: (data: any) => void
 }
+
+const V2_RUNTIME_DIRECTORY = Symbol("engram.v2RuntimeDirectory")
 
 export const Engram: Plugin = async (ctx) => {
   // Finite categories bound deduplication and pending memory per instance.
@@ -550,7 +554,23 @@ export const Engram: Plugin = async (ctx) => {
     return endSessionInEngram(sessionId)
   }
 
-  function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
+  // Global is a runtime sentinel, not project authority. Only V2 supplies
+  // authoritative location evidence; concrete project matching stays unchanged.
+  function sessionOwnershipFailure(info: { projectID?: unknown; location?: unknown } | undefined): string {
+    const projectID = info?.projectID
+    if (typeof projectID !== "string" || !projectID) return "session-metadata-invalid"
+    const directory = (ctx as any)[V2_RUNTIME_DIRECTORY]
+    if (projectID === "global" && typeof directory === "string") {
+      const location = info?.location as { directory?: unknown } | undefined
+      if (typeof location?.directory !== "string" || !location.directory) return "global-location-missing-or-malformed"
+      return location.directory === directory ? "" : "global-location-mismatch"
+    }
+    return ctx.project?.id && projectID !== ctx.project.id ? "foreign-project" : ""
+  }
+
+  const globalSessions = new Set<string>()
+
+  function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown; location?: unknown } | undefined): boolean {
     const rawSessionID = info?.id
     const sessionId = typeof rawSessionID === "string" && rawSessionID ? rawSessionID : ""
     if (!sessionId || closedSessions.has(sessionId)) return false
@@ -560,12 +580,7 @@ export const Engram: Plugin = async (ctx) => {
       : typeof rawParentID === "string" && rawParentID
         ? rawParentID
         : undefined
-    const rawProjectID = info?.projectID
-    const invalidProjectID = (
-      typeof rawProjectID !== "string" ||
-      !rawProjectID ||
-      (ctx.project?.id && rawProjectID !== ctx.project.id)
-    )
+    const invalidProjectID = sessionOwnershipFailure(info)
     if (parentID === undefined || invalidProjectID) {
       parentSessions.delete(sessionId)
       subAgentSessions.delete(sessionId)
@@ -584,12 +599,17 @@ export const Engram: Plugin = async (ctx) => {
       return false
     }
     parentSessions.set(sessionId, parentID)
+    if ((ctx as any)[V2_RUNTIME_DIRECTORY] !== undefined && info?.projectID === "global") globalSessions.add(sessionId)
     return true
   }
 
-  async function resolveAuthoritativeSessionID(sessionId: string): Promise<string> {
-    if (!sessionId || invalidSessions.has(sessionId)) return ""
-    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return ""
+  async function resolveAuthoritativeSessionID(sessionId: string, failure?: { reason: string }): Promise<string> {
+    const refuse = (reason: string): string => {
+      if (failure) failure.reason = reason
+      return ""
+    }
+    if (!sessionId || invalidSessions.has(sessionId)) return refuse("session-unavailable-or-invalid-chain")
+    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return refuse("session-unavailable-or-invalid-chain")
     const visited = new Set<string>()
     const resolvedParents = new Map<string, string | null>()
     const publishResolvedParents = (): void => {
@@ -606,10 +626,10 @@ export const Engram: Plugin = async (ctx) => {
     }
     let current = sessionId
     while (true) {
-      if (visited.has(current)) return ""
+      if (visited.has(current)) return refuse("session-unavailable-or-invalid-chain")
       if (invalidSessions.has(current) || closeRequestedSessions.has(current) || closedSessions.has(current)) {
         invalidateResolvedTree(current)
-        return ""
+        return refuse("session-unavailable-or-invalid-chain")
       }
       visited.add(current)
 
@@ -621,37 +641,36 @@ export const Engram: Plugin = async (ctx) => {
         try {
           result = await ctx.client.session.get({ path: { id: current } })
         } catch {
-          return ""
+          return refuse("session-lookup-failed")
         }
         if (invalidSessions.has(current)) {
           invalidateResolvedTree(current)
-          return ""
+          return refuse("session-unavailable-or-invalid-chain")
         }
         if (parentSessions.has(current)) {
           parentID = parentSessions.get(current) ?? null
         } else {
           const info = result?.data
           const status = result?.response?.status
+          if (result?.error || (typeof status === "number" && status >= 400)) return refuse("session-lookup-failed")
           if (
-            result?.error ||
-            (typeof status === "number" && status >= 400) ||
             !info ||
             typeof info.id !== "string" ||
             info.id !== current ||
-            typeof info.projectID !== "string" ||
-            !info.projectID ||
-            (ctx.project?.id && info.projectID !== ctx.project.id) ||
             (info.parentID !== undefined && (typeof info.parentID !== "string" || !info.parentID))
           ) {
-            return ""
+            return refuse("session-metadata-invalid")
           }
+          const ownershipFailure = sessionOwnershipFailure(info)
+          if (ownershipFailure) return refuse(ownershipFailure)
+          if ((ctx as any)[V2_RUNTIME_DIRECTORY] !== undefined && info.projectID === "global") globalSessions.add(current)
           parentID = info.parentID ?? null
           resolvedParents.set(current, parentID)
         }
       }
 
       if (parentID === null) {
-        if (subAgentSessions.has(current)) return ""
+        if (subAgentSessions.has(current)) return refuse("session-unavailable-or-invalid-chain")
         for (const [resolvedID, resolvedParentID] of resolvedParents) {
           const invalidID = invalidSessions.has(resolvedID)
             ? resolvedID
@@ -660,7 +679,7 @@ export const Engram: Plugin = async (ctx) => {
               : ""
           if (invalidID) {
             invalidateResolvedTree(invalidID)
-            return ""
+            return refuse("session-unavailable-or-invalid-chain")
           }
         }
         publishResolvedParents()
@@ -807,6 +826,14 @@ export const Engram: Plugin = async (ctx) => {
   return {
     [CAPTURE_PROMPT]: capturePrompt,
     [DELIVER_WARNING]: deliverWarning,
+    [REVOKE_GLOBAL_AUTHORITY]: (data: any) => {
+      // Inspect updates before the V2 foreign-location filter drops them. Only
+      // previously accepted global sessions gain this stricter lifecycle rule.
+      if (!globalSessions.has(data?.sessionID)) return
+      if (data.projectID !== "global" || sessionOwnershipFailure(data)) {
+        invalidateSessionTree(data.sessionID)
+      }
+    },
 
 		dispose: async () => {
       disposed = true
@@ -894,14 +921,15 @@ export const Engram: Plugin = async (ctx) => {
 
     "tool.execute.before": async (input, output) => {
       if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(canonicalEngramToolName(input.tool))) return
-      const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      const failure = { reason: "session-unavailable-or-invalid-chain" }
+      const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID, failure)
       if (!authoritativeSessionID) {
-        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${canonicalEngramToolName(input.tool)} [${failure.reason}]. Reopen the session in the current project and retry; if it persists, check OpenCode runtime session metadata.`)
       }
       const registered = await ensureSession(authoritativeSessionID, true)
-      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID, failure)
       if (confirmedSessionID !== authoritativeSessionID) {
-        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${canonicalEngramToolName(input.tool)} [${failure.reason}]. Reopen the session in the current project and retry; if it persists, check OpenCode runtime session metadata.`)
       }
       if (!registered) {
         const tool = canonicalEngramToolName(input.tool)
@@ -1156,7 +1184,7 @@ function v1SessionEvent(event: any, directory: string): any {
   if (event.type === "session.created" || event.type === "session.updated") {
     // The V2 server is shared across locations; V1 only saw its own instance.
     if (data.location?.directory && data.location.directory !== directory) return undefined
-    return { type: event.type, properties: { info: { id: data.sessionID, parentID: data.parentID, projectID: data.projectID } } }
+    return { type: event.type, properties: { info: { id: data.sessionID, parentID: data.parentID, projectID: data.projectID, location: data.location } } }
   }
   if (event.type === "session.deleted") {
     return { type: event.type, properties: { info: { id: data.sessionID } } }
@@ -1199,6 +1227,7 @@ function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 
 async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
   const hooks: EngramHooks = await Engram({
+    [V2_RUNTIME_DIRECTORY]: ctx.location.directory,
     directory: ctx.location.directory,
     project: { id: ctx.location.project?.id },
     client: {
@@ -1277,6 +1306,9 @@ async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
             try {
               const prompt = v2InboxPrompt(event, ctx.location.directory)
               if (prompt) await (hooks[CAPTURE_PROMPT] as CapturePrompt)(prompt.sessionID, prompt.text, prompt.inboxID)
+              if (event?.type === "session.created" || event?.type === "session.updated") {
+                hooks[REVOKE_GLOBAL_AUTHORITY](event.data)
+              }
               const translated = v1SessionEvent(event, ctx.location.directory)
               if (translated) await hooks.event({ event: translated })
             } catch {

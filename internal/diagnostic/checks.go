@@ -599,9 +599,13 @@ func (c SyncTargetClosedSpaceCheck) Run(ctx context.Context, scope Scope) (Check
 		if closed[state.TargetKey] {
 			continue
 		}
+		severity := SeverityError
+		if state.UnackedMutations == 0 {
+			severity = SeverityWarning
+		}
 		findings = append(findings, Finding{
 			CheckID:    c.Code(),
-			Severity:   SeverityError,
+			Severity:   severity,
 			ReasonCode: ReasonForeignSyncTarget,
 			Message:    fmt.Sprintf("Sync target %q is outside the closed set of legitimate sync targets.", state.TargetKey),
 			Why:        "A sync_state row for an unknown target records sync progress no configured delivery pipeline can ever advance, so its state can silently rot while appearing live.",

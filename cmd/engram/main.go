@@ -804,6 +804,13 @@ func main() {
 		return
 	}
 
+	if usesLocalSQLite(os.Args[1:]) {
+		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
+			fatal(err)
+			return
+		}
+	}
+
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
 	owned, _ := validateSessionOwned(os.Args[2:])
@@ -1446,7 +1453,7 @@ func cmdSearch(cfg store.Config) {
 	}
 }
 
-const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]\nUntracked folders inside a HOME Git repository require --project, ENGRAM_PROJECT, or .engram/config.json project_name."
 
 type saveArgs struct {
 	title       string
@@ -1535,7 +1542,7 @@ func cmdSave(cfg store.Config) {
 	_, preflightErr := project.Resolve(project.ResolutionOptions{
 		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
 		Detect: func(dir string) project.DetectionResult {
-			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true})
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true, RequireExplicitHomeProject: true})
 		},
 	})
 	if preflightErr != nil {
@@ -1555,7 +1562,7 @@ func cmdSave(cfg store.Config) {
 		Explicit:  projectName,
 		Directory: cwd,
 		Detect: func(dir string) project.DetectionResult {
-			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory, RequireExplicitHomeProject: true})
 		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
@@ -3918,6 +3925,8 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
+                       repair --project P --check CODE (--plan|--dry-run|--apply)
+                       repair mutates state: only --apply writes.
   context [project] [--project PROJECT|--all] [--scope SCOPE] [--older-history]
                      Show recent context from previous sessions
   stats [--project PROJECT|--all]
@@ -3927,9 +3936,11 @@ Commands:
   import <file>      Import memories from a JSON export file
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
+  hook resolve-hook-project
+                     Inspect the absolute cwd in hook JSON on stdin without HTTP, database or binding writes
   projects list      List all projects with observation, session, and prompt counts
   projects merge --from <source> --to <canonical> (--dry-run|--apply)
-                     Preview or apply a separator or Unicode normalization variant merge
+                     Preview or apply a legacy case, separator or Unicode normalization variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups

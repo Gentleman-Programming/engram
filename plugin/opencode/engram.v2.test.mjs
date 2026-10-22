@@ -723,3 +723,150 @@ test("V2 keeps backing off when each subscription only delivers the server hands
     await withTimeout(runtime.cleanup(), "cleanup waited on the reconnect backoff")
   }
 })
+
+// Exercise runtime authority through the exported V2 hook, including event cache.
+for (const cached of [false, true]) {
+  for (const parent of [false, true]) {
+    test(`V2 global location accepts matching authority cached=${cached} parent=${parent}`, async (t) => {
+      const root = { id: 'root', projectID: 'global', location: { directory: DIRECTORY } }
+      const child = sessionInfo('child', 'root')
+      const runtime = await setupV2(t, { sessions: new Map([['root', root], ['child', child]]) })
+      t.after(() => runtime.cleanup())
+      if (cached) {
+        await runtime.events.emit({ type: 'session.created', data: { ...root, sessionID: root.id } })
+        if (parent) await runtime.created('child', 'root')
+      }
+      for (const tool of ['mem_save', 'mem_save_prompt', 'mem_session_summary', 'mem_capture_passive']) {
+        const input = { session_id: 'untrusted', project: 'keep' }
+        await runtime.hooks.get('tool.execute.before')({ tool, sessionID: parent ? 'child' : 'root', input })
+        assert.deepEqual(input, { session_id: 'root', project: 'keep' })
+      }
+      assert.equal(runtime.posts('/sessions').length, cached ? 5 : 4, 'event registration plus one renewal per attributed write')
+      assert.ok(runtime.posts('/sessions').every(({ body }) => body.id === 'root'))
+      if (cached) assert.deepEqual(runtime.sessionGetIDs, [])
+    })
+  }
+  for (const [label, projectID, location, category] of [
+    ['missing location', 'global', undefined, 'global-location-missing-or-malformed'],
+    ['malformed location', 'global', { directory: 17 }, 'global-location-missing-or-malformed'],
+    ['foreign location', 'global', { directory: '/private/foreign' }, 'global-location-mismatch'],
+    ['foreign concrete', 'private-project', { directory: DIRECTORY }, 'foreign-project'],
+    ['missing project', undefined, { directory: DIRECTORY }, 'session-metadata-invalid'],
+    ['malformed project', 17, { directory: DIRECTORY }, 'session-metadata-invalid'],
+  ]) {
+    for (const parent of [false, true]) test(`V2 authority refuses ${label} cached=${cached} parent=${parent}`, async (t) => {
+      const root = { id: 'private-root', projectID, location }
+      const child = sessionInfo('child', root.id)
+      const runtime = await setupV2(t, { sessions: new Map([[root.id, root], ['child', child]]) })
+      t.after(() => runtime.cleanup())
+      if (cached) {
+        await runtime.events.emit({ type: 'session.created', data: { ...root, sessionID: root.id } })
+        if (parent) await runtime.created('child', root.id)
+      }
+      for (const tool of ['mem_save', 'mem_save_prompt', 'mem_session_summary', 'mem_capture_passive']) {
+        const input = { session_id: 'unchanged', project: 'keep' }
+        await assert.rejects(runtime.hooks.get('tool.execute.before')({ tool, sessionID: parent ? 'child' : root.id, input }), (error) => {
+          assert.match(error.message, /could not resolve an authoritative OpenCode runtime session/)
+          assert.ok(error.message.includes(category), error.message)
+          assert.doesNotMatch(error.message, /private-root|private-project|\/private\//)
+          return true
+        })
+        assert.deepEqual(input, { session_id: 'unchanged', project: 'keep' })
+      }
+      assert.equal(runtime.posts('/sessions').length, 0)
+    })
+  }
+}
+
+// Previously validated global evidence must not survive a runtime update.
+for (const cached of [false, true]) for (const duringRegistration of [false, true]) {
+  for (const globalChild of [false, true]) for (const change of ['foreign', 'malformed', 'missing', 'project', 'project-missing', 'project-malformed']) {
+    test(`V2 revokes global authority cached=${cached} during=${duringRegistration} child=${globalChild} change=${change}`, async (t) => {
+      let entered, release, pause = false
+      const registrationEntered = new Promise((resolve) => { entered = resolve })
+      const registrationReleased = new Promise((resolve) => { release = resolve })
+      const root = { id: 'root', projectID: globalChild ? PROJECT_ID : 'global', location: { directory: DIRECTORY } }
+      const child = { id: 'child', parentID: 'root', projectID: 'global', location: { directory: DIRECTORY } }
+      const runtime = await setupV2(t, {
+        sessions: new Map([['root', root], ['child', child]]),
+        registrationResponse: async (body) => {
+          if (pause) { entered(); await registrationReleased }
+          return httpResponse({ id: body.id, status: 'created' })
+        },
+      })
+      t.after(() => runtime.cleanup())
+      const before = runtime.hooks.get('tool.execute.before')
+      const target = globalChild ? child : root
+      if (cached) {
+        await runtime.events.emit({ type: 'session.created', data: { ...root, sessionID: root.id } })
+        if (globalChild) await runtime.events.emit({ type: 'session.created', data: { ...child, sessionID: child.id } })
+      } else await before({ tool: 'mem_save', sessionID: target.id, input: {} })
+      const registrations = runtime.posts('/sessions').length
+      const data = { ...target, sessionID: target.id }
+      if (change === 'foreign') data.location = { directory: '/other' }
+      if (change === 'malformed') data.location = { directory: 17 }
+      if (change === 'missing') delete data.location
+      if (change === 'project') data.projectID = 'foreign-project'
+      if (change === 'project-missing') delete data.projectID
+      if (change === 'project-malformed') data.projectID = 17
+      const input = { session_id: 'unchanged' }
+      let pending
+      if (duringRegistration) {
+        pause = true
+        pending = before({ tool: 'mem_save', sessionID: target.id, input })
+        await withTimeout(registrationEntered, 'registration did not start')
+      }
+      // Deliver outside the registration callback: no synthetic await cycle.
+      await runtime.events.emit({ type: 'session.updated', data })
+      release()
+      if (!pending) pending = before({ tool: 'mem_save', sessionID: target.id, input })
+      await assert.rejects(pending, /could not resolve an authoritative OpenCode runtime session/)
+      assert.deepEqual(input, { session_id: 'unchanged' })
+      assert.equal(runtime.posts('/sessions').length, registrations + (duringRegistration ? 1 : 0))
+      assert.equal(runtime.requests.some(({ path }) => path.endsWith('/end')), false)
+      assert.equal(runtime.posts('/observations/passive').length, 0)
+      assert.equal(runtime.posts('/prompts').length, 0)
+      // Even unchanged stale SDK metadata cannot revive revoked authority.
+      await assert.rejects(before({ tool: 'mem_save_prompt', sessionID: target.id, input }), /could not resolve/)
+    })
+  }
+}
+
+test('V2 global authority survives matching updates and ignores unrelated foreign events', async (t) => {
+  const root = { id: 'root', projectID: 'global', location: { directory: DIRECTORY } }
+  const runtime = await setupV2(t, { sessions: new Map([['root', root]]) })
+  t.after(() => runtime.cleanup())
+  await runtime.events.emit({ type: 'session.created', data: { ...root, sessionID: 'root' } })
+  await runtime.events.emit({ type: 'session.updated', data: { ...root, sessionID: 'root' } })
+  for (const type of ['session.created', 'session.updated']) {
+    await runtime.events.emit({ type, data: { sessionID: 'unrelated', projectID: 'global', parentID: 'root', location: { directory: '/other' } } })
+  }
+  const input = {}
+  await runtime.hooks.get('tool.execute.before')({ tool: 'mem_save', sessionID: 'root', input })
+  assert.equal(input.session_id, 'root')
+  assert.ok(runtime.posts('/sessions').every(({ body }) => body.id === 'root'))
+  assert.equal(runtime.requests.some(({ path }) => path.endsWith('/end')), false)
+})
+
+test('V2 revoked global ancestor invalidates a previously resolved concrete child', async (t) => {
+  const root = { id: 'root', projectID: 'global', location: { directory: DIRECTORY } }
+  const runtime = await setupV2(t, { sessions: new Map([['root', root], ['child', sessionInfo('child', 'root')]]) })
+  t.after(() => runtime.cleanup())
+  const before = runtime.hooks.get('tool.execute.before')
+  await before({ tool: 'mem_save', sessionID: 'child', input: {} })
+  await runtime.events.emit({ type: 'session.updated', data: { ...root, sessionID: 'root', location: { directory: '/other' } } })
+  const input = { session_id: 'unchanged' }
+  await assert.rejects(before({ tool: 'mem_save', sessionID: 'child', input }), /could not resolve/)
+  assert.deepEqual(input, { session_id: 'unchanged' })
+  assert.equal(runtime.posts('/sessions').length, 1)
+})
+
+test('V2 concrete cached authority keeps its pre-existing foreign-location update behavior', async (t) => {
+  const runtime = await setupV2(t, { sessions: new Map([['root', sessionInfo('root')]]) })
+  t.after(() => runtime.cleanup())
+  await runtime.created('root')
+  await runtime.events.emit({ type: 'session.updated', data: { sessionID: 'root', projectID: PROJECT_ID, location: { directory: '/other' } } })
+  const input = {}
+  await runtime.hooks.get('tool.execute.before')({ tool: 'mem_save', sessionID: 'root', input })
+  assert.equal(input.session_id, 'root')
+})

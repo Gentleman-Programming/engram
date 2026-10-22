@@ -190,9 +190,10 @@ jobs:
         with:
           node-version: "24"
 
-      # No install step: test/plugin-sandbox.mjs copies the plugin into a temp
-      # directory with its own stubbed node_modules, so the suite runs from a
-      # clean checkout and never writes into plugin/pi/node_modules.
+      # Real-schema diagnostics need only the locked test dependency, not Pi peers.
+      - name: Install Pi test dependencies
+        working-directory: plugin/pi
+        run: npm ci --ignore-scripts --legacy-peer-deps
       - name: Set up Go for Pi checks
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:

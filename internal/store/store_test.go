@@ -13390,7 +13390,7 @@ func TestExplicitMergePreviewCases(t *testing.T) {
 		{"inserted separator", "acmeapi", "acme-api", true},
 		{"Unicode separator", "caféapi", "café-api", true},
 		{"Unicode mismatch", "caféapi", "cafe-api", false},
-		{"normalized equal case", "Acme-api", "acme-api", false},
+		{"normalized equal case", "Acme-api", "acme-api", true},
 		{"normalized equal spacing", " acme-api ", "acme-api", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

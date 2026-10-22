@@ -515,7 +515,6 @@ func (s *Server) routes() {
 
 	// Prompts
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
-	s.mux.HandleFunc("GET /prompts/search", s.handleSearchPrompts)
 	s.mux.HandleFunc("DELETE /prompts/{id}", requireAuth(s.handleDeletePrompt))
 
 	// Context
@@ -1651,13 +1650,24 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:      projectpkg.ResolutionCurrent,
 		Directory: cwd,
-		Detect:    s.store.DetectProject,
+		Detect:    s.captureProjectDetector(false),
 	})
 	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		s.writeProjectResolutionError(w, res, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, currentProjectPayload(cwd, res))
+}
+
+// captureProjectDetector protects context negotiation without tightening ordinary reads.
+// Inspection callers retain their no-binding contract; current-project keeps its
+// existing binding behavior after the HOME guard and history checks succeed.
+func (s *Server) captureProjectDetector(inspectOnly bool) func(string) projectpkg.DetectionResult {
+	return func(directory string) projectpkg.DetectionResult {
+		return projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{
+			InspectOnly: inspectOnly, HistoryLookup: s.store.ProjectHistory, RequireExplicitHomeProject: true,
+		})
+	}
 }
 
 // currentProjectPayload builds the shared current-project response metadata.
@@ -1744,6 +1754,10 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectp
 	}
 	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		code = "ambiguous_project"
+		status = http.StatusConflict
+	}
+	if errors.Is(err, projectpkg.ErrExplicitProjectRequired) {
+		code = "explicit_project_required"
 		status = http.StatusConflict
 	}
 	var transition *projectpkg.ProjectTransitionError

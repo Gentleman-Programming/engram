@@ -73,7 +73,7 @@ func TestRuntimeContractCommand(t *testing.T) {
 		Operations map[string]json.RawMessage `json:"operations"`
 		InstanceID *string                    `json:"instance_id"`
 	}
-	if err := json.Unmarshal([]byte(generated), &projection); err != nil || projection.ContractID != "engram.pi-http-runtime/v1" || projection.Revision != 1 || len(projection.Operations) != 22 || projection.InstanceID != nil {
+	if err := json.Unmarshal([]byte(generated), &projection); err != nil || projection.ContractID != "engram.pi-http-runtime/v1" || projection.Revision != 1 || len(projection.Operations) != 23 || projection.InstanceID != nil {
 		t.Fatalf("invalid projection: %+v error=%v", projection, err)
 	}
 	file := filepath.Join(cwd, "plugin", "pi", "runtime-contract.json")

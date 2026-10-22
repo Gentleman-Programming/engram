@@ -68,6 +68,13 @@ test("local package CLI packs real fixture offline without hooks and validates i
   assert.equal(result.stderr, "");
 });
 
+test("local package CLI validates the Pi archive independently of core version", t => {
+  const result = run(fixture(t), ["--core-ref", "refs/tags/v3.0.0", "--pi-ref", "refs/tags/pi-v1.2.3"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, success);
+  assert.equal(result.stderr, "");
+});
+
 for (const [name, args, modify, env] of [
   ["missing refs", [], undefined, undefined],
   ["unsupported publishing", ["--publish"], undefined, undefined],

@@ -86,14 +86,14 @@ func TestDashboardCacheCharacterizationConcurrentColdCallers(t *testing.T) {
 	}}
 	results := make(chan characterizationResult, 2)
 	go characterizationRead(cs, results)
+	characterizationWait(t, entered)
 	go characterizationRead(cs, results)
-	characterizationWait(t, entered)
-	characterizationWait(t, entered)
-	if calls.Load() != 2 {
-		t.Fatalf("both cold reads must enter loader, loads=%d", calls.Load())
+	waitForDashboardBuildWaiters(t, cs, 1)
+	// The second cold read joins the in-flight build instead of entering the loader.
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent cold reads must share one loader call, loads=%d", calls.Load())
 	}
-	// Send two releases rather than closing: deferred close also unblocks failure paths.
-	release <- struct{}{}
+	// Send a release rather than closing: deferred close also unblocks failure paths.
 	release <- struct{}{}
 	for i := 0; i < 2; i++ {
 		result := characterizationWait(t, results)
@@ -101,7 +101,7 @@ func TestDashboardCacheCharacterizationConcurrentColdCallers(t *testing.T) {
 	}
 	rows, err := cs.ListProjects("")
 	characterizationEqual(t, rows, model.projects, err)
-	if calls.Load() != 2 {
+	if calls.Load() != 1 {
 		t.Fatalf("warm follow-up rebuilt: %d", calls.Load())
 	}
 }
@@ -134,19 +134,20 @@ func TestDashboardCacheCharacterizationInvalidationDuringLoad(t *testing.T) {
 	release <- struct{}{}
 	result := characterizationWait(t, results)
 	characterizationEqual(t, result.rows, old.projects, result.err)
-	// Baseline permits old publication after invalidation; warm public detail stays old.
+	// A build that started before an invalidation is returned to its callers but
+	// never published, so the next public read rebuilds.
 	detail, err := cs.ProjectDetail("project-a")
-	characterizationEqual(t, detail, old.projectDetails["project-a"], err)
-	if calls.Load() != 1 {
-		t.Fatalf("old publication was not reused: loads=%d", calls.Load())
+	characterizationEqual(t, detail, next.projectDetails["project-a"], err)
+	if calls.Load() != 2 {
+		t.Fatalf("stale build was published: loads=%d, want 2", calls.Load())
 	}
 	cs.invalidateDashboardReadModel()
 	rows, err := cs.ListProjects("")
 	characterizationEqual(t, rows, next.projects, err)
 	rows, err = cs.ListProjects("")
 	characterizationEqual(t, rows, next.projects, err)
-	if calls.Load() != 2 {
-		t.Fatalf("next invalidation/reuse loads=%d, want 2", calls.Load())
+	if calls.Load() != 3 {
+		t.Fatalf("next invalidation/reuse loads=%d, want 3", calls.Load())
 	}
 }
 

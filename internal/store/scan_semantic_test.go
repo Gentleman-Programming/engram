@@ -488,7 +488,7 @@ func TestScanProject_Semantic_ErrorIsolation(t *testing.T) {
 
 // TestScanProject_Semantic_MaxSemanticCap verifies that the MaxSemantic cap
 // limits the number of LLM calls. We seed many similar observations, then set
-// MaxSemantic=1 and confirm at most 1 semantic call is made.
+// MaxSemantic=2 and confirm exactly two judgments and a capped scan.
 func TestScanProject_Semantic_MaxSemanticCap(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("ses-cap-test", "cap-project", "/tmp/cap"); err != nil {
@@ -528,12 +528,12 @@ func TestScanProject_Semantic_MaxSemanticCap(t *testing.T) {
 	}
 
 	total := result.SemanticJudged + result.SemanticSkipped + result.SemanticErrors
-	if total > 2 {
-		t.Errorf("MaxSemantic=2: expected total semantic calls <= 2; got %d (judged=%d, skipped=%d, errors=%d)",
-			total, result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors)
+	if total != 2 || result.SemanticJudged != 2 || result.SemanticErrors != 0 || result.SemanticSkipped != 0 || !result.Capped {
+		t.Errorf("MaxSemantic=2: want judged=2 skipped=0 errors=0 capped=true; got total=%d judged=%d skipped=%d errors=%d capped=%t",
+			total, result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors, result.Capped)
 	}
-	if runner.calls > 2 {
-		t.Errorf("MaxSemantic=2: runner calls = %d, want <= 2", runner.calls)
+	if runner.calls != 2 {
+		t.Errorf("MaxSemantic=2: runner calls = %d, want 2", runner.calls)
 	}
 }
 
@@ -581,8 +581,8 @@ func TestScanProject_Semantic_TimeoutCounted(t *testing.T) {
 	}
 
 	total := result.SemanticJudged + result.SemanticSkipped + result.SemanticErrors
-	if total > 0 && result.SemanticErrors == 0 {
-		t.Errorf("expected SemanticErrors > 0 when runner blocks beyond timeout; got errors=0 (total=%d)", total)
+	if total != 1 || result.SemanticErrors != 1 {
+		t.Errorf("timeout: want exactly one semantic error; got errors=%d total=%d", result.SemanticErrors, total)
 	}
 }
 
@@ -652,5 +652,137 @@ func TestScanProject_Semantic_BuildPromptNilError(t *testing.T) {
 	})
 	if !errors.Is(err, ErrSemanticPromptBuilderRequired) {
 		t.Errorf("expected ErrSemanticPromptBuilderRequired; got %v", err)
+	}
+}
+
+// mixedSemanticRunner uses stable pair identities and a context-bounded barrier
+// so completing a valid verdict requires two concurrent workers.
+type mixedSemanticRunner struct {
+	mu       sync.Mutex
+	calls    map[string]int
+	outcomes map[string]int
+	started  int
+	ready    chan struct{}
+}
+
+func (r *mixedSemanticRunner) Compare(ctx context.Context, prompt string) (SemanticVerdict, error) {
+	r.mu.Lock()
+	r.calls[prompt]++
+	r.started++
+	if r.started == 2 {
+		close(r.ready)
+	}
+	outcome := r.outcomes[prompt]
+	r.mu.Unlock()
+	select {
+	case <-r.ready:
+	case <-ctx.Done():
+		return SemanticVerdict{}, ctx.Err()
+	}
+	switch outcome {
+	case 0:
+		return SemanticVerdict{Relation: RelationCompatible, Confidence: 0.9}, nil
+	case 1:
+		return SemanticVerdict{Relation: RelationNotConflict, Confidence: 0.9}, nil
+	case 2:
+		return SemanticVerdict{}, errors.New("mixed runner error")
+	case 3:
+		panic("mixed runner panic")
+	case 4:
+		return SemanticVerdict{Relation: "invalid", Confidence: 0.9}, nil
+	default:
+		return SemanticVerdict{Relation: RelationCompatible, Confidence: math.NaN()}, nil
+	}
+}
+func semanticPairKey(a, b string) string {
+	if b < a {
+		a, b = b, a
+	}
+	return a + ":" + b
+}
+func TestScanProject_Semantic_ConcurrentMixedAccounting(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("apply=%t", apply), func(t *testing.T) {
+			s := newTestStore(t)
+			const project = "mixed-semantic"
+			if err := s.CreateSession("mixed-session", project, "/tmp/mixed"); err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, 4)
+			for i := range ids {
+				id, err := s.AddObservation(AddObservationParams{SessionID: "mixed-session", Project: project, Scope: "project", Type: "decision", Title: "JWT auth session token security", Content: fmt.Sprintf("Distinct implementation choice number %d", i)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				obs, err := s.GetObservation(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ids[i] = obs.SyncID
+			}
+			if err := s.EnrollProject(project); err != nil {
+				t.Fatal(err)
+			}
+			before, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &mixedSemanticRunner{calls: map[string]int{}, outcomes: map[string]int{}, ready: make(chan struct{})}
+			for i := range ids {
+				for j := i + 1; j < len(ids); j++ {
+					runner.outcomes[semanticPairKey(ids[i], ids[j])] = len(runner.outcomes)
+				}
+			}
+			result, err := s.ScanProject(ScanOptions{Project: project, Apply: apply, Semantic: true, Concurrency: 2, MaxSemantic: 10, TimeoutPerCall: 5 * time.Second, Runner: runner, BuildPrompt: func(a, b ObservationSnippet) string { return semanticPairKey(a.SyncID, b.SyncID) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantJudged, wantSkipped, wantRows := 1, 1, 0
+			if apply {
+				wantJudged, wantSkipped, wantRows = 2, 0, 2
+			}
+			if result.SemanticJudged != wantJudged || result.SemanticSkipped != wantSkipped || result.SemanticErrors != 4 || result.Capped {
+				t.Fatalf("unexpected accounting: %+v", result)
+			}
+			if len(runner.calls) != 6 {
+				t.Fatalf("completed pairs = %d, want 6", len(runner.calls))
+			}
+			for key := range runner.outcomes {
+				if runner.calls[key] != 1 {
+					t.Errorf("pair %s calls=%d, want 1", key, runner.calls[key])
+				}
+			}
+			rows, err := s.ListRelations(ListRelationsOptions{Project: project})
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, err := s.CountRelations(ListRelationsOptions{Project: project})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count != wantRows || len(rows) != wantRows {
+				t.Fatalf("persisted count=%d rows=%d, want %d", count, len(rows), wantRows)
+			}
+			for _, row := range rows {
+				outcome := runner.outcomes[semanticPairKey(row.SourceID, row.TargetID)]
+				want := RelationCompatible
+				if outcome == 1 {
+					want = RelationNotConflict
+				}
+				if outcome > 1 || row.Relation != want || row.JudgmentStatus != "judged" {
+					t.Errorf("unexpected persisted verdict: %+v", row)
+				}
+			}
+			after, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !apply && (after.LastEnqueuedSeq != before.LastEnqueuedSeq || after.Lifecycle != before.Lifecycle) {
+				t.Errorf("dry-run sync changed: before=%+v after=%+v", before, after)
+			}
+			if apply && after.LastEnqueuedSeq != before.LastEnqueuedSeq+2 {
+				t.Errorf("apply sync sequence=%d, want %d", after.LastEnqueuedSeq, before.LastEnqueuedSeq+2)
+			}
+		})
 	}
 }
