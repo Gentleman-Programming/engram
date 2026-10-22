@@ -31,6 +31,9 @@ type StoreReader interface {
 type Exporter struct {
 	store  StoreReader
 	config ExportConfig
+
+	// Optional per-exporter seam for the scoped topic-hub open boundary.
+	openTopicHub func(string, int, os.FileMode) (*os.File, error)
 }
 
 // NewExporter constructs an Exporter. Validation happens in Export().
@@ -431,19 +434,21 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 		safeName := strings.ReplaceAll(prefix, "/", "--")
 		hubPath := filepath.Join(topicsDir, safeName+".md")
-		if !fullScope {
-			// Topic hubs are shared across projects; scoped refs cannot replace them.
-			if _, err := os.Lstat(hubPath); err == nil {
+		content := TopicHubMarkdown(prefix, refs)
+		var writeErr error
+		if fullScope {
+			writeErr = os.WriteFile(hubPath, []byte(content), 0644)
+		} else {
+			writeErr = e.writeScopedTopicHub(hubPath, []byte(content))
+			if os.IsExist(writeErr) {
+				// Shared hubs, including competing creations, must not be replaced
+				// with references from only the selected project.
 				state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
 				continue
-			} else if !os.IsNotExist(err) {
-				result.Errors = append(result.Errors, fmt.Errorf("stat topic hub %s: %w", hubPath, err))
-				continue // Unknown filesystem state must not permit an overwrite.
 			}
 		}
-		content := TopicHubMarkdown(prefix, refs)
-		if err := os.WriteFile(hubPath, []byte(content), 0644); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("write topic hub %s: %w", hubPath, err))
+		if writeErr != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("write topic hub %s: %w", hubPath, writeErr))
 			continue
 		}
 		state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
@@ -486,6 +491,24 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	return result, nil
+}
+
+// writeScopedTopicHub creates without replacing an existing shared hub, retaining
+// os.WriteFile's write/close error handling after a successful exclusive open.
+func (e *Exporter) writeScopedTopicHub(path string, content []byte) error {
+	open := e.openTopicHub
+	if open == nil {
+		open = os.OpenFile
+	}
+	file, err := open(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(content)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // removeExportFile deletes one note tracked by the sync state from the export

@@ -2,8 +2,10 @@ package obsidian
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -101,6 +103,112 @@ func TestScopedTopicHubsCreateMissing(t *testing.T) {
 				t.Error("alpha export changed disjoint beta hub")
 			}
 		})
+	}
+}
+
+// The rival writes a real complete hub immediately before the scoped open.
+// Bytes and public export results, rather than requested flags, are the oracle.
+func TestScopedTopicHubsCompetingCreate(t *testing.T) {
+	dir, root := newReconcileVault(t)
+	observations := scopedTopicObservations()
+	ms := &mockStore{exportData: &store.ExportData{Observations: observations}}
+	cfg := ExportConfig{VaultPath: dir, Project: "alpha"}
+	hubPath := filepath.Join(root, "_topics", "shared.md")
+	rival := []byte("# Complete rival hub\n\n[[alpha-one-1]]\n[[alpha-two-2]]\n[[beta-one-3]]\n[[beta-two-4]]\n")
+	exporter := NewExporter(ms, cfg)
+	calls := 0
+	exporter.openTopicHub = func(path string, flags int, perm os.FileMode) (*os.File, error) {
+		calls++
+		if path != hubPath {
+			t.Fatalf("unexpected scoped hub path: %s", path)
+		}
+		if err := os.WriteFile(path, rival, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return os.OpenFile(path, flags, perm)
+	}
+	result, err := exporter.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("scoped open calls = %d, want 1", calls)
+	}
+	if got := readScopedTopicFile(t, hubPath); !bytes.Equal(got, rival) {
+		t.Errorf("competing complete hub was clobbered:\n%s", got)
+	}
+	if result.Created != 2 || result.Skipped != 0 || result.Updated != 0 || result.Deleted != 0 || result.HubsCreated != 0 || len(result.Errors) != 0 {
+		t.Errorf("competing create result = %+v; want two notes, zero hubs/errors", result)
+	}
+	notes := make(map[string][]byte)
+	for _, obs := range observations[:2] {
+		path := filepath.Join(root, "alpha", "manual", Slugify(obs.Title, obs.ID)+".md")
+		notes[path] = readScopedTopicFile(t, path)
+	}
+	assertScopedTopicNotes(t, notes)
+
+	// A later full export with only one live observation retires a tracked hub.
+	// This observes persisted tracking through Export, not private state reads.
+	ms.exportData = &store.ExportData{Observations: observations[:1]}
+	retired, err := NewExporter(ms, ExportConfig{VaultPath: dir}).Export()
+	if err != nil || len(retired.Errors) != 0 {
+		t.Fatalf("retirement Export = %+v, %v", retired, err)
+	}
+	if _, err := os.Stat(hubPath); !os.IsNotExist(err) {
+		t.Errorf("tracked rival hub was not retired: %v", err)
+	}
+	remainingPath := filepath.Join(root, "alpha", "manual", Slugify(observations[0].Title, observations[0].ID)+".md")
+	assertScopedTopicNotes(t, map[string][]byte{remainingPath: notes[remainingPath]})
+}
+
+func TestScopedTopicHubsOpenFailure(t *testing.T) {
+	dir, root := newReconcileVault(t)
+	observations := scopedTopicObservations()
+	before := scopedTopicObservations()
+	ms := &mockStore{exportData: &store.ExportData{Observations: observations}}
+	cfg := ExportConfig{VaultPath: dir, Project: "alpha"}
+	exporter := NewExporter(ms, cfg)
+	calls := 0
+	exporter.openTopicHub = func(path string, flags int, perm os.FileMode) (*os.File, error) {
+		calls++
+		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+	}
+	result, err := exporter.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || result.Created != 2 || result.Updated != 0 || result.Deleted != 0 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("failed scoped open result = %+v, calls=%d", result, calls)
+	}
+	if !errors.Is(result.Errors[0], os.ErrPermission) {
+		t.Errorf("reported error = %v, want permission error", result.Errors[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "_topics", "shared.md")); !os.IsNotExist(err) {
+		t.Errorf("failed creation left a hub: %v", err)
+	}
+	if !reflect.DeepEqual(observations, before) {
+		t.Error("failed hub creation mutated observation data")
+	}
+	notes := make(map[string][]byte)
+	for _, obs := range observations[:2] {
+		path := filepath.Join(root, "alpha", "manual", Slugify(obs.Title, obs.ID)+".md")
+		notes[path] = readScopedTopicFile(t, path)
+	}
+	assertScopedTopicExport(t, ms, cfg, 0, 2, 1)
+	assertScopedTopicNotes(t, notes)
+}
+
+func TestScopedTopicHubsFullExportBypassesScopedOpen(t *testing.T) {
+	dir, _ := newReconcileVault(t)
+	ms := &mockStore{exportData: &store.ExportData{Observations: scopedTopicObservations()}}
+	exporter := NewExporter(ms, ExportConfig{VaultPath: dir})
+	exporter.openTopicHub = func(string, int, os.FileMode) (*os.File, error) {
+		t.Fatal("full export used scoped open seam")
+		return nil, os.ErrPermission
+	}
+	result, err := exporter.Export()
+	if err != nil || result.HubsCreated != 1 || len(result.Errors) != 0 {
+		t.Fatalf("full Export = %+v, %v", result, err)
 	}
 }
 

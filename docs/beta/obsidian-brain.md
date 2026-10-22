@@ -202,7 +202,7 @@ Hub generation includes only successfully written or skipped notes, not notes wh
 
 **Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `architecture/obsidian-plugin/*` observations cluster under `_topics/architecture--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).
 
-Project-scoped exports preserve existing topic hub files unchanged, because those hubs may link observations from other projects. Missing topic hubs are still created when the selected project supplies ≥2 observations for the prefix. Preserved hubs are not counted as regenerated. Use a full-scope export (`--all`) to regenerate topic hubs with references across projects.
+Project-scoped exports preserve existing topic hub files unchanged, because those hubs may link observations from other projects. Missing topic hubs are still created when the selected project supplies ≥2 observations for the prefix, using exclusive creation so a hub created by another writer before the open is preserved too. Preserved hubs are not counted as regenerated. This protects hub creation, not concurrent exports or sync-state updates as a whole. Use a full-scope export (`--all`) to regenerate topic hubs with references across projects.
 
 Slashes in topic keys become `--` in filenames for filesystem safety.
 
