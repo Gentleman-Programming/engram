@@ -26,6 +26,10 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions/") {
+			http.NotFound(w, r) // External unknown hosts require client inspection.
+			return
+		}
 		if r.URL.Path == "/project/current" {
 			_, _ = io.WriteString(w, `{"project":"end-project","project_source":"config"}`)
 			return
@@ -138,22 +142,22 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 func codexTestBash(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {
-		path, err := exec.LookPath("bash")
+		_, err := exec.LookPath("bash")
 		if err != nil {
 			t.Fatalf("find bash: %v", err)
 		}
-		return path
+		return newCodexIntentFixture(t).bash
 	}
 
 	gitPath, err := exec.LookPath("git.exe")
 	if err != nil {
 		t.Fatalf("find Git for Windows: %v", err)
 	}
-	path, err := codexTestBashCandidate(gitPath)
+	_, err = codexTestBashCandidate(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return path
+	return newCodexIntentFixture(t).bash
 }
 
 func codexTestBashCandidate(gitPath string) (string, error) {
@@ -215,7 +219,9 @@ func TestCodexTestBashCandidates(t *testing.T) {
 
 func requireCodexUnixTools(t *testing.T, bashPath string) {
 	t.Helper()
+	cwd := t.TempDir()
 	check := exec.Command(bashPath, "--noprofile", "--norc", "-c", "command -v jq >/dev/null && command -v curl >/dev/null")
+	check.Env, check.Dir = codexHandoffEnv(t, cwd, "http://127.0.0.1:1"), cwd
 	if output, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("Unix SessionEnd runtime tests require jq and curl: %v: %s", err, output)
 	}
@@ -234,6 +240,11 @@ func assertSilentCodexUnixSessionEnd(t *testing.T, bashPath, adapterPath, input 
 	}
 	run := exec.Command(bashPath, adapterPath)
 	run.Dir = cwd
+	id, validID := payload["session_id"].(string)
+	validInput := validID && strings.TrimSpace(id) != "" && payload["cwd"] == cwd
+	if validInput {
+		codexFixtureProject(t, cwd, "end-project")
+	}
 	run.Env = codexHandoffEnv(t, cwd, "http://127.0.0.1:"+*port, buildCodexFixtureCLI(t))
 	run.Stdin = strings.NewReader(input)
 	var stdout, stderr strings.Builder
@@ -250,6 +261,11 @@ func assertSilentCodexUnixSessionEnd(t *testing.T, bashPath, adapterPath, input 
 			code = exitErr.ExitCode()
 		} else {
 			t.Fatalf("run Unix adapter: %v", err)
+		}
+	}
+	if !validInput {
+		if _, err := os.Stat(filepath.Join(cwd, ".engram")); !os.IsNotExist(err) {
+			t.Fatal("rejected input acquired project configuration")
 		}
 	}
 	if code != 0 || stdout.String() != "" || stderr.String() != "" {

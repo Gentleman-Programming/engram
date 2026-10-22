@@ -13,6 +13,7 @@
 #
 # MUST exit 0 always and output valid JSON — otherwise Codex blocks the message.
 
+ENGRAM_NATIVE_URL="${ENGRAM_URL:-}"
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
 ENGRAM_URL="${ENGRAM_URL:-http://127.0.0.1:${ENGRAM_PORT}}"
 
@@ -42,7 +43,7 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   (
     PROJECT=$(resolve_project "$CWD") || exit 0
-    IDENTITY=$(printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_URL" ENGRAM_HOOK_OUTPUT=json engram hook codex-resolve 2>/dev/null) || exit 0
+    IDENTITY=$(printf '%s' "$INPUT" | engram_native_hook codex-resolve 2>/dev/null) || exit 0
     [ -n "$IDENTITY" ] || exit 0
     PROMPT_BODY=$(printf '%s' "$IDENTITY" | jq -esc --arg p "$PROJECT" --arg c "$PROMPT" '
       if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
@@ -141,7 +142,7 @@ fi
 # Get session start time to check if session is > 5 minutes old
 SESSION_START=""
 if [ -n "$SESSION_ID" ]; then
-  IDENTITY=$(printf '%s' "$INPUT" | ENGRAM_URL="$ENGRAM_URL" ENGRAM_HOOK_OUTPUT=json engram hook codex-resolve 2>/dev/null) || IDENTITY=""
+  IDENTITY=$(printf '%s' "$INPUT" | engram_native_hook codex-resolve 2>/dev/null) || IDENTITY=""
   SESSION_URI=$(printf '%s' "$IDENTITY" | jq -esr 'if length == 1 and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0 then .[0].session_id | @uri else error("invalid identity") end' 2>/dev/null) || { echo "$OUTPUT"; exit 0; }
   SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_URI}" --max-time 0.2 2>/dev/null \
     | jq -r '.started_at // empty' 2>/dev/null)
