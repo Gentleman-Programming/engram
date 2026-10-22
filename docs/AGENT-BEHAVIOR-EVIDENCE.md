@@ -82,6 +82,17 @@ no SQL/private-store seed, endpoint, production seam or external LLM is used.
 - Existing all-error batch, topic validation, consolidation authorization/preview
   and finalization receipt/lifecycle vectors remain, not replacements for these cases.
 
+### Exactly two pending relations
+
+The same public workflow judges any extra scan candidates before taking baseline
+stats, then asserts exactly two pending relations. After judging those two, it
+checks that Go omits the zero-valued `pending` key. The original direct comparison
+reproduced `undefined !== 0`; the assertion now interprets only a nullish pending
+count as zero with `?? 0`, retaining exact judged/verdict increments and no-write
+assertions for rejected input. No private setup, new skip or runtime change is
+introduced. Earlier execution results below retain their original snapshot scope;
+the correction's exact candidate and results are recorded separately by the owner.
+
 ## Write outcomes: separate proofs, separate limits
 
 | Stage | Evidence / missing proof |

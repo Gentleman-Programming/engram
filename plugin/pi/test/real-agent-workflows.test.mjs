@@ -208,11 +208,20 @@ realTest("real Pi judgments persist successful and mixed outcomes from public sc
     assert.equal(listed.status, 200);
     assert.equal(listed.data.total, scan.data.inserted);
     const [first, second] = listed.data.relations;
+    // Judge extra candidates publicly so exactly two remain pending.
+    for (const extra of listed.data.relations.slice(2)) {
+      const seeded = await tool("mem_judge_many", { judgments: [
+        { judgment_id: extra.sync_id, relation: "related", confidence: 0.5 },
+      ] });
+      assert.notEqual(seeded.isError, true, JSON.stringify(seeded));
+      assert.equal(seeded.details.data.outcomes[0].status, "success");
+    }
     const stats = async () => {
       const result = await request(`/conflicts/stats?project=${project}`);
       assert.equal(result.status, 200); return result.data;
     };
     const beforeStats = await stats();
+    assert.equal(beforeStats.by_judgment_status.pending, 2);
     const success = await tool("mem_judge_many", { judgments: [
       { judgment_id: first.sync_id, relation: "compatible", confidence: 0 },
     ] });
@@ -249,7 +258,8 @@ realTest("real Pi judgments persist successful and mixed outcomes from public sc
     assert.equal(secondRead.data.relation, "conflicts_with");
     assert.equal(secondRead.data.judgment_status, "judged");
     const afterStats = await stats();
-    assert.equal(afterStats.by_judgment_status.pending, beforeStats.by_judgment_status.pending - 2);
+    assert.equal(Object.hasOwn(afterStats.by_judgment_status, "pending"), false);
+    assert.equal(afterStats.by_judgment_status.pending ?? 0, beforeStats.by_judgment_status.pending - 2);
     assert.equal(afterStats.by_judgment_status.judged, (beforeStats.by_judgment_status.judged ?? 0) + 2);
     assert.equal(afterStats.by_relation.compatible, (beforeStats.by_relation.compatible ?? 0) + 1);
     assert.equal(afterStats.by_relation.conflicts_with, (beforeStats.by_relation.conflicts_with ?? 0) + 1);
