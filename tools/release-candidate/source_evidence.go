@@ -132,9 +132,8 @@ func runSourceCheck(ctx context.Context, repo, workspace, core, pi, piVersion st
 	cmd := exec.CommandContext(ctx, "go", "run", "./tools/agent-contract", "-check")
 	cmd.Dir = coreRoot
 	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "GOWORK=off", "GOFLAGS=-mod=readonly")
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	err = cmd.Run()
-	if cmd.ProcessState != nil {
+	if ctx.Err() == nil && cmd.ProcessState != nil {
 		code := cmd.ProcessState.ExitCode()
 		result.ExitCode = &code
 		result.State = "not-established"

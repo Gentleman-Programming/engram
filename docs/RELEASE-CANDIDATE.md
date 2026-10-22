@@ -105,7 +105,10 @@ Go uses local toolchain/cached dependencies, readonly modules and no work file.
 The report binds verified source IDs and the artifact's actual SHA-256 to the
 observed process result. It does not import caller-authored proof or commands.
 A nonzero checker result is `not-established`, not automatically a semantic
-regression; missing objects/tools, unsupported sources, persistent source
+regression. Cancellation/deadline expiry is `unavailable`, without a checker
+exit outcome. Null-device outputs prevent waiting for inherited output pipes;
+this does not terminate or sandbox the entire child process tree.
+Missing objects/tools, unsupported sources, persistent source
 mutation or cleanup failure cannot produce a passing check.
 Output is partial source-evidence JSON with `outcome: "blocked"`, exit 2 and
 empty stderr even when the check passes. The observed `go run` exit is a wrapper
