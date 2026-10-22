@@ -1,5 +1,5 @@
 {
-  "eager_schemas.agent": 28960,
+  "eager_schemas.agent": 28032,
   "eager_schemas.agent.tool.mem_capture_passive": 1101,
   "eager_schemas.agent.tool.mem_compare": 2282,
   "eager_schemas.agent.tool.mem_consolidate": 1630,

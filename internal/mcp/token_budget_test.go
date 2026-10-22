@@ -60,7 +60,7 @@ func TestTokenBudget(t *testing.T) {
 			continue
 		}
 		if measurement.runes > budget {
-			t.Errorf("%s is %d runes, over the pinned budget of %d — trim the surface or raise the budget deliberately",
+			t.Errorf("%s is %d runes, over the pinned budget of %d — trim the surface, or raise the budget deliberately once a maintainer has acknowledged the increase",
 				measurement.name, measurement.runes, budget)
 		}
 	}
