@@ -38,6 +38,50 @@ capability changes or publication actions. Tests assert the diagnostic behavior;
 they do not require current schemas to match. The rejection-only release checker
 and candidate publisher safeguards remain independent and unchanged.
 
+## Go-owned input projection verification
+
+`internal/mcp.VerifyPiInputSchemas(capture []byte) error` accepts serialized
+`[{"name":"mem_...","parameters":{...}}]` registrations. Inventory and base
+schemas come from live `AgentContractJSON`/`ProfileAgent`, not another registry or
+expected-schema fixture. The pure API never writes files or opens a store.
+Nil means **scope-only shape acceptance**, not semantic parity, installed-host
+compatibility or release eligibility; status remains `mcp-foundation`.
+
+Descriptions at schema nodes and tool annotations are outside this comparison,
+not declared semantically benign. A property named `description` remains a field.
+Only required-set order and absent/empty `required` are normalized; other keywords,
+constraints and array orders remain compared. Numbers retain `json.Number` tokens.
+Actual capture schemas are never projected. Expected-only policy is bounded by:
+
+- `internal/mcp/agent_contract.go:199-230`, `session_finalize.go:24-28,44-46`:
+  host-owned session identity, optional destination/assertion cwd instead of MCP
+  recovery inputs, and required canonical content after legacy-alias omission.
+- `internal/mcp/agent_contract.go:172-182`: omit ID-lookup response-context project
+  and current-project directory alias, retaining canonical cwd only.
+- `internal/agentops/consolidate.go:24-42`, `internal/store/consolidate.go:24-26`:
+  nonempty strings and at least two distinct positive exact JSON integer IDs.
+- `internal/agentops/judgments.go:12-14,40-43`: batch size 1..32 and confidence [0,1].
+- `internal/mcp/mcp.go:2064-2067`: positive-integer max_bytes is a **model domain**,
+  not equivalence with MCP's nonpositive/fractional fallback or global coercion.
+
+Source preconditions reject incompatible types, newly present bounds (even null),
+changed omitted-field shapes and pre-existing cwd instead of overwriting them.
+Errors are `Pi input: invalid capture`, `Pi input: duplicate registration`,
+`Pi input: inventory differs`, `Pi input: NAME schema differs` (sorted first tool),
+or `Pi input: unsupported source for NAME`; authority-generation errors propagate.
+
+Run from the repository root with Node.js 24 and existing TypeBox 1.3.34:
+`ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 GOPROXY=off GOSUMDB=off go test ./internal/mcp -run '^TestPiInput' -count=1 -v`.
+Tests capture actual registrations twice through the existing disposable sandbox,
+then independently mutate fields/constraints/inventory and check immutability.
+Default Go-only runs skip integration only for missing Node or the fixed local
+TypeBox package used by `plugin-sandbox.mjs`; required mode turns absence into failure.
+Wrong versions, broken imports, stderr, capture/cleanup exceptions, malformed output,
+expired contexts and verifier mismatches fail, never skip. Isolated source-copy
+probes without node_modules exercise default-skip versus required-failure behavior.
+The raw diagnostic, artifact freshness and historical MCP ratchet remain separate;
+no new CLI mode or runtime schema behavior is introduced here.
+
 ## Field audit
 
 Fields listed below record the Pi input surface and its current MCP/HTTP differences. They do not assert identical schemas, defaults or response envelopes across transports. “Runtime-injected” means the host owns the value; it must not be recovered from a model-supplied session ID. “Transport-specific” describes a deliberately different adapter envelope. “Semantic” identifies a restriction or canonical-input choice. “Accidental loss” is an outstanding capability gap, not an approved design exemption.
