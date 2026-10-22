@@ -296,8 +296,9 @@ resolution; it does **not** merge or move previously split memories.
 Historical directories are matched as absolute, lexically normalized paths;
 Engram does not access their filesystems. Relative history without a recorded
 base is ignored. Only the selected working directory is filesystem-canonicalized.
-On Windows, its local long and available 8.3 spellings are compared with history;
-no historical paths or UNC selections are queried for aliases. Unexpected alias
+On Windows, history may mix long and available 8.3 component names. These are
+compared against only the selected directory's known spellings, at the exact
+same drive and depth; no historical paths or UNC selections are queried for aliases. Unexpected alias
 lookup errors make history unavailable rather than permitting a first binding
 without that evidence. Stored directory spellings are never rewritten. Legacy
 history stored under a symlink alias may still require an explicit project

@@ -33,7 +33,7 @@ func (s *Store) ProjectHistory(directory string) ([]string, error) {
 		// Only a valid canonical name can be weak project evidence.
 		resolved, err := project.Resolve(project.ResolutionOptions{Mode: project.ResolutionExplicit, Explicit: name})
 		historicalDir := historicalDirectoryIdentity(storedDir)
-		if err == nil && historicalDir != "" && slices.Contains(aliases, historicalDir) {
+		if err == nil && historicalDir != "" && project.DirectoryHistoryMatches(aliases, historicalDir) {
 			projects = append(projects, resolved.Project)
 		}
 	}

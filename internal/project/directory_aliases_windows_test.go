@@ -8,6 +8,38 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestDirectoryHistoryMatchesComponents(t *testing.T) {
+	// These are lexical matcher inputs, not a claim that invented paths have
+	// real aliases. The public store regression proves real Windows identity.
+	aliases := []string{`c:\selected parent\selected leaf`, `c:\parent~1\leaf~1`}
+	for _, tc := range []struct {
+		name, historical string
+		want             bool
+	}{
+		{"long", aliases[0], true},
+		{"short", aliases[1], true},
+		{"mixed-prefix", `c:\parent~1\selected leaf`, true},
+		{"mixed-leaf", `c:\selected parent\leaf~1`, true},
+		{"other-drive", `d:\parent~1\leaf~1`, false},
+		{"parent", `c:\parent~1`, false},
+		{"child", `c:\parent~1\leaf~1\child`, false},
+		{"sibling", `c:\parent~1\other leaf`, false},
+		{"unrelated-parent", `c:\other parent\leaf~1`, false},
+		{"relative", `parent~1\leaf~1`, false},
+		{"historical-unc", `\\offline.invalid\share\leaf~1`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DirectoryHistoryMatches(aliases, tc.historical); got != tc.want {
+				t.Fatalf("lexical history match for %q = %v, want %v", tc.historical, got, tc.want)
+			}
+		})
+	}
+	unc := []string{`\\offline.invalid\share\selected directory`}
+	if !DirectoryHistoryMatches(unc, unc[0]) || DirectoryHistoryMatches(unc, `\\offline.invalid\share\select~1`) {
+		t.Fatal("UNC matching must remain exact lexical evidence")
+	}
+}
+
 func TestDirectoryHistoryAliasesNoDistinctAlias(t *testing.T) {
 	canonical := DirectoryIdentity(t.TempDir())
 	// A successful query returning the long spelling models a volume without

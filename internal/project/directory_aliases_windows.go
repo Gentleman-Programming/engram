@@ -15,6 +15,35 @@ func DirectoryHistoryAliases(directory string) ([]string, error) {
 	return directoryHistoryAliases(directory, windows.GetLongPathName, windows.GetShortPathName)
 }
 
+// DirectoryHistoryMatches compares normalized history lexically against the
+// selected directory's known component spellings. No historical path is queried.
+func DirectoryHistoryMatches(aliases []string, historical string) bool {
+	if slices.Contains(aliases, historical) {
+		return true
+	}
+	if len(aliases) < 2 || !filepath.IsAbs(historical) {
+		return false
+	}
+	parts := strings.Split(historical, string(filepath.Separator))
+	matched := make([]bool, len(parts))
+	volume := filepath.VolumeName(historical)
+	for _, alias := range aliases {
+		selected := strings.Split(alias, string(filepath.Separator))
+		if filepath.VolumeName(alias) != volume || len(selected) != len(parts) {
+			continue
+		}
+		for i, component := range selected {
+			matched[i] = matched[i] || component == parts[i]
+		}
+	}
+	for _, componentMatches := range matched {
+		if !componentMatches {
+			return false
+		}
+	}
+	return true
+}
+
 type directoryPathQuery func(*uint16, *uint16, uint32) (uint32, error)
 
 func directoryHistoryAliases(directory string, longQuery, shortQuery directoryPathQuery) ([]string, error) {

@@ -35,6 +35,91 @@ func TestProjectHistoryAliasLookupError(t *testing.T) {
 	}
 }
 
+func TestProjectHistoryMatchesRealWindowsMixedDirectory(t *testing.T) {
+	s := newTestStore(t)
+	selected := filepath.Join(t.TempDir(), "First long directory component", "Second long directory component")
+	if err := os.MkdirAll(selected, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonical := project.DirectoryIdentity(selected)
+	input, err := windows.UTF16PtrFromString(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]uint16, 32768)
+	n, err := windows.GetShortPathName(input, &buffer[0], uint32(len(buffer)))
+	if err != nil || n == 0 || n >= uint32(len(buffer)) {
+		t.Fatalf("real selected-directory short spelling: length=%d error=%v", n, err)
+	}
+	short := windows.UTF16ToString(buffer[:n])
+	prefix := filepath.Join(filepath.Dir(short), filepath.Base(canonical))
+	leaf := filepath.Join(filepath.Dir(canonical), filepath.Base(short))
+	for _, mixed := range []string{prefix, leaf} {
+		if strings.EqualFold(mixed, canonical) || strings.EqualFold(mixed, short) {
+			t.Skip("volume exposes no distinct mixed 8.3 spelling for the selected fixture")
+		}
+	}
+	selectedInfo, err := os.Stat(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spellings := []struct{ name, directory string }{
+		{"long", canonical}, {"short", short}, {"prefix", prefix}, {"leaf", leaf},
+	}
+	for _, spelling := range spellings {
+		info, err := os.Stat(spelling.directory)
+		if err != nil || !os.SameFile(selectedInfo, info) {
+			t.Fatalf("%s spelling is not the selected directory: %q, %v", spelling.name, spelling.directory, err)
+		}
+	}
+	nested := filepath.Join(canonical, "nested")
+	sibling := canonical + " sibling"
+	for _, directory := range []string{nested, sibling} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []struct{ id, name, directory string }{
+		{"long", "long-app", canonical}, {"short", "short-app", short},
+		{"prefix", "prefix-app", prefix}, {"leaf", "leaf-app", leaf},
+		{"duplicate", "short-app", canonical}, {"nested", "nested-app", nested},
+		{"sibling", "sibling-app", sibling},
+	}
+	before := make(map[string]*Session)
+	for _, row := range rows {
+		if err := s.CreateSession(row.id, row.name, row.directory); err != nil {
+			t.Fatal(err)
+		}
+		before[row.id], err = s.GetSession(row.id)
+		if err != nil || before[row.id].Directory != row.directory {
+			t.Fatalf("session spelling before history query: %s, %v", row.id, err)
+		}
+	}
+	statsBefore, err := s.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"leaf-app", "long-app", "prefix-app", "short-app"}
+	for _, spelling := range spellings {
+		t.Run(spelling.name, func(t *testing.T) {
+			got, err := s.ProjectHistory(spelling.directory)
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("mixed directory history = %v, %v; want %v", got, err, want)
+			}
+		})
+	}
+	for _, row := range rows {
+		after, err := s.GetSession(row.id)
+		if err != nil || !reflect.DeepEqual(before[row.id], after) {
+			t.Errorf("history query changed session %q: before=%+v after=%+v error=%v", row.id, before[row.id], after, err)
+		}
+	}
+	statsAfter, err := s.Stats()
+	if err != nil || !reflect.DeepEqual(statsBefore, statsAfter) {
+		t.Errorf("history query changed counters: before=%+v after=%+v error=%v", statsBefore, statsAfter, err)
+	}
+}
+
 func TestProjectHistoryMatchesRealWindowsShortDirectory(t *testing.T) {
 	s := newTestStore(t)
 	selected := filepath.Join(t.TempDir(), "Selected directory history")
