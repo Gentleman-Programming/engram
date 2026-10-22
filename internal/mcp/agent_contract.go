@@ -236,9 +236,9 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 		PiDifferences:   []string{"Pi end is deliberately limited to its current host/effective session with local ownership and persistence evidence"},
 	},
 	"mem_review": {
-		Effect: "read-or-mark-reviewed", Risk: "persistent-write", ProjectPolicy: "list: explicit known project or all projects; current MCP mark_reviewed ignores the project argument and uses current/process resolution", SessionPolicy: "observation_id (or id alias) identifies an observation",
-		Guarantees: []string{"actions are list or mark_reviewed", "omitted-project list is global", "mark_reviewed is confined when a project is resolved"}, ErrorEffects: "invalid action/ID is rejected before mutation; reload can fail after marking reviewed",
-		PiDifferences: []string{"Pi accepts an explicit project for mark_reviewed; the current MCP branch only uses project for list"},
+		Effect: "read-or-mark-reviewed", Risk: "persistent-write", ProjectPolicy: "list: explicit known project or all projects; mark_reviewed: explicit project or resolved current project; never global", SessionPolicy: "observation_id (or id alias) identifies an observation",
+		Guarantees: []string{"actions are list or mark_reviewed", "omitted-project list is global", "mark_reviewed requires a resolved project and confines the mutation"}, ErrorEffects: "invalid action/ID is rejected before mutation; reload can fail after marking reviewed",
+		PiDifferences: []string{"Pi forwards explicit/resolved project over HTTP; MCP resolves explicit/current project in Go"},
 		TargetRule:    "mark_reviewed: explicit project confines the mutation; omission requires the current resolved project; never mark globally",
 	},
 	"mem_pin": {

@@ -1215,18 +1215,12 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
-	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.captureProjectDetector(false))
 	if err != nil {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
-	markReviewed := s.store.MarkReviewed
-	if resolved.Project != "" {
-		markReviewed = func(observationID int64) error {
-			return s.store.MarkReviewedForProject(observationID, resolved.Project)
-		}
-	}
-	if err := markReviewed(id); err != nil {
+	if err := s.store.MarkReviewedForProject(id, resolved.Project); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
 			if resolved.Project != "" {
 				jsonError(w, http.StatusNotFound, "observation not found in resolved project")
