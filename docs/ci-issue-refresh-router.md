@@ -8,7 +8,27 @@ The original-event identity correction below still requires delivery to trusted
 code and a new covered PR event before it can provide live evidence.
 Integration and local tests are not live required-gate proof;
 #1802 stays open and #1810 retirement remains blocked.
-Public runtime evidence: **pending fresh consented live acceptance**.
+Public runtime evidence is bounded by the
+[canonical #1810 matrix](https://github.com/Gentleman-Programming/engram/issues/1810):
+sequential/manual positives are bounded, rapid burst is **PARTIAL** (two failed
+routers; aggregate errors did not expose underlying causes). This draft remains
+**NO-GO**, not active retirement on main. Four premerge gaps remain: late-legacy
+selection without a safe publication boundary, in-flight/superseded heads,
+complete rapid-event admission/ordering, and post-merge-group revocation.
+No new experiments or diagnostic changes are authorized.
+
+When integrated, the #1810 candidate removes the transitional API publisher and
+only the PR trigger from `pr-check.yml`. That original workflow keeps its complete
+merge-group jobs, resolver/aggregation and Claude guard. A new PR-only
+`pr-claude-plugin-version.yml` copies the original six actions, permissions and
+Claude job with no merge-group trigger. Native PR jobs/router/helpers, six required
+contexts, App15368 and queue settings remain unchanged; dormant publisher helpers
+are retained, not a fallback.
+
+Removal does not cancel old in-flight/queued runs or historical reruns using old
+code. Late legacy writes still require current-head inspection and eligible native
+metadata-router reconciliation only, never broad CI or API publication. There is
+no fixed latency, atomic cancellation or automatic retry.
 
 ## Caller and public SDK contract
 

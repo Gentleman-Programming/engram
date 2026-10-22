@@ -1,178 +1,96 @@
-# Roll out trusted issue-check refresh
+# Legacy issue-writer retirement — draft candidate only
 
-**Status: integrated bootstrap/native foundations and issue-label router;
-original-event binding correction awaits trusted delivery and live evidence.** PR #1823 integrated the bootstrap, #1838 the native
-jobs/adapter, and #1843 the inactive guarded rerun helper. PR #1850 integrated
-#1844's inactive dispatcher on verified main at `f14fc4f3`; PR #1855 integrated #1835's issue-label router at `47911e25`.
-That integration did not establish live required-gate recovery. The identity
-marker correction needs trusted delivery and a new covered PR event; its
-introducing PR cannot supply a marker from untrusted candidate code.
-Keep original PR Validation unchanged. Local tests and integration do not prove
-token capability, App15368 identity, gate selection, forks or queue compatibility.
+## Status: NO-GO for integration
 
-## Native replacement candidate
+This #1810 candidate is not an activated retirement on trusted `main`.
+The [canonical #1810 evidence matrix](https://github.com/Gentleman-Programming/engram/issues/1810)
+records the live evidence and acceptance boundary. Sequential and manual positives
+are bounded; rapid burst is **PARTIAL**, including two failed routers whose
+underlying causes were not exposed by aggregate errors. Local tests do not prove
+hosted event selection, token capability, provider identity or required-gate behavior.
+No new probes, diagnostic instrumentation, settings changes or acceptance amendments
+are authorized by this draft.
 
-The [native-policy foundation](ci-issue-native-policy.md) now defines the #1834
-integrated read-only jobs and head-bound adapter; their presence is not live proof.
-The earlier controlled fork probe published failures without proving required-gate
-revocation blocking. Keep this bootstrap and legacy/queue validation unchanged;
-native job definitions and local mocks do not repair or prove live gate selection.
-The selective router is integrated, but original-event admission blocked the
-stopped #1859 fork probe because its native API PR associations were empty. #1802 remains open, #1810 remains blocked,
-and fresh probe/cleanup admission is required; no new live budget is granted.
+Four premerge gaps remain:
 
-## Quick path for maintainers
+1. Late-legacy required-check selection without a safe publication boundary.
+2. In-flight/superseded-head reconciliation evidence.
+3. Complete rapid-event admission and ordering evidence.
+4. Post-merge-group approval-revocation evidence.
 
-1. Evaluator #1807 / PR #1812 is integrated on verified `main` (`871f99e3`).
-2. Publisher #1808 / PR #1819 is integrated on verified `main` (`4197117c`).
-   These inactive foundations do not establish live token/provider compatibility.
-3. Bootstrap #1809 / PR #1823 and native #1834 / PR #1838 are integrated.
-   PR #1843's helper remains inactive without the issue-event caller. PR #1850
-   integrated #1844's inactive dispatcher on verified main at `f14fc4f3`.
-   PR #1855 integrated #1835's workflow at `47911e25`; live acceptance is pending.
-   Retain legacy issue jobs, six contexts/App15368 and the native queue.
-4. Obtain fresh probe consent and collect the evidence below under #1802 before
-   #1810 writer retirement. Implementation/CI does not close live acceptance;
-   #1802 stays open. Native merge-group jobs/resolver remain intact after retirement.
+Do not merge/enqueue this candidate until the canonical prerequisites are met.
+The six required contexts, GitHub Actions App15368 binding and existing queue
+settings are unchanged; #1802 remains open. Preparing the draft is not live proof.
 
-CI preserves the exact original four-suite policy-test command and adds a
-separate step discovering available `.github/scripts/issue-*.test.mjs` files.
-The first slice therefore does not need unpublished publisher tests.
-The new workflow cannot be exercised by merely opening its introducing PR:
-`pull_request_target` loads the trusted base workflow, while issue events require
-the workflow on the default branch. Trusted revisions predating the helpers
-cannot supply them; missing imports fail the refresh rather than executing PR code.
+## Candidate event separation (when integrated)
 
-## Historical bootstrap publication and permissions
+| Event/path | Candidate responsibility |
+|------------|--------------------------|
+| Native `issue-policy.yml` / `pull_request_target` | Two read-only, head-bound issue-policy jobs on all six existing PR actions |
+| Existing `pr-check.yml` / `merge_group` | Original workflow identity and complete unchanged jobs: Claude version plus both queue issue jobs and resolver/aggregation |
+| New `pr-claude-plugin-version.yml` / `pull_request` | Original six PR actions, permissions and verbatim Claude version job only |
+| `issue-refresh-router.yml` / approval-label issue events | Selectively request eligible native metadata reruns |
+| Transitional `issue-validation.yml` | Removed by this candidate; no API-publisher fallback |
 
-The runner checks out `github.workflow_sha` from the repository hosting the
-workflow, with credentials persistence disabled. Trust comes from the restricted
-triggers: `issues` uses default-branch code and `pull_request_target` uses base-
-branch code. `workflow_sha` identifies the executing workflow commit; it is not
-a universal trust marker. A merge-group event can select a group-origin workflow
-definition, so this checks-write publisher does not subscribe to `merge_group`.
-Native PR Validation merge-group jobs and their resolver remain unchanged.
-There is no PR-head checkout or candidate fallback. Metadata stays API data;
-no issue titles, bodies or labels become shell commands.
+The old `pr-check.yml` PR trigger is removed, not replaced with skipped issue
+jobs. The new Claude workflow has no merge-group subscription. The native policy,
+router, evaluator, dispatcher, queue resolver and broad CI are unchanged.
+Dormant `issue-check-publisher.mjs` and its helper tests remain for historical
+contract coverage; `issue-validation.mjs` is still the native evaluator/parser.
 
-| Scope | Sole purpose |
-|-------|--------------|
-| `checks: write` | Create the two existing issue-policy check names on explicit evaluated heads |
-| `pull-requests: read` | Resolve open PRs and authoritative current bodies/head SHAs |
-| `issues: read` | Read current labels for every closing-reference issue |
-| `contents: read` | Load trusted repository helpers |
+The historical bootstrap used trusted base/default-branch checkout, metadata-only
+reads and `checks: write` to create checks. Publication alone did not establish
+required-gate enforcement. Its workflow is retired in this candidate, not a
+recovery option. Its preserved helper tests do not imply an active publisher.
 
-Global permissions are empty. No PAT, new app/service, `actions: write`,
-`statuses: write`, issue/PR writes, ruleset changes or queue mutations are used.
-Capability denial or a returned check not bound to GitHub Actions integration
-`15368` and the requested head/name/result is an explicit workflow failure;
-stop and report it, never obtain larger credentials.
+## Cutover and reconciliation windows
 
-Each evaluation creates two completed check runs with summaries. It never
-updates a legacy job's run. Approval failure is published as a failed check,
-not a neutral/skipped result. The entire batch is validated before any writes;
-an empty batch produces no requests. Writes are not transactional: a later API
-failure can leave earlier checks published. Returned identity can only be
-verified after creation; detecting a mismatch does not undo that write.
+Removing a workflow or trigger does **not** cancel old in-flight or queued runs,
+or prevent historical reruns from executing their old workflow code. Late legacy
+writes can still overlap native checks. Observe current-head check selection and
+reconcile through the eligible native metadata route; never substitute the API
+publisher, original broad PR Validation or broad CI.
 
-## Candidate native routing and manual recovery
+Delivery, runner scheduling and API availability have no fixed maximum delay.
+Metadata can change after reads, and concurrent events can complete out of order.
+There is no atomic cancellation/invalidation, automatic retry or strict
+no-stale-success guarantee. Failed reconciliation can leave visible old success.
+A later successful evaluation must be inspected rather than assumed.
+PR recovery does not atomically revalidate an already evaluated merge group;
+inspect its own head and queue checks separately.
 
-The [native router](ci-issue-refresh-router.md) uses only genuine approval-label
-issue events and trusted default-branch code. Root permissions are empty; only
-its router job requests contents/issues/pull-requests read and `actions: write`.
-This is repository Actions capability, restricted by helper admission rather
-than workflow-granular permissions. No settings change or broader credentials
-are authorized. Complete discovery precedes dispatch; aggregate target errors
-fail explicitly even when earlier native reruns were requested. No retries,
-older-run fallback, check publication or broad CI reruns occur in this path.
+## Trusted manual recovery only
 
-Rerun an eligible **Issue Approval Refresh Router** run to
-rediscover affected current PRs. Its original trusted revision must contain all
-helpers; every native target still needs original PR/run/source admission.
-Inspect both exact native policy jobs on each current head after completion.
-A requested rerun is not success, recovery or gate proof. Both native jobs must
-carry the matching typed original-event tuple defined by the router contract,
-with verified trusted source. API `pull_requests: []` is admissible only with
-that proof; contradictory or ambiguous associations still block. Pre-correction
-runs without markers cannot gain them by rerunning old code. A new covered
-PR event after trusted delivery is needed; this is not consent to mutate #1859
-or create another fixture. Missing original-event proof/capability blocks recovery: stop and report, never substitute the
-bootstrap publisher, an older run or larger credentials. A rerun does not upgrade
-workflow code; no `workflow_dispatch` entry point exists. These are recovery
-instructions, not authorization to mutate another probe or the retained fixture.
+Rerun an eligible **Issue Approval Refresh Router** metadata-only run to rediscover
+currently affected PRs. Its original trusted revision must contain the dispatcher
+and helpers. Every native target must pass the
+[router admission contract](ci-issue-refresh-router.md), including the typed
+original-event tuple, matching PR/head and verified trusted source.
+API `pull_requests: []` is admissible only with that independent proof;
+contradictory or ambiguous associations block.
 
-## Consistency and legacy-writer windows
+Inspect both exact native policy job conclusions on each current head after
+completion. A requested rerun is not completed recovery or required-gate proof.
+Partial target failure does not undo earlier requests. There is no automatic
+retry, older-run fallback or manual dispatch entry point.
 
-- Event delivery, runner scheduling and API availability delay reconciliation;
-  there is no fixed maximum delay. Unrelated issue labels do not request refresh.
-- Current metadata is evaluated, but labels or heads can change after the last
-  read. Concurrent refreshes can complete out of order. No atomic invalidation
-  or strict no-stale-success guarantee is made; later successful reconciliation
-  is required. Cancellation is not used to discard events.
-- A fetch/validation/publication error never fabricates approval success. An
-  already visible success may remain until reconciliation or manual recovery.
-- Legacy PR Validation can finish or be rerun after the new publisher. During
-  overlap, duplicate names from the same provider may affect gate selection;
-  observe actual required-gate behavior instead of assuming newest-run selection.
-  After late legacy completion, reconcile again with the trusted publisher and
-  inspect both named checks on the current head.
-- Refreshing a PR head does not atomically revalidate an already evaluated merge
-  group. The new publisher does not run on merge-group events. Unchanged native
-  PR Validation handles `checks_requested`; retain those jobs and the resolver
-  in later PR-writer retirement too. Record queue checks separately.
+Historical reruns retain their original workflow revision: they cannot acquire
+missing helpers or original-event markers. If no eligible native target or token
+capability exists, stop and report the missing evidence; do not broaden credentials
+or fall back to an API publisher/broad CI. A new normal covered PR event may be
+needed after trusted delivery; that is not authorization for a new live fixture,
+probe mutation or cleanup.
 
-## Historical bootstrap-only recovery (not native gate recovery)
+## Local evidence boundary
 
-After this workflow is live, use the Actions UI to locate an **Issue Validation
-Refresh** run for the affected PR or a `status:approved` issue-label event. Check
-its workflow revision is trusted and contains both helpers, then **Re-run all
-jobs** for that metadata-only workflow. This reads current metadata again rather
-than reusing stale approval conclusions. An issue-event rerun can reconcile all
-currently affected open PRs. Do not rerun original **PR Validation** or broad CI
-as an approval-refresh recovery; it includes unrelated work and legacy writers.
+Run the issue-policy helper tests, including `issue-writer-retirement.test.mjs`,
+and the existing merge-queue/Claude helper suites. Structural tests pin unchanged
+jobs and native/CI source contracts without reading Git history. An ephemeral
+base comparison verifies that only the legacy PR trigger was removed and that
+the PR-only Claude job is copied verbatim. Production JavaScript helpers are
+unchanged, so a CLI behavior differential is not applicable.
 
-Inspect both exact check names on the PR's current head and verify current issue
-labels, conclusions and App15368 binding. If the PR head changed during recovery,
-reconcile again; if a legacy writer finishes later, repeat trusted reconciliation.
-For a queue group, inspect its own head/checks as well; PR recovery is not queue
-invalidation. If no eligible trusted run exists, report missing recovery evidence
-and wait for a normal covered event; there is no `workflow_dispatch` entry point.
-A rerun retains its original trusted workflow revision: it does not upgrade code.
-If that revision lacks the helpers or capability, stop and report the blocker.
-
-## Evidence required before legacy retirement
-
-All replacement acceptance items remain unproved. The historical fork probe
-published approval failure while the gate stayed CLEAN; publication is not
-enforcement. Prior #1828 mutation allowances are spent; fresh probe/cleanup
-consent is required and PR #1828 must not be merged/enqueued. Record run URLs,
-trusted revisions/attempts, original PR associations, current heads/labels,
-job/check IDs/App15368 and actual gate/queue outcomes for each case.
-
-- [ ] Router GITHUB_TOKEN can rerun admitted native metadata runs; their two
-      native jobs/checks retain original PR/head binding and App15368 identity.
-- [ ] Existing six required contexts recognize both exact names/provider, including
-      duplicate selection and late legacy completion/rerun followed by recovery.
-- [ ] Approval and revocation reconcile affected open PRs; unrelated labels and
-      unmatched references produce no policy writes.
-- [ ] Fork PRs and normal opened/edited/labeled/unlabeled/synchronize/reopened
-      events run only trusted code and bind checks to the current fetched head.
-- [ ] Multiple references retain the exact closing regex and all-issues approval
-      rule; rapid approve/revoke and changed-head cases document observed windows.
-- [ ] Unchanged native merge-group `checks_requested` validation retains required-
-      gate and queue compatibility; PR refresh does not invalidate a queue group.
-- [ ] API/capability failures stay explicit; trusted manual recovery is observed.
-
-Run the deterministic candidate checks with:
-
-```bash
-node --test .github/scripts/issue-check-publisher.test.mjs .github/scripts/issue-validation-workflow.test.mjs .github/scripts/issue-validation-composed.test.mjs
-node --check .github/scripts/issue-check-publisher.mjs
-node --test .github/scripts/issue-refresh-router.test.mjs .github/scripts/issue-refresh-dispatch.test.mjs .github/scripts/issue-refresh-router-workflow.test.mjs
-node --check .github/scripts/issue-refresh-dispatch.mjs
-```
-
-These verify the public publisher contract, actual script-body composition with
-fake APIs, and workflow structure, not live
-GitHub behavior. Independent seam verification and CI belong to the parent;
-rollout evidence and any later retirement require maintainer observation.
+These checks do not exercise Actions, live gate selection, token permissions or
+race ordering. Normal hosted CI and independent review remain separate evidence;
+all live acceptance and merge prerequisites stay on the canonical #1810 matrix.
+See also the [native-policy boundary](ci-issue-native-policy.md).

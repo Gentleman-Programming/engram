@@ -141,21 +141,21 @@ The active required contexts run automatically on every PR and merge queue group
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
 | **Plugin Tests** | The Pi plugin test suite runs from a clean checkout |
 
-PR Validation runs on PR opening, edits, label addition/removal, synchronization,
-and reopening. Reopening requests a fresh **Check Issue Reference** and
+Native issue policy covers PR opening, edits, label addition/removal, synchronization,
+and reopening. In the #1810 draft candidate, the original PR Validation workflow
+keeps only its merge-group trigger and all original jobs; a separate PR-only
+Claude version workflow copies the original guard unchanged. Reopening requests a fresh **Check Issue Reference** and
 **Check Issue Has status:approved** evaluation under the existing rules.
 Changes to labels on a linked issue do not themselves trigger PR Validation;
 the approval check fetches current issue labels and assignees when the workflow runs. PR label events
 and linked-issue label events are distinct.
 
-**Issue-refresh bootstrap (not yet live proof):** the candidate **Issue Validation
-Refresh** workflow adds trusted metadata-only publication for approval-label
+**Historical issue-refresh bootstrap (retired by the #1810 candidate):** **Issue Validation
+Refresh** historically added trusted metadata-only publication for approval-label
 addition/removal and the same PR events via `pull_request_target`, not merge-group
-events. Native PR Validation merge-group jobs and their resolver remain unchanged
-and must remain intact even in later PR-writer retirement. It becomes
-available only after integration on the trusted branch; do not assume this
-introducing PR can run it. Original PR Validation and its issue jobs remain
-unchanged until live provider/required-gate compatibility is observed.
+events. This draft removes that transitional workflow when integrated, while
+retaining native PR Validation merge-group jobs and their resolver unchanged.
+Its dormant publisher helper/tests remain, not an active recovery route.
 See the [rollout and trusted manual recovery guide](docs/ci-issue-refresh-rollout.md)
 before relying on refresh or retiring legacy writers. The publisher uses only
 `checks: write`, PR/issues read access and contents read access for trusted helpers;
@@ -164,25 +164,33 @@ Its issue/default and PR-target/base triggers establish trusted provenance;
 `workflow_sha` alone is not a universal trust marker.
 Refresh is eventual, not atomic: scheduling/API delays, metadata changes after
 reads, concurrent or late legacy writes and already evaluated merge groups leave
-consistency windows. Existing visible checks may remain after an error. Recover
-by rerunning an eligible **Issue Validation Refresh** metadata-only run, not
-original PR Validation or broad CI; verify current-head results afterwards.
+consistency windows. Existing visible checks may remain after an error. In this candidate, recover
+only by rerunning an eligible **Issue Approval Refresh Router** metadata-only run,
+never the transitional API publisher, original PR Validation or broad CI;
+verify current-head native results afterwards.
 
 **Approved native-gating amendment:** #1802 now permits `actions: write` only
 on the selective issue-label router job, never globally. Native metadata
 jobs remain read-only. #1834 / PR #1838 integrated the native jobs and head-bound
 adapter; PR #1843 integrated the inactive guarded rerun helper on trusted main.
 PR #1850 integrated #1844's inactive dispatcher on verified main at `f14fc4f3`.
-The #1835 branch candidate adds approval-label issue routing, not yet available
-on trusted main. Its dispatcher prerequisite is integrated; workflow delivery
-and activation remain separate from local preparation. Repository Actions
+PR #1855 integrated #1835 approval-label issue routing at `47911e25`.
+Trusted delivery and live acceptance remain separate from local preparation. Repository Actions
 capability is constrained by trusted code, not workflow-granular permissions.
 Missing native-run PR association or token capability blocks refresh explicitly.
 Partial target failures can leave earlier reruns requested; this is not atomic
-reconciliation. Local tests are not live required-gate proof. Legacy writers,
-the queue, six contexts and App15368 remain intact. #1802 stays open and #1810
-retirement stays blocked: fresh T4 probe consent and live evidence are required
-before rollout claims or retirement. See the
+reconciliation. Local tests are not live required-gate proof. The #1810 draft
+candidate removes legacy PR writers and the transitional publisher only when
+integrated; it preserves complete merge-group jobs, six contexts and App15368.
+It is not active retirement on main: **NO-GO** remains. The
+[canonical #1810 matrix](https://github.com/Gentleman-Programming/engram/issues/1810)
+records bounded sequential/manual positives and PARTIAL rapid-burst evidence.
+Four premerge gaps remain: late-legacy selection without a safe publication
+boundary, in-flight/superseded heads, complete rapid-event admission/ordering,
+and post-merge-group revocation. Removing triggers does not cancel old in-flight,
+queued or historical reruns using old code. Use eligible native metadata-router
+recovery only; no fixed latency, atomic cancellation or automatic retry is promised.
+#1802 stays open; no new live probe is authorized by this draft. See the
 [native-policy scope and rollout boundary](docs/ci-issue-native-policy.md).
 
 Closing references also support `Closes OWNER/REPO#N`, `Fixes OWNER/REPO#N`

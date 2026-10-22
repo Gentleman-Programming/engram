@@ -1,8 +1,6 @@
 name: PR Validation
 
 on:
-  pull_request:
-    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
   merge_group:
     types: [checks_requested]
 
