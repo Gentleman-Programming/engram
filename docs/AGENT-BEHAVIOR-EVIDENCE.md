@@ -1,11 +1,12 @@
 # Agent behavior evidence, not a parity certificate
 
-This matrix maps the current Go `ProfileAgent` surface to representative evidence
-for #1985. Runtime semantics are unchanged. **Source-present is not executed**;
-neither a mock nor a source test establishes installed-host or release compatibility.
-The [contract](contracts/agent-contract-v1.json) remains `mcp-foundation`.
+This matrix maps the Go `ProfileAgent` surface to representative evidence from
+#1985, with a source-only review reconciliation after #2011 / #2014 below.
+**Source-present is not executed**; neither a mock nor a source test establishes
+installed-host or release compatibility. The [contract](contracts/agent-contract-v1.json)
+remains `mcp-foundation`.
 
-## Identity and evidence levels
+## Historical #1985 identity and evidence levels
 
 - Source baseline and worker HEAD: `945750bfa321b0067c9d94d1ca3a03c333920353`.
   This delivery changes only tests/docs. Its exact final commit SHA and clean-tree
@@ -23,6 +24,29 @@ The [contract](contracts/agent-contract-v1.json) remains `mcp-foundation`.
   #1903 / PR1906 remains open/unmerged at head
   `8571e684ebb708d1ba1ef6347ad553937338a356`. Its PATH/integration
   qualification is **not** evidence for this candidate; none was imported.
+
+## Post-merge review reconciliation
+
+[PR #2014](https://github.com/Gentleman-Programming/engram/pull/2014) closed #2011
+and merged as `b3c399a12a115f556ff95430cd1c3b2b4e065936`
+(head `e55e2a9e401591b976623fcebfd323b6b83cb782`). Source readback at that merge
+confirms that MCP `mem_review(action=mark_reviewed)` now reads the explicit
+project, requires explicit/current project resolution and always calls
+`MarkReviewedForProject`; the old global fallback is removed from this path.
+The generated contract's `project_policy` and `target_rule` both describe this
+confinement. Omitted-project `action=list` remains global.
+
+The scoped regression sources are `internal/mcp/review_project_contract_test.go`,
+`internal/server/review_project_contract_test.go` and
+`internal/store/review_project_guard_test.go` (**S**). This reconciliation is
+source/metadata readback, not a new execution of those tests. Candidate execution
+and review evidence belong to #2014's exact-head qualification record; neither
+that evidence nor the historical #1985 results automatically certify later main.
+
+The review implementation discrepancy is resolved. Residual behavioral-proof
+applicability and an aggregate verdict for an exact closure candidate remain
+outstanding for #1347. The write-outcome, installed-host and published-pair limits
+below remain explicit; no stronger artifact status or closure follows.
 
 ## Operation and rule map
 
@@ -50,7 +74,7 @@ Representative coverage does not assert every input/transport permutation.
 | `mem_current_project` | `project_transition_test.go`: `TestProjectTransitionFirstGitDetection`; Pi `native-tool-contract.test.mjs` | Canonical cwd projection; configured project may prevail |
 | `mem_doctor` | `mcp_test.go`: `TestMemDoctorRegisteredAndReturnsEnvelope`, `TestMemDoctorUnknownProjectReturnsStructuredError`; Pi `doctor-caller-binding.test.mjs` | Caller binding is diagnostic, not registration |
 | `mem_capture_passive` | `mcp_test.go`: `TestHandleCapturePassiveExtractsAndSaves`, `TestHandleCapturePassiveDefaultsSourceAndSession`; host-binding tests; Pi `passive-capture.test.mjs` | Parse/dedupe counts; no arbitrary destination identity |
-| `mem_review` | `mcp_test.go`: `TestHandleReviewListAndMarkReviewed`, `TestHandleReviewMarkReviewedEnforcesResolvedProjectAtMutation`; Pi `native-tool-contract.test.mjs` | **Current/target discrepancy:** MCP ignores explicit project for mark-reviewed, resolves current/process project, then falls back globally when unresolved. Pi forwards explicit/resolved project. `target_rule` is future, not certified |
+| `mem_review` | `mcp_test.go`: `TestHandleReviewListAndMarkReviewed`, `TestHandleReviewMarkReviewedEnforcesResolvedProjectAtMutation`; scoped MCP/HTTP/store sources in the post-merge section (**S**); Pi `native-tool-contract.test.mjs` | Mark-reviewed requires an explicit or resolved current project, never a global fallback; omitted-project list remains global. The #2011 / #2014 source reconciliation is not fresh execution or complete cross-runtime certification |
 | `mem_judge` | `mcp_judge_test.go`: `TestHandleJudge_HappyPath`, `TestHandleJudge_OptionalFieldsStayNull`, `TestHandleJudge_Idempotent_Overwrite` | Pi's omitted provenance uses host ID; batch omission does not. Complete real Pi single-judgment success/error proof remains unverified here |
 | `mem_judge_many` | `mcp_judge_many_test.go`: `TestJudgeManyPersistenceIsolationSync`, `TestJudgeManyInvalidInputNoMutation`; Pi new real public-scan vector below | Independent item transactions, ordered outcomes, no batch rollback |
 | `mem_compare` | `mcp_compare_test.go`: `TestHandleCompare_HappyPath`, `TestHandleCompare_NotConflictPersists`, `TestHandleCompare_Idempotency` | Public compare persists a judged relation, not a pending seed. Complete real Pi compare success/error proof remains unverified here |
@@ -142,9 +166,11 @@ worker checkout. The artifact was not regenerated. This does not erase the
 historical #1347 focused Go exit 1 or certify a future candidate. Parent owns the
 final clean LF-controlled checkout/candidate-specific freshness qualification.
 
-S2/S3 map and retain existing evidence; S4 adds successful/mixed public judgments;
-S5 explicitly retains missing reload/lost-ack proof; S6/S7 require final owner
-qualification and candidate SHA; S8 keeps `mcp-foundation` and the review discrepancy.
+At the #1985 snapshot, S2/S3 mapped and retained existing evidence; S4 added
+successful/mixed public judgments; S5 retained missing reload/lost-ack proof;
+S6/S7 required final owner qualification and candidate SHA; S8 kept
+`mcp-foundation` and the then-existing review discrepancy. #2011 / #2014 resolved
+that implementation discrepancy as recorded above, not the other proof limits.
 No installed-host, published-pair, package compatibility, full-parity or parent
 closure verdict follows. Continue with the [projection audit](PI-TOOL-PROJECTIONS.md)
 and [contract authority](AGENT-CONTRACT.md), not stronger artifact status.
