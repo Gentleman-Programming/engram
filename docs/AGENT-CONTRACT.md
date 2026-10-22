@@ -5,6 +5,10 @@ current 23-tool MCP `agent` profile and its semantic/projection metadata. Its
 status is **`mcp-foundation`**, not a claim that Pi already implements the same
 contract. Runtime negotiation and Pi alignment are not enabled by this artifact.
 
+The [behavioral evidence matrix](AGENT-BEHAVIOR-EVIDENCE.md) separates current
+operation/rule tests from execution results and remaining fault/host/release proof.
+It does not upgrade this artifact's status.
+
 ## Regenerate and check
 
 Run from the repository root:
