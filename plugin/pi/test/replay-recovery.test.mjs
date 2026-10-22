@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
 
@@ -13,7 +14,7 @@ function runtimeContext() {
   return { cwd: PLUGIN_ROOT, sessionManager: { getSessionId: () => "recovery-session" }, ui: { setStatus() {} } };
 }
 
-async function saveWith(handler, signal) {
+async function saveWith(handler, signal, contract = fixtureContract) {
   const originalFetch = globalThis.fetch;
   const originalURL = process.env.ENGRAM_URL;
   const calls = [];
@@ -23,6 +24,7 @@ async function saveWith(handler, signal) {
     const request = new URL(url);
     if (request.pathname === "/project/current") return Response.json({ project: "pi" });
     if (request.pathname === "/sessions") return Response.json({ id: "recovery-session", status: "created" });
+    if (request.pathname === "/runtime-contract") return Response.json(contract());
     if (request.pathname === "/health") {
       healthChecks += 1;
       return Response.json({ status: "ok" });
@@ -66,6 +68,17 @@ for (const [name, status, response] of [
     assert.equal(healthChecks, 0, "a received HTTP error must not start self-heal probing");
   });
 }
+
+test("ambiguous save never queries or replays onto a changed runtime instance", async () => {
+  let changed = false;
+  const { result, calls } = await saveWith(() => {
+    changed = true;
+    throw new TypeError("acknowledgement lost");
+  }, undefined, () => ({ ...fixtureContract(), ...(changed ? { instance_id: "replacement" } : {}) }));
+  assert.equal(result.isError, true);
+  assert.equal(result.details.outcome, "unknown");
+  assert.deepEqual(calls.map(({ options }) => options.method), ["POST"]);
+});
 
 test("typed receipt miss authorizes one byte-identical replay to frozen canonical destinations", { concurrency: false }, async () => {
   const { result, calls } = await saveWith((_request, options, seen) => {

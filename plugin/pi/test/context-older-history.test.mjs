@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -33,6 +34,7 @@ async function mocked(run) {
   let payload = { context: "Go context unchanged" }, status = 200;
   globalThis.fetch = async (url, init = {}) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     if (request.pathname === "/health") return Response.json({ status: "ok" });
     if (request.pathname === "/project/current") return Response.json({ project: "context-alpha" });
     assert.equal(request.pathname, "/context");

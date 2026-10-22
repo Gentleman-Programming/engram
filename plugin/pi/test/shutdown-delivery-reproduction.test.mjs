@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { fixtureContract } from './support/runtime-contract-fixture.mjs';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { fork } from 'node:child_process';
@@ -42,6 +43,11 @@ async function scenario(interrupted, fault) {
       for await (const chunk of req) text += chunk;
       const path = new URL(req.url, 'http://127.0.0.1').pathname;
       const body = text ? JSON.parse(text) : undefined;
+      if (path === '/runtime-contract') {
+        assert.equal(req.method, 'GET');
+        assert.equal(body, undefined);
+        return res.end(JSON.stringify(fixtureContract()));
+      }
       requests.push({ path, method: req.method, body });
       if (path === '/project/current') {
         assert.equal(req.method, 'GET');

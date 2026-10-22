@@ -16,6 +16,7 @@ import { Type } from "typebox";
 import { ArchiveOutcome, buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
 import { compactResultStatus, humanToolName, renderCallText, renderResultText } from "./memory-tool-chrome.js";
 import { redactPrivateTags, redactUrlPath, redactValue } from "./private-redaction.js";
+import { runtimeContractIdentity, runtimeContractID } from "./runtime-contract.js";
 
 function optionalEnvironmentValue(value: string | undefined): string | undefined {
   return value?.trim() ? value : undefined;
@@ -377,8 +378,8 @@ class EngramHttpError extends Error {
 }
 
 class EngramUnavailableError extends Error {
-  constructor() {
-    super(unreachableMessage(undefined));
+  constructor(message = unreachableMessage(undefined)) {
+    super(message);
     this.name = "EngramUnavailableError";
   }
 }
@@ -449,6 +450,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   let refused = false;
   let ambiguousTransport = false;
   for (let attempt = 0; attempt < policy.maxAttempts; attempt += 1) {
+    await ensureRuntimeQualification(opts.signal);
     // Validation errors must escape, not be classified/retried as transport failures.
     if (opts.beforeDispatch) await opts.beforeDispatch();
     opts.onDispatch?.();
@@ -563,6 +565,8 @@ function isAmbiguousObservationSaveReplayStatus(status: number): boolean {
 // Only native mem_save opts in. Its request bytes and both destinations are frozen before
 // the first dispatch, so recovery cannot pick up a changed server configuration or payload.
 async function postObservationWithReplayRecovery<TResponse>(body: Record<string, unknown>, signal?: AbortSignal): Promise<EngramFetchResult<TResponse>> {
+  await ensureRuntimeQualification(signal);
+  const qualifiedInstance = acceptedRuntimeQualification;
   const operationID = randomUUID();
   const writeHeaders = transportHeaders(true);
   const lookupHeaders = transportHeaders();
@@ -600,6 +604,10 @@ async function postObservationWithReplayRecovery<TResponse>(body: Record<string,
     signal?.addEventListener("abort", onCallerAbort, { once: true });
     try {
       const exchange = (async () => {
+        await ensureRuntimeQualification(controller.signal);
+        // Frozen bytes/destinations never move an uncertain write to a new runtime.
+        if (acceptedRuntimeQualification !== qualifiedInstance) throw runtimeContractFailure("server binding changed during observation recovery");
+        throwIfAborted(controller.signal);
         const response = await fetch(method === "POST" ? destination : lookupDestination, {
           method,
           headers: method === "POST" ? writeHeaders : lookupHeaders,
@@ -758,6 +766,100 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
 // retrying it on the exponential curve only delays the recheck. Its retry cadence is a fixed
 // short window instead; transient failures keep the exponential backoff.
 class DeterministicStartupError extends Error {}
+
+class RuntimeContractError extends DeterministicStartupError {}
+type RuntimeQualification = { endpoint: string; token: string; instanceID: string };
+let acceptedRuntimeQualification: RuntimeQualification | undefined;
+let runtimeQualificationFlight: { endpoint: string; token: string; promise: Promise<void> } | undefined;
+const effectiveTransportToken = () => SESSION_OWNED ? ownedToken : CONFIGURED_HTTP_TOKEN;
+
+function runtimeContractFailure(reason: string): RuntimeContractError {
+  return new RuntimeContractError(`gentle-engram rejected the Engram runtime contract: ${reason}. Expected ${runtimeContractID}. Upgrade Engram and restart its server and Pi; verify ENGRAM_URL/ENGRAM_BIN. Memory dispatch was blocked.`);
+}
+
+async function ensureRuntimeQualification(signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  const endpoint = ENGRAM_URL, token = effectiveTransportToken();
+  let flight = runtimeQualificationFlight;
+  if (!flight || flight.endpoint !== endpoint || flight.token !== token) {
+    const promise = (async () => {
+      const controller = new AbortController();
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let timer: ReturnType<typeof setTimeout>;
+      const stopped = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(runtimeContractFailure("contract probe timed out"));
+        }, ENGRAM_WRITE_TIMEOUT_MS);
+      });
+      try {
+        const probe = (async () => {
+          let attempt = { endpoint, token, headers: transportHeaders() };
+          let recovered = false;
+          const request = () => fetch(`${attempt.endpoint}/runtime-contract`, { headers: attempt.headers, signal: controller.signal });
+          let response: Response;
+          try { response = await request(); }
+          catch (error) {
+            // Only definite refusal can enter existing implicit generation recovery.
+            if (!isConnectionRefusedError(error) || !await recoverImplicitEngramServer()) throw error;
+            throwIfAborted(controller.signal);
+            // Owned startup may acknowledge a fresh endpoint and credential. Snapshot
+            // both together; never retry the retired destination with the new bearer.
+            attempt = { endpoint: ENGRAM_URL, token: effectiveTransportToken(), headers: transportHeaders() };
+            recovered = true;
+            response = await request();
+          }
+          if (!response.ok) throw runtimeContractFailure(`missing or unavailable contract (HTTP ${response.status})`);
+          reader = response.body?.getReader();
+          if (!reader) throw runtimeContractFailure("missing contract response body");
+          const chunks: Uint8Array[] = [];
+          let size = 0;
+          for (;;) {
+            const chunk = await reader.read();
+            throwIfAborted(controller.signal);
+            if (chunk.done) break;
+            size += chunk.value.byteLength;
+            if (size > 65536) throw runtimeContractFailure("oversized contract response");
+            chunks.push(chunk.value);
+          }
+          const identity = runtimeContractIdentity(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+          if (attempt.endpoint !== ENGRAM_URL || attempt.token !== effectiveTransportToken()) throw runtimeContractFailure("transport changed during qualification");
+          if (localEngramInstanceID && identity !== localEngramInstanceID) throw runtimeContractFailure("contract identity does not match the local server");
+          const prior = acceptedRuntimeQualification;
+          const sameTransport = prior?.endpoint === attempt.endpoint && prior?.token === attempt.token;
+          if (prior && (prior.instanceID !== identity || (!sameTransport
+            && (!recovered || prior.endpoint !== endpoint || prior.token !== token)))) {
+            throw runtimeContractFailure("server identity changed; restart Pi to bind a fresh qualified runtime");
+          }
+          // A recovered same-instance transport gets a new binding object. Frozen
+          // uncertain observation recovery must still refuse to move onto it.
+          acceptedRuntimeQualification = prior && sameTransport ? prior
+            : { endpoint: attempt.endpoint, token: attempt.token, instanceID: identity };
+        })();
+        await Promise.race([probe, stopped]);
+      } catch (error) {
+        if (error instanceof RuntimeContractError) throw error;
+        if (error instanceof EngramUnavailableError || isConnectionRefusedError(error)) {
+          throw new EngramUnavailableError("gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.");
+        }
+        // Never echo fetch errors, raw metadata, URL credentials or private bindings.
+        throw runtimeContractFailure(error instanceof SyntaxError ? "malformed JSON contract" : "unreadable or incompatible contract");
+      } finally {
+        clearTimeout(timer!);
+        controller.abort();
+        void reader?.cancel().catch(() => {});
+      }
+    })();
+    flight = { endpoint, token, promise };
+    runtimeQualificationFlight = flight;
+    const current = flight;
+    void promise.finally(() => {
+      if (runtimeQualificationFlight === current) runtimeQualificationFlight = undefined;
+    }).catch(() => {});
+  }
+  // Each caller owns its wait, not the shared read-only probe.
+  await awaitWithAbort(flight.promise, signal);
+}
 
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
 // told us nothing either way. Only "ready" is proof that a server is answering, so nothing
@@ -1189,6 +1291,8 @@ function closeOwnedTransport(): Promise<void> {
       ownedChild = undefined;
       ownedToken = "";
       ENGRAM_URL = "";
+      acceptedRuntimeQualification = undefined;
+      runtimeQualificationFlight = undefined;
       initialization = undefined;
       clearStartupRetryWindow();
     }
@@ -1914,6 +2018,7 @@ async function initialize(cwd: string): Promise<void> {
   project = fallbackProjectName(cwd);
 
   await initializeEngramServer();
+  await ensureRuntimeQualification();
 
   applyDetectedProject(await detectServerProject(cwd));
 }
@@ -1922,6 +2027,7 @@ async function initialize(cwd: string): Promise<void> {
 // the same actionable prefix instead of leaking a raw spawn or readiness message.
 function normalizeInitializationError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof RuntimeContractError || error instanceof EngramUnavailableError) return error;
   const normalized = `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_PORT/ENGRAM_BIN.`;
   return error instanceof ForeignOwnershipError
     ? new ForeignOwnershipError(error.evidence, normalized)
@@ -1929,7 +2035,7 @@ function normalizeInitializationError(error: unknown): Error {
 }
 
 function initOnce(cwd: string): Promise<void> {
-  return sharedInitialization(() => initialize(cwd)).catch((error) => {
+  return sharedInitialization(() => initialize(cwd)).then(() => ensureRuntimeQualification()).catch((error) => {
     throw normalizeInitializationError(error);
   });
 }
@@ -2262,7 +2368,25 @@ function callerBindingContext(ctx: SessionContext, target: string, appendAvailab
     host_context: { append_entry_available: appendAvailable, branch_available: branchAvailable } };
 }
 
-async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined): Promise<unknown> {
+type ExplicitEndInvocation = {
+  runtimeID: string; effectiveID: string; binding: RuntimeQualification | undefined;
+  registrations: Promise<string>[]; ending?: Promise<unknown>; owner?: string;
+};
+function captureExplicitEndInvocation(params: Record<string, unknown>, ctx: SessionContext, appendEntry?: ExtensionAPI["appendEntry"]): ExplicitEndInvocation | undefined {
+  const runtimeID = getSessionId(ctx);
+  if (!runtimeID || params.id !== runtimeID) return undefined;
+  const effectiveID = effectiveSessionID(ctx, runtimeID);
+  const owner = registeredSessionProjects.get(effectiveID);
+  const pending = pendingEffectiveSession(ctx, runtimeID, effectiveID);
+  const registrations = [...effectiveSessionRegistrations.entries()]
+    .filter(([key]) => key.endsWith(`\u0000${runtimeID}`)).map(([, promise]) => promise);
+  const ending = owner && (!pending || (!!appendEntry && pendingEffectiveSessionProject(ctx, runtimeID, effectiveID) === owner))
+    ? sessionEndingsInFlight.get(effectiveID) : undefined;
+  for (const promise of [...registrations, ending]) void promise?.catch(() => {});
+  return { runtimeID, effectiveID, binding: acceptedRuntimeQualification, registrations, ending, owner };
+}
+
+async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext, fetch: EngramFetcher = engramFetch, appendEntry?: ExtensionAPI["appendEntry"], transportFailure?: () => EngramTransportFailure | undefined, endInvocation?: ExplicitEndInvocation): Promise<unknown> {
   const sessionId = toolName === "mem_doctor" ? undefined : getSessionId(ctx);
   const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
   const writeState = sessionId ? lifecycle(ctx, sessionId) : undefined;
@@ -2487,6 +2611,11 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (typeof params.id !== "string" || !params.id || params.id !== sessionId) {
         throw new Error("Pi-native session end requires the current host session ID; end independent sessions directly outside Pi-native tools");
       }
+      // Captured promises coordinate an invocation; they never grant write authority.
+      if (endInvocation?.runtimeID === sessionId) {
+        if (endInvocation.binding && endInvocation.binding !== acceptedRuntimeQualification) throw runtimeContractFailure("server binding changed during explicit session end");
+        await Promise.all(endInvocation.registrations);
+      }
       // Registration may select a continuation while this explicit end is waiting.
       await Promise.all([...effectiveSessionRegistrations.entries()]
         .filter(([key]) => key.endsWith(`\u0000${sessionId}`))
@@ -2500,6 +2629,10 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           throw new Error("Cannot end a pending Pi session without confirmed local project ownership and entry persistence");
         }
       }
+      if (endInvocation?.ending && endInvocation.runtimeID === sessionId
+        && endInvocation.effectiveID === endedSessionID && endInvocation.owner
+        && endInvocation.binding === acceptedRuntimeQualification
+        && (!persistedPending || owner === endInvocation.owner)) return endInvocation.ending;
       const pendingEnd = sessionEndingsInFlight.get(endedSessionID);
       if (pendingEnd) return pendingEnd;
       // A persisted reservation from an earlier module graph is not local proof of
@@ -2649,12 +2782,13 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
   const transport = createMemoryToolTransport(signal);
 
   try {
+    const endInvocation = toolName === "mem_session_end" ? captureExplicitEndInvocation(params, ctx, appendEntry) : undefined;
     // Initialization runs inside the guarded path: a rejected startup must reach the agent as
     // a normalized tool error, not as a rejection escaping the Pi tool boundary.
     await awaitWithAbort(initOnce(ctx.cwd), signal);
     await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
-    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry, transport.transportFailure), signal);
+    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch, appendEntry, transport.transportFailure, endInvocation), signal);
     const failure = transport.transportFailure();
     if (failure) throw new Error(unreachableMessage(failure));
 

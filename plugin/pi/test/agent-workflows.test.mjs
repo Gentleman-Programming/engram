@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { test } from "node:test";
 import { importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
 
@@ -11,6 +12,7 @@ async function fixture(body, handler) {
     const path = new URL(url).pathname;
     const call = { path, method: init.method ?? "GET", body: init.body && JSON.parse(init.body) };
     calls.push(call);
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return Response.json({ status: "ok" });
     if (path === "/project/current") return Response.json({ project: "engram" });
     if (handler) {

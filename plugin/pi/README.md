@@ -348,9 +348,16 @@ Pi-native compact tools use the same HTTP server path as event capture, includin
 The package includes `runtime-contract.js` and the adjacent Go-generated
 `runtime-contract.json`. The standalone comparison helper accepts only the complete
 expected projection and returns its dynamic server instance identity; it does not
-compute a digest or infer compatibility from versions. These assets are not yet
-wired into consumer readiness or dispatch. Their inclusion does not establish SDK
-or schema-semantic parity, successful pending-batch writes, or release eligibility.
+compute a digest or infer runtime compatibility from versions. Before readiness
+and every memory request (including retries and observation recovery), the adapter
+rechecks `GET /runtime-contract`. Missing, malformed, older, unknown or mismatching
+projections block dispatch with upgrade/restart guidance, including with explicit
+`ENGRAM_URL`. Explicit URLs still bypass local binary ownership checks and never
+authorize local restart. Qualification privately pins URL, effective transport
+credential and instance identity; an identity change requires restarting Pi.
+Concurrent callers share bounded read-only probes, with independent cancellation.
+This does not establish SDK or schema-semantic parity, successful pending-batch
+writes, or release eligibility.
 
 ## Default agent profile
 

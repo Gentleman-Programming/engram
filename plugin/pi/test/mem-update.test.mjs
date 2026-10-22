@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -35,6 +36,7 @@ test("registered mem_update exposes optional strings and forwards exact supplied
   let error;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return Response.json({ status: "ok" });
     if (path === "/project/current") return Response.json({ project: "update-contract" });
     assert.equal(path, "/observations/42");
@@ -85,6 +87,7 @@ test("mem_update legacy full-content metadata and omission forwarding", async (t
   const payload = { id: 42, content: "server-owned", revision_count: 7 };
   globalThis.fetch = async (url, init = {}) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     if (request.pathname === "/health") return Response.json({ status: "ok" });
     if (request.pathname === "/project/current") return Response.json({ project: "update-contract" });
     assert.equal(request.pathname, "/observations/42");

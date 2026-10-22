@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { runtimeMetadataResponse } from './support/runtime-contract-fixture.mjs';
 import { test } from 'node:test';
 import { importPluginFromSandbox, PLUGIN_ROOT, withPluginSandbox } from './plugin-sandbox.mjs';
 
@@ -15,6 +16,7 @@ test('prompt search forwards scope and preserves original text without changing 
   let failure = false;
   globalThis.fetch = async url => {
     const parsed = new URL(url);
+    if (parsed.pathname === '/runtime-contract') return runtimeMetadataResponse(parsed.pathname);
     if (parsed.pathname === '/project/current') return new Response('{"project":"engram"}');
     if (parsed.pathname === '/prompts/search' || parsed.pathname === '/search') {
       requests.push(parsed);

@@ -4,11 +4,129 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { runtimeContractID, runtimeContractIdentity } from '../runtime-contract.js';
-import { withPluginSandbox } from './plugin-sandbox.mjs';
+import { importPluginFromSandbox, withPluginSandbox } from './plugin-sandbox.mjs';
+import { fixtureContract } from './support/runtime-contract-fixture.mjs';
 
 // Go's current checked-in projection is the only expected inventory.
 const expected = JSON.parse(await readFile(new URL('../runtime-contract.json', import.meta.url), 'utf8'));
 const response = () => ({ ...structuredClone(expected), instance_id: '1'.repeat(32) });
+
+async function withConsumer(contract, run, endpoint = 'http://127.0.0.1:17437') {
+  const previousFetch = globalThis.fetch;
+  const keys = ['ENGRAM_URL', 'ENGRAM_HTTP_TOKEN', 'ENGRAM_SERVER_MODE'];
+  const saved = keys.map(key => process.env[key]);
+  process.env.ENGRAM_URL = endpoint;
+  process.env.ENGRAM_HTTP_TOKEN = 'private-bearer';
+  delete process.env.ENGRAM_SERVER_MODE;
+  const calls = [], hooks = new Map(), tools = new Map();
+  let current = contract;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname.replace(/^\/\//, '/');
+    calls.push({ path, metadata: String(url).endsWith('/runtime-contract'), health: String(url).endsWith('/health'), method: init.method ?? 'GET', headers: new Headers(init.headers) });
+    if (String(url).endsWith('/runtime-contract')) return typeof current === 'function' ? current() : Response.json(current);
+    if (String(url).includes('/project/current')) return Response.json({ project: 'runtime-tests' });
+    return Response.json({ id: 1, context: '', topic_key: 'architecture/test' });
+  };
+  try {
+    await withPluginSandbox('engram-runtime-consumer-', async ({ sandbox, clock }) => {
+      const register = await importPluginFromSandbox(sandbox);
+      register({ registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => hooks.set(event, handler) });
+      const ctx = { cwd: sandbox, sessionManager: { getSessionId: () => 'runtime-host', getBranch: () => [] }, ui: { setStatus() {} } };
+      const tool = signal => tools.get('mem_suggest_topic_key').execute('qualification', { title: 'Test' }, signal, undefined, ctx);
+      await run({ tool, calls, hooks, ctx, clock, setContract: value => { current = value; } });
+    }, { controlledDelay: 5000 });
+  } finally {
+    globalThis.fetch = previousFetch;
+    keys.forEach((key, i) => { if (saved[i] === undefined) delete process.env[key]; else process.env[key] = saved[i]; });
+  }
+}
+
+test('consumer refusal preserves unavailable transport and self-heal without private data or writes', async () => {
+  const refused = () => {
+    const cause = Object.assign(new Error('private-bearer'), { code: 'ECONNREFUSED' });
+    throw new TypeError('private-password private-query', { cause });
+  };
+  await withConsumer(refused, async ({ tool, calls, clock }) => {
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, 'gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.');
+    assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
+    assert.equal(calls.length, 1, 'an explicit endpoint never authorizes a recovery request');
+    assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
+    assert.equal(clock.pending(), 1, 'typed unavailability must schedule the existing self-heal probe');
+    await clock.advance();
+    assert.equal(calls.filter(call => call.health).length, 1, 'self-heal must perform exactly one health probe');
+    assert.equal(calls.length, 2, 'only qualification and the health probe may be dispatched');
+    assert.ok(calls.every(call => call.method === 'GET'), 'qualification failure must not send lifecycle or memory writes');
+  }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
+});
+
+for (const [name, contract] of [
+  ['missing endpoint', () => new Response('', { status: 404 })],
+  ['malformed JSON', () => new Response('{')],
+  ['private transport error', () => { throw new Error('private-password private-query private-bearer'); }],
+  ['unknown contract', { ...fixtureContract(), contract_id: 'unknown' }],
+  ['missing identity', expected],
+  ['older revision', { ...fixtureContract(), revision: 0 }],
+  ['changed inventory with claimed digest', { ...fixtureContract(), operations: {} }],
+  ['oversized response', () => new Response(' '.repeat(65537))],
+]) {
+  test(`consumer blocks ${name} before lifecycle and tool effects without leaking credentials`, async () => {
+    await withConsumer(contract, async ({ tool, calls, hooks, ctx, clock }) => {
+      await hooks.get('session_start')({}, ctx);
+      const result = await tool();
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /runtime contract/i);
+      assert.match(result.content[0].text, /upgrade|restart/i);
+      assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
+      assert.ok(calls.length > 0);
+      assert.ok(calls.every(call => call.method === 'GET' && call.metadata), 'only metadata may be requested');
+      assert.equal(clock.pending(), 0, 'contract failures must not schedule transport self-heal');
+    }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
+  });
+}
+
+test('consumer requalifies exact metadata using effective shared credentials and pins instance', async () => {
+  await withConsumer(fixtureContract(), async ({ tool, calls, setContract }) => {
+    assert.notEqual((await tool()).isError, true);
+    assert.ok(calls.some(call => call.path === '/topic-keys/suggest' && call.method === 'POST'));
+    const before = calls.length;
+    setContract({ ...fixtureContract(), instance_id: 'foreign-instance' });
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /identity changed/i);
+    assert.ok(calls.length > before);
+    assert.equal(calls.slice(before).some(call => call.method === 'POST'), false);
+    for (const call of calls) assert.equal(call.headers.get('authorization'), 'Bearer private-bearer');
+  });
+});
+
+test('consumer cancellation retires only its waiter while another caller shares the probe', async () => {
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  let probes = 0;
+  await withConsumer(async () => { probes++; started(); await gate; return Response.json(fixtureContract()); }, async ({ tool }) => {
+    const controller = new AbortController();
+    const canceled = tool(controller.signal);
+    await entered;
+    const survivor = tool();
+    controller.abort(new DOMException('caller stopped', 'AbortError'));
+    await assert.rejects(canceled, /caller stopped/);
+    assert.equal(probes, 1, 'concurrent initialization shares one metadata request');
+    release();
+    assert.notEqual((await survivor).isError, true);
+  });
+});
+
+test('consumer bounds a stalled metadata body by the whole probe deadline', async () => {
+  await withConsumer(() => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } })), async ({ tool, calls }) => {
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contract probe timed out/);
+    assert.ok(calls.every(call => call.metadata));
+  });
+});
 
 test('public helper accepts the complete projection and returns the dynamic identity', () => {
   assert.equal(runtimeContractID, expected.contract_id);
