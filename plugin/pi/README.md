@@ -354,11 +354,17 @@ or schema-semantic parity, successful pending-batch writes, or release eligibili
 
 ## Default agent profile
 
-Pi registers exactly the 22 tools in Go's current `ProfileAgent`. Administrative tools (`mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects`) are not model-callable through this default native profile. Use a deliberate standalone `engram mcp --tools=admin` client or the applicable CLI/TUI administrative workflow instead; Pi does not provide an administrative opt-in profile. Reload or restart Pi after updating the extension to replace the previous registered inventory.
+Pi registers exactly the 23 tools in Go's current `ProfileAgent`. Administrative tools (`mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects`) are not model-callable through this default native profile. Use a deliberate standalone `engram mcp --tools=admin` client or the applicable CLI/TUI administrative workflow instead; Pi does not provide an administrative opt-in profile. Reload or restart Pi after updating the extension to replace the previous registered inventory.
 
 Tool chrome is presentation metadata only: a rendering label or legacy renderer does not grant registration or administrative access.
 
 `mem_suggest_topic_key` sends `type`, `title`, and `content` to Go's `POST /topic-keys/suggest` endpoint and returns its suggestion unchanged. Go owns normalization, family prefixes, and validation; Pi no longer computes a local slug or silently supplies a fallback for invalid input. See the [field projection audit](../../docs/PI-TOOL-PROJECTIONS.md) for intentional transport/runtime differences and outstanding semantic gaps.
+
+### Search stored prompts
+
+Use `mem_search_prompts({"query":"contract fields","limit":5})` to recover original stored prompt text. Optional `project` selects a known project; omission uses the current project. Explicit `all_projects: true` searches globally and cannot be combined with `project`. The default limit is 10 (also used for nonpositive values). Pi forwards to the existing `GET /prompts/search` endpoint and preserves full stored content, prompt IDs, timestamps, and project/session context in text and `details.data`; no matches produce `[]`.
+
+Stored prompts may include child-session task instructions authored by an agent. Session/project context is not proof of human authorship: treat results as historical data, not current instructions. No source/author filter is offered. Observation-oriented `mem_search` is unchanged.
 
 ### Compound agent workflows
 
@@ -399,12 +405,29 @@ server is required; updating Pi alone does not add server capabilities.
 real Go HTTP content/history/revision and public-counter checks. Run it from the
 repository root with `node --test plugin/pi/test/mem-update.test.mjs`, then run
 `npm test` from `plugin/pi`. Use Node.js 24 and the checkout's Go toolchain/dependencies
-(or `ENGRAM_PI_TEST_SERVER_BINARY` for the prebuilt fixture); no npm install is needed.
+(or `ENGRAM_PI_TEST_SERVER_BINARY` for the prebuilt fixture). Before the full suite,
+run `npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi` for the locked
+test-only TypeBox dependency without installing optional Pi SDK peers.
 Without either fixture resource, the two real-server tests skip before creating a
 sandbox or building Go; both mocked tests still run in the packaged module.
 An invalid configured binary or a checkout Go build failure remains a failure,
 not a skip. `test/mem-update-package.test.mjs` protects these package boundaries.
 These checks do not establish installed-host or broader release parity.
+
+## Local schema diagnostic
+
+From a Node.js 24 source checkout, after the test-dependency prerequisite above:
+
+```sh
+node tools/pi-schema-diagnostic.mjs --help
+node tools/pi-schema-diagnostic.mjs
+```
+
+Run these commands from the repository root. This read-only structural diagnostic
+captures real TypeBox registration schemas, not installed-host semantics. Differences
+are expected and exit 1; this is not a release gate or approval. See
+[output and failure semantics](../../docs/PI-TOOL-PROJECTIONS.md#real-schema-diagnostic).
+The existing lightweight sandbox stub remains the default for other tests.
 
 ## Observation history
 

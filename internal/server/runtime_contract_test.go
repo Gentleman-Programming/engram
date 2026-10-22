@@ -58,7 +58,7 @@ func TestRuntimeContractEndpoint(t *testing.T) {
 		t.Fatalf("operations: %v", err)
 	}
 	names := []string{
-		"mem_search", "mem_context", "mem_consolidate", "mem_judge_many", "mem_get_observation",
+		"mem_search", "mem_search_prompts", "mem_context", "mem_consolidate", "mem_judge_many", "mem_get_observation",
 		"mem_save", "mem_session_summary", "mem_update", "mem_session_finalize", "mem_save_prompt",
 		"mem_session_start", "mem_session_end", "mem_current_project", "mem_doctor",
 		"mem_capture_passive", "mem_review", "mem_judge", "mem_compare", "mem_list_projects",

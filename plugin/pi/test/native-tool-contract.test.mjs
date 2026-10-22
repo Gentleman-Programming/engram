@@ -524,6 +524,41 @@ test("Pi native saves persist under separate host sessions and stop on failed re
         assert.equal(row.session_id, ids[index % 2]);
         assert.notEqual(row.session_id, "model-foreign-session");
       }
+      // Recover verbatim stored prompts through the registered tool and real Go route.
+      const promptContent = `prompt-retrieval-orbit\n${"original 世界 ".repeat(150).trim()}`;
+      const promptSaved = await registeredTools.get("mem_save_prompt").execute("real-prompt-save", {
+        content: promptContent,
+      }, undefined, undefined, runtimeContext(ids[0]));
+      assert.notEqual(promptSaved.isError, true, promptSaved.content?.[0]?.text);
+      const searchPrompts = registeredTools.get("mem_search_prompts");
+      for (const selectors of [{}, { project: "pi-persistence-test" }, { all_projects: true }]) {
+        const result = await searchPrompts.execute("real-prompt-search", {
+          query: "prompt-retrieval-orbit", limit: 5, ...selectors,
+        }, undefined, undefined, runtimeContext(ids[0]));
+        assert.notEqual(result.isError, true, result.content?.[0]?.text);
+        const query = new URLSearchParams({ q: "prompt-retrieval-orbit", limit: "5" });
+        if (selectors.all_projects) query.set("all_projects", "true");
+        else query.set("project", "pi-persistence-test");
+        const direct = await fetch(`${url}/prompts/search?${query}`);
+        assert.equal(direct.status, 200);
+        assert.deepEqual(result.details.data, await direct.json());
+        assert.equal(result.details.data.length, 1);
+        assert.equal(result.details.data[0].content, promptContent);
+        assert.equal(result.details.data[0].session_id, ids[0]);
+      }
+      const promptState = async () => Promise.all(["/prompts/recent?all_projects=true&limit=100", "/stats?all_projects=true"].map(async path => {
+        const response = await fetch(`${url}${path}`);
+        assert.equal(response.status, 200);
+        return response.json();
+      }));
+      const beforePromptRefusal = await promptState();
+      const promptRefusal = await searchPrompts.execute("real-prompt-conflict", {
+        query: "prompt-retrieval-orbit", project: "pi-persistence-test", all_projects: true,
+      }, undefined, undefined, runtimeContext(ids[0]));
+      assert.equal(promptRefusal.isError, true);
+      assert.equal(promptRefusal.details.http_status, 400);
+      assert.match(promptRefusal.content[0].text, /project and all_projects cannot be used together/);
+      assert.deepEqual(await promptState(), beforePromptRefusal, "rejected search leaves prompts and counters unchanged");
       // Exercise cross-project routing against the same real core, not a wire-only stub.
       const runtimeBefore = await (await fetch(`${url}/sessions/${ids[0]}`)).json();
       const foreign = await save.execute("real-foreign", {

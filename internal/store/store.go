@@ -33,7 +33,6 @@ import (
 
 	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 	"github.com/Gentleman-Programming/engram/v3/internal/timeutil"
-	"golang.org/x/text/unicode/norm"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -9683,11 +9682,10 @@ func (s *Store) PreviewExplicitProjectMerge(source, canonical string) (*Explicit
 	if canonical == ReservedInboxProjectName {
 		return nil, fmt.Errorf("reserved inbox project cannot be a merge destination")
 	}
-	// Preserve the raw legacy spelling for SQL selection. Unicode-equivalent
-	// names may normalize to the target but still identify distinct stored rows.
-	unicodeVariant := !norm.NFC.IsNormalString(strings.TrimSpace(source))
-	if canonical == "" || normalizedSource == "" || (normalizedSource == canonical && !unicodeVariant) || !mergeProjectEligible(normalizedSource, canonical, true) {
-		return nil, fmt.Errorf("source project %q must be a distinct separator variant or Unicode normalization variant of canonical project %q", source, canonical)
+	// Preserve the exact trimmed legacy spelling for SQL selection. Case and
+	// Unicode variants may normalize to the target but identify distinct rows.
+	if canonical == "" || normalizedSource == "" || strings.TrimSpace(source) == canonical || !mergeProjectEligible(normalizedSource, canonical, true) {
+		return nil, fmt.Errorf("source project %q must be a distinct legacy case, separator or Unicode normalization variant of canonical project %q", source, canonical)
 	}
 	name := strings.TrimSpace(source)
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})

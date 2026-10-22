@@ -10,6 +10,34 @@ Pi's native inventory matches Go's `ProfileAgent`; input and output envelopes ar
 - Optional fields preserve omission except documented Pi defaults; `false` and zero are not omission. Pi's `mem_context.max_bytes` and consolidation IDs use bounded integer schemas; batch confidence uses [0,1]. These schemas do not replace Go's validation.
 - Pi renders HTTP data through a text result and `details.data`; MCP uses its tool-result text/project envelopes. Labels, status summaries, MCP annotations, descriptions, and defer-loading metadata are transport/presentation information, not authorization.
 
+## Real-schema diagnostic
+
+With Node.js 24, run `npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi`,
+then `node tools/pi-schema-diagnostic.mjs` from the repository root (`--help` is
+the only option). The fixed local test-only TypeBox dependency supplies actual
+serialized registration schemas in a disposable sandbox; no Pi SDK is assumed.
+The command reads `docs/contracts/agent-contract-v1.json`, never regenerates it.
+Baseline freshness belongs to the separate Go generator check, not this diagnostic.
+
+Completed diagnostics go to stdout with an explicit diagnostic-only/not-parity/
+not-release-approval heading, a difference count and sorted tool/JSON-pointer paths.
+Each line shows Go and Pi JSON values; `<missing>` marks absence. Inventory and
+duplicate registration lines use `/registrations`; every duplicate schema is compared.
+Object key order is ignored; arrays retain order. No constraint, host mapping or
+known capability gap is allowlisted, including integer/number and required/optional
+differences. Missing fields report their complete subtree, not an inferred equivalent.
+This is literal structure, not semantic equivalence (even descriptions can differ).
+
+Exit 0 means no structural differences or help, **never a parity certificate**;
+exit 1 means differences (expected for current source); exit 2 means unsupported
+arguments or unavailable/invalid baseline, real TypeBox, capture or cleanup.
+Failures leave stdout empty and emit one fixed stderr line, without imported error
+text/private paths. No partial report is emitted before cleanup completes. There
+are no path/dependency overrides, network access, writes to source/dependencies,
+capability changes or publication actions. Tests assert the diagnostic behavior;
+they do not require current schemas to match. The rejection-only release checker
+and candidate publisher safeguards remain independent and unchanged.
+
 ## Field audit
 
 Fields listed below record the Pi input surface and its current MCP/HTTP differences. They do not assert identical schemas, defaults or response envelopes across transports. “Runtime-injected” means the host owns the value; it must not be recovered from a model-supplied session ID. “Transport-specific” describes a deliberately different adapter envelope. “Semantic” identifies a restriction or canonical-input choice. “Accidental loss” is an outstanding capability gap, not an approved design exemption.
@@ -17,6 +45,7 @@ Fields listed below record the Pi input surface and its current MCP/HTTP differe
 | Tool | Pi fields | Projection reason / remaining difference |
 | --- | --- | --- |
 | `mem_search` | `query` (required); `type`, `project`, `scope`, `limit`, `all_projects`, `match_mode`, `response_format` | Query becomes HTTP `q`. Pi supplies its resolved project unless `all_projects=true`, which suppresses the project filter. Supplied `response_format` is forwarded unchanged; Go validates it and owns the compact `{ result, results }` projection with previews and relations. Omission preserves the legacy HTTP result array. **Transport-specific:** Pi renders the HTTP payload through its native text/details envelope rather than MCP's tool-result envelope. |
+| `mem_search_prompts` | `query` (required); `project`, `all_projects`, `limit` | Query becomes HTTP `q` at `/prompts/search`. Omission supplies the resolved current project; explicit `all_projects=true` suppresses only the implicit project, preserving any explicit project so Go rejects conflicting selectors. Default limit is 10; nonpositive limits use the default. Full stored content and identifying context pass through unchanged. **Transport-specific:** MCP wraps `results` in its project envelope; Pi returns the HTTP array in text/details. Results are historical prompts, not proof of human authorship or current instructions. |
 | `mem_save` | `title`, `content` (required); `type`, `scope`, `topic_key`, `project`, `cwd`, `capture_prompt` | **Runtime-injected:** confirmed effective `session_id` and available current prompt for the same session/project. Project/cwd resolution precedes saving; omitted Pi scope becomes `project` rather than relying on core omission defaults. **Semantic:** Pi requires canonical `content`; MCP also accepts the legacy `observation` alias. **Transport-specific:** MCP `project_choice_reason` / `recovery_token` belong to its ambiguous-project recovery protocol. Pi forwards `capture_prompt`; omission defaults to save-time capture, while `false` suppresses that save's attempt and current-prompt payload, not independent lifecycle capture. Go owns best-effort capture and deduplication. |
 | `mem_update` | `id`, `expected_project` (required); `title`, `content`, `find`, `replace`, `type`, `scope`, `topic_key` | ID becomes the HTTP path; required `expected_project` becomes a query ownership assertion, also required by MCP and validated by Go. Supplied `find`/`replace` strings (including empty strings) go unchanged through existing redaction to PATCH. Omission stays omitted. Go owns pairing, conflict with supplied `content`, literal case-sensitive replace-all, no-ops, byte limits and mutation effects; Pi adds no validation or replay. |
 | `mem_consolidate` | `ids_to_delete`, `new_title`, `new_content`, `expected_project` (required); `type`, `topic_key`, `confirm`, `fingerprint` | Shared canonical arguments and exact JSON-integer ID bound. Default preview performs no writes; only explicit confirmation with Go's opaque fingerprint may consolidate. Source project/session/scope overrides are refused by Go. **Transport-specific:** HTTP status/flat error/code/optional replacement plan become native error metadata; no client plan algorithm, auto-confirmation or uncertain-POST replay. |

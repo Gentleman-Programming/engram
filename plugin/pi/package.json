@@ -62,9 +62,9 @@
     "access": "public"
   },
   "peerDependencies": {
-    "typebox": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": ">=0.74.0"
+    "@earendil-works/pi-tui": ">=0.74.0",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "typebox": {
@@ -73,5 +73,8 @@
     "@earendil-works/pi-tui": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "typebox": "1.3.34"
   }
 }

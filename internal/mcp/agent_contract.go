@@ -157,6 +157,14 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 		ErrorEffects:  "no observation mutation; invalid MCP match_mode/response_format is rejected before project resolution",
 		PiDifferences: []string{"Pi sends its resolved project to HTTP, while MCP clears the project filter for implicit personal scope", "MCP uses bounded previews by default; HTTP/Pi uses full search result rows unless response_format=compact"},
 	},
+	"mem_search_prompts": {
+		Effect: "read", Risk: "read-only",
+		ProjectPolicy: "resolved current project by default; explicit known project or all_projects=true; conflicting selectors reject",
+		SessionPolicy: "stored session_id is context, not proof of human authorship or current instructions",
+		Guarantees:    []string{"require query", "return full original prompt content and id, created_at, project and session_id", "default limit is 10; nonpositive limits use the default", "preserve FTS ranking and short-term LIKE newest-first ordering", "empty results are an empty array"},
+		ErrorEffects:  "no prompt or observation mutation; validation and store failures are tool errors",
+		PiDifferences: []string{"MCP returns results within its project envelope; HTTP/Pi returns a prompt array"},
+	},
 	"mem_context": {
 		Effect: "read", Risk: "read-only", ProjectPolicy: readProjectPolicy, SessionPolicy: "no session attribution required",
 		Guarantees:    []string{"personal scope without explicit project clears the observation project filter", "MCP bounds its complete context result, including its suffix", "default byte budget is 16384; ceiling is 65536; preserve UTF-8"},

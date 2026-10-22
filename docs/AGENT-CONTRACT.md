@@ -1,7 +1,7 @@
 # Generate the Go-owned agent contract foundation
 
 The checked-in [agent contract](contracts/agent-contract-v1.json) describes the
-current 22-tool MCP `agent` profile and its semantic/projection metadata. Its
+current 23-tool MCP `agent` profile and its semantic/projection metadata. Its
 status is **`mcp-foundation`**, not a claim that Pi already implements the same
 contract. Runtime negotiation and Pi alignment are not enabled by this artifact.
 
@@ -132,7 +132,7 @@ mutations, and lost write acknowledgements can leave outcomes unknown.
 
 ## Compatibility and review boundary
 
-The existing 26-tool MCP `all` behavior and the historical
+The existing 27-tool MCP `all` behavior and the historical
 `internal/mcp/testdata/tool-contract-v1.json` compatibility ratchet remain intact.
 `TestAgentContractArtifactCurrent` checks this new current artifact separately.
 The generator tests exercise its public binary against isolated filesystem state.

@@ -66,8 +66,8 @@ func TestServerInstructionsUsesCandidateJudgmentIDs(t *testing.T) {
 
 func TestMCPToolInventoryMatchesDocumentation(t *testing.T) {
 	tools := NewServer(newMCPTestStore(t)).ListTools()
-	if len(tools) != 26 {
-		t.Fatalf("registered %d tools, want 26", len(tools))
+	if len(tools) != 27 {
+		t.Fatalf("registered %d tools, want 27", len(tools))
 	}
 	for _, name := range []string{"mem_judge_many", "mem_session_finalize", "mem_consolidate"} {
 		if tools[name] == nil {
@@ -79,7 +79,7 @@ func TestMCPToolInventoryMatchesDocumentation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, text := range []string{
-		"## MCP Tools (26 tools)",
+		"## MCP Tools (27 tools)",
 		`<a id="mcp-tools-23-tools"></a>`,
 		`<a id="mcp-tools-25-tools"></a>`,
 		"### mem_consolidate",
