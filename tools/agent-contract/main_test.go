@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +123,81 @@ func TestGeneratorWritesChecksAndPreservesStaleArtifact(t *testing.T) {
 	entries, err := os.ReadDir(root)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "contract.json" {
 		t.Fatalf("check/export created unexpected state (including a data directory): %v, %v", entries, err)
+	}
+}
+
+func TestProjectionMetadataCurrent(t *testing.T) {
+	binary, root := generatorExecutable(t), t.TempDir()
+	path := filepath.Join(root, "contract.json")
+	code, stdout, stderr := runGenerator(t, binary, root, "-output", path)
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("export: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Revision   int    `json:"revision"`
+		Status     string `json:"status"`
+		Operations map[string]struct {
+			Semantics struct {
+				PiDifferences []string `json:"pi_differences"`
+				ProjectPolicy string   `json:"project_policy"`
+				TargetRule    string   `json:"target_rule"`
+			} `json:"semantics"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Revision != 2 || document.Status != "mcp-foundation" {
+		t.Fatalf("metadata correction promoted contract: %+v", document)
+	}
+	for _, tc := range []struct {
+		name     string
+		facts    []string
+		obsolete string
+	}{
+		{"mem_consolidate", []string{"HTTP", "fingerprint", "auto-confirm", "replay"}, "Go/MCP-only"},
+		{"mem_judge_many", []string{"HTTP", "ordered", "provenance", "replay"}, "Go/MCP-only"},
+		{"mem_session_finalize", []string{"confirmed", "host", "model", "explicit", "unknown", "replay"}, "Go/MCP-only"},
+		{"mem_suggest_topic_key", []string{"HTTP", "Go", "envelope"}, "own slug"},
+		{"mem_update", []string{"find", "replace", "Go", "envelope"}, "omits find"},
+		{"mem_current_project", []string{"intentional", "canonical cwd", "directory", "host", "fallback"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := strings.Join(document.Operations[tc.name].Semantics.PiDifferences, " ")
+			for _, fact := range tc.facts {
+				if !strings.Contains(text, fact) {
+					t.Errorf("projection missing %q: %s", fact, text)
+				}
+			}
+			if tc.obsolete != "" && strings.Contains(text, tc.obsolete) {
+				t.Errorf("obsolete projection claim %q: %s", tc.obsolete, text)
+			}
+		})
+	}
+	review := document.Operations["mem_review"].Semantics
+	if !strings.Contains(review.ProjectPolicy, "ignores the project argument") || !strings.Contains(review.TargetRule, "explicit project confines") {
+		t.Error("review current behavior must remain distinct from proposed target")
+	}
+	for _, name := range []string{"mem_save", "mem_search", "mem_context", "mem_get_observation"} {
+		if len(document.Operations[name].Semantics.PiDifferences) == 0 {
+			t.Errorf("valid transport/runtime differences erased for %s", name)
+		}
+	}
+	code, stdout, stderr = runGenerator(t, binary, root, "-check", "-output", path)
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("check: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(raw, after) || bytes.Contains(raw, []byte("\r")) {
+		t.Fatalf("check changed artifact or export was not LF: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "contract.json" {
+		t.Fatalf("export/check created unexpected state: %v, %v", entries, err)
 	}
 }
 
