@@ -116,6 +116,10 @@ Fields listed below record the Pi input surface and its current MCP/HTTP differe
 
 ## Verification and remaining work
 
+See the [behavioral evidence matrix](AGENT-BEHAVIOR-EVIDENCE.md) for named
+operation/rule coverage, real public judgment vectors, execution provenance and
+remaining write-outcome proof. Source presence is not candidate qualification.
+
 ### Metadata reconciliation evidence (#1983)
 
 | Correction | Current source / regression evidence |
