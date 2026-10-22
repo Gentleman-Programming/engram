@@ -139,6 +139,19 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 	})
 }
 
+func TestCodexTestBashWithoutFixtureOverrides(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Git for Windows discovery")
+	}
+	t.Setenv("CODEX_TEST_TRUSTED_BASH", "")
+	t.Setenv("CODEX_TEST_TRUSTED_JQ", "")
+	bash := codexTestBash(t)
+	info, err := os.Stat(bash)
+	if err != nil || !info.Mode().IsRegular() || !filepath.IsAbs(bash) || !strings.EqualFold(filepath.Base(bash), "bash.exe") {
+		t.Fatalf("expected discovered Git Bash executable, got %q: %v", bash, err)
+	}
+}
+
 func codexTestBash(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {
@@ -153,11 +166,11 @@ func codexTestBash(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("find Git for Windows: %v", err)
 	}
-	_, err = codexTestBashCandidate(gitPath)
+	path, err := codexTestBashCandidate(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newCodexIntentFixture(t).bash
+	return path
 }
 
 func codexTestBashCandidate(gitPath string) (string, error) {
