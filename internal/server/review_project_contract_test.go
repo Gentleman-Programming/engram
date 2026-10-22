@@ -34,9 +34,13 @@ func TestReviewProjectContractUnresolvedHTTP(t *testing.T) {
 }
 
 func TestReviewProjectContractHTTP(t *testing.T) {
-	for _, owner := range []string{"alpha", "beta"} {
-		t.Run(owner, func(t *testing.T) {
-			t.Setenv("ENGRAM_PROJECT", "beta")
+	for _, tc := range []struct{ name, current, owner, query string }{
+		{"explicit positive", "beta", "alpha", "?project=ALPHA"},
+		{"explicit wrong owner", "beta", "beta", "?project=ALPHA"},
+		{"omitted wrong owner", "alpha", "beta", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENGRAM_PROJECT", tc.current)
 			s := newServerTestStore(t)
 			for _, p := range []string{"alpha", "beta"} {
 				if err := s.CreateSession(p, p, ""); err != nil {
@@ -46,7 +50,7 @@ func TestReviewProjectContractHTTP(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			id, err := s.AddObservation(store.AddObservationParams{SessionID: owner, Project: owner, Type: "decision", Title: "HTTP ownership", Content: "review target"})
+			id, err := s.AddObservation(store.AddObservationParams{SessionID: tc.owner, Project: tc.owner, Type: "decision", Title: "HTTP ownership", Content: "review target"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,9 +81,9 @@ func TestReviewProjectContractHTTP(t *testing.T) {
 			}
 			before := snapshot()
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=ALPHA", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
+			req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed"+tc.query, strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
 			New(s, 0).Handler().ServeHTTP(rec, req)
-			if owner == "beta" {
+			if tc.owner == "beta" {
 				if rec.Code != http.StatusNotFound || strings.TrimSpace(rec.Body.String()) != `{"error":"observation not found in resolved project"}` {
 					t.Fatalf("refusal: %d %s", rec.Code, rec.Body.String())
 				}

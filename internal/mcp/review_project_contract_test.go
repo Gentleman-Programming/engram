@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -21,6 +23,35 @@ func TestReviewProjectContractUnresolvedRPC(t *testing.T) {
 	}
 	if after := mcpHomeSelectionState(t, s); !reflect.DeepEqual(before, after) {
 		t.Fatalf("unresolved project changed observations/counters/sync: before=%v after=%v", before, after)
+	}
+}
+
+func TestReviewProjectContractAmbiguousRPC(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("ENGRAM_PROJECT", "")
+	for _, name := range []string{"read-a", "read-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+	s := newMCPTestStore(t)
+	id := seedHomeSelectionMCP(t, s)
+	before := mcpHomeSelectionState(t, s)
+	failed, body := homeSelectionRPC(t, NewServer(s), "mem_review", map[string]any{"action": "mark_reviewed", "id": id})
+	if !failed || body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil || body["project_source"] != "ambiguous" || body["project_path"] != parent {
+		t.Errorf("missing structured ambiguity: failed=%v body=%v", failed, body)
+	}
+	if !reflect.DeepEqual(body["available_projects"], []any{"read-a", "read-b"}) {
+		t.Errorf("missing ambiguity candidates: %v", body)
+	}
+	if after := mcpHomeSelectionState(t, s); !reflect.DeepEqual(before, after) {
+		t.Errorf("ambiguity changed observations/counters/sync: before=%v after=%v", before, after)
+	}
+	if body["hint"] != "Ask the user to choose a project, then retry mem_review action=mark_reviewed with an explicit project." {
+		t.Errorf("incorrect mark_reviewed recovery hint: %v", body)
 	}
 }
 

@@ -1914,7 +1914,11 @@ func handleReview(s *store.Store, cfg MCPConfig, activities ...*SessionActivity)
 			project, _ := req.GetArguments()["project"].(string)
 			detRes, detErr := resolveMCPProjectWithDetector(s, project, cfg.DefaultProject, true, captureProjectDetector(s))
 			if detErr != nil {
-				return readProjectErrorResult(activity, detRes, detErr), nil
+				result := readProjectErrorResult(activity, detRes, detErr)
+				if errors.Is(detErr, projectpkg.ErrAmbiguousProject) {
+					addErrorMetadata(result, map[string]any{"hint": "Ask the user to choose a project, then retry mem_review action=mark_reviewed with an explicit project."})
+				}
+				return result, nil
 			}
 			if err := s.MarkReviewedForProject(id, detRes.Project); err != nil {
 				if detRes.Project != "" && errors.Is(err, store.ErrObservationNotFound) {
