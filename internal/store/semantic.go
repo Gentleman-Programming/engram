@@ -138,7 +138,7 @@ func semanticSnapshot(ctx context.Context, q semanticQuerier, opts SearchOptions
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err

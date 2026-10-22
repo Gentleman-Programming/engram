@@ -49,7 +49,7 @@ func TestSemanticHTTPRoundTripAndFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	if err = st.CreateSession("semantic", "alpha", "/synthetic"); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestSemanticHTTPRoundTripAndFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -130,7 +130,7 @@ func TestSemanticHTTPRoundTripAndFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		b, _ := io.ReadAll(r.Body)
-		r.Body.Close()
+		_ = r.Body.Close()
 		canceledServer.Close()
 		if r.StatusCode != want || !strings.Contains(string(b), "engram embed") {
 			t.Fatalf("context: %d %s", r.StatusCode, b)
@@ -181,7 +181,7 @@ func TestSemanticHTTPValidationAndCapability(t *testing.T) {
 			t.Fatal(err)
 		}
 		b, _ := io.ReadAll(r.Body)
-		r.Body.Close()
+		_ = r.Body.Close()
 		if r.StatusCode != tc.status || !strings.Contains(string(b), tc.contains) {
 			t.Errorf("%s: %d %s", tc.path, r.StatusCode, b)
 		}
@@ -190,7 +190,7 @@ func TestSemanticHTTPValidationAndCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var body struct {
 		Capabilities map[string]bool `json:"capabilities"`
 	}

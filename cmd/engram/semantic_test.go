@@ -44,7 +44,7 @@ func TestEmbedMainRoundTrip(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags":
-			json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"name": "local:latest", "digest": strings.Repeat("a", 64)}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"name": "local:latest", "digest": strings.Repeat("a", 64)}}})
 		case "/api/embed":
 			var body struct {
 				Input    []string `json:"input"`
@@ -63,7 +63,7 @@ func TestEmbedMainRoundTrip(t *testing.T) {
 			for i := range vectors {
 				vectors[i] = []float64{1, 0}
 			}
-			json.NewEncoder(w).Encode(map[string]any{"model": "local:latest", "embeddings": vectors})
+			_ = json.NewEncoder(w).Encode(map[string]any{"model": "local:latest", "embeddings": vectors})
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 			http.Error(w, "unexpected", 404)
@@ -151,7 +151,7 @@ func TestSemanticLazyConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if _, err = s.Search("hello", store.SearchOptions{}); err != nil {
 		t.Fatal(err)
 	}

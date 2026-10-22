@@ -504,7 +504,7 @@ func TestSemanticBatchCoverageAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	rows, err := reopened.Search("question", SearchOptions{SearchMode: "semantic", Limit: 100})
 	if err != nil || len(rows) != 20 {
 		t.Fatalf("persisted cache: %d %v", len(rows), err)

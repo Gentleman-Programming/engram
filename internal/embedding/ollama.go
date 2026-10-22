@@ -55,7 +55,7 @@ func validIdentity(id Identity) bool {
 		return false
 	}
 	for _, r := range id.Model {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-:", r)) {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("/._-:", r) {
 			return false
 		}
 	}
@@ -199,7 +199,7 @@ func (c *Client) request(ctx context.Context, path string, payload []byte, outpu
 		}
 		return ErrUnavailable
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("%w: HTTP %d", ErrUnavailable, response.StatusCode)
 	}

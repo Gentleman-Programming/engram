@@ -90,7 +90,7 @@ func cmdEmbed(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	opts.Project, err = resolveCLIProjectScope(s, opts.Project, all, true)
 	if err != nil {
 		fatal(err)

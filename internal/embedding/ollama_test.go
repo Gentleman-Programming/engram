@@ -71,7 +71,7 @@ func TestResolve(t *testing.T) {
 					t.Error("unexpected operation")
 				}
 				w.WriteHeader(tc.status)
-				fmt.Fprint(w, tc.body)
+				_, _ = fmt.Fprint(w, tc.body)
 			})
 			if calls != 0 {
 				t.Fatal("constructor IO")
@@ -128,7 +128,7 @@ func TestEmbed(t *testing.T) {
 					if tc.change > 0 && reads >= tc.change {
 						id.Digest = strings.Repeat("b", 64)
 					}
-					fmt.Fprint(w, tags(id, ""))
+					_, _ = fmt.Fprint(w, tags(id, ""))
 				case "/api/embed":
 					posts++
 					if r.Method != "POST" {
@@ -145,7 +145,7 @@ func TestEmbed(t *testing.T) {
 					if payload.Model != identity.Model || len(payload.Input) != 2 || payload.Input[0] != "synthetic one" || payload.Truncate == nil || *payload.Truncate {
 						t.Errorf("wrong payload: %+v", payload)
 					}
-					fmt.Fprint(w, tc.body)
+					_, _ = fmt.Fprint(w, tc.body)
 				default:
 					t.Error("hidden operation")
 					w.WriteHeader(500)
@@ -176,7 +176,7 @@ func TestEmbed(t *testing.T) {
 }
 func TestEmptyAndCancellation(t *testing.T) {
 	calls := 0
-	c := fixture(t, func(w http.ResponseWriter, r *http.Request) { calls++; fmt.Fprint(w, tags(identity, "")) })
+	c := fixture(t, func(w http.ResponseWriter, r *http.Request) { calls++; _, _ = fmt.Fprint(w, tags(identity, "")) })
 	if _, err := c.Embed(context.Background(), identity, nil); err == nil {
 		t.Error("accepted empty input")
 	}
@@ -193,7 +193,7 @@ func TestInvalidCanonicalIdentity(t *testing.T) {
 	for _, model := range []string{"test", "test:", "test:latest?invalid", "test:latest#invalid", "test:latest@invalid"} {
 		t.Run(model, func(t *testing.T) {
 			c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprint(w, tags(Identity{model, identity.Digest}, ""))
+				_, _ = fmt.Fprint(w, tags(Identity{model, identity.Digest}, ""))
 			})
 			c.model = model
 			if _, err := c.Resolve(context.Background()); err == nil {
@@ -226,7 +226,7 @@ func TestActionableFailures(t *testing.T) {
 		{"badJSON", `{`, 200, ErrResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := fixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); fmt.Fprint(w, tc.body) })
+			c := fixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); _, _ = fmt.Fprint(w, tc.body) })
 			if _, err := c.Resolve(context.Background()); !errors.Is(err, tc.want) {
 				t.Errorf("classification: %v", err)
 			}
@@ -236,12 +236,12 @@ func TestActionableFailures(t *testing.T) {
 		calls := 0
 		c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/tags" {
-				fmt.Fprint(w, tags(identity, ""))
+				_, _ = fmt.Fprint(w, tags(identity, ""))
 				return
 			}
 			calls++
 			w.WriteHeader(400)
-			fmt.Fprint(w, `{"error":"synthetic secret"}`)
+			_, _ = fmt.Fprint(w, `{"error":"synthetic secret"}`)
 		})
 		if result, err := c.Embed(context.Background(), identity, []string{"synthetic"}); result != nil || !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "synthetic secret") {
 			t.Errorf("invalid status result: %v %v", result, err)
@@ -255,7 +255,7 @@ func TestActionableFailures(t *testing.T) {
 func TestBodyDeadline(t *testing.T) {
 	c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"models":`)
+		_, _ = fmt.Fprint(w, `{"models":`)
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	})
