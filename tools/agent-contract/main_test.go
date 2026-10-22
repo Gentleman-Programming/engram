@@ -179,8 +179,8 @@ func TestProjectionMetadataCurrent(t *testing.T) {
 		})
 	}
 	review := document.Operations["mem_review"].Semantics
-	if !strings.Contains(review.ProjectPolicy, "ignores the project argument") || !strings.Contains(review.TargetRule, "explicit project confines") {
-		t.Error("review current behavior must remain distinct from proposed target")
+	if !strings.Contains(review.ProjectPolicy, "mark_reviewed: explicit project or resolved current project; never global") || strings.Contains(review.ProjectPolicy, "ignores the project argument") || !strings.Contains(review.TargetRule, "explicit project confines") {
+		t.Errorf("review metadata must describe enforced project confinement: %+v", review)
 	}
 	for _, name := range []string{"mem_save", "mem_search", "mem_context", "mem_get_observation"} {
 		if len(document.Operations[name].Semantics.PiDifferences) == 0 {
