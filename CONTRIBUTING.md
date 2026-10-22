@@ -240,6 +240,40 @@ The original #1293 audit found 23 open PRs needing migration; that is a historic
 
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
+### Windows full-suite baseline (#1891)
+
+The candidate `Windows Unit Tests (observational)` job runs `go test ./...` on
+`windows-latest` for PRs and pushes to `main`, using the same pinned Go version
+as Linux. It does not run on merge groups during baseline collection. Existing
+Linux and selected Windows checks remain intact. This is not a required context;
+failing tests still fail the job, rather than being converted to success.
+
+The job provisions Node.js 24 for subprocess fixtures and records the checked-out
+commit (including a PR's synthetic merge), runner image, Go/environment settings,
+PowerShell version, and resolved Git/Bash/sh/Node paths in its summary. Hosted
+Windows supplies Git Bash and PowerShell. The test step log retains diagnostics
+and the process exit code; the final summary records success, failure, or skipped
+execution. Setup failure, cancellation, or timeout is not a passing baseline.
+
+Record actual run URLs and evidence on #1891. Classify failures as product
+portability defects, nonportable fixtures, missing prerequisites, or genuinely
+Unix-only behavior; compare baseline and candidate under equivalent environments
+before attributing regressions. Preserve assertions and document justified
+exclusions. Do not claim a hosted baseline from local workflow-contract tests.
+
+Use local focused RED/GREEN for iteration and hosted CI for broad integration.
+Platform-specific failures remain actionable within their tested scope; a remote
+run or green Linux result alone does not prove Windows correctness. Before ending
+the observational phase, the maintainer must record a stability criterion,
+comparable successful hosted evidence, any remaining exclusions and their owners,
+and an explicit promotion decision on #1891. No stability threshold or promotion
+is approved by this initial job. Required-check/ruleset activation is a separate
+administrator-authorized action; current six required contexts remain unchanged.
+
+Run `node --test .github/scripts/windows-suite.test.mjs` for local workflow
+contract checks. Publication and an actual hosted run are still needed to prove
+runner prerequisites, dependency availability, and full-suite execution.
+
 ### Merge Queue Activation (administrators)
 
 The `main` merge queue is already active. Contributors submit eligible PRs to the

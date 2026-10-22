@@ -57,6 +57,9 @@ jobs:
       - name: Run issue policy helper tests
         run: node --test .github/scripts/issue-*.test.mjs
 
+      - name: Verify Windows suite workflow contract
+        run: node --test .github/scripts/windows-suite.test.mjs
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -107,6 +110,67 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  # Not a required context during baseline collection. Failures stay visible:
+  # do not use continue-on-error or weaken tests to make this job green.
+  windows-unit-tests:
+    name: Windows Unit Tests (observational)
+    runs-on: windows-latest
+    if: github.event_name != 'merge_group'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+
+      - name: Set up Node.js for subprocess fixtures
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Record Windows baseline environment
+        shell: pwsh
+        run: |
+          $evidence = @(
+            "Checked-out commit: $(git rev-parse HEAD)"
+            "Runner image: $env:ImageOS $env:ImageVersion"
+            "OS: $([System.Environment]::OSVersion.VersionString)"
+            (go version)
+            (go env GOOS GOARCH GOPROXY GOSUMDB CGO_ENABLED)
+            (git --version)
+            (bash --version)
+            (node --version)
+            ($PSVersionTable | Out-String)
+            (Get-Command bash, sh, node, pwsh, git, go | Format-Table Name, Source | Out-String)
+          )
+          $evidence | Write-Output
+          @('## Windows full-suite baseline', '```text') + $evidence + @('```') |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Run complete Go suite
+        id: suite
+        run: go test ./...
+
+      - name: Record baseline result
+        if: always()
+        shell: pwsh
+        env:
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          @(
+            'Command: `go test ./...`'
+            "Test step outcome: $env:SUITE_OUTCOME"
+            "Run and diagnostics: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            'The test step log retains stdout, stderr, and the process exit code.'
+            'Observational only; failures require classification under issue #1891.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
   windows-setup-test:
     name: Windows Setup Test
