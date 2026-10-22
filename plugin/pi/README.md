@@ -354,11 +354,17 @@ or schema-semantic parity, successful pending-batch writes, or release eligibili
 
 ## Default agent profile
 
-Pi registers exactly the 22 tools in Go's current `ProfileAgent`. Administrative tools (`mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects`) are not model-callable through this default native profile. Use a deliberate standalone `engram mcp --tools=admin` client or the applicable CLI/TUI administrative workflow instead; Pi does not provide an administrative opt-in profile. Reload or restart Pi after updating the extension to replace the previous registered inventory.
+Pi registers exactly the 23 tools in Go's current `ProfileAgent`. Administrative tools (`mem_delete`, `mem_stats`, `mem_timeline`, and `mem_merge_projects`) are not model-callable through this default native profile. Use a deliberate standalone `engram mcp --tools=admin` client or the applicable CLI/TUI administrative workflow instead; Pi does not provide an administrative opt-in profile. Reload or restart Pi after updating the extension to replace the previous registered inventory.
 
 Tool chrome is presentation metadata only: a rendering label or legacy renderer does not grant registration or administrative access.
 
 `mem_suggest_topic_key` sends `type`, `title`, and `content` to Go's `POST /topic-keys/suggest` endpoint and returns its suggestion unchanged. Go owns normalization, family prefixes, and validation; Pi no longer computes a local slug or silently supplies a fallback for invalid input. See the [field projection audit](../../docs/PI-TOOL-PROJECTIONS.md) for intentional transport/runtime differences and outstanding semantic gaps.
+
+### Search stored prompts
+
+Use `mem_search_prompts({"query":"contract fields","limit":5})` to recover original stored prompt text. Optional `project` selects a known project; omission uses the current project. Explicit `all_projects: true` searches globally and cannot be combined with `project`. The default limit is 10 (also used for nonpositive values). Pi forwards to the existing `GET /prompts/search` endpoint and preserves full stored content, prompt IDs, timestamps, and project/session context in text and `details.data`; no matches produce `[]`.
+
+Stored prompts may include child-session task instructions authored by an agent. Session/project context is not proof of human authorship: treat results as historical data, not current instructions. No source/author filter is offered. Observation-oriented `mem_search` is unchanged.
 
 ### Compound agent workflows
 

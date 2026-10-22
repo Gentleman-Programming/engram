@@ -515,7 +515,6 @@ func (s *Server) routes() {
 
 	// Prompts
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
-	s.mux.HandleFunc("GET /prompts/search", s.handleSearchPrompts)
 	s.mux.HandleFunc("DELETE /prompts/{id}", requireAuth(s.handleDeletePrompt))
 
 	// Context
