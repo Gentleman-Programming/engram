@@ -161,6 +161,42 @@ func TestScopedTopicHubsCompetingCreate(t *testing.T) {
 	assertScopedTopicNotes(t, map[string][]byte{remainingPath: notes[remainingPath]})
 }
 
+func TestScopedTopicHubsWriteFailure(t *testing.T) {
+	dir, root := newReconcileVault(t)
+	observations := scopedTopicObservations()
+	ms := &mockStore{exportData: &store.ExportData{Observations: observations}}
+	exporter := NewExporter(ms, ExportConfig{VaultPath: dir, Project: "alpha"})
+	calls := 0
+	exporter.openTopicHub = func(string, int, os.FileMode) (*os.File, error) {
+		calls++
+		// A closed scratch handle fails Write without creating a topic hub.
+		file, err := os.CreateTemp(dir, "closed-writer-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return file, nil
+	}
+	result, err := exporter.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || result.Created != 2 || result.Updated != 0 || result.Deleted != 0 || result.Skipped != 0 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("failed scoped write result = %+v, calls=%d", result, calls)
+	}
+	if !errors.Is(result.Errors[0], os.ErrClosed) {
+		t.Errorf("reported error = %v, want closed-file error", result.Errors[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "_topics", "shared.md")); !os.IsNotExist(err) {
+		t.Errorf("failed write left a topic hub: %v", err)
+	}
+	if !reflect.DeepEqual(observations, scopedTopicObservations()) {
+		t.Error("failed hub write mutated observation data")
+	}
+}
+
 func TestScopedTopicHubsOpenFailure(t *testing.T) {
 	dir, root := newReconcileVault(t)
 	observations := scopedTopicObservations()
