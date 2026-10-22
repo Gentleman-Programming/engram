@@ -60,7 +60,61 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
+      - name: Await selected CI proof
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CI_PROOF_CONTROL: ${{ vars.ISSUE_CI_PROOF_CI }}
+        with:
+          script: |
+            const raw = process.env.CI_PROOF_CONTROL;
+            if (!raw) return;
+            const fail = () => new Error('proof-ci: bootstrap');
+            let cfg;
+            try {
+              if (raw.length > 8192) throw fail();
+              cfg = JSON.parse(raw);
+            } catch { throw fail(); }
+            if (cfg?.enabled === false) return;
+            if (!['pull_request', 'merge_group'].includes(context.eventName)) return;
+            const pr = context.payload.pull_request;
+            const mg = context.payload.merge_group;
+            const b = { repo: `${context.repo.owner}/${context.repo.repo}`, event: context.eventName,
+              action: context.payload.action, job: process.env.GITHUB_JOB, head: context.sha,
+              checkout: pr?.base?.sha ?? mg?.base_sha, workflow: process.env.GITHUB_WORKFLOW_SHA,
+              runId: Number(process.env.GITHUB_RUN_ID), attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+              prHead: context.eventName === 'pull_request' ? pr?.head?.sha : null };
+            if (cfg?.enabled !== true || !cfg.target || typeof cfg.target !== 'object') throw fail();
+            const optional = ['runId', 'attempt', 'workflow', 'head'];
+            if (Object.keys(b).some((key) => (!optional.includes(key) || key in cfg.target)
+              && cfg.target[key] !== b[key])) return;
+            const sha = (s) => typeof s === 'string' && /^[a-f0-9]{40}$/.test(s);
+            if (![b.head, b.checkout, b.workflow].every(sha)
+              || (mg && mg.head_sha !== b.head) || b.job !== 'unit-tests') throw fail();
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const dir = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, 'ci-proof-'));
+            const pins = {
+              'issue-ci-proof-ci.mjs': '02beea7bd200bc213b1e8eb6e65784eaaee4a43cf06f0b4fcee026c2e2c500cb',
+              'issue-ci-proof-controls.mjs': '1be88a7a4874f54d0efcfd05a19a812381e216b70c8a0a71f1217579a6a74740',
+            };
+            try {
+              for (const [file, pin] of Object.entries(pins)) {
+                const response = await github.rest.repos.getContent({ ...context.repo,
+                  path: `.github/scripts/${file}`, ref: b.checkout });
+                if (response.data?.encoding !== 'base64' || typeof response.data.content !== 'string') throw fail();
+                const bytes = Buffer.from(response.data.content, 'base64');
+                if (crypto.createHash('sha256').update(bytes).digest('hex') !== pin) throw fail();
+                fs.writeFileSync(path.join(dir, file), bytes, { flag: 'wx' });
+              }
+              const { holdCI } = require(path.join(dir, 'issue-ci-proof-ci.mjs'));
+              await holdCI({ raw, identity: b, github, emit: (r) => core.info(JSON.stringify(r)) });
+            } catch { throw fail(); }
+
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
