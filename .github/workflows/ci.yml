@@ -141,8 +141,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $bash = 'C:/Program Files/Git/usr/bin/bash.exe'
           $jq = 'C:/ProgramData/chocolatey/lib/jq/tools/jq.exe'
+          $curl = 'C:/Windows/System32/curl.exe'
           $required = @(
-            $bash, $jq,
+            $bash, $jq, $curl,
             'C:/Program Files/Git/usr/bin/cygpath.exe',
             'C:/Program Files/Git/usr/bin/cat.exe',
             'C:/Program Files/Git/usr/bin/dirname.exe',
@@ -159,11 +160,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Version check failed: $bash (exit $LASTEXITCODE)" }
           $jqVersion = & $jq --version
           if ($LASTEXITCODE -ne 0) { throw "Version check failed: $jq (exit $LASTEXITCODE)" }
-          $evidence = @("Trusted Bash: $bash", $bashVersion, "Trusted jq: $jq", $jqVersion)
+          $curlVersion = & $curl --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed: $curl (exit $LASTEXITCODE)" }
+          $evidence = @("Trusted Bash: $bash", $bashVersion, "Trusted jq: $jq", $jqVersion, "Trusted curl: $curl", $curlVersion)
           $evidence | Write-Output
           @('## Windows fixture prerequisites', '```text') + $evidence + @('```') |
             Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          @("CODEX_TEST_TRUSTED_BASH=$bash", "CODEX_TEST_TRUSTED_JQ=$jq") |
+          @("CODEX_TEST_TRUSTED_BASH=$bash", "CODEX_TEST_TRUSTED_JQ=$jq", "CODEX_TEST_TRUSTED_CURL=$curl") |
             Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Record Windows baseline environment

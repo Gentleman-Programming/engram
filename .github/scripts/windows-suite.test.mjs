@@ -44,6 +44,20 @@ test('Windows prerequisites use reviewed real executables and fail closed before
   assert.ok(job.indexOf(setup) < job.indexOf('run: go test ./...'));
 });
 
+test('Windows CURL selection is explicit, reviewed, and validated before export', () => {
+  const setup = job.match(/      - name: Select trusted Windows fixture tools\n([\s\S]*?)(?=      - name:)/)[1];
+  assert.ok(setup.includes("$curl = 'C:/Windows/System32/curl.exe'"));
+  assert.match(setup, /\$required = @\([\s\S]*?\$curl/);
+  assert.match(setup, /\$curlVersion = & \$curl --version\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+  assert.match(setup, /"Trusted curl: \$curl", \$curlVersion/);
+  const validation = setup.indexOf('foreach ($path in $required)');
+  const version = setup.indexOf('& $curl --version');
+  const exported = setup.indexOf('CODEX_TEST_TRUSTED_CURL=$curl');
+  assert.ok(validation < version && version < exported);
+  assert.match(setup, /CODEX_TEST_TRUSTED_CURL=\$curl/);
+  assert.doesNotMatch(setup, /mingw64|Get-Command|where\.exe|Invoke-WebRequest|choco /);
+});
+
 test('Windows evidence records checkout, toolchain, prerequisites, and actual test outcome', () => {
   assert.ok(job, 'missing Windows full-suite job');
   for (const evidence of ['git rev-parse HEAD', 'go version', 'go env', 'bash --version', 'node --version', '$PSVersionTable', 'steps.suite.outcome']) {

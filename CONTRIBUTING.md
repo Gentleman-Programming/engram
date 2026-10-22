@@ -254,14 +254,18 @@ PowerShell version, and resolved Git/Bash/sh/Node paths in its summary. Hosted
 Windows supplies Git Bash and PowerShell. Before diagnostics or tests, the job
 selects `C:/Program Files/Git/usr/bin/bash.exe` (not the `bin` launcher) and
 `C:/ProgramData/chocolatey/lib/jq/tools/jq.exe`, the candidate Chocolatey package
-payload. It validates both as leaf `.exe` files and checks adjacent Git tools
-`cygpath`, `cat`, `dirname`, and `chmod` before executing version checks. Missing
-prerequisites or failed version checks fail the job with the exact path; there is
-no PATH fallback or installation. Only after validation does it export
-`CODEX_TEST_TRUSTED_BASH` and `CODEX_TEST_TRUSTED_JQ` for the existing fixture
-guards, logging the selected paths and versions in the job log and summary.
+payload, and native Windows `C:/Windows/System32/curl.exe`. It validates all three
+as leaf `.exe` files and checks adjacent Git tools `cygpath`, `cat`, `dirname`,
+and `chmod` before executing version checks. Missing prerequisites or failed
+version checks fail the job with the exact path; there is no PATH fallback or
+installation. Only after validation does it export `CODEX_TEST_TRUSTED_BASH`,
+`CODEX_TEST_TRUSTED_JQ`, and `CODEX_TEST_TRUSTED_CURL`, logging selected paths and
+versions in the job log and summary. Windows handoff fixtures require the explicit
+CURL selector and retain absolute/regular/`.exe` validation; they no longer infer
+Git's `mingw64` layout. Local Windows fixture runs must also supply a reviewed
+absolute CURL executable through `CODEX_TEST_TRUSTED_CURL`.
 Neither local contract tests nor this declaration prove these paths exist on the
-hosted image (especially the jq payload); a new hosted run remains necessary.
+hosted image (including native curl); a new hosted run remains necessary.
 The test step log retains diagnostics
 and the process exit code; the final summary records success, failure, or skipped
 execution. Setup failure, cancellation, or timeout is not a passing baseline.

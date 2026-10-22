@@ -51,13 +51,13 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b,
   // plus the approved #1994 TypeBox test bootstrap in f65380cc79ffa6fe63d4594b1e5341733d51f288.
   // Approved #1891 adds observational Windows full-suite coverage and its contract check;
-  // prerequisite correction declares reviewed Bash/jq selectors with fail-closed validation only.
+  // prerequisite corrections declare reviewed Bash/jq/native Windows CURL selectors with fail-closed validation only.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '963bf7f27237527df684b9d7a28894b741bf47f61a45de577327c5925abfeb00',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '1a3091c88771ecc5b51059aad6987d31c97177b48f4522bfdb8963d0c4bc952c',
-    '.github/workflows/ci.yml': 'c7ffbd62203a0f9ea1e28b6cbcbf4e27cd62f7c3160453560e5195ddef98ab9a',
+    '.github/workflows/ci.yml': 'bbf1155b9bd2a6808dc4ad9fef9a208c8750f9a2b86dc369ede10f7cc83f5a38',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

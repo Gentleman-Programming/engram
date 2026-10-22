@@ -94,7 +94,7 @@ func codexIntentTool(t *testing.T, name, dir string) string {
 	t.Helper()
 	key := "CODEX_TEST_TRUSTED_" + strings.ToUpper(name)
 	value := ""
-	if name == "bash" || name == "jq" {
+	if name == "bash" || name == "jq" || (runtime.GOOS == "windows" && name == "curl") {
 		value = os.Getenv(key)
 	}
 	if value == "" {
@@ -111,14 +111,11 @@ func codexIntentTool(t *testing.T, name, dir string) string {
 				}
 			}
 		default:
-			if name == "bash" || name == "jq" {
+			if name == "bash" || name == "jq" || (runtime.GOOS == "windows" && name == "curl") {
 				t.Fatalf("explicit reviewed %s executable required", key)
 			}
 			if runtime.GOOS == "windows" {
 				value += ".exe"
-				if name == "curl" {
-					value = filepath.Join(dir, "..", "..", "mingw64", "bin", "curl.exe")
-				}
 			}
 		}
 	}
