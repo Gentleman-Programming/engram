@@ -204,7 +204,7 @@ func TestProjectionMetadataCurrent(t *testing.T) {
 func TestGeneratorHelpAndRejectedArgumentsHaveNoEffects(t *testing.T) {
 	binary, root := generatorExecutable(t), t.TempDir()
 	code, stdout, stderr := runGenerator(t, binary, root, "-h")
-	wantHelp := "Usage: agent-contract [-output path] [-check]\n\nGenerate the Go-owned MCP agent-contract foundation without opening a store.\n  -output path  Artifact path (default docs/contracts/agent-contract-v1.json).\n  -check        Compare without writing; exit 1 for a missing or stale artifact.\n"
+	wantHelp := "Usage: agent-contract [-output path] [-check]\n\nGenerate the Go-owned MCP agent-contract foundation without opening a store.\n  -output path  Artifact path (default docs/contracts/agent-contract-v1.json).\n  -check        Compare without writing; exit 1 for a missing or stale artifact.\n\nVerify Pi model-input projections without writing:\n  agent-contract -verify-pi capture.json\n  Cannot combine with explicitly supplied -output or -check.\n  Exit 0: scope match; 1: refusal; 2: usage or capture unavailable.\n  Not semantic parity, installed-host compatibility or release approval.\n"
 	if code != 0 || stdout != "" || stderr != wantHelp {
 		t.Fatalf("help: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
@@ -224,4 +224,50 @@ func TestGeneratorHelpAndRejectedArgumentsHaveNoEffects(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("help/rejection created files or data: %v, %v", entries, err)
 	}
+}
+
+func TestPiInputUsageAndRefusal(t *testing.T) {
+	binary, root := generatorExecutable(t), t.TempDir()
+	capture := filepath.Join(root, "capture.json")
+	if err := os.WriteFile(capture, []byte("null"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		code   int
+		stderr string
+	}{
+		{"invalid-capture", []string{"-verify-pi", capture}, 1, "pi input: invalid capture\n"},
+		{"missing-file", []string{"-verify-pi", filepath.Join(root, "private-missing")}, 2, "pi input: capture unavailable\n"},
+		{"blank", []string{"-verify-pi="}, 2, "verify-pi path must not be blank\n"},
+		{"whitespace", []string{"-verify-pi", " "}, 2, "verify-pi path must not be blank\n"},
+		{"check", []string{"-verify-pi", capture, "-check"}, 2, "verify-pi cannot be combined with output or check\n"},
+		{"explicit-false", []string{"-check=false", "-verify-pi", capture}, 2, "verify-pi cannot be combined with output or check\n"},
+		{"output-default", []string{"-output", "docs/contracts/agent-contract-v1.json", "-verify-pi", capture}, 2, "verify-pi cannot be combined with output or check\n"},
+		{"blank-output", []string{"-verify-pi", capture, "-output="}, 2, "verify-pi cannot be combined with output or check\n"},
+		{"positional", []string{"-verify-pi", capture, "unexpected"}, 2, "unexpected positional arguments\n"},
+		{"missing-value", []string{"-verify-pi"}, 2, "flag needs an argument: -verify-pi\n" + help},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errout := runGenerator(t, binary, root, tc.args...)
+			if code != tc.code || out != "" || errout != tc.stderr {
+				t.Errorf("exit=%d stdout=%q stderr=%q; want exit=%d stderr=%q", code, out, errout, tc.code, tc.stderr)
+			}
+			raw, err := os.ReadFile(capture)
+			if err != nil || string(raw) != "null" {
+				t.Fatal("capture changed", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "capture.json" {
+				t.Fatal("rejection wrote state", entries, err)
+			}
+		})
+	}
+}
+
+func TestPiInputLegacyModes(t *testing.T) {
+	t.Run("generate-check", TestGeneratorWritesChecksAndPreservesStaleArtifact)
+	t.Run("help-no-toolchain", TestGeneratorUsesCurrentExecutableWithoutGoToolchain)
+	t.Run("help-and-arguments", TestGeneratorHelpAndRejectedArgumentsHaveNoEffects)
 }
