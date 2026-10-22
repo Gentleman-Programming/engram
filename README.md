@@ -295,8 +295,12 @@ resolution; it does **not** merge or move previously split memories.
 
 Historical directories are matched as absolute, lexically normalized paths;
 Engram does not access their filesystems. Relative history without a recorded
-base is ignored. Only the selected working directory is filesystem-canonicalized,
-so legacy history stored under a symlink alias may require an explicit project
+base is ignored. Only the selected working directory is filesystem-canonicalized.
+On Windows, its local long and available 8.3 spellings are compared with history;
+no historical paths or UNC selections are queried for aliases. Unexpected alias
+lookup errors make history unavailable rather than permitting a first binding
+without that evidence. Stored directory spellings are never rewritten. Legacy
+history stored under a symlink alias may still require an explicit project
 choice (`engram init local-app`) rather than automatic recognition.
 
 Existing Git bindings stay stable. This check cannot reconstruct history without
