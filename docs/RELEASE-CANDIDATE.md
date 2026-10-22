@@ -85,6 +85,36 @@ or use `-assess=false` for unchanged legacy export/standalone tarball behavior.
 Assessment does not run suites, schema diagnostics, npm or the Node guard; it
 cannot authorize publication or promotion to `latest`.
 
+## Trusted source observation (partial evidence only)
+
+The Go CLI also supports `-observe-contract` with `-core-source` and
+`-pi-source`: explicit full lowercase 40/64-hex commit IDs available in the
+local Git repository selected by `-root`. Existing `-core-ref`/`-pi-ref`
+remain independent SemVer intents, not verified remote tags. Missing prospective
+tags are allowed; existing local tag bindings must agree with selected commits.
+Sources must already be reviewed and trusted by the operator. This executes Go
+from the selected core commit; a temporary copy is **not a security sandbox**,
+and a malicious checker can forge success or perform arbitrary side effects.
+Never use this mode for untrusted sources or with privileged secrets.
+
+Git replacement objects are disabled for all source, tag and object reads.
+The collector copies raw committed Git objects (no export filters, symlinks or
+submodule materialization), reads the selected Pi manifest and core installer
+pin, and runs the fixed `go run ./tools/agent-contract -check` in the core copy.
+Go uses local toolchain/cached dependencies, readonly modules and no work file.
+The report binds verified source IDs and the artifact's actual SHA-256 to the
+observed process result. It does not import caller-authored proof or commands.
+A nonzero checker result is `not-established`, not automatically a semantic
+regression; missing objects/tools, unsupported sources, persistent source
+mutation or cleanup failure cannot produce a passing check.
+Output is partial source-evidence JSON with `outcome: "blocked"`, exit 2 and
+empty stderr even when the check passes. The observed `go run` exit is a wrapper
+exit, not an inferred inner-program exit. No package execution, installed-host
+compatibility, eligibility or publication is established. Invocation errors
+retain stderr/exit 1. Source flags require observation, which refuses active
+`-assess` or any `-pi-tarball` presence before repository access. Legacy modes
+are otherwise unchanged. The report is a view, not an approval credential.
+
 ## Separate real-schema diagnostic
 
 `node tools/pi-schema-diagnostic.mjs` captures real serialized TypeBox schemas
