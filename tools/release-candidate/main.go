@@ -26,6 +26,10 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -pi-ref    Required full Pi tag ref with independent strict SemVer.
 -root      Candidate metadata directory (default: current directory).
 -pi-tarball Optional local .tgz to validate against candidate package contents.
+-assess    Emit rejected/blocked assessment JSON; never release approval.
+-observe-contract Execute the selected trusted core's freshness checker; never approval.
+-core-source Full lowercase core commit ID for observation (40 or 64 hex digits).
+-pi-source Full lowercase Pi commit ID, independently selected.
 -h, --help Show this help.
 
 Reads plugin/pi/package.json and internal/setup/setup.go without writes.
@@ -35,6 +39,13 @@ Refs define an ordered metadata pair, not remote tags or compatibility proof.
 Only literal package file/directory allowlists are supported, up to 4096 files
 and 64 MiB. No archive extraction; links and unexpected/missing content reject.
 Export/validator success is not Pi parity or release approval.
+Assessment exits 1 (rejected) or 2 (blocked), with empty stderr.
+-assess cannot be combined with -pi-tarball, including an empty archive argument.
+Without -assess (or with -assess=false), legacy export/validation is unchanged.
+Invocation errors retain plain stderr and exit 1, not assessment JSON.
+Observation requires operator-reviewed/trusted source; a copy is NOT a sandbox.
+It executes Go from that core commit with local cached dependencies only.
+Ref/version labels are intents, not verified remote tags. Output always blocks.
 No publication, version selection, or bypass flags are supported.
 `
 
@@ -42,6 +53,10 @@ var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
+		var result *assessmentExit
+		if errors.As(err, &result) {
+			os.Exit(result.code)
+		}
 		message := err.Error()
 		if errors.Is(err, errPackageRejected) {
 			message = "Pi package tarball validation failed"
@@ -59,6 +74,10 @@ func run(args []string, output io.Writer) error {
 	piRef := flags.String("pi-ref", "", "full Pi tag ref")
 	root := flags.String("root", ".", "candidate metadata directory")
 	tarball := flags.String("pi-tarball", "", "optional local Pi package tarball")
+	assess := flags.Bool("assess", false, "non-approving structured assessment")
+	observe := flags.Bool("observe-contract", false, "observe trusted selected source; not a sandbox")
+	coreSource := flags.String("core-source", "", "full core source commit ID")
+	piSource := flags.String("pi-source", "", "full Pi source commit ID")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, err = io.WriteString(output, helpText)
@@ -68,6 +87,27 @@ func run(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("positional arguments are not supported")
+	}
+	tarballProvided, sourceProvided := false, false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "pi-tarball" {
+			tarballProvided = true
+		}
+		if option.Name == "core-source" || option.Name == "pi-source" {
+			sourceProvided = true
+		}
+	})
+	if *observe && (*assess || tarballProvided) {
+		return errors.New("-observe-contract cannot be combined with -assess or -pi-tarball")
+	}
+	if sourceProvided && !*observe {
+		return errors.New("source commit flags require -observe-contract")
+	}
+	if *observe && (!regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*coreSource) || !regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*piSource)) {
+		return errors.New("core-source and pi-source must be full lowercase commit IDs")
+	}
+	if *assess && tarballProvided {
+		return errors.New("-assess and -pi-tarball cannot be combined")
 	}
 	if *coreRef == "" || *piRef == "" {
 		return errors.New("core-ref and pi-ref are required")
@@ -80,15 +120,15 @@ func run(args []string, output io.Writer) error {
 	if !ok {
 		return errors.New("invalid pi-ref: expected refs/tags/pi-v<strict-semver>")
 	}
+	if *observe {
+		return observeContract(*root, *coreRef, *piRef, version, piVersion, *coreSource, *piSource, output)
+	}
+	if *assess {
+		return assessCandidate(*root, version, piVersion, output)
+	}
 	if err := validateMetadata(*root, piVersion); err != nil {
 		return err
 	}
-	tarballProvided := false
-	flags.Visit(func(option *flag.Flag) {
-		if option.Name == "pi-tarball" {
-			tarballProvided = true
-		}
-	})
 	if tarballProvided {
 		count, err := validatePackage(*root, piVersion, *tarball)
 		if err != nil {
@@ -150,9 +190,13 @@ func refVersion(ref, prefix string) (string, bool) {
 }
 
 func validateMetadata(root, version string) error {
-	data, err := os.ReadFile(filepath.Join(root, "plugin", "pi", "package.json"))
+	return validatePairMetadata(root, root, version)
+}
+
+func validatePairMetadata(coreRoot, piRoot, version string) error {
+	data, err := os.ReadFile(filepath.Join(piRoot, "plugin", "pi", "package.json"))
 	if err != nil {
-		return errors.New("cannot read plugin/pi/package.json")
+		return &metadataUnavailable{message: "cannot read plugin/pi/package.json"}
 	}
 	var manifest struct {
 		Name    string `json:"name"`
@@ -167,9 +211,9 @@ func validateMetadata(root, version string) error {
 	if manifest.Version != version {
 		return errors.New("package version must match candidate version")
 	}
-	data, err = os.ReadFile(filepath.Join(root, "internal", "setup", "setup.go"))
+	data, err = os.ReadFile(filepath.Join(coreRoot, "internal", "setup", "setup.go"))
 	if err != nil {
-		return errors.New("cannot read internal/setup/setup.go")
+		return &metadataUnavailable{message: "cannot read internal/setup/setup.go"}
 	}
 	file, err := parser.ParseFile(token.NewFileSet(), "setup.go", data, 0)
 	if err != nil {

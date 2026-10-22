@@ -157,11 +157,11 @@ describes host-owned context separately from MCP model-visible parameters.
 Observation IDs, explicit session IDs, host runtime IDs, continuation IDs, and
 provenance are not interchangeable.
 
-`target_rule` is a proposed alignment rule, not existing behavior. In particular,
-the agreed `mem_review` target admits an explicit project for `mark_reviewed`,
-uses the resolved current project when omitted, and never marks globally. The
-current MCP branch still ignores that argument for this action; Pi accepts it.
-No review handler behavior is changed by exporting this foundation.
+`target_rule` records the review alignment rule now enforced by Go:
+`mem_review` accepts an explicit project for `mark_reviewed`, uses the resolved
+current project when omitted, and never marks globally. Explicit project outranks
+process/default context; unresolved write context is refused. List behavior
+remains global when project is omitted; the `id` alias remains supported.
 
 Known differences include save conflict-candidate output, native HTTP result/error
 envelopes, host-owned session attribution, and project/personal-scope selection.

@@ -40,6 +40,17 @@ Pi sends `resume: true` for runtime-root registration and adopts only a valid ac
 
 When resuming an ended, directory-bound host, new numeric continuations inherit its persisted project, directory, and ownership mode after registration ownership checks. After a received `409 runtime session scope conflict`, Codex looks up the ended root and makes at most one resolve/end request with its persisted directory and mode while retaining the caller's requested project: `shared` hosts still allow cross-project use, but `project_owned` hosts reject foreign projects. This rebinding is limited to that confirmed rejection; normal paths, unrelated errors, and uncertain transport failures do not trigger it. Fresh and live-host paths keep their existing registration and resolution behavior.
 
+### Codex Bash passive capture
+
+The synchronous `SubagentStop` hook resolves the supplied host through native
+`engram hook codex-resolve` before passive capture. Only a confirmed host or its
+numeric continuation is submitted; identity bytes remain opaque JSON data,
+including trailing newlines. Missing, invalid, foreign or unavailable confirmation
+skips capture without registering or reopening a session. Go owns live identity
+and project authority. The hook retains its exact `{}` JSON result and best-effort
+exit status; project lookup (2s), native resolution (1.5s aggregate) and capture
+(3s) network budgets fit within the existing outer 10s hook timeout.
+
 ### Codex on Windows
 - The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
 - The adapter reads the setup-owned absolute pin and invokes its native hook command.

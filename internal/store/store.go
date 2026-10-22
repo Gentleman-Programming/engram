@@ -4606,6 +4606,9 @@ func (s *Store) MarkReviewed(id int64) error {
 // remains owned by project at the mutation boundary.
 func (s *Store) MarkReviewedForProject(id int64, project string) error {
 	project, _ = NormalizeProject(project)
+	if project == "" {
+		return ErrProjectRequired
+	}
 	return s.markReviewed(id, project)
 }
 

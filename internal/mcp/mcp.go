@@ -1537,6 +1537,33 @@ func handlePin(s *store.Store, pinned bool) server.ToolHandlerFunc {
 	}
 }
 
+// prepareWriteProject preserves raw detection evidence separately from the normalized
+// project used for persistence. Callers validate their content/options first.
+func prepareWriteProject(s *store.Store, cfg MCPConfig, activity *SessionActivity, req mcp.CallToolRequest) (projectpkg.DetectionResult, string, string, *mcp.CallToolResult) {
+	sessionID, _ := req.GetArguments()["session_id"].(string)
+	projectChoice, _ := req.GetArguments()["project"].(string)
+	_, explicitProjectProvided := req.GetArguments()["project"]
+	projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
+	recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
+	recoverySessionID := sessionID
+	if strings.TrimSpace(recoverySessionID) == "" {
+		recoverySessionID = defaultSessionID("")
+	}
+	validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
+		if strings.TrimSpace(recoveryToken) == "" {
+			return false, false
+		}
+		return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
+	}
+
+	detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
+	if err != nil {
+		return detRes, "", "", writeProjectErrorResult(activity, recoverySessionID, detRes, err)
+	}
+	project, warning := store.NormalizeProject(detRes.Project)
+	return detRes, project, warning, nil
+}
+
 func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		timing := beginSaveTiming()
@@ -1565,9 +1592,6 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
-		_, explicitProjectProvided := req.GetArguments()["project"]
-		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
-		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 		var capturePrompt *bool
 		if value, present := req.GetArguments()["capture_prompt"]; present {
 			option, ok := value.(bool)
@@ -1576,33 +1600,16 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			}
 			capturePrompt = &option
 		}
-		recoverySessionID := sessionID
-		if strings.TrimSpace(recoverySessionID) == "" {
-			recoverySessionID = defaultSessionID("")
+		detRes, project, normWarning, projectError := prepareWriteProject(s, cfg, activity, req)
+		if projectError != nil {
+			return projectError, nil
 		}
-		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
-			if strings.TrimSpace(recoveryToken) == "" {
-				return false, false
-			}
-			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
-		}
-
-		// Resolve write project using the full MCP precedence: explicit request,
-		// existing session association, process override, repo config/directory detection, then cwd fallback.
-		detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
-		if err != nil {
-			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
-		}
-		project := detRes.Project
-
-		// Normalize project name and capture warning
-		normalized, normWarning := store.NormalizeProject(project)
-		project = normalized
 
 		if typ == "" {
 			typ = "manual"
 		}
 		if sessionID == "" {
+			var err error
 			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -1911,17 +1918,16 @@ func handleReview(s *store.Store, cfg MCPConfig, activities ...*SessionActivity)
 			if id == 0 {
 				return mcp.NewToolResultError("observation_id is required for mark_reviewed"), nil
 			}
-			detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+			project, _ := req.GetArguments()["project"].(string)
+			detRes, detErr := resolveMCPProjectWithDetector(s, project, cfg.DefaultProject, true, captureProjectDetector(s))
 			if detErr != nil {
-				return readProjectErrorResult(activity, detRes, detErr), nil
-			}
-			markReviewed := s.MarkReviewed
-			if detRes.Project != "" {
-				markReviewed = func(observationID int64) error {
-					return s.MarkReviewedForProject(observationID, detRes.Project)
+				result := readProjectErrorResult(activity, detRes, detErr)
+				if errors.Is(detErr, projectpkg.ErrAmbiguousProject) {
+					addErrorMetadata(result, map[string]any{"hint": "Ask the user to choose a project, then retry mem_review action=mark_reviewed with an explicit project."})
 				}
+				return result, nil
 			}
-			if err := markReviewed(id); err != nil {
+			if err := s.MarkReviewedForProject(id, detRes.Project); err != nil {
 				if detRes.Project != "" && errors.Is(err, store.ErrObservationNotFound) {
 					return mcp.NewToolResultError("Failed to mark reviewed: observation not found in resolved project"), nil
 				}
@@ -2485,38 +2491,19 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
-		_, explicitProjectProvided := req.GetArguments()["project"]
-		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
-		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 
 		// Reject empty/whitespace-only content before any project resolution (#393).
 		if strings.TrimSpace(content) == "" {
 			return mcp.NewToolResultError("content is required for mem_session_summary"), nil
 		}
 
-		recoverySessionID := sessionID
-		if strings.TrimSpace(recoverySessionID) == "" {
-			recoverySessionID = defaultSessionID("")
+		detRes, project, _, projectError := prepareWriteProject(s, cfg, activity, req)
+		if projectError != nil {
+			return projectError, nil
 		}
-		// validateRecoveryToken verifies if a recovery token matches the request.
-		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
-			if strings.TrimSpace(recoveryToken) == "" {
-				return false, false
-			}
-			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
-		}
-
-		// Resolve write project using the full MCP precedence: explicit request,
-		// existing session association, process override, repo config/directory detection, then cwd fallback.
-		detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
-		if err != nil {
-			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
-		}
-		project := detRes.Project
-
-		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
+			var err error
 			sessionID, err = resolveFallbackSessionID(s, project, captureProjectEvidence(s, detRes, sessionID, projectChoice, cfg.DefaultProject))
 			if err != nil {
 				return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil

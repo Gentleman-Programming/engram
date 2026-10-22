@@ -51,6 +51,73 @@ semantic equivalence and do not change the rejection-only outcome.
 The Go contract remains `mcp-foundation` with declared Pi differences. These are
 honest source rejection reasons, not failures to be bypassed for a release.
 
+## Opt-in Go assessment (non-approving)
+
+The Go CLI separately supports `-assess`; the Node checker above does not accept
+this option and retains its rejection-only behavior:
+
+```sh
+go run ./tools/release-candidate -assess -core-ref refs/tags/v3.0.0 -pi-ref refs/tags/pi-v0.5.0
+```
+
+For a valid independent metadata pair with a matching installer pin, stdout is:
+
+```json
+{"schemaVersion":1,"version":"3.0.0","piVersion":"0.5.0","outcome":"blocked","reason":{"code":"positive-proof-unavailable","message":"live Go contract does not establish Pi parity or release approval"}}
+```
+
+This is illustrative, not a claim that current metadata matches those refs.
+Assessment emits one deterministic JSON object plus newline, without source
+writes. Readable invalid metadata yields `rejected`, `invalid-metadata`, and
+exit 1; unavailable/unreadable metadata yields `blocked`, `metadata-unavailable`,
+and exit 2. A live contract export failure yields `blocked`,
+`contract-unavailable`, and exit 2. Reason messages are fixed safe diagnostics.
+Structured results have empty stderr. The compiled executable preserves these
+exit codes; `go run` adds its own exit-status stderr and wrapper exit code.
+There is no `eligible` outcome or assessment success/exit 0: `mcp-foundation`
+is not Pi parity, and no trusted positive producer/binding is available.
+
+Flag/ref invocation errors instead retain plain stderr, empty stdout and exit 1.
+Help retains exit 0. Caller-authored evidence, passed JSON and status/contract
+overrides are unsupported. `-assess` refuses any `-pi-tarball` presence, even an
+empty argument, before reading metadata or validating archives. Omit `-assess`
+or use `-assess=false` for unchanged legacy export/standalone tarball behavior.
+Assessment does not run suites, schema diagnostics, npm or the Node guard; it
+cannot authorize publication or promotion to `latest`.
+
+## Trusted source observation (partial evidence only)
+
+The Go CLI also supports `-observe-contract` with `-core-source` and
+`-pi-source`: explicit full lowercase 40/64-hex commit IDs available in the
+local Git repository selected by `-root`. Existing `-core-ref`/`-pi-ref`
+remain independent SemVer intents, not verified remote tags. Missing prospective
+tags are allowed; existing local tag bindings must agree with selected commits.
+Sources must already be reviewed and trusted by the operator. This executes Go
+from the selected core commit; a temporary copy is **not a security sandbox**,
+and a malicious checker can forge success or perform arbitrary side effects.
+Never use this mode for untrusted sources or with privileged secrets.
+
+Git replacement objects are disabled for all source, tag and object reads.
+The collector copies raw committed Git objects (no export filters, symlinks or
+submodule materialization), reads the selected Pi manifest and core installer
+pin, and runs the fixed `go run ./tools/agent-contract -check` in the core copy.
+Go uses local toolchain/cached dependencies, readonly modules and no work file.
+The report binds verified source IDs and the artifact's actual SHA-256 to the
+observed process result. It does not import caller-authored proof or commands.
+A nonzero checker result is `not-established`, not automatically a semantic
+regression. Cancellation/deadline expiry is `unavailable`, without a checker
+exit outcome. Null-device outputs prevent waiting for inherited output pipes;
+this does not terminate or sandbox the entire child process tree.
+Missing objects/tools, unsupported sources, persistent source
+mutation or cleanup failure cannot produce a passing check.
+Output is partial source-evidence JSON with `outcome: "blocked"`, exit 2 and
+empty stderr even when the check passes. The observed `go run` exit is a wrapper
+exit, not an inferred inner-program exit. No package execution, installed-host
+compatibility, eligibility or publication is established. Invocation errors
+retain stderr/exit 1. Source flags require observation, which refuses active
+`-assess` or any `-pi-tarball` presence before repository access. Legacy modes
+are otherwise unchanged. The report is a view, not an approval credential.
+
 ## Separate real-schema diagnostic
 
 `node tools/pi-schema-diagnostic.mjs` captures real serialized TypeBox schemas
