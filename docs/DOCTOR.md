@@ -2,6 +2,14 @@
 
 `engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
+## Automatic repair backup privacy
+
+On Unix, automatic SQLite repair snapshots under `<ENGRAM_DATA_DIR>/backups/` are reserved with mode `0600` before SQLite writes to them. New backup directories are created with mode `0700`. Reservation or close errors stop the backup before repair proceeds. Windows access remains governed by inherited ACLs.
+
+Existing directories and snapshots keep their permissions and contents; there is no automatic permission migration or cleanup. Older snapshots can remain readable by other local users when their parent directories are traversable. Review those copies separately, since they contain the plaintext memory store. This change does not retroactively make them private.
+
+A failed attempt can leave an empty or incomplete backup reservation. File presence alone is not proof of a valid recovery copy; verify a backup before restoring it.
+
 ## Enrolled sync journal repair
 
 Before export or autosync push, missing journal entries are repaired in bounded atomic batches. A failed or cancelled attempt preserves earlier committed batches; retry resumes missing work without treating partial progress as completion. Other operations such as enrollment, project merge and cloud upgrade retain their caller-owned atomic transactions. This does not turn the base doctor command into a repair operation or promise a writer latency bound.
