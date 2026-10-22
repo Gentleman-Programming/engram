@@ -50,10 +50,10 @@ jobs:
           ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       - name: Verify PR links an issue
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           ENGRAM_CI_PROOF_MANIFEST: ${{ vars.ENGRAM_CI_PROOF_MANIFEST }}
           CI_PROOF_CHECKOUT: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
@@ -127,10 +127,10 @@ jobs:
           ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       - name: Verify linked issue is approved
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           ENGRAM_CI_PROOF_MANIFEST: ${{ vars.ENGRAM_CI_PROOF_MANIFEST }}
           CI_PROOF_CHECKOUT: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
