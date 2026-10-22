@@ -238,8 +238,8 @@ func TestPiInputUsageAndRefusal(t *testing.T) {
 		code   int
 		stderr string
 	}{
-		{"invalid-capture", []string{"-verify-pi", capture}, 1, "Pi input: invalid capture\n"},
-		{"missing-file", []string{"-verify-pi", filepath.Join(root, "private-missing")}, 2, "Pi input: capture unavailable\n"},
+		{"invalid-capture", []string{"-verify-pi", capture}, 1, "pi input: invalid capture\n"},
+		{"missing-file", []string{"-verify-pi", filepath.Join(root, "private-missing")}, 2, "pi input: capture unavailable\n"},
 		{"blank", []string{"-verify-pi="}, 2, "verify-pi path must not be blank\n"},
 		{"whitespace", []string{"-verify-pi", " "}, 2, "verify-pi path must not be blank\n"},
 		{"check", []string{"-verify-pi", capture, "-check"}, 2, "verify-pi cannot be combined with output or check\n"},

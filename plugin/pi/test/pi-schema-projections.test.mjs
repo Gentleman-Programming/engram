@@ -61,7 +61,7 @@ test("existing CLI verifies real Pi registration without writing", async (t) => 
         const registration = tools.find(({ name }) => name === tool);
         assert.ok(registration);
         mutate(registration.parameters);
-        await run(JSON.stringify(tools), 1, `Pi input: ${tool} schema differs\n`);
+        await run(JSON.stringify(tools), 1, `pi input: ${tool} schema differs\n`);
       });
     }
     const tools = JSON.parse(capture);
@@ -71,7 +71,7 @@ test("existing CLI verifies real Pi registration without writing", async (t) => 
       ["duplicate", JSON.stringify([...tools, tools[0]]), "duplicate registration"],
       ["invalid-json", "[", "invalid capture"],
       ["trailing-json", capture + " null", "invalid capture"],
-    ]) await t.test(name, () => run(value, 1, `Pi input: ${error}\n`));
+    ]) await t.test(name, () => run(value, 1, `pi input: ${error}\n`));
     t.diagnostic(`real TypeBox 1.3.34 capture SHA256=${hash(capture)} artifact SHA256=${hash(artifact)}`);
   }, { realTypeBox: true });
   assert.deepEqual(await readFile(artifactPath), artifact, "checkout artifact unchanged");

@@ -14,7 +14,7 @@ import (
 // registrations against live Go authority and explicit current Pi projections.
 // It is pure, excludes schema descriptions, and grants no semantic/release parity.
 func VerifyPiInputSchemas(capture []byte) error {
-	invalid := errors.New("Pi input: invalid capture")
+	invalid := errors.New("pi input: invalid capture")
 	var tools []struct {
 		Name       string         `json:"name"`
 		Parameters map[string]any `json:"parameters"`
@@ -34,7 +34,7 @@ func VerifyPiInputSchemas(capture []byte) error {
 			return invalid
 		}
 		if _, ok := actual[t.Name]; ok {
-			return errors.New("Pi input: duplicate registration")
+			return errors.New("pi input: duplicate registration")
 		}
 		actual[t.Name] = t.Parameters
 	}
@@ -49,7 +49,7 @@ func VerifyPiInputSchemas(capture []byte) error {
 	names := make([]string, 0, len(doc.Operations))
 	for name := range doc.Operations {
 		if actual[name] == nil || len(actual) != len(doc.Operations) {
-			return errors.New("Pi input: inventory differs")
+			return errors.New("pi input: inventory differs")
 		}
 		names = append(names, name)
 	}
@@ -66,7 +66,7 @@ func VerifyPiInputSchemas(capture []byte) error {
 			return err
 		}
 		if !reflect.DeepEqual(piInputShape(expected, true), piInputShape(actual[name], true)) {
-			return fmt.Errorf("Pi input: %s schema differs", name)
+			return fmt.Errorf("pi input: %s schema differs", name)
 		}
 	}
 	return nil
@@ -75,7 +75,7 @@ func VerifyPiInputSchemas(capture []byte) error {
 // piInputProjection owns only the source-specific rules below. Clone first so
 // neither success nor unsupported-source failure mutates authority/caller data.
 func piInputProjection(name string, source map[string]any) (map[string]any, error) {
-	unsupported := fmt.Errorf("Pi input: unsupported source for %s", name)
+	unsupported := fmt.Errorf("pi input: unsupported source for %s", name)
 	raw, err := json.Marshal(source)
 	if err != nil {
 		return nil, unsupported

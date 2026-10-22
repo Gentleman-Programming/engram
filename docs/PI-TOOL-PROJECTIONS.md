@@ -66,9 +66,9 @@ Actual capture schemas are never projected. Expected-only policy is bounded by:
 
 Source preconditions reject incompatible types, newly present bounds (even null),
 changed omitted-field shapes and pre-existing cwd instead of overwriting them.
-Errors are `Pi input: invalid capture`, `Pi input: duplicate registration`,
-`Pi input: inventory differs`, `Pi input: NAME schema differs` (sorted first tool),
-or `Pi input: unsupported source for NAME`; authority-generation errors propagate.
+Errors are `pi input: invalid capture`, `pi input: duplicate registration`,
+`pi input: inventory differs`, `pi input: NAME schema differs` (sorted first tool),
+or `pi input: unsupported source for NAME`; authority-generation errors propagate.
 
 Run from the repository root with Node.js 24 and existing TypeBox 1.3.34:
 `ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 GOPROXY=off GOSUMDB=off go test ./internal/mcp -run '^TestPiInput' -count=1 -v`.

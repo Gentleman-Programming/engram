@@ -50,7 +50,7 @@ func run(args []string, stderr io.Writer) int {
 		}
 		capture, err := os.ReadFile(*verifyPi)
 		if err != nil {
-			_, _ = fmt.Fprintln(stderr, "Pi input: capture unavailable")
+			_, _ = fmt.Fprintln(stderr, "pi input: capture unavailable")
 			return 2
 		}
 		if err := engrammcp.VerifyPiInputSchemas(capture); err != nil {

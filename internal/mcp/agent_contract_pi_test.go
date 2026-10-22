@@ -69,7 +69,7 @@ func TestPiInputSourceDrift(t *testing.T) {
 			tc.mutate(s)
 			before, _ := json.Marshal(s)
 			_, err := piInputProjection(tc.tool, s)
-			if err == nil || err.Error() != "Pi input: unsupported source for "+tc.tool {
+			if err == nil || err.Error() != "pi input: unsupported source for "+tc.tool {
 				t.Errorf("error=%v; want deterministic unsupported source", err)
 			}
 			after, _ := json.Marshal(s)
@@ -148,7 +148,7 @@ func TestPiInputCaptureBoundary(t *testing.T) {
 		raw := []byte(tc.raw)
 		before := sha256.Sum256(raw)
 		err := VerifyPiInputSchemas(raw)
-		if err == nil || err.Error() != "Pi input: "+tc.want {
+		if err == nil || err.Error() != "pi input: "+tc.want {
 			t.Errorf("%s: error=%v", tc.raw, err)
 		}
 		if sha256.Sum256(raw) != before {
@@ -297,7 +297,7 @@ func TestPiInputCapturePrerequisites(t *testing.T) {
 				t.Errorf("missing=%v err=%q", missing, got)
 			}
 			if tc.name == "malformed-output" {
-				if err := VerifyPiInputSchemas(raw); err == nil || err.Error() != "Pi input: invalid capture" {
+				if err := VerifyPiInputSchemas(raw); err == nil || err.Error() != "pi input: invalid capture" {
 					t.Errorf("malformed output: %v", err)
 				}
 			}
@@ -407,7 +407,7 @@ func TestPiInputRealCapture(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			check(t, raw, "Pi input: "+tc.tool+" schema differs")
+			check(t, raw, "pi input: "+tc.tool+" schema differs")
 		})
 	}
 	var tools []registration
@@ -428,10 +428,10 @@ func TestPiInputRealCapture(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			check(t, raw, "Pi input: "+tc.want)
+			check(t, raw, "pi input: "+tc.want)
 		})
 	}
-	check(t, append(append([]byte{}, capture...), []byte(" null")...), "Pi input: invalid capture")
+	check(t, append(append([]byte{}, capture...), []byte(" null")...), "pi input: invalid capture")
 	after, err := os.ReadFile(artifact)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("artifact changed", err)

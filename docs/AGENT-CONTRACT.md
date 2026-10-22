@@ -53,7 +53,7 @@ It never writes an artifact/capture or opens a store. The binary exits:
   refused capture, including invalid JSON, duplicates, inventory/schema differences
   or unsupported source projections.
 - **2**, with empty stdout: usage error or unavailable input file. Read failures
-  emit only `Pi input: capture unavailable`, without private paths.
+  emit only `pi input: capture unavailable`, without private paths.
 
 Explicit blank/whitespace paths reject with `verify-pi path must not be blank`.
 Combining verification with explicitly supplied `-output` or `-check` rejects with
