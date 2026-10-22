@@ -104,7 +104,9 @@ func TestCodexSubagentStopAlwaysEmitsHookEnvelope(t *testing.T) {
 		t.Fatalf("marshal normal input: %v", err)
 	}
 	run := exec.Command(bash, script)
-	run.Env = appendFilteredCodexPort(port)
+	confirmationDir := t.TempDir()
+	writeCodexStopConfirmation(t, confirmationDir)
+	run.Env = append(appendFilteredCodexPort(port), "PATH="+confirmationDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	run.Stdin = bytes.NewReader(normalInput)
 	var stdout, stderr bytes.Buffer
 	run.Stdout = &stdout
@@ -134,6 +136,7 @@ func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 	}
 	// Reject jq 1.7+ binary-mode flags, even when the installed jq accepts them.
 	shimDir := t.TempDir()
+	writeCodexStopConfirmation(t, shimDir)
 	shim := "#!/usr/bin/env bash\nfor arg in \"$@\"; do\n  case \"$arg\" in -b|-bj|--binary) exit 97;; esac\ndone\nexec " + fmt.Sprintf("'%s'", strings.ReplaceAll(jq, "'", "'\\''")) + " \"$@\"\n"
 	shimPath := filepath.Join(shimDir, "jq")
 	if err := os.WriteFile(shimPath, []byte(shim), 0755); err != nil {
@@ -209,6 +212,19 @@ func TestCodexSubagentStopExplicitEmptyMessageSelection(t *testing.T) {
 				t.Fatalf("passive POSTs = %+v, want one capture of %q", captures, tt.want)
 			}
 		})
+	}
+}
+
+// Content/envelope tests control only native confirmation; lifecycle authority
+// is exercised separately against the candidate CLI and production HTTP handlers.
+func writeCodexStopConfirmation(t *testing.T, dir string) {
+	t.Helper()
+	const script = `#!/usr/bin/env bash
+[ "$#" = 2 ] && [ "$1" = hook ] && [ "$2" = codex-resolve ] && [ "$ENGRAM_HOOK_OUTPUT" = json ] || exit 97
+jq -c '{session_id: .session_id}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "engram"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
 	}
 }
 

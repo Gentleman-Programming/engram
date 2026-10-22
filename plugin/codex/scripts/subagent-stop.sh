@@ -23,7 +23,6 @@ source "${SCRIPT_DIR}/_helpers.sh"
 
 # Read hook input from stdin
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 # Keep the original extraction for other cases. In the explicit-empty case,
 # transport stdout as JSON so jq text-mode newline conversion cannot alter it.
@@ -41,17 +40,35 @@ PROJECT=$(resolve_project "$CWD") || {
   exit 0
 }
 
-# Post to passive capture — server handles extraction, dedup, and storage
+# Resolve, never register: Go owns the live binding and project policy. Keep
+# identity in JSON throughout so shell command substitution cannot trim ID bytes.
+IDENTITY=$(printf '%s' "$INPUT" | engram_native_hook codex-resolve 2>/dev/null) || {
+  emit_hook_result
+  exit 0
+}
+BODY=$(printf '%s' "$IDENTITY" | jq -esc --argjson input "$INPUT" \
+  --argjson content "$OUTPUT_JSON" --arg project "$PROJECT" '
+  ($input.session_id // null) as $host |
+  if length == 1 and ($host | type) == "string" and ($host | length) > 0
+    and (.[0].session_id | type) == "string" and (.[0].session_id | length) > 0
+    and (.[0].session_id as $id | $id == $host or
+      ($id | startswith($host + ":resume:")) and
+      ($id | ltrimstr($host + ":resume:") | test("^[0-9]+\\z")))
+  then {session_id: .[0].session_id, content: $content, project: $project, source: "subagent-stop"}
+  else error("unconfirmed runtime identity") end
+' 2>/dev/null) || {
+  emit_hook_result
+  exit 0
+}
+
+# Native resolution has a 1.5s aggregate deadline; project lookup takes at most
+# 2s and capture 3s. Network budgets fit together within Codex's outer 10s bound.
+# The server handles extraction, dedup, and storage.
 curl -sf "${ENGRAM_URL}/observations/passive" \
   -X POST \
   -H "Content-Type: application/json" \
-  --max-time 9 \
-  -d "$(jq -n \
-    --arg sid "$SESSION_ID" \
-    --argjson content "$OUTPUT_JSON" \
-    --arg project "$PROJECT" \
-    --arg source "subagent-stop" \
-    '{session_id: $sid, content: $content, project: $project, source: $source}')" \
+  --max-time 3 \
+  -d "$BODY" \
   > /dev/null 2>&1
 
 emit_hook_result
