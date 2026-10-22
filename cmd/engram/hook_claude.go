@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -174,6 +175,11 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 	// lookup that fails outright denies the write: a degraded answer is not a
 	// first registration.
 	session, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
+	if lookupErr != nil && hookLocalRecoveryEligible(runtime.GOOS, base, base+"/sessions/"+url.PathEscape(id), lookupErr) {
+		if recoverHookLocalServer(ctx, client, base) == nil && ctx.Err() == nil {
+			session, known, lookupErr = hookSessionOwnerProject(ctx, client, base, id)
+		}
+	}
 	if lookupErr != nil {
 		return "", lookupErr
 	}
@@ -249,9 +255,23 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 	if err != nil {
 		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
 	}
-	response, err := client.Do(request)
+	// Track redirects without changing policy or the shared request context,
+	// including redirects back to exactly the original request URL.
+	lookupClient := *client
+	redirected := false
+	lookupClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		redirected = true
+		if client.CheckRedirect != nil {
+			return client.CheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	response, err := lookupClient.Do(request)
 	if err != nil || response == nil {
-		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
+		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed", cause: err, redirected: redirected}
 	}
 	defer func() { _ = response.Body.Close() }()
 	switch {
@@ -357,8 +377,12 @@ func hookResolutionDenial(body []byte) error {
 // hookDenialError carries a cause-specific confirmation failure. The generic
 // unconfirmed error remains the fallback for unexplained failures.
 type hookDenialError struct {
-	message string
+	message    string
+	cause      error
+	redirected bool
 }
+
+func (e *hookDenialError) Unwrap() error { return e.cause }
 
 func (e *hookDenialError) Error() string { return e.message }
 
