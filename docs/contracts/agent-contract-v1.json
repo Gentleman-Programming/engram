@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "cff12dcbe6f4ed23d36d2da38c7a53d3cf03aa1fab9c162c1d6462fcf71247ca",
+  "digest": "ee442d7eaab5ecd1b6f950622acf861b2c77b2d878ade2bfd4cd0031a43574bb",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -588,12 +588,12 @@
         "guarantees": [
           "actions are list or mark_reviewed",
           "omitted-project list is global",
-          "mark_reviewed is confined when a project is resolved"
+          "mark_reviewed requires a resolved project and confines the mutation"
         ],
         "pi_differences": [
-          "Pi accepts an explicit project for mark_reviewed; the current MCP branch only uses project for list"
+          "Pi forwards explicit/resolved project over HTTP; MCP resolves explicit/current project in Go"
         ],
-        "project_policy": "list: explicit known project or all projects; current MCP mark_reviewed ignores the project argument and uses current/process resolution",
+        "project_policy": "list: explicit known project or all projects; mark_reviewed: explicit project or resolved current project; never global",
         "risk": "persistent-write",
         "session_policy": "observation_id (or id alias) identifies an observation",
         "target_rule": "mark_reviewed: explicit project confines the mutation; omission requires the current resolved project; never mark globally"

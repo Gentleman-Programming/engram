@@ -125,7 +125,7 @@ Fields listed below record the Pi input surface and its current MCP/HTTP differe
 | Topic keys use Go, not local slugs | `dispatchTool` calls `/topic-keys/suggest`; `topic-key-contract.test.mjs` and `native-tool-contract.test.mjs` |
 | Literal update fields are present | `mem_update` schema/PATCH body; `mem-update.test.mjs` (#1981) |
 | Canonical `cwd` is intentional | `mem_current_project` schema/dispatch, MCP alias selection and HTTP current-project handler; accepted maintainer decision above |
-| Review target is still future | MCP `mark_reviewed` resolves current/process project, ignoring explicit project; Pi forwards explicit/resolved project. `target_rule` is not implemented MCP behavior |
+| Review project ownership | Go confines `mark_reviewed` to explicit project or resolved current project and refuses unresolved write context; Pi forwards explicit/resolved project. Omitted-project list remains global; the `id` alias is preserved |
 | History is already present | `mem_get_observation` and `mem_context` schemas/GET forwarding; `observation-history.test.mjs` and #1982 context regressions |
 
 The Go metadata/public generator regression records these six corrected projections
