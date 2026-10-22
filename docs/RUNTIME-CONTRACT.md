@@ -85,6 +85,9 @@ Concurrent callers share a bounded 64 KiB, three-second whole-probe flight, not 
 caller's cancellation signal. Qualification is refreshed rather than indefinitely
 cached. Only definite connection refusal may enter the existing generation-bounded
 implicit recovery; HTTP, parsing and compatibility failures cannot restart a
-server. Uncertain observation saves retain frozen destinations and cannot replay
+server. If bounded recovery is unavailable or exhausted, a definite refusal stays
+transport-unavailable and schedules the existing read-only self-heal probe. Its
+qualification error does not expose the configured URL or credentials.
+Uncertain observation saves retain frozen destinations and cannot replay
 onto a new binding. These source changes do not prove installed SDK execution,
 semantic parity, hosted CI acceptance or publication readiness.

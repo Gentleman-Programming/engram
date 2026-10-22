@@ -378,8 +378,8 @@ class EngramHttpError extends Error {
 }
 
 class EngramUnavailableError extends Error {
-  constructor() {
-    super(unreachableMessage(undefined));
+  constructor(message = unreachableMessage(undefined)) {
+    super(message);
     this.name = "EngramUnavailableError";
   }
 }
@@ -839,6 +839,9 @@ async function ensureRuntimeQualification(signal?: AbortSignal): Promise<void> {
         await Promise.race([probe, stopped]);
       } catch (error) {
         if (error instanceof RuntimeContractError) throw error;
+        if (error instanceof EngramUnavailableError || isConnectionRefusedError(error)) {
+          throw new EngramUnavailableError("gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.");
+        }
         // Never echo fetch errors, raw metadata, URL credentials or private bindings.
         throw runtimeContractFailure(error instanceof SyntaxError ? "malformed JSON contract" : "unreadable or incompatible contract");
       } finally {
@@ -2024,7 +2027,7 @@ async function initialize(cwd: string): Promise<void> {
 // the same actionable prefix instead of leaking a raw spawn or readiness message.
 function normalizeInitializationError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof RuntimeContractError) return error;
+  if (error instanceof RuntimeContractError || error instanceof EngramUnavailableError) return error;
   const normalized = `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_PORT/ENGRAM_BIN.`;
   return error instanceof ForeignOwnershipError
     ? new ForeignOwnershipError(error.evidence, normalized)

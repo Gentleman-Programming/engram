@@ -926,6 +926,7 @@ test("normalization preserves typed ownership evidence without text classificati
   }
   const normalize = new Function("ForeignOwnershipError", "ENGRAM_URL", `
     class RuntimeContractError extends Error {}
+    class EngramUnavailableError extends Error {}
     return function normalizeInitializationError(error) {
       ${extractFunctionBody("normalizeInitializationError", "{\n  const message")}
     };

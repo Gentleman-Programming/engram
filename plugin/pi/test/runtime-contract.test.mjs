@@ -22,24 +22,44 @@ async function withConsumer(contract, run, endpoint = 'http://127.0.0.1:17437') 
   let current = contract;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname.replace(/^\/\//, '/');
-    calls.push({ path, metadata: String(url).endsWith('/runtime-contract'), method: init.method ?? 'GET', headers: new Headers(init.headers) });
+    calls.push({ path, metadata: String(url).endsWith('/runtime-contract'), health: String(url).endsWith('/health'), method: init.method ?? 'GET', headers: new Headers(init.headers) });
     if (String(url).endsWith('/runtime-contract')) return typeof current === 'function' ? current() : Response.json(current);
     if (String(url).includes('/project/current')) return Response.json({ project: 'runtime-tests' });
     return Response.json({ id: 1, context: '', topic_key: 'architecture/test' });
   };
   try {
-    await withPluginSandbox('engram-runtime-consumer-', async ({ sandbox }) => {
+    await withPluginSandbox('engram-runtime-consumer-', async ({ sandbox, clock }) => {
       const register = await importPluginFromSandbox(sandbox);
       register({ registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => hooks.set(event, handler) });
       const ctx = { cwd: sandbox, sessionManager: { getSessionId: () => 'runtime-host', getBranch: () => [] }, ui: { setStatus() {} } };
       const tool = signal => tools.get('mem_suggest_topic_key').execute('qualification', { title: 'Test' }, signal, undefined, ctx);
-      await run({ tool, calls, hooks, ctx, setContract: value => { current = value; } });
-    });
+      await run({ tool, calls, hooks, ctx, clock, setContract: value => { current = value; } });
+    }, { controlledDelay: 5000 });
   } finally {
     globalThis.fetch = previousFetch;
     keys.forEach((key, i) => { if (saved[i] === undefined) delete process.env[key]; else process.env[key] = saved[i]; });
   }
 }
+
+test('consumer refusal preserves unavailable transport and self-heal without private data or writes', async () => {
+  const refused = () => {
+    const cause = Object.assign(new Error('private-bearer'), { code: 'ECONNREFUSED' });
+    throw new TypeError('private-password private-query', { cause });
+  };
+  await withConsumer(refused, async ({ tool, calls, clock }) => {
+    const result = await tool();
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, 'gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.');
+    assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
+    assert.equal(calls.length, 1, 'an explicit endpoint never authorizes a recovery request');
+    assert.ok(calls.every(call => call.metadata && call.method === 'GET'));
+    assert.equal(clock.pending(), 1, 'typed unavailability must schedule the existing self-heal probe');
+    await clock.advance();
+    assert.equal(calls.filter(call => call.health).length, 1, 'self-heal must perform exactly one health probe');
+    assert.equal(calls.length, 2, 'only qualification and the health probe may be dispatched');
+    assert.ok(calls.every(call => call.method === 'GET'), 'qualification failure must not send lifecycle or memory writes');
+  }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
+});
 
 for (const [name, contract] of [
   ['missing endpoint', () => new Response('', { status: 404 })],
@@ -52,7 +72,7 @@ for (const [name, contract] of [
   ['oversized response', () => new Response(' '.repeat(65537))],
 ]) {
   test(`consumer blocks ${name} before lifecycle and tool effects without leaking credentials`, async () => {
-    await withConsumer(contract, async ({ tool, calls, hooks, ctx }) => {
+    await withConsumer(contract, async ({ tool, calls, hooks, ctx, clock }) => {
       await hooks.get('session_start')({}, ctx);
       const result = await tool();
       assert.equal(result.isError, true);
@@ -61,6 +81,7 @@ for (const [name, contract] of [
       assert.doesNotMatch(JSON.stringify(result), /private-password|private-query|private-bearer/);
       assert.ok(calls.length > 0);
       assert.ok(calls.every(call => call.method === 'GET' && call.metadata), 'only metadata may be requested');
+      assert.equal(clock.pending(), 0, 'contract failures must not schedule transport self-heal');
     }, 'http://user:private-password@127.0.0.1:17437/?token=private-query');
   });
 }
