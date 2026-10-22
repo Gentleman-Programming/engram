@@ -29,6 +29,42 @@ go run ./tools/agent-contract -output docs/contracts/agent-contract-v1.json
 `-output` changes the destination. Help and argument rejection do not generate
 an artifact or open a data directory.
 
+## Verify a Pi model-input capture
+
+The existing command also supports an independent, read-only mode:
+
+```sh
+go run ./tools/agent-contract -verify-pi /path/to/capture.json
+node --test plugin/pi/test/pi-schema-projections.test.mjs
+```
+
+The input file is a nonempty JSON array of actual serialized registrations:
+`[{"name":"mem_...","parameters":{...JSON schema...}}]`. The Node regression
+captures registrations with the existing disposable sandbox and real pinned
+TypeBox 1.3.34 (Node.js 24 and existing plugin test dependencies required).
+It builds the existing Go command once in temporary storage; no server is needed.
+
+`-verify-pi` calls the [Go-owned projection verifier](PI-TOOL-PROJECTIONS.md#go-owned-input-projection-verification)
+against live Go authority, not a second inventory or the checked-in artifact.
+It never writes an artifact/capture or opens a store. The binary exits:
+
+- **0**, with empty stdout/stderr: scope-only projection match.
+- **1**, with empty stdout and the exact Go verifier error plus newline on stderr:
+  refused capture, including invalid JSON, duplicates, inventory/schema differences
+  or unsupported source projections.
+- **2**, with empty stdout: usage error or unavailable input file. Read failures
+  emit only `Pi input: capture unavailable`, without private paths.
+
+Explicit blank/whitespace paths reject with `verify-pi path must not be blank`.
+Combining verification with explicitly supplied `-output` or `-check` rejects with
+`verify-pi cannot be combined with output or check`, even for `-check=false` or
+an output equal to its default. Diagnostics end with a newline. `-h` describes
+both modes; legacy generation and freshness checking remain independent.
+`go run` additionally reports a failing child's exit status.
+
+Success is not semantic parity, installed-host compatibility or release approval.
+The raw diagnostic, artifact digest/status/freshness and MCP ratchet are unchanged.
+
 ## Authority and digest
 
 | Field | Authority / meaning |
