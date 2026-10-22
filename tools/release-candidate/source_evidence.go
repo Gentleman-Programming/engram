@@ -38,13 +38,17 @@ type sourceObservation struct {
 	Core          sourceIdentity `json:"core"`
 	Pi            sourceIdentity `json:"pi"`
 	Check         sourceCheck    `json:"check"`
+	PiInputs      *piInputCheck  `json:"piInputs,omitempty"`
 }
 
-func observeContract(root, coreRef, piRef, version, piVersion, core, pi string, output io.Writer) error {
+func observeContract(root, coreRef, piRef, version, piVersion, core, pi string, piInputs bool, output io.Writer) error {
 	r := sourceObservation{SchemaVersion: 1, Outcome: "blocked",
 		Core:  sourceIdentity{VersionIntent: version, RefIntent: coreRef, RequestedCommit: core},
 		Pi:    sourceIdentity{VersionIntent: piVersion, RefIntent: piRef, RequestedCommit: pi},
 		Check: sourceCheck{Name: "go-contract-freshness", State: "unavailable"}}
+	if piInputs {
+		r.PiInputs = &piInputCheck{Name: "pi-input-projection", State: "unavailable"}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	repo, err := sourceGit(ctx, root, "rev-parse", "--show-toplevel")
@@ -74,9 +78,16 @@ func observeContract(root, coreRef, piRef, version, piVersion, core, pi string, 
 		workspace, e := os.MkdirTemp(root, ".release-source-evidence-")
 		if e == nil {
 			r.Check = runSourceCheck(ctx, root, workspace, r.Core.Commit, r.Pi.Commit, piVersion)
+			if piInputs && r.Check.State == "passed" {
+				check := runPiInputCheck(ctx, root, workspace, r.Core.Commit, r.Pi.Commit, r.Check.ArtifactSHA256)
+				r.PiInputs = &check
+			}
 			// Never report success before owned workspace cleanup completes.
 			if os.RemoveAll(workspace) != nil {
 				r.Check.State = "unavailable"
+				if r.PiInputs != nil {
+					r.PiInputs.State = "unavailable"
+				}
 			}
 		}
 	}

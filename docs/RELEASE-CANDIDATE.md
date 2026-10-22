@@ -118,6 +118,34 @@ retain stderr/exit 1. Source flags require observation, which refuses active
 `-assess` or any `-pi-tarball` presence before repository access. Legacy modes
 are otherwise unchanged. The report is a view, not an approval credential.
 
+### Opt-in selected-Pi input projections
+
+Add `-observe-pi-inputs` to the Go `-observe-contract` invocation to capture
+actual selected-Pi schemas with the existing helper and real TypeBox, then run
+`go run ./tools/agent-contract -verify-pi <owned-capture>` from the selected Core.
+The independently selected Pi must carry the existing real-TypeBox helper.
+Node.js 24 and the already authorized `plugin/pi/node_modules/typebox` 1.3.34
+in the repository selected by `-root` are required. The collector only copies
+that fixed dependency into its owned workspace; it never installs/downloads,
+uses an ancestor/global dependency, or falls back to the schema stub.
+Trust must cover the executed selected-Pi/helper code and installed dependency,
+not just Core. A package version is not an authenticity attestation.
+
+The optional `piInputs` view records both source identities, contract/capture
+SHA-256, TypeBox version, Node capture exit and actual Go-wrapper verification
+exit when established. Missing prerequisites, cancellation, mutation or cleanup
+uncertainty cannot pass. Capture pipes have bounded EOF waits; descendants are
+not universally terminated. Raw captures/diagnostics are not emitted.
+Without this flag (or with `-observe-pi-inputs=false`), the old observation
+JSON and Go-only behavior remain unchanged. The flag requires active
+`-observe-contract`; other modes and the Node sibling remain unchanged.
+Even passing projections only prove Go-owned input-shape acceptance using a
+stub UI host—not semantic parity, artifact execution, installed-host behavior
+or release eligibility. The overall observation remains blocked/exit2/empty stderr.
+For mandatory local functional coverage, use
+`ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 go test ./tools/release-candidate`;
+without prerequisites the real-capture test may skip, never proving this check.
+
 ## Separate real-schema diagnostic
 
 `node tools/pi-schema-diagnostic.mjs` captures real serialized TypeBox schemas
