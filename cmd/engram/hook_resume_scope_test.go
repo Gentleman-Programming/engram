@@ -105,11 +105,14 @@ func TestRootScopedResumeLifecycle(t *testing.T) {
 			call("POST", "/sessions", scope("host", "owner", a, tc.mode), 201)
 			call("POST", "/sessions/host/end", map[string]any{}, 200)
 			original := call("GET", "/sessions/host", nil, 200)
+			// This matrix protects legacy server-resolved caller scope, including
+			// shared cross-project permissions; external routing has its own CLI matrix.
+			useLegacyLocalHookEndpoint(t, endpoint.URL)
 			cli := func(action string, payload any) []byte {
 				t.Helper()
 				raw, _ := json.Marshal(payload)
 				command := exec.Command(os.Args[0], "-test.run=^TestRootScopedResumeHookProcess$")
-				command.Env = append(os.Environ(), "ENGRAM_RESUME_TEST_ACTION="+action, "ENGRAM_URL="+endpoint.URL, "ENGRAM_SOCKET=", "ENGRAM_PROJECT=", "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "child-data"), "ENGRAM_HOOK_OUTPUT=json")
+				command.Env = append(os.Environ(), "ENGRAM_RESUME_TEST_ACTION="+action, "ENGRAM_PROJECT=", "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "child-data"), "ENGRAM_HOOK_OUTPUT=json")
 				command.Stdin = bytes.NewReader(raw)
 				var stdout, stderr bytes.Buffer
 				command.Stdout = &stdout
