@@ -3988,7 +3988,7 @@ Commands:
                      Inspect the absolute cwd in hook JSON on stdin without HTTP, database or binding writes
   projects list      List all projects with observation, session, and prompt counts
   projects merge --from <source> --to <canonical> (--dry-run|--apply)
-                     Preview or apply a separator or Unicode normalization variant merge
+                     Preview or apply a legacy case, separator or Unicode normalization variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
