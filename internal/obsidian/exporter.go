@@ -431,6 +431,16 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 		safeName := strings.ReplaceAll(prefix, "/", "--")
 		hubPath := filepath.Join(topicsDir, safeName+".md")
+		if !fullScope {
+			// Topic hubs are shared across projects; scoped refs cannot replace them.
+			if _, err := os.Lstat(hubPath); err == nil {
+				state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
+				continue
+			} else if !os.IsNotExist(err) {
+				result.Errors = append(result.Errors, fmt.Errorf("stat topic hub %s: %w", hubPath, err))
+				continue // Unknown filesystem state must not permit an overwrite.
+			}
+		}
 		content := TopicHubMarkdown(prefix, refs)
 		if err := os.WriteFile(hubPath, []byte(content), 0644); err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("write topic hub %s: %w", hubPath, err))
