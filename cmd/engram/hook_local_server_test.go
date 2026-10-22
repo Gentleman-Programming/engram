@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,21 +15,36 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestHookManagedRecoveryConfirmation(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows recovery only")
-	}
-	for _, ended := range []bool{false, true} {
-		t.Run(fmt.Sprint("ended=", ended), func(t *testing.T) {
+	for _, tc := range []struct {
+		name, platform                                  string
+		ended, launchFailure, retryFailure, expireRetry bool
+		initialFailure                                  bool
+	}{
+		{name: "live session"},
+		{name: "ended session", ended: true},
+		{name: "recovery failure", launchFailure: true},
+		{name: "retry lookup failure", retryFailure: true},
+		{name: "context expiry after recovery", expireRetry: true},
+		{name: "initial HTTP failure never launches", initialFailure: true},
+		{name: "non-Windows never launches", platform: "linux"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			platform := tc.platform
+			if platform == "" {
+				platform = "windows"
+			}
 			dir := t.TempDir()
 			t.Setenv("ENGRAM_DATA_DIR", dir)
 			t.Setenv("ENGRAM_URL", "")
 			t.Setenv("ENGRAM_SOCKET", "")
+			t.Setenv("ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT", "2s")
 			expected, err := store.EnsureInstanceID(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -40,15 +56,24 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 			port := listener.Addr().(*net.TCPAddr).Port
 			_ = listener.Close()
 			t.Setenv("ENGRAM_PORT", strconv.Itoa(port))
-			var launches, owners, registrations, mutations atomic.Int32
+			var launches, health, owners, registrations, mutations atomic.Int32
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/health":
+					health.Add(1)
 					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "engram", "instance_id": expected})
 				case r.URL.Path == "/sessions/host":
 					owners.Add(1)
+					if tc.initialFailure || tc.retryFailure {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					if tc.expireRetry {
+						<-r.Context().Done()
+						return
+					}
 					row := map[string]any{"id": "host", "project": "persisted-owner", "directory": ""}
-					if ended {
+					if tc.ended {
 						row["ended_at"] = "ended"
 					}
 					_ = json.NewEncoder(w).Encode(row)
@@ -56,8 +81,8 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 					registrations.Add(1)
 					var body map[string]string
 					_ = json.NewDecoder(r.Body).Decode(&body)
-					if body["project"] != "persisted-owner" {
-						t.Errorf("lost persisted owner: %v", body)
+					if body["project"] != "persisted-owner" || body["id"] != "host" {
+						t.Errorf("lost persisted identity: %v", body)
 					}
 					w.WriteHeader(201)
 					_, _ = w.Write([]byte(`{"id":"host","status":"created"}`))
@@ -67,10 +92,8 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 				}
 			}))
 			_ = server.Listener.Close()
-			old := hookLocalServerLaunch
-			defer func() { hookLocalServerLaunch = old }()
-			hookLocalServerLaunch = func(ctx context.Context, executable, log string, env []string) error {
-				launches.Add(1)
+			defer server.Close()
+			startServer := func() error {
 				l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 				if err != nil {
 					return err
@@ -79,21 +102,43 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 				server.Start()
 				return nil
 			}
-			defer server.Close()
-			effective, err := confirmHookSession("host", "untrusted-cwd", true)
-			if ended {
-				if err == nil || effective != "" {
-					t.Fatalf("ended session permitted: %q %v", effective, err)
+			old := hookLocalServerLaunch
+			defer func() { hookLocalServerLaunch = old }()
+			hookLocalServerLaunch = func(context.Context, string, string, []string) error {
+				launches.Add(1)
+				if tc.launchFailure {
+					return errors.New("synthetic launch failure")
 				}
-			} else if err != nil || effective != "host" {
-				t.Fatalf("recovery: %q %v", effective, err)
+				return startServer()
 			}
-			wantRegistrations := int32(1)
-			if ended {
-				wantRegistrations = 0
+			if tc.initialFailure {
+				if err := startServer(); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if launches.Load() != 1 || owners.Load() != 1 || registrations.Load() != wantRegistrations || mutations.Load() != 0 {
-				t.Fatalf("launch=%d owner=%d registration=%d unexpected=%d", launches.Load(), owners.Load(), registrations.Load(), mutations.Load())
+			effective, err := confirmHookSessionForPlatform("host", "untrusted-cwd", true, platform)
+			wantSuccess := tc.name == "live session"
+			if (err == nil) != wantSuccess || (wantSuccess && effective != "host") || (!wantSuccess && effective != "") {
+				t.Fatalf("confirmation: effective=%q error=%v want success=%v", effective, err, wantSuccess)
+			}
+			if tc.expireRetry && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("confirmation lost deadline: %v", err)
+			}
+			wantLaunches, wantHealth, wantOwners, wantRegistrations := int32(1), int32(1), int32(1), int32(0)
+			if tc.launchFailure {
+				wantHealth, wantOwners = 0, 0
+			}
+			if tc.initialFailure || platform != "windows" {
+				wantLaunches, wantHealth = 0, 0
+			}
+			if platform != "windows" {
+				wantOwners = 0
+			}
+			if wantSuccess {
+				wantRegistrations = 1
+			}
+			if launches.Load() != wantLaunches || health.Load() != wantHealth || owners.Load() != wantOwners || registrations.Load() != wantRegistrations || mutations.Load() != 0 {
+				t.Fatalf("launch=%d health=%d owner=%d registration=%d unexpected=%d; want %d/%d/%d/%d/0", launches.Load(), health.Load(), owners.Load(), registrations.Load(), mutations.Load(), wantLaunches, wantHealth, wantOwners, wantRegistrations)
 			}
 		})
 	}
@@ -150,7 +195,9 @@ func TestHookLocalReadiness(t *testing.T) {
 		{"malformed", `{`, 200, false}, {"HTTP", `{}`, 503, false}, {"redirect", `{}`, 302, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			}))
@@ -159,6 +206,9 @@ func TestHookLocalReadiness(t *testing.T) {
 			defer cancel()
 			if err := hookLocalServerReady(ctx, server.Client(), server.URL, "expected"); (err == nil) != tc.want {
 				t.Fatalf("readiness: %v", err)
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("non-500 response retried: %d", requests.Load())
 			}
 		})
 	}
@@ -169,6 +219,77 @@ func TestHookLocalReadiness(t *testing.T) {
 	defer cancel()
 	if err := hookLocalServerReady(ctx, &http.Client{}, endpoint, "expected"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
+	}
+}
+
+type hookHealthTestBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *hookHealthTestBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestHookLocalReadinessTransient500(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		want       bool
+	}{
+		{"matching identity", `{"status":"ok","service":"engram","instance_id":"expected"}`, 200, true},
+		{"foreign identity", `{"status":"ok","service":"engram","instance_id":"other"}`, 200, false},
+		{"other HTTP status", `{}`, 503, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodies []*hookHealthTestBody
+			client := &http.Client{Transport: codexRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet || r.URL.Path != "/health" {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+				}
+				status, body := 500, "temporary stats failure"
+				if len(bodies) != 0 {
+					status, body = tc.status, tc.body
+				}
+				b := &hookHealthTestBody{Reader: strings.NewReader(body)}
+				bodies = append(bodies, b)
+				return &http.Response{StatusCode: status, Body: b, Header: make(http.Header), Request: r}, nil
+			})}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected")
+			if (err == nil) != tc.want || len(bodies) != 2 {
+				t.Fatalf("readiness=%v requests=%d want success=%v requests=2", err, len(bodies), tc.want)
+			}
+			for i, body := range bodies {
+				if !body.closed {
+					t.Errorf("response %d not closed", i)
+				}
+			}
+		})
+	}
+}
+
+func TestHookLocalReadinessPersistent500Deadline(t *testing.T) {
+	var bodies []*hookHealthTestBody
+	client := &http.Client{Transport: codexRoundTripper(func(r *http.Request) (*http.Response, error) {
+		b := &hookHealthTestBody{Reader: strings.NewReader("temporary stats failure")}
+		bodies = append(bodies, b)
+		return &http.Response{StatusCode: 500, Body: b, Header: make(http.Header), Request: r}, nil
+	})}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := hookLocalServerReady(ctx, client, "http://127.0.0.1:7437", "expected"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("persistent 500: %v", err)
+	}
+	if len(bodies) < 2 {
+		t.Fatalf("500 was not retried: %d requests", len(bodies))
+	}
+	for i, body := range bodies {
+		if !body.closed {
+			t.Errorf("response %d not closed", i)
+		}
 	}
 }
 

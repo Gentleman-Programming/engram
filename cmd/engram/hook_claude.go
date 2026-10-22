@@ -155,6 +155,11 @@ func hookSessionConfirmationDeny(agent string, err error) []byte {
 // confirmHookSession returns the session ID writes must use: the host ID, or
 // the live continuation that SessionStart registered after a resume (#1624).
 func confirmHookSession(id, cwd string, projectOwned bool) (effective string, confirmationErr error) {
+	return confirmHookSessionForPlatform(id, cwd, projectOwned, runtime.GOOS)
+}
+
+// Keep the platform seam private; production always supplies runtime.GOOS.
+func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform string) (effective string, confirmationErr error) {
 	base, client := hookEndpointClient("")
 	if base == "" {
 		return "", errHookSessionUnconfirmed
@@ -175,7 +180,7 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 	// lookup that fails outright denies the write: a degraded answer is not a
 	// first registration.
 	session, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
-	if lookupErr != nil && hookLocalRecoveryEligible(runtime.GOOS, base, base+"/sessions/"+url.PathEscape(id), lookupErr) {
+	if lookupErr != nil && hookLocalRecoveryEligible(platform, base, base+"/sessions/"+url.PathEscape(id), lookupErr) {
 		if recoverHookLocalServer(ctx, client, base) == nil && ctx.Err() == nil {
 			session, known, lookupErr = hookSessionOwnerProject(ctx, client, base, id)
 		}

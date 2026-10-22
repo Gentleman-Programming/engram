@@ -91,7 +91,11 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 			return err
 		}
 		response, err := healthClient.Do(request)
-		if err == nil {
+		if err == nil && response.StatusCode == http.StatusInternalServerError {
+			// Startup stats can fail transiently; this is readiness polling,
+			// never permission to launch again or accept an unknown identity.
+			_ = response.Body.Close()
+		} else if err == nil {
 			var health struct {
 				Status     string `json:"status"`
 				Service    string `json:"service"`
