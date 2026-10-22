@@ -405,12 +405,29 @@ server is required; updating Pi alone does not add server capabilities.
 real Go HTTP content/history/revision and public-counter checks. Run it from the
 repository root with `node --test plugin/pi/test/mem-update.test.mjs`, then run
 `npm test` from `plugin/pi`. Use Node.js 24 and the checkout's Go toolchain/dependencies
-(or `ENGRAM_PI_TEST_SERVER_BINARY` for the prebuilt fixture); no npm install is needed.
+(or `ENGRAM_PI_TEST_SERVER_BINARY` for the prebuilt fixture). Before the full suite,
+run `npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi` for the locked
+test-only TypeBox dependency without installing optional Pi SDK peers.
 Without either fixture resource, the two real-server tests skip before creating a
 sandbox or building Go; both mocked tests still run in the packaged module.
 An invalid configured binary or a checkout Go build failure remains a failure,
 not a skip. `test/mem-update-package.test.mjs` protects these package boundaries.
 These checks do not establish installed-host or broader release parity.
+
+## Local schema diagnostic
+
+From a Node.js 24 source checkout, after the test-dependency prerequisite above:
+
+```sh
+node tools/pi-schema-diagnostic.mjs --help
+node tools/pi-schema-diagnostic.mjs
+```
+
+Run these commands from the repository root. This read-only structural diagnostic
+captures real TypeBox registration schemas, not installed-host semantics. Differences
+are expected and exit 1; this is not a release gate or approval. See
+[output and failure semantics](../../docs/PI-TOOL-PROJECTIONS.md#real-schema-diagnostic).
+The existing lightweight sandbox stub remains the default for other tests.
 
 ## Observation history
 
