@@ -31,6 +31,22 @@ func useLegacyLocalHookEndpoint(t *testing.T, endpoint string) {
 	if err != nil || parsed.Port() == "" {
 		t.Fatalf("legacy hook endpoint must have a port: %q (%v)", endpoint, err)
 	}
+	// A closed managed endpoint now enters recovery. Keep legacy denial
+	// fixtures synthetic and stop at launch admission instead of executing
+	// this test binary as `serve` or consulting the user's default store.
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("ENGRAM_DATA_DIR", root)
+	if err := os.WriteFile(filepath.Join(root, "engram.db"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	launch := hookLocalServerLaunch
+	hookLocalServerLaunch = func(context.Context, string, string, []string) error {
+		return errors.New("legacy fixture does not launch a server")
+	}
+	t.Cleanup(func() { hookLocalServerLaunch = launch })
 	t.Setenv("ENGRAM_URL", "")
 	t.Setenv("ENGRAM_SOCKET", "")
 	t.Setenv("ENGRAM_PORT", parsed.Port())
