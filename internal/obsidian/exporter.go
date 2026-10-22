@@ -1,12 +1,14 @@
 package obsidian
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
@@ -32,8 +34,9 @@ type Exporter struct {
 	store  StoreReader
 	config ExportConfig
 
-	// Optional per-exporter seam for the scoped topic-hub open boundary.
-	openTopicHub func(string, int, os.FileMode) (*os.File, error)
+	// Optional per-exporter seams for owned temporary creation and publication.
+	createTopicTemp func(string, string) (*os.File, error)
+	publishTopicHub func(string, string) error
 }
 
 // NewExporter constructs an Exporter. Validation happens in Export().
@@ -439,8 +442,9 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		if fullScope {
 			writeErr = os.WriteFile(hubPath, []byte(content), 0644)
 		} else {
-			writeErr = e.writeScopedTopicHub(hubPath, []byte(content))
-			if os.IsExist(writeErr) {
+			var created bool
+			created, writeErr = e.writeScopedTopicHub(hubPath, []byte(content))
+			if writeErr == nil && !created {
 				// Shared hubs, including competing creations, must not be replaced
 				// with references from only the selected project.
 				state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
@@ -493,22 +497,43 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	return result, nil
 }
 
-// writeScopedTopicHub creates without replacing an existing shared hub, retaining
-// os.WriteFile's write/close error handling after a successful exclusive open.
-func (e *Exporter) writeScopedTopicHub(path string, content []byte) error {
-	open := e.openTopicHub
-	if open == nil {
-		open = os.OpenFile
+// writeScopedTopicHub publishes only a closed, complete owned temporary file.
+// A competing destination is preserved; cleanup never touches the final path.
+func (e *Exporter) writeScopedTopicHub(path string, content []byte) (created bool, err error) {
+	create := e.createTopicTemp
+	if create == nil {
+		create = os.CreateTemp
 	}
-	file, err := open(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	publish := e.publishTopicHub
+	if publish == nil {
+		publish = identityfile.Publish
+	}
+	file, err := create(filepath.Dir(path), ".topic-hub-*")
 	if err != nil {
-		return err
+		return false, err
 	}
+	temporary := file.Name()
+	defer func() {
+		// Linux no-replace rename consumes the source; hard-link publication
+		// leaves it behind. In either case only this attempt's temp is ours.
+		if cleanupErr := os.Remove(temporary); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			err = errors.Join(err, fmt.Errorf("clean topic hub temporary %s: %w", temporary, cleanupErr))
+		}
+	}()
 	_, err = file.Write(content)
+	if err == nil {
+		err = file.Chmod(0644)
+	}
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	if err = publish(temporary, path); os.IsExist(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // removeExportFile deletes one note tracked by the sync state from the export
