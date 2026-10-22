@@ -1,5 +1,5 @@
 import { closingIssueNumbers } from './issue-validation.mjs';
-import { rerunNativeIssuePolicy } from './issue-refresh-router.mjs';
+import { issueRefreshFailureDiagnostic, rerunNativeIssuePolicy } from './issue-refresh-router.mjs';
 
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
 function requireEvidence(condition, message) {
@@ -40,17 +40,21 @@ export async function dispatchIssueApprovalRefresh(github, context, trustedSha) 
       && (pull.body === null || typeof pull.body === 'string'), 'current PR metadata malformed');
     if (pull.state === 'open' && closingIssueNumbers(pull.body).includes(payload.issue.number)) affected.push(pull);
   }
-  const results = [], failures = [];
+  const results = [], failures = [], outcomes = [];
   for (const pull of affected) {
     try {
-      results.push(await rerunNativeIssuePolicy(github, repo, pull, trustedSha));
+      const result = await rerunNativeIssuePolicy(github, repo, pull, trustedSha);
+      results.push(result);
+      outcomes.push({ pullNumber: pull.number, outcome: 'requested', runId: result.runId, fromAttempt: result.attempt });
     } catch (error) {
       failures.push({ pullNumber: pull.number, error });
+      outcomes.push({ pullNumber: pull.number, outcome: 'failed', ...issueRefreshFailureDiagnostic(error) });
     }
   }
   if (failures.length) {
+    const diagnostic = { outcomes: outcomes.slice(0, 20), omitted: Math.max(0, outcomes.length - 20) };
     const error = new AggregateError(failures.map((failure) => failure.error),
-      `Issue refresh blocked for PRs: ${failures.map((failure) => failure.pullNumber).join(', ')}`);
+      `Issue refresh blocked for PRs: ${failures.map((failure) => failure.pullNumber).join(', ')}\nIssue refresh diagnostics: ${JSON.stringify(diagnostic)}`);
     error.results = results;
     error.failures = failures;
     throw error;
