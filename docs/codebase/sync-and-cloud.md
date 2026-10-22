@@ -89,6 +89,55 @@ identities found in the local `sessions` table as blocking findings. Neither is
 auto-repaired, because inventing a canonical session ID would fabricate identity
 data.
 
+### Opaque session identities and historical compatibility
+
+Direct `CloudStore.WriteChunk` and mutation-batch ingestion reject a session
+DELETE whose nonblank payload ID differs byte-for-byte from its entity key,
+before persisting any part of the chunk or batch. Matching padded IDs remain
+valid; sparse legacy session DELETE payloads retain the existing key fallback.
+Other entity DELETE validation is unchanged. This is producer validation, not
+historical startup repair.
+
+Nonblank session IDs are opaque, byte-exact identifiers. In the same project,
+`session` and ` session ` identify different sessions. Cloud chunk and mutation
+ingestion must retain those IDs, their observation/prompt `session_id` values,
+and session-index keys unchanged. Trimming is a blank check, not an identity
+transformation. Generated observation, prompt and relation keys keep their
+existing normalization rules. Chunk replay retains exact session keys in dependency
+matching and typed mutation synthesis, including repeated imports. This shared
+import path also preserves the same IDs in local Git chunks.
+
+Dashboard session maps and observation/prompt references preserve those bytes too.
+Session, observation and prompt detail routes use the decoded session path segment
+unchanged, so `%20session%20` does not look up `session`. Project grants and generated
+child IDs keep their existing normalization. A mismatched historical session key
+and payload ID is an explicit dashboard load error, not a guessed association.
+
+A supplied session mutation key must exactly match its payload ID. In particular,
+a historical key `session` paired with payload ID ` session ` is inconsistent,
+not a legacy alias to accept silently. Pulled inconsistent identities retain the
+existing quarantine-plus-evidence behavior described above.
+
+| Historical evidence | Compatibility boundary |
+| --- | --- |
+| Original local store/journal or retained typed chunk arrays | May retain exact IDs and child associations. Preserve these sources. |
+| Materialized mutation with trimmed key and original payload ID | Inconsistency is detectable; do not silently rekey or merge it. |
+| Mutation normalized before storage, including a chunk generated from it | Original padding and child ownership may be irrecoverably ambiguous. Do not infer them. |
+| Mixed typed arrays and explicit normalized mutations | Conflicting representations require explicit review, not a guessed winner for repair. |
+| Session index or dashboard projection | Derived state can be rebuilt only from complete, unambiguous source history. Rebuilding cannot recover bytes absent from every source. |
+
+This change does not rewrite historical chunks, their content hashes, mutation
+rows, or local databases. The existing startup backfill still completes ordinary
+session-index entries. It does not invent trimmed aliases or add missing padded
+historical identities: startup fails with `cloudstore: session index requires
+explicit historical resolution` when a retained padded ID has no exact index
+entry. Correctly ingested padded IDs already have that entry and reopen normally.
+Existing aliases are not pruned. A maintainer must separately authorize historical
+recovery after checking source completeness, conflicts and child ownership; do
+not retry startup expecting a repair or guess the missing identity. A dry-run
+mutation chunk backfill uses exact session identities when comparing signatures;
+it is not a historical identity repair command.
+
 ### Session directory admission: local-partial, cloud ownership-aware, cloud-mutation-compatible
 
 Session `directory` follows a two-domain contract (engram#1287), with one Cloud

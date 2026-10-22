@@ -1607,8 +1607,8 @@ func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks 
 			if mutation.Entity != store.SyncEntitySession || mutation.Op != store.SyncOpUpsert {
 				continue
 			}
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				available[sessionID] = struct{}{}
 			}
 		}
@@ -1687,7 +1687,7 @@ func buildImportMutations(chunk ChunkData) []store.SyncMutation {
 	merged := make([]store.SyncMutation, 0, len(synthesized)+len(explicit))
 	for _, mutation := range retainedSynthesized {
 		if mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
-			if _, required := requiredSessionIDs[strings.TrimSpace(mutation.EntityKey)]; !required {
+			if _, required := requiredSessionIDs[mutation.EntityKey]; !required {
 				continue
 			}
 		}
@@ -1705,8 +1705,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 		}
 		switch mutation.Entity {
 		case store.SyncEntitySession:
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		case store.SyncEntityObservation, store.SyncEntityPrompt:
@@ -1716,8 +1716,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1739,8 +1739,8 @@ func referencedSessionIDsFromNonSessionUpserts(mutations []store.SyncMutation) m
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1763,8 +1763,8 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID == "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) == "" {
 				continue
 			}
 			project, _ := store.NormalizeProject(strings.TrimSpace(mutation.Project))
@@ -1782,7 +1782,11 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 }
 
 func mutationIdentityKey(mutation store.SyncMutation) string {
-	return fmt.Sprintf("%s:%s", mutation.Entity, strings.TrimSpace(mutation.EntityKey))
+	key := mutation.EntityKey
+	if mutation.Entity != store.SyncEntitySession {
+		key = strings.TrimSpace(key)
+	}
+	return fmt.Sprintf("%s:%s", mutation.Entity, key)
 }
 
 func (sy *Syncer) chunkTrackingTargetKey(project string) string {
@@ -1941,7 +1945,7 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		}
 		mutations = append(mutations, store.SyncMutation{
 			Entity:    store.SyncEntitySession,
-			EntityKey: strings.TrimSpace(session.ID),
+			EntityKey: session.ID,
 			Op:        store.SyncOpUpsert,
 			Payload:   string(payload),
 		})
@@ -2040,9 +2044,9 @@ func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk C
 				}
 			}
 			if isDelete || payload.Deleted || payload.HardDelete {
-				id := strings.TrimSpace(payload.ID)
-				if id == "" {
-					id = strings.TrimSpace(mutation.EntityKey)
+				id := payload.ID
+				if strings.TrimSpace(id) == "" {
+					id = mutation.EntityKey
 				}
 				session, err := sy.store.GetSession(id)
 				if errors.Is(err, sql.ErrNoRows) {
@@ -2802,7 +2806,7 @@ func resolveMutationProject(mutation store.SyncMutation, sessionProjectByID map[
 			return strings.TrimSpace(normalized)
 		}
 	}
-	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[strings.TrimSpace(payload.SessionID)])); strings.TrimSpace(normalized) != "" {
+	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[payload.SessionID])); strings.TrimSpace(normalized) != "" {
 		return strings.TrimSpace(normalized)
 	}
 	return ""

@@ -987,8 +987,8 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs map[string]struct{}) error {
 	chunkSessionIDs := make(map[string]struct{}, len(chunk.Sessions))
 	for i, session := range chunk.Sessions {
-		sessionID := strings.TrimSpace(session.ID)
-		if sessionID == "" {
+		sessionID := session.ID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
 		chunkSessionIDs[sessionID] = struct{}{}
@@ -1003,11 +1003,11 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 		if err := decodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return fmt.Errorf("mutations[%d] invalid payload: %w", i, err)
 		}
-		sessionID := strings.TrimSpace(body.ID)
-		if sessionID == "" {
-			sessionID = strings.TrimSpace(mutation.EntityKey)
+		sessionID := body.ID
+		if strings.TrimSpace(sessionID) == "" {
+			sessionID = mutation.EntityKey
 		}
-		if sessionID == "" {
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("mutations[%d].payload.id is required for session upsert", i)
 		}
 		chunkSessionIDs[sessionID] = struct{}{}
@@ -1022,8 +1022,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 	}
 
 	for i, observation := range chunk.Observations {
-		sessionID := strings.TrimSpace(observation.SessionID)
-		if sessionID == "" {
+		sessionID := observation.SessionID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("observations[%d].session_id is required", i)
 		}
 		if !hasSession(sessionID) {
@@ -1032,8 +1032,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 	}
 
 	for i, prompt := range chunk.Prompts {
-		sessionID := strings.TrimSpace(prompt.SessionID)
-		if sessionID == "" {
+		sessionID := prompt.SessionID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("prompts[%d].session_id is required", i)
 		}
 		if !hasSession(sessionID) {
@@ -1051,8 +1051,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 		if err := decodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return fmt.Errorf("mutations[%d] invalid payload: %w", i, err)
 		}
-		sessionID := strings.TrimSpace(body.SessionID)
-		if mutation.Op == store.SyncOpUpsert && sessionID == "" {
+		sessionID := body.SessionID
+		if mutation.Op == store.SyncOpUpsert && strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("mutations[%d].payload.session_id is required for upsert", i)
 		}
 		if mutation.Op == store.SyncOpUpsert && !hasSession(sessionID) {
