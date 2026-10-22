@@ -145,6 +145,10 @@ or release eligibility. The overall observation remains blocked/exit2/empty stde
 For mandatory local functional coverage, use
 `ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 go test ./tools/release-candidate`;
 without prerequisites the real-capture test may skip, never proving this check.
+CI's Plugin Tests job runs that focused test with the mandatory flag after its
+existing Node24, locked TypeBox install and Go build. A missing prerequisite or
+skipped positive capture therefore cannot satisfy that CI evidence. Hosted
+results must still be observed for the exact candidate; scheduling is not a pass.
 
 ## Separate real-schema diagnostic
 
