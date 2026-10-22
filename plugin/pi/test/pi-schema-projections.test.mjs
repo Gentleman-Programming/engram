@@ -12,7 +12,24 @@ const artifactPath = join(root, "docs/contracts/agent-contract-v1.json");
 const hash = (raw) => createHash("sha256").update(raw).digest("hex");
 
 test("existing CLI verifies real Pi registration without writing", async (t) => {
-  const artifact = await readFile(artifactPath);
+  const go = spawnSync("go", ["version"], {
+    cwd: root, encoding: "utf8", timeout: 5_000,
+    env: { ...process.env, GOPROXY: "off", GOSUMDB: "off" },
+  });
+  if (go.error?.code === "ENOENT") {
+    t.skip("Go toolchain unavailable");
+    return;
+  }
+  assert.ifError(go.error);
+  assert.equal(go.status, 0, `Go toolchain check failed: ${go.stderr}`);
+  let artifact;
+  try {
+    artifact = await readFile(artifactPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    t.skip("repository contract artifact unavailable");
+    return;
+  }
   await withPluginSandbox("engram-pi-cli-", async ({ dir, sandbox }) => {
     const binary = join(dir, process.platform === "win32" ? "agent-contract.exe" : "agent-contract");
     const build = spawnSync("go", ["build", "-o", binary, "./tools/agent-contract"], {

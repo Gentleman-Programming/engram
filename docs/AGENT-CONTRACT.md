@@ -43,6 +43,10 @@ The input file is a nonempty JSON array of actual serialized registrations:
 captures registrations with the existing disposable sandbox and real pinned
 TypeBox 1.3.34 (Node.js 24 and existing plugin test dependencies required).
 It builds the existing Go command once in temporary storage; no server is needed.
+The repository-only Node test skips when the Go executable or repository contract
+artifact is genuinely absent (for example in a packaged copy). Failed toolchain
+commands, builds, artifact reads other than absence, and verification errors fail
+rather than skip; a complete checkout still runs every real-capture case.
 
 `-verify-pi` calls the [Go-owned projection verifier](PI-TOOL-PROJECTIONS.md#go-owned-input-projection-verification)
 against live Go authority, not a second inventory or the checked-in artifact.

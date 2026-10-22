@@ -456,8 +456,15 @@ func TestPiInputDependencyCopy(t *testing.T) {
 		t.Skip("external Pi schema dependency probe")
 	}
 	if os.Getenv("ENGRAM_PI_SCHEMA_PROBE_CHILD") == "1" {
+		if os.Getenv("GOPROXY") != "off" || os.Getenv("GOSUMDB") != "off" {
+			t.Fatal("isolated dependency probe must explicitly disable network access")
+		}
 		return
 	}
+	// The child must not rely on the caller already having offline settings.
+	// A local-only proxy prevents network access even before this regression is fixed.
+	t.Setenv("GOPROXY", "file:///nonexistent-pi-schema-proxy")
+	t.Setenv("GOSUMDB", "sum.golang.org")
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -478,7 +485,7 @@ func TestPiInputDependencyCopy(t *testing.T) {
 			cmd.Env = slices.DeleteFunc(os.Environ(), func(s string) bool {
 				return strings.HasPrefix(s, "ENGRAM_PI_SCHEMA_REQUIRE_REAL=") || strings.HasPrefix(s, "ENGRAM_PI_SCHEMA_PROBE_CHILD=")
 			})
-			cmd.Env = append(cmd.Env, "ENGRAM_PI_SCHEMA_REQUIRE_REAL="+required, "ENGRAM_PI_SCHEMA_PROBE_CHILD=1")
+			cmd.Env = append(cmd.Env, "ENGRAM_PI_SCHEMA_REQUIRE_REAL="+required, "ENGRAM_PI_SCHEMA_PROBE_CHILD=1", "GOPROXY=off", "GOSUMDB=off")
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 			stdout, err := cmd.Output()

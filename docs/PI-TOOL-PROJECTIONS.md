@@ -79,8 +79,10 @@ TypeBox package used by `plugin-sandbox.mjs`; required mode turns absence into f
 Wrong versions, broken imports, stderr, capture/cleanup exceptions, malformed output,
 expired contexts and verifier mismatches fail, never skip. Isolated source-copy
 probes without node_modules exercise default-skip versus required-failure behavior.
-The raw diagnostic, artifact freshness and historical MCP ratchet remain separate;
-no new CLI mode or runtime schema behavior is introduced here.
+The raw diagnostic, artifact freshness and historical MCP ratchet remain separate.
+The existing CLI adds the read-only `-verify-pi` mode documented in
+[AGENT-CONTRACT.md](AGENT-CONTRACT.md#verify-a-pi-model-input-capture); no runtime
+schema behavior is introduced.
 
 ## Field audit
 
