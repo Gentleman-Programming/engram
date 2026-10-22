@@ -109,8 +109,11 @@ test('declares ownership and migration precedence as machine-readable policy', (
 test('runs PR label policy from the trusted base with current API labels', () => {
   const prWorkflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
   const labelWorkflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
-  assert.match(prWorkflow, /^  pull_request:/m);
-  assert.doesNotMatch(prWorkflow, /^  pull_request_target:/m);
+  const claudeWorkflow = fs.readFileSync('.github/workflows/pr-claude-plugin-version.yml', 'utf8');
+  assert.match(prWorkflow, /^  merge_group:\r?\n    types: \[checks_requested\]/m);
+  assert.doesNotMatch(prWorkflow, /^  pull_request(?:_target)?:/m);
+  assert.match(claudeWorkflow, /^  pull_request:\r?\n    types: \[opened, edited, labeled, unlabeled, synchronize, reopened\]/m);
+  assert.doesNotMatch(claudeWorkflow, /^  merge_group:|^  check-issue-/m);
   assert.match(
     labelWorkflow,
     /^  pull_request_target:\r?\n    types: \[opened, edited, labeled, unlabeled, synchronize, reopened\]/m,

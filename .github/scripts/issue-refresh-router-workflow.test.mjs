@@ -52,8 +52,9 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // plus the approved #1994 TypeBox test bootstrap in f65380cc79ffa6fe63d4594b1e5341733d51f288.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
-    '.github/workflows/pr-check.yml': '963bf7f27237527df684b9d7a28894b741bf47f61a45de577327c5925abfeb00',
-    '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
+    // #1810 removes only the PR trigger; full jobs are independently pinned.
+    // The retired publisher is asserted absent by the retirement/workflow suites.
+    '.github/workflows/pr-check.yml': '0ecccab568eb4de4e6b8d3ae1a43eadb79323706b53028a4fcbe8761fa2d6e12',
     '.github/workflows/issue-policy.yml': '1a3091c88771ecc5b51059aad6987d31c97177b48f4522bfdb8963d0c4bc952c',
     '.github/workflows/ci.yml': '7fb879bdc7faddb36dcce9d67386accb02418c9b65d0e436a003933a104537fa',
   };

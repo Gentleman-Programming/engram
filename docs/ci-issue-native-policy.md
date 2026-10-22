@@ -53,13 +53,31 @@ node --check .github/scripts/issue-validation.mjs
 ```
 
 These are SDK-mock and composed actual-script-body tests, not live token,
-provider, fork, duplicate-selection or required-gate evidence. The bootstrap
-publisher and original PR/queue validation mechanics remain unchanged; readiness
+provider, fork, duplicate-selection or required-gate evidence. The native
+adapter/evaluator and original queue validation mechanics remain unchanged; readiness
 requires approval plus assignment as described in [CONTRIBUTING](../CONTRIBUTING.md).
 
-## Rollout boundary
+## Rollout boundary — #1810 candidate only, NO-GO
 
-Keep legacy writers, all six required contexts, integration `15368` and native merge-group validation intact. Deliver implementation slices serially to verified `main`, with tests and guidance alongside each behavior change.
+The draft candidate removes only the legacy PR subscription and transitional
+API-publisher workflow when integrated; this is not active retirement on main.
+The original `pr-check.yml` identity and COMPLETE merge-group jobs remain,
+including Claude enforcement and both queue issue jobs/resolver/aggregation.
+A new PR-only `pr-claude-plugin-version.yml` copies the original six PR actions,
+permissions and Claude job; it has no merge-group trigger or duplicate issue jobs.
+Native PR metadata jobs, all six required contexts, integration `15368`, queue
+settings and helpers remain unchanged. Dormant publisher helpers/tests remain.
+
+The [canonical #1810 matrix](https://github.com/Gentleman-Programming/engram/issues/1810)
+records bounded sequential/manual positives and PARTIAL rapid burst, not full
+acceptance. Four premerge gaps remain: late-legacy selection without a safe
+publication boundary; in-flight/superseded heads; complete rapid-event admission
+and ordering; and post-merge-group revocation. No new probes are authorized.
+
+Trigger/workflow removal does not cancel old in-flight or queued runs or historical
+reruns executing old code. Reconcile through eligible native metadata-router
+recovery only, never API publication or broad CI. No automatic retry, fixed
+latency or atomic cancellation is promised.
 
 [#1810](https://github.com/Gentleman-Programming/engram/issues/1810) retirement remains blocked until live blocking, recovery, duplicate selection and queue compatibility are observed. #1802 stays open and its acceptance criteria stay unchecked until their evidence exists.
 

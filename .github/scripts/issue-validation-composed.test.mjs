@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { evaluateNativeIssuePolicy } from './issue-native-policy.mjs';
 
 const repo = { owner: 'Gentleman-Programming', repo: 'engram' };
@@ -8,6 +7,18 @@ const sha = 'a'.repeat(40);
 const names = ['Check Issue Reference', 'Check Issue Has status:approved'];
 const workspace = new URL('../../', import.meta.url).href.replace(/\/$/, '');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+// Historical publisher wrapper, retained only to cover dormant helper composition
+// and late old-code executions. This is NOT an active workflow or recovery route.
+const historicalPublisherWrapper = `
+try {
+  const { evaluateIssueValidation } = await import(\`\${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-validation.mjs\`);
+  const { publishIssueChecks } = await import(\`\${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-check-publisher.mjs\`);
+  const evaluations = await evaluateIssueValidation(github, context);
+  await publishIssueChecks(github, context.repo, evaluations);
+} catch (error) {
+  core.setFailed(error.message);
+}
+`;
 
 async function execute({ action = 'labeled', approved = true, body = 'Closes #9', pr = false,
   unrelated = false, changed = false, fault = '', secondApproved = true,
@@ -43,9 +54,7 @@ async function execute({ action = 'labeled', approved = true, body = 'Closes #9'
     action, label: { name: unrelated ? 'priority:high' : 'status:approved' }, issue: { number: 9 },
     pull_request: { number: 1, body: 'Closes #999', head: { sha: 'c'.repeat(40) } },
   } };
-  const source = readFileSync(new URL('../workflows/issue-validation.yml', import.meta.url), 'utf8');
-  const script = source.split('script: |')[1];
-  assert.ok(script);
+  const script = historicalPublisherWrapper;
   await new AsyncFunction('github', 'context', 'core', 'process', script)(github, context,
     { setFailed: (message) => failures.push(message) }, { env: { GITHUB_WORKSPACE: workspace } });
   return { reads, attempts, stored, failures };

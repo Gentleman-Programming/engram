@@ -95,8 +95,10 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 
 	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
 	for _, required := range []string{
-		"pull_request:",
-		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
+		"merge_group:",
+		"types: [checks_requested]",
+		"check-claude-plugin-version:",
+		"name: Check Claude Plugin Version",
 		"check-issue-reference:",
 		"name: Check Issue Reference",
 		"check-issue-approved:",
@@ -109,11 +111,43 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 			t.Errorf("%s does not contain %q", prCheckPath, required)
 		}
 	}
-	for _, forbidden := range []string{"pull_request_target:", "check-transient-artifacts:"} {
+	for _, forbidden := range []string{"pull_request:", "pull_request_target:", "check-transient-artifacts:"} {
 		if strings.Contains(prCheck, forbidden) {
 			t.Errorf("%s must not contain %q", prCheckPath, forbidden)
 		}
 	}
+
+	prClaudePath := filepath.Join(workflowDirectory(t), "pr-claude-plugin-version.yml")
+	prClaudeContent, err := os.ReadFile(prClaudePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", prClaudePath, err)
+	}
+	prClaude := strings.ReplaceAll(string(prClaudeContent), "\r\n", "\n")
+	for _, required := range []string{
+		"pull_request:",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
+		"permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
+		"check-claude-plugin-version:",
+		"name: Check Claude Plugin Version",
+		"persist-credentials: false",
+		"node \"$policy\" \"$BASE_SHA\" \"$HEAD_SHA\"",
+	} {
+		if !strings.Contains(prClaude, required) {
+			t.Errorf("%s does not contain %q", prClaudePath, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"merge_group:",
+		"pull_request_target:",
+		"check-issue-reference:",
+		"check-issue-approved:",
+		"check-transient-artifacts:",
+	} {
+		if strings.Contains(prClaude, forbidden) {
+			t.Errorf("%s must not contain %q", prClaudePath, forbidden)
+		}
+	}
+
 	labelCheckPath := filepath.Join(workflowDirectory(t), "pr-label-check.yml")
 	labelCheckContent, err := os.ReadFile(labelCheckPath)
 	if err != nil {
