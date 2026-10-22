@@ -17,6 +17,33 @@ test('Windows full suite is independent, observational, and aligned with Linux',
   assert.doesNotMatch(job, /continue-on-error|needs:|GOPROXY:|TEMP:|TMP:| -skip| -run|\|\| true/);
 });
 
+test('Windows prerequisites use reviewed real executables and fail closed before export or suite', () => {
+  const setup = job?.match(/      - name: Select trusted Windows fixture tools\n([\s\S]*?)(?=      - name:)/)?.[1];
+  assert.ok(setup, 'missing explicit trusted-tool setup');
+  assert.match(setup, /shell: pwsh/);
+  assert.ok(setup.includes("$bash = 'C:/Program Files/Git/usr/bin/bash.exe'"));
+  assert.ok(setup.includes("$jq = 'C:/ProgramData/chocolatey/lib/jq/tools/jq.exe'"));
+  assert.match(setup, /foreach \(\$path in \$required\)/);
+  assert.match(setup, /Test-Path -LiteralPath \$path -PathType Leaf/);
+  assert.match(setup, /\[System.IO.Path\]::GetExtension\(\$path\) -ne '\.exe'/);
+  assert.match(setup, /throw "Missing Windows fixture prerequisite: \$path"/);
+  for (const tool of ['cygpath', 'cat', 'dirname', 'chmod']) {
+    assert.ok(setup.includes(`C:/Program Files/Git/usr/bin/${tool}.exe`));
+  }
+  const validation = setup.indexOf('foreach ($path in $required)');
+  const execution = setup.indexOf('& $bash --version');
+  const exportAt = setup.indexOf('CODEX_TEST_TRUSTED_BASH=$bash');
+  assert.ok(validation < execution && execution < exportAt);
+  assert.match(setup, /& \$jq --version/);
+  assert.match(setup, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+  assert.match(setup, /CODEX_TEST_TRUSTED_JQ=\$jq/);
+  assert.match(setup, /GITHUB_ENV/);
+  assert.match(setup, /GITHUB_STEP_SUMMARY/);
+  assert.doesNotMatch(setup, /Get-Command|where.exe|Get-ChildItem|choco |Invoke-WebRequest|continue-on-error/);
+  assert.ok(job.indexOf(setup) < job.indexOf('Record Windows baseline environment'));
+  assert.ok(job.indexOf(setup) < job.indexOf('run: go test ./...'));
+});
+
 test('Windows evidence records checkout, toolchain, prerequisites, and actual test outcome', () => {
   assert.ok(job, 'missing Windows full-suite job');
   for (const evidence of ['git rev-parse HEAD', 'go version', 'go env', 'bash --version', 'node --version', '$PSVersionTable', 'steps.suite.outcome']) {

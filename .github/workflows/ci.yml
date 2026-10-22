@@ -135,6 +135,37 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Select trusted Windows fixture tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = 'C:/Program Files/Git/usr/bin/bash.exe'
+          $jq = 'C:/ProgramData/chocolatey/lib/jq/tools/jq.exe'
+          $required = @(
+            $bash, $jq,
+            'C:/Program Files/Git/usr/bin/cygpath.exe',
+            'C:/Program Files/Git/usr/bin/cat.exe',
+            'C:/Program Files/Git/usr/bin/dirname.exe',
+            'C:/Program Files/Git/usr/bin/chmod.exe'
+          )
+          foreach ($path in $required) {
+            Write-Output "Checking Windows fixture prerequisite: $path"
+            if ([System.IO.Path]::GetExtension($path) -ne '.exe' -or
+                -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing Windows fixture prerequisite: $path"
+            }
+          }
+          $bashVersion = & $bash --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed: $bash (exit $LASTEXITCODE)" }
+          $jqVersion = & $jq --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed: $jq (exit $LASTEXITCODE)" }
+          $evidence = @("Trusted Bash: $bash", $bashVersion, "Trusted jq: $jq", $jqVersion)
+          $evidence | Write-Output
+          @('## Windows fixture prerequisites', '```text') + $evidence + @('```') |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          @("CODEX_TEST_TRUSTED_BASH=$bash", "CODEX_TEST_TRUSTED_JQ=$jq") |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Record Windows baseline environment
         shell: pwsh
         run: |

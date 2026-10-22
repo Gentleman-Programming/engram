@@ -251,7 +251,18 @@ failing tests still fail the job, rather than being converted to success.
 The job provisions Node.js 24 for subprocess fixtures and records the checked-out
 commit (including a PR's synthetic merge), runner image, Go/environment settings,
 PowerShell version, and resolved Git/Bash/sh/Node paths in its summary. Hosted
-Windows supplies Git Bash and PowerShell. The test step log retains diagnostics
+Windows supplies Git Bash and PowerShell. Before diagnostics or tests, the job
+selects `C:/Program Files/Git/usr/bin/bash.exe` (not the `bin` launcher) and
+`C:/ProgramData/chocolatey/lib/jq/tools/jq.exe`, the candidate Chocolatey package
+payload. It validates both as leaf `.exe` files and checks adjacent Git tools
+`cygpath`, `cat`, `dirname`, and `chmod` before executing version checks. Missing
+prerequisites or failed version checks fail the job with the exact path; there is
+no PATH fallback or installation. Only after validation does it export
+`CODEX_TEST_TRUSTED_BASH` and `CODEX_TEST_TRUSTED_JQ` for the existing fixture
+guards, logging the selected paths and versions in the job log and summary.
+Neither local contract tests nor this declaration prove these paths exist on the
+hosted image (especially the jq payload); a new hosted run remains necessary.
+The test step log retains diagnostics
 and the process exit code; the final summary records success, failure, or skipped
 execution. Setup failure, cancellation, or timeout is not a passing baseline.
 
