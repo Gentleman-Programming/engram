@@ -229,6 +229,8 @@ If validation returns `project_name_collision`, do not guess. Ask the user to di
 
 Alternatives: `cd` into the target repo before starting the MCP server, or add repo `.engram/config.json`.
 
+**Optional semantic recall:** MCP `mem_search` accepts `search_mode: "lexical"|"semantic"` (default lexical). Explicit semantic queries return potentially related memories and similarity, not answer confidence. Omit `match_mode` for semantic queries. Set `ENGRAM_EMBEDDING_MODEL` (and optionally `ENGRAM_EMBEDDING_URL`) on the server/MCP process and manually run `engram embed` with the same filters first; an already-installed local Ollama model is required. Errors never fall back to lexical search. See [configuration, examples and recovery](semantic-search.md). Health capability support is not index/provider readiness.
+
 **Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`, `mem_get_observation`) accept an optional `project` override validated against known projects. Omit it to use the process override or cwd detection. For `mem_get_observation`, `project` selects response-envelope context only; the observation is still retrieved by ID without ownership filtering.
 
 `mem_get_observation` retains its read-only stored-owner fallback: only when cwd detection is ambiguous and the observation has a nonblank stored project does it use that project (`project_source: "stored_project"`, `project_path: ""`). This identifies the record's owner, not a verified repository path, and does not bypass malformed or unknown explicit/process overrides.

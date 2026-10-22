@@ -83,7 +83,7 @@ func TestAgentContractRejectsInconsistentSemanticInventory(t *testing.T) {
 
 func TestAgentContractInventoryAndMCPParity(t *testing.T) {
 	document, _ := readAgentContract(t)
-	if document["contract_id"] != "engram.agent-contract/v1" || document["revision"] != json.Number("1") || document["status"] != "mcp-foundation" {
+	if document["contract_id"] != "engram.agent-contract/v1" || document["revision"] != json.Number("2") || document["status"] != "mcp-foundation" {
 		t.Fatalf("unexpected identity or parity status: %#v", document)
 	}
 	operations := document["operations"].(map[string]any)

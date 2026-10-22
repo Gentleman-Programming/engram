@@ -34,7 +34,7 @@ an artifact or open a data directory.
 | Field | Authority / meaning |
 | --- | --- |
 | `contract_id` | `engram.agent-contract/v1`, the contract format identity |
-| `revision` | Explicit semantic revision, currently `1`; not binary/npm SemVer |
+| `revision` | Explicit semantic revision, currently `2`; not binary/npm SemVer |
 | `profile` | `agent`, drawn from Go `ProfileAgent`, not the MCP `all` default |
 | `operations` | Names, descriptions, schemas, and annotations from the existing Go MCP registrations; semantics from `internal/mcp/agent_contract.go` |
 | `status` | `mcp-foundation`; no runtime compatibility decision is implied |
@@ -104,6 +104,20 @@ No Node/Pi runtime verifier, parity assertion, or negotiation is introduced.
 Change the revision deliberately when the semantic contract changes, regenerate,
 and review the diff. The generation-drift test does not automatically grant
 compatibility to a different revision/digest.
+
+### Revision 2: explicit semantic search
+
+Issue #233 adds optional `mem_search.search_mode: "lexical"|"semantic"`.
+Lexical search remains the default, with `match_mode: "all"|"any"`; semantic
+mode rejects nonempty `match_mode`, requires explicit local configuration and a
+fresh manually built index, and never falls back to lexical results. Similarity
+describes potentially related memories, not answer confidence.
+
+Revision 2 records this schema and semantic change deliberately. The historical
+v1 tool fixture and comparator remain unchanged: the compatibility test asserts
+only this approved optional string enum before removing that one property from
+the observed schema. Missing, malformed, required, or unrelated schema changes
+still fail. Regeneration does not assert Pi support or runtime parity.
 
 ## Semantic metadata is not implemented parity
 

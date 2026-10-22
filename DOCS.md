@@ -30,6 +30,7 @@ For other docs:
 
 | Doc                                         | Description                                                                                   |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| [Explicit Semantic Search](docs/semantic-search.md) | Local model configuration, manual indexing, CLI/HTTP/MCP queries and recovery |
 | [Installation](docs/INSTALLATION.md)        | All install methods + platform support                                                        |
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart path, branding, and reference links                            |
 | [Agent Setup](docs/AGENT-SETUP.md)          | Per-agent configuration + compaction survival                                                 |
@@ -88,6 +89,7 @@ This catalog covers the tracked Markdown documentation surfaces. **Owner `GP`** 
 | Surface | Audience | Authority | Status | Owner |
 | --- | --- | --- | --- | --- |
 | [README.md](README.md) | New users | Guide: overview | Living | GP |
+| [docs/semantic-search.md](docs/semantic-search.md) | CLI, HTTP and MCP users | Guide: explicit local semantic retrieval | Living | GP |
 | [DOCS.md](DOCS.md) | Users, maintainers | Canonical: technical contracts above | Living | GP |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contributors | Policy: contribution workflow | Living | GP |
 | [SECURITY.md](SECURITY.md) | Security reporters | Policy: disclosure | Living | GP |
@@ -188,7 +190,8 @@ engram mcp                    Start stdio MCP server
 engram tui                    Launch terminal UI
 engram test [suite]            Run isolated self-tests [--quick] [--json]
 engram init [name]             Initialize .engram/config.json [--force]
-engram search <query>         Search memories [--project P|--all] [--match all|any]
+engram search <query>         Search memories [--project P|--all] [--match all|any] [--search-mode lexical|semantic]
+engram embed                 Manually index [--project P|--all] [--scope SCOPE] [--type TYPE]
 engram save <title> <msg>     Save a memory [--project P]
 engram delete <obs_id>        Delete an observation [--hard]
 engram delete session <id>    Delete an empty session
@@ -447,7 +450,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Search
 
-- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N&match_mode=all&response_format=compact`
+- `GET /search` — FTS5 by default; optional `search_mode=lexical|semantic`. Explicit semantic mode rejects nonempty `match_mode`, uses request cancellation, and adds `similarity` / `retrieval_mode` only to semantic hits. See [semantic setup, examples and error statuses](docs/semantic-search.md). Health `capabilities.semantic_search: true` means protocol support, not readiness. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N&match_mode=all&response_format=compact`
   - With `response_format` omitted or empty: `200` with the existing JSON array of full search results.
   - No-result example: `GET /search?q=definitely-no-hit` returns `200` with `[]` (never `null`).
   - Opt in with `response_format=compact`: `200` with `{"result":"Found N memories.","results":[...]}`. Each entry has `id`, `sync_id`, `title`, `type`, `state`, `scope`, `pinned`, `preview`, and `truncated`; `project`, nonempty `topic_key`, and `review_after` are conditional. Optional `relations` contains `as_source` and `as_target` annotations, matching MCP compact search semantics.
@@ -792,6 +795,8 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_MEM_SAVE_TIMING`        | Set to exactly `1` in the MCP server environment to log one privacy-safe stage timing record per `mem_save` invocation to stderr. See [mem_save timing diagnostics](#mem_save-timing-diagnostics). | (unset — disabled) |
 | `ENGRAM_HTTP_WRITE_TIMING`      | Set to exactly `1` in the local HTTP server environment to log one privacy-safe timing record for each session registration, observation save, or passive capture. See [HTTP write timing diagnostics](#http-write-timing-diagnostics). | (unset — disabled) |
+| `ENGRAM_EMBEDDING_MODEL` | Installed local Ollama embedding model; required for semantic opt-in. Validated only on explicit semantic/index operations. | none |
+| `ENGRAM_EMBEDDING_URL` | Optional root HTTP loopback Ollama URL; machine/process-local, no proxy or cloud provider. | `http://127.0.0.1:11434` |
 | `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
@@ -1374,6 +1379,8 @@ Go/MCP-only: this foundation adds no Pi support or runtime negotiation.
 ### mem_search
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
+
+Optional `search_mode` is `lexical` (default) or `semantic`. Semantic mode returns potentially related memories, not answer confidence; do not supply nonempty `match_mode`. Configure the process and manually run `engram embed` with the same filters first. Missing/stale indexes and provider failures return actionable tool errors without fallback. Semantic hits alone add `similarity` and `retrieval_mode`; both legacy and compact formats retain their existing envelope. See [explicit semantic search](docs/semantic-search.md).
 
 Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
 

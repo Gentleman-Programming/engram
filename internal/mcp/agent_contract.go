@@ -47,7 +47,7 @@ func AgentContractJSON() ([]byte, error) {
 	}
 	document := agentContractDocument{
 		ContractID: "engram.agent-contract/v1",
-		Revision:   1,
+		Revision:   2,
 		Status:     "mcp-foundation",
 		Profile:    "agent",
 		Operations: operations,
@@ -153,8 +153,8 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 	},
 	"mem_search": {
 		Effect: "read", Risk: "read-only", ProjectPolicy: readProjectPolicy, SessionPolicy: "no session attribution required; MCP activity is tracked separately",
-		Guarantees:    []string{"all_projects=true ignores project selection", "match_mode is all by default or any; other values are rejected", "personal scope without explicit project searches across projects", "default limit is 10"},
-		ErrorEffects:  "no observation mutation; invalid MCP match_mode/response_format is rejected before project resolution",
+		Guarantees:    []string{"all_projects=true ignores project selection", "search_mode defaults to lexical; explicit semantic mode requires a configured local provider and a manually built fresh index", "lexical match_mode defaults to all or may be any; semantic mode rejects every nonempty match_mode", "semantic results are potentially related memories; similarity is not answer confidence", "semantic failures remain explicit errors without lexical fallback or automatic indexing", "personal scope without explicit project searches across projects", "default limit is 10"},
+		ErrorEffects:  "no observation mutation or document indexing; invalid MCP search_mode/match_mode/response_format and blank semantic queries are rejected before project resolution",
 		PiDifferences: []string{"Pi sends its resolved project to HTTP, while MCP clears the project filter for implicit personal scope", "MCP uses bounded previews by default; HTTP/Pi uses full search result rows unless response_format=compact"},
 	},
 	"mem_context": {
