@@ -1,5 +1,5 @@
 {
-  "eager_schemas.agent": 28032,
+  "eager_schemas.agent": 28960,
   "eager_schemas.agent.tool.mem_capture_passive": 1101,
   "eager_schemas.agent.tool.mem_compare": 2282,
   "eager_schemas.agent.tool.mem_consolidate": 1630,
@@ -15,6 +15,7 @@
   "eager_schemas.agent.tool.mem_save": 3911,
   "eager_schemas.agent.tool.mem_save_prompt": 1253,
   "eager_schemas.agent.tool.mem_search": 1603,
+  "eager_schemas.agent.tool.mem_search_prompts": 927,
   "eager_schemas.agent.tool.mem_session_end": 460,
   "eager_schemas.agent.tool.mem_session_finalize": 1300,
   "eager_schemas.agent.tool.mem_session_start": 932,
