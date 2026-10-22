@@ -48,11 +48,11 @@ test('static trusted helpers evaluate before publishing and exceptions fail work
 });
 
 test('bootstrap pins PR validation including approved qualified references and readiness guards', () => {
-  // Pin the approved #1501 baseline, retaining the existing readiness-guard exclusions.
+  // Pin #2030 dormant boundary wiring; retain #1501/readiness semantics and exclusions.
   // Git's blob hash normalizes checkout line endings on Windows.
   const bytes = Buffer.from(read('pr-check.yml').replaceAll('\r\n', '\n').replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, ''));
   const header = Buffer.from(`blob ${bytes.length}\0`);
-  assert.equal(createHash('sha1').update(header).update(bytes).digest('hex'), 'bfeb81f457cee4904d210810cd588460519ca16d');
+  assert.equal(createHash('sha1').update(header).update(bytes).digest('hex'), '8e44b490093e2359c6ab60eed07ccc9765d2b5cb');
 });
 
 test('existing policy helper CI runs new regression suites without renaming checks', () => {

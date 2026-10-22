@@ -50,6 +50,9 @@ jobs:
           ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       - name: Verify PR links an issue
+        env:
+          ENGRAM_CI_PROOF_MANIFEST: ${{ vars.ENGRAM_CI_PROOF_MANIFEST }}
+          CI_PROOF_CHECKOUT: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
@@ -93,6 +96,25 @@ jobs:
                 failures.join('\n')
               );
             }
+            if (context.eventName === 'pull_request' && process.env.ENGRAM_CI_PROOF_MANIFEST) {
+              let proofConfig;
+              try { proofConfig = JSON.parse(process.env.ENGRAM_CI_PROOF_MANIFEST); }
+              catch { throw new Error('proof-adapter: configuration'); }
+              if (proofConfig?.enabled !== false) {
+                const selector = { repo: `${context.repo.owner}/${context.repo.repo}`,
+                  prNumber: context.payload?.pull_request?.number, head: context.payload?.pull_request?.head?.sha,
+                  action: context.payload?.action, checkout: process.env.CI_PROOF_CHECKOUT, phase: 'legacy-completion:reference' };
+                if (proofConfig?.enabled !== true || !proofConfig.target) throw new Error('proof-adapter: configuration');
+                if (Object.keys(selector).every((key) => proofConfig.target[key] === selector[key])) {
+                  const { createGitHubProof } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-ci-proof-adapter.mjs`);
+                  await createGitHubProof({ github, context, raw: process.env.ENGRAM_CI_PROOF_MANIFEST, environment: process.env,
+                    phase: 'legacy-completion:reference', checkout: process.env.CI_PROOF_CHECKOUT,
+                    emit: (record) => core.info(JSON.stringify(record)),
+                  }).complete(failures);
+                }
+              }
+            }
+
 
   check-issue-approved:
     name: Check Issue Has status:approved
@@ -105,6 +127,9 @@ jobs:
           ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       - name: Verify linked issue is approved
+        env:
+          ENGRAM_CI_PROOF_MANIFEST: ${{ vars.ENGRAM_CI_PROOF_MANIFEST }}
+          CI_PROOF_CHECKOUT: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
@@ -172,4 +197,22 @@ jobs:
 
             if (failures.length > 0) {
               core.setFailed('❌ Linked issue(s) not approved:\n' + failures.join('\n'));
+            }
+            if (context.eventName === 'pull_request' && process.env.ENGRAM_CI_PROOF_MANIFEST) {
+              let proofConfig;
+              try { proofConfig = JSON.parse(process.env.ENGRAM_CI_PROOF_MANIFEST); }
+              catch { throw new Error('proof-adapter: configuration'); }
+              if (proofConfig?.enabled !== false) {
+                const selector = { repo: `${context.repo.owner}/${context.repo.repo}`,
+                  prNumber: context.payload?.pull_request?.number, head: context.payload?.pull_request?.head?.sha,
+                  action: context.payload?.action, checkout: process.env.CI_PROOF_CHECKOUT, phase: 'legacy-completion:approved' };
+                if (proofConfig?.enabled !== true || !proofConfig.target) throw new Error('proof-adapter: configuration');
+                if (Object.keys(selector).every((key) => proofConfig.target[key] === selector[key])) {
+                  const { createGitHubProof } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-ci-proof-adapter.mjs`);
+                  await createGitHubProof({ github, context, raw: process.env.ENGRAM_CI_PROOF_MANIFEST, environment: process.env,
+                    phase: 'legacy-completion:approved', checkout: process.env.CI_PROOF_CHECKOUT,
+                    emit: (record) => core.info(JSON.stringify(record)),
+                  }).complete(failures);
+                }
+              }
             }
