@@ -21,6 +21,11 @@ type assessmentExit struct{ code int }
 func (e *assessmentExit) Error() string { return "candidate assessment is non-approving" }
 
 func assessCandidate(root, version, piVersion string, output io.Writer) error {
+	return assessCandidateWithContract(root, version, piVersion, output, mcp.AgentContractJSON)
+}
+
+// The per-call seam keeps production bound to the live Go exporter.
+func assessCandidateWithContract(root, version, piVersion string, output io.Writer, exportContract func() ([]byte, error)) error {
 	report := struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		Version       string `json:"version"`
@@ -44,7 +49,7 @@ func assessCandidate(root, version, piVersion string, output io.Writer) error {
 		}
 		// validateMetadata exposes only fixed, repository-owned diagnostics.
 		report.Reason.Message = err.Error()
-	} else if _, err := mcp.AgentContractJSON(); err != nil {
+	} else if _, err := exportContract(); err != nil {
 		report.Reason.Code = "contract-unavailable"
 		report.Reason.Message = "cannot export live Go agent contract"
 	}
