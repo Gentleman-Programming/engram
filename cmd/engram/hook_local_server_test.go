@@ -330,6 +330,7 @@ func TestHookRecoveryEligibility(t *testing.T) {
 		{name: "non Windows", platform: "linux", endpoint: endpoint, cause: refusal(endpoint, refused)},
 		{name: "explicit URL", platform: "windows", explicitURL: "http://127.0.0.1:7437", endpoint: endpoint, cause: refusal(endpoint, refused)},
 		{name: "socket", platform: "windows", socket: "synthetic", endpoint: endpoint, cause: refusal(endpoint, refused)},
+		{name: "redirect marked same endpoint", platform: "windows", endpoint: endpoint, cause: &hookDenialError{redirected: true, cause: refusal(endpoint, refused)}, want: false},
 		{name: "redirect path", platform: "windows", endpoint: endpoint, cause: refusal("http://127.0.0.1:7437/other", refused)},
 		{name: "redirect host", platform: "windows", endpoint: endpoint, cause: refusal("http://127.0.0.1:7438/sessions/host", refused)},
 		{name: "cancel", platform: "windows", endpoint: endpoint, cause: refusal(endpoint, context.Canceled)},
