@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { runtimeMetadataResponse } from './support/runtime-contract-fixture.mjs';
 import { test } from 'node:test';
 import { importPluginFromSandbox, withPluginSandbox } from './plugin-sandbox.mjs';
 
@@ -17,6 +18,7 @@ for (const scenario of ['mapped', 'blocked', 'missing', 'no-append', 'no-branch'
     globalThis.fetch = async (url, init = {}) => {
       const request = new URL(url);
       calls.push({ path: request.pathname, query: request.search, method: init.method || 'GET', body: init.body && JSON.parse(init.body) });
+      if (request.pathname === '/runtime-contract') return runtimeMetadataResponse(request.pathname);
       if (request.pathname === '/project/current') return Response.json({ project: 'engram' });
       if (request.pathname === '/doctor') return Response.json(projectReport);
       if (request.pathname === '/doctor/caller-binding') {

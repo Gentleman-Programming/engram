@@ -8,7 +8,7 @@ const pull = (number = 1, body = 'Closes #9', head = sha) => ({ number, body, st
 const prEvent = (action = 'opened') => ({ repo, eventName: 'pull_request_target', payload: { action, pull_request: { number: 1, body: 'Closes #999', head: { sha: 'old' } } } });
 const issueEvent = (action = 'labeled') => ({ repo, eventName: 'issues', payload: { action, label: { name: 'status:approved' }, issue: { number: 9 } } });
 
-function fake({ pulls = [pull()], issues = { 9: { labels: [{ name: 'status:approved' }] } }, change, fail, pages, queue } = {}) {
+function fake({ pulls = [pull()], issues = { 9: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] } }, change, fail, pages, queue } = {}) {
   const journal = [];
   const counts = {};
   const initial = structuredClone({ pulls, issues });
@@ -60,7 +60,7 @@ for (const action of ['opened', 'edited', 'labeled', 'unlabeled', 'synchronize',
 for (const action of ['labeled', 'unlabeled']) {
   for (const approved of [true, false]) {
     test(`${action} uses current approval ${approved}, not event ordering`, async () => {
-      const f = fake({ issues: { 9: { labels: approved ? [{ name: 'status:approved' }] : [] } } });
+      const f = fake({ issues: { 9: { labels: approved ? [{ name: 'status:approved' }] : [], assignees: [{ login: 'owner-not-author' }] } } });
       conclusions(await evaluateIssueValidation(f.github, issueEvent(action)), sha, 'success', approved ? 'success' : 'failure');
       assert.deepEqual(f.journal, [list(), get(), issueGet(), get()]);
       f.unchanged();
@@ -82,10 +82,24 @@ test('irrelevant or invalid events perform no requests or writes', async () => {
   }
 });
 test('exact legacy parser and all references, including duplicates', async () => {
-  const f = fake({ pulls: [pull(1, 'preCLOSES #9; fixes\n#10; resolves #9; closes#11; closes owner/repo#12')], issues: { 9: { labels: [{ name: 'status:approved' }] }, 10: { labels: [] } } });
+  const f = fake({ pulls: [pull(1, 'preCLOSES #9; fixes\n#10; resolves #9; closes#11; closes owner/repo#12')], issues: { 9: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] }, 10: { labels: [], assignees: [{ login: 'owner-not-author' }] } } });
   conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'success', 'failure');
-  assert.deepEqual(f.journal, [get(), issueGet(), issueGet(10), issueGet(), get()]);
+  assert.deepEqual(f.journal, [get(), issueGet(), issueGet(10), issueGet(), issueGet(12), get()]);
 });
+for (const context of [prEvent(), issueEvent()]) {
+  test(`${context.eventName} rejects every unassigned closing issue without writes`, async () => {
+    const f = fake({ pulls: [pull(1, 'Closes #9, fixes #10')], issues: {
+      9: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] },
+      10: { labels: [{ name: 'status:approved' }], assignees: [] },
+    } });
+    assert.deepEqual(await evaluateIssueValidation(f.github, context), [{ headSha: sha,
+      reference: { conclusion: 'success', summary: 'Validation passed.' },
+      approved: { conclusion: 'failure', summary: 'PR #1: issue #10 has no assignee. Assign an owner before merge.' },
+    }]);
+    assert.deepEqual(f.journal, [...(context.eventName === 'issues' ? [list(), get()] : [get()]), issueGet(), issueGet(10), get()]);
+    f.unchanged();
+  });
+}
 test('ordinary PR without references fails both checks', async () => {
   const f = fake({ pulls: [pull(1, 'mentions #9')] });
   conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'failure', 'failure');
@@ -108,12 +122,13 @@ for (const changed of [pull(1, 'Closes #9', 'b'.repeat(40)), pull(1, 'Closes #10
   });
 }
 test('legacy approval accepts issues.get records with pull_request and approved labels', async () => {
-  const f = fake({ issues: { 9: { labels: [{ name: 'status:approved' }], pull_request: {} } } });
+  const f = fake({ issues: { 9: { labels: [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }], pull_request: {} } } });
   conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'success', 'success');
   assert.deepEqual(f.journal, [get(), issueGet(), get()]);
   f.unchanged();
 });
-for (const value of [undefined, { labels: null }, { labels: [{ name: 4 }]}]) {
+for (const value of [undefined, { labels: null }, { labels: [{ name: 4 }]},
+  ...[undefined, null, {}, ['owner'], [{}]].map((assignees) => ({ labels: [{ name: 'status:approved' }], assignees }))]) {
   test(`unavailable/malformed issue cannot approve: ${JSON.stringify(value)}`, async () => {
     const f = fake({ issues: { 9: value } });
     conclusions(await evaluateIssueValidation(f.github, prEvent()), sha, 'success', 'failure');

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { evaluateNativeIssuePolicy } from './issue-native-policy.mjs';
 
 const repo = { owner: 'Gentleman-Programming', repo: 'engram' };
 const sha = 'a'.repeat(40);
@@ -9,7 +10,8 @@ const workspace = new URL('../../', import.meta.url).href.replace(/\/$/, '');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 async function execute({ action = 'labeled', approved = true, body = 'Closes #9', pr = false,
-  unrelated = false, changed = false, fault = '', secondApproved = true } = {}) {
+  unrelated = false, changed = false, fault = '', secondApproved = true,
+  assignees = [{ login: 'owner-not-author' }], approvalState, beforeCreate } = {}) {
   const reads = [], attempts = [], stored = [], failures = [];
   let pullReads = 0;
   const pull = { number: 1, state: 'open', body, head: { sha, repo: { full_name: 'untrusted/fork' } } };
@@ -25,10 +27,11 @@ async function execute({ action = 'labeled', approved = true, body = 'Closes #9'
     issues: { get: async (request) => {
       reads.push(['issue', request]);
       if (fault === 'issue') throw new Error('Issue unavailable');
-      const allowed = request.issue_number === 9 ? approved : secondApproved;
-      return { data: { labels: allowed ? [{ name: 'status:approved' }] : [] } };
+      const allowed = request.issue_number === 9 ? (approvalState?.approved ?? approved) : secondApproved;
+      return { data: { labels: allowed ? [{ name: 'status:approved' }] : [], assignees } };
     } },
     checks: { create: async (request) => {
+      if (beforeCreate) await beforeCreate(structuredClone(request));
       attempts.push(structuredClone(request));
       if (fault === 'create' || (fault === 'later' && attempts.length === 2)) throw new Error('Checks denied');
       const run = { ...request, app: { id: fault === 'binding' ? 42 : 15368 } };
@@ -66,6 +69,77 @@ for (const [action, approved] of [['labeled', true], ['unlabeled', false], ['lab
   });
 }
 
+test('a paused legacy success can publish after a current native failure without changing reevaluation', { timeout: 5000 }, async () => {
+  const approvalState = { approved: true };
+  const order = [], nativeReads = [], nativeWrites = [];
+  let markReady, resumeLegacy;
+  const ready = new Promise((resolve) => { markReady = resolve; });
+  const resume = new Promise((resolve) => { resumeLegacy = resolve; });
+  const legacy = execute({ approvalState, beforeCreate: async (request) => {
+    if (request.name === names[1]) {
+      order.push('legacy approval snapshot ready');
+      markReady(request);
+      await resume;
+      order.push('legacy approval publication');
+    }
+  } });
+  const pull = { number: 1, state: 'open', body: 'Closes #9',
+    head: { sha, repo: { full_name: 'untrusted/fork' } } };
+  const github = { rest: {
+    pulls: { get: async (request) => {
+      nativeReads.push(['pull', request]); return { data: structuredClone(pull) };
+    } },
+    issues: { get: async (request) => {
+      nativeReads.push(['issue', request]);
+      return { data: { labels: approvalState.approved ? [{ name: 'status:approved' }] : [],
+        assignees: [{ login: 'owner-not-author' }] } };
+    } },
+    checks: { create: async (request) => {
+      nativeWrites.push(request); assert.fail('Native evaluation must remain read-only');
+    } },
+  } };
+  const context = { repo, eventName: 'pull_request_target', payload: {
+    action: 'opened', pull_request: { number: 1, head: { sha } },
+  } };
+  const failure = { headSha: sha, conclusion: 'failure', summary: 'PR #1: issue #9 lacks status:approved' };
+  let state;
+  try {
+    assert.deepEqual(await ready, requests(['success', 'success'], ['Validation passed.', 'Validation passed.'])[1]);
+    approvalState.approved = false;
+    assert.deepEqual(await evaluateNativeIssuePolicy(github, context, 'approved'), failure);
+    order.push('native current approval failure');
+    assert.deepEqual(order, ['legacy approval snapshot ready', 'native current approval failure']);
+    assert.deepEqual(nativeWrites, []);
+  } finally {
+    resumeLegacy();
+    state = await legacy;
+  }
+  // This models the documented publication window, not GitHub's required-check selection.
+  assert.deepEqual(order, ['legacy approval snapshot ready', 'native current approval failure', 'legacy approval publication']);
+  assert.deepEqual(state.attempts, requests(['success', 'success'], ['Validation passed.', 'Validation passed.']));
+  assert.deepEqual(state.stored, state.attempts.map((run) => ({ ...run, app: { id: 15368 } })));
+  assert.deepEqual(state.failures, []);
+  assert.deepEqual(state.reads, [['list', { ...repo, state: 'open', per_page: 100, page: 1 }],
+    ['pull', { ...repo, pull_number: 1 }], ['issue', { ...repo, issue_number: 9 }],
+    ['pull', { ...repo, pull_number: 1 }]]);
+  assert.deepEqual(await evaluateNativeIssuePolicy(github, context, 'approved'), failure);
+  const currentReads = [['pull', { ...repo, pull_number: 1 }], ['issue', { ...repo, issue_number: 9 }],
+    ['pull', { ...repo, pull_number: 1 }]];
+  assert.deepEqual(nativeReads, [...currentReads, ...currentReads]);
+  assert.deepEqual(nativeWrites, []);
+  assert.equal(approvalState.approved, false);
+  assert.deepEqual(pull, { number: 1, state: 'open', body: 'Closes #9',
+    head: { sha, repo: { full_name: 'untrusted/fork' } } });
+});
+
+test('composed refresh publishes assignment failure on the fetched head', async () => {
+  const state = await execute({ assignees: [] });
+  const expected = requests(['success', 'failure'], ['Validation passed.', 'PR #1: issue #9 has no assignee. Assign an owner before merge.']);
+  assert.deepEqual(state.attempts, expected);
+  assert.deepEqual(state.stored, expected.map((run) => ({ ...run, app: { id: 15368 } })));
+  assert.deepEqual(state.failures, []);
+  assert.deepEqual(state.reads.map(([method]) => method), ['list', 'pull', 'issue', 'pull']);
+});
 test('unrelated labels and unmatched references publish nothing', async () => {
   const irrelevant = await execute({ unrelated: true });
   assert.deepEqual(irrelevant, { reads: [], attempts: [], stored: [], failures: [] });

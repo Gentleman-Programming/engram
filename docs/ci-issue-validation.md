@@ -48,7 +48,8 @@ code or acquire credentials. Untrusted bodies and labels are only metadata.
 
 Closing references retain exactly `/(?:closes|fixes|resolves)\s+#(\d+)/gi`,
 including its existing substring and whitespace behavior. Every match is checked,
-including duplicates; all linked issues must carry `status:approved`. Missing
+including duplicates; all linked issues must carry `status:approved` and have at
+least one assignee. Any assignee qualifies; it need not be the PR author. Missing
 references fail both conclusions for ordinary PRs. For issue-label routing,
 no matching authoritative reference means no target.
 
@@ -59,7 +60,7 @@ semantics and tests. This module does not resolve or publish group heads.
 
 ## Failure and consistency boundaries
 
-- Issue read failures or malformed labels fail approval explicitly. They never
+- Issue read failures or malformed labels/assignees fail approval explicitly. They never
   become success. As in the legacy policy, an `issues.get` record's
   `pull_request` field does not disqualify valid approval labels; issue-as-PR
   events remain excluded from issue-label routing.
@@ -70,7 +71,7 @@ semantics and tests. This module does not resolve or publish group heads.
   initial PR discovery or target resolution cannot complete, the evaluator
   throws; callers must report
   that error rather than fabricate success or silently treat it as no targets.
-- Current labels, not the event's historical label state, decide approval. Thus a
+- Current labels and assignees, not the event's historical label state, decide approval. Thus a
   delayed approval event can observe revocation and vice versa. There are no
   locks, cancellation guarantees or compare-and-swap publication fences.
 

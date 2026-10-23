@@ -2,6 +2,7 @@
 // process, so these tests exercise the actual spawn/readiness/failure lifecycle instead of
 // re-implementing it with stubs.
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer as createHTTPServer, get } from "node:http";
@@ -11,6 +12,204 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT as ROOT, RUNTIME_STUB_MARKER, createPluginSandbox, importPluginFromSandbox } from "./plugin-sandbox.mjs";
+
+test("package advertises the implemented session-owned protocol to bundled launchers", async () => {
+  const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8"));
+  assert.equal(pkg.engram.startupPolicy, 1);
+  assert.equal(pkg.engram.sessionOwned, 1);
+});
+
+async function withOwnedFixture(options, run) {
+  const dir = await mkdtemp(join(tmpdir(), "engram-owned-pi fixture-"));
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  const saved = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")));
+  for (const key of Object.keys(saved)) delete process.env[key];
+  let hooks, ctx;
+  try {
+    process.env.ENGRAM_SERVER_MODE = options.mode ?? "session-owned";
+    process.env.ENGRAM_DATA_DIR = join(dir, "store");
+    Object.assign(process.env, options.env ?? {});
+    const log = join(dir, "events.log");
+    await writeFile(log, "");
+    const bin = join(dir, "owned.cjs");
+    await writeFile(bin, `#!/usr/bin/env node
+const {createServer}=require('node:http');
+const {appendFileSync}=require('node:fs');
+const {resolve}=require('node:path');
+const log=(v)=>appendFileSync(${JSON.stringify(log)},JSON.stringify(v)+'\\n');
+// A Node preload sees the synthetic command in argv[1], not its own script path.
+const syntheticServePath=resolve('serve');
+const invocationArgs=process.argv.slice(process.argv[1]===__filename?2:1);
+if (invocationArgs[0]===syntheticServePath) invocationArgs[0]='serve';
+log({args:invocationArgs,tokenShape:/^[a-f0-9]{64}$/.test(process.env.ENGRAM_TOKEN||'')});
+if (!invocationArgs.includes('--session-owned')) process.exit(3);
+if (process.argv[1]!==__filename && invocationArgs[0]==='serve') process.once('uncaughtException',(error)=>{
+ if (error?.code==='MODULE_NOT_FOUND' && error.message.includes("Cannot find module '"+syntheticServePath+"'")) return;
+ throw error;
+});
+const server=createServer(async(req,res)=>{
+ log({path:req.url,authorized:req.headers.authorization==='Bearer '+process.env.ENGRAM_TOKEN});
+ let body='';for await(const c of req)body+=c;
+ if(req.url==='/observations'){req.socket.destroy();return;}
+ res.setHeader('content-type','application/json');
+ if(req.url==='/runtime-contract'){res.end(${JSON.stringify(JSON.stringify(fixtureContract()))});return;}
+ res.end(JSON.stringify(req.url.startsWith('/project/current')?{project:'owned-project'}:req.url==='/sessions'?{id:JSON.parse(body).id,status:'created'}:req.url.startsWith('/observations/save-result')?{id:1,status:'committed'}:{}));
+});
+server.listen(0,'127.0.0.1',()=>{
+ const ready={protocol:'engram-session-owned-v1',endpoint:'http://127.0.0.1:'+server.address().port,pid:process.pid,instance_id:'0'.repeat(32)};
+ ${options.bad === "unknown" ? "ready.extra=true;" : ""}
+ ${options.bad === "foreign" ? "ready.endpoint='http://example.com:7437';" : ""}
+ ${options.bad === "oversize" ? "ready.extra='x'.repeat(2048);" : ""}
+ ${options.bad === "exit" ? "process.exit(7);" : `setTimeout(()=>process.stdout.write(JSON.stringify(ready)+'\\n'),${options.readyDelay ?? 0});`}
+});
+process.stdin.resume();process.stdin.on('end',()=>{log({eof:true});server.close(()=>process.exit(0));});
+setTimeout(()=>process.exit(9),15000).unref();
+`);
+    await chmod(bin, 0o755);
+    // Windows cannot directly execute a shebang .cjs file. Preload the real fake
+    // child through Node without changing the production spawn arguments.
+    if (options.preload ?? process.platform === "win32") {
+      process.env.ENGRAM_BIN = process.execPath;
+      process.env.NODE_OPTIONS = `--require "${bin.replaceAll("\\", "\\\\")}"`;
+    } else {
+      process.env.ENGRAM_BIN = bin;
+    }
+    const sandbox = await createPluginSandbox(dir);
+    const register = await importPluginFromSandbox(sandbox);
+    const tools = new Map(); hooks = new Map();
+    register({ registerTool: tool => tools.set(tool.name, tool), on: (name, fn) => hooks.set(name, fn) });
+    const warnings = [], statuses = [];
+    ctx = { cwd: dir, hasUI: true, sessionManager: {getSessionId:()=>"owned-session"}, ui:{notify:(m)=>warnings.push(m),setStatus:(_k,v)=>statuses.push(v)} };
+    await run({hooks,ctx,tools,warnings,statuses,log,events:async()=> (await readFile(log,"utf8")).trim().split('\n').filter(Boolean).map(v=>JSON.parse(v))});
+  } finally {
+    if (hooks && ctx) await hooks.get("session_shutdown")?.({reason:"reload"},ctx);
+    for (const key of Object.keys(process.env)) if (key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")) delete process.env[key];
+    Object.assign(process.env,saved);
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+    await rm(dir,{recursive:true,force:true});
+  }
+}
+
+test("owned preload launches a real child with actual argv and restores Node options", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--no-warnings";
+  try {
+    await withOwnedFixture({ preload: true }, async ({ hooks, ctx, events, statuses }) => {
+      assert.equal(process.env.ENGRAM_BIN, process.execPath);
+      assert.equal(process.env.NODE_OPTIONS,
+        `--require "${join(ctx.cwd, "owned.cjs").replaceAll("\\", "\\\\")}"`);
+      await hooks.get("session_start")({}, ctx);
+      assert.ok(statuses.some(value => value?.includes("ready")));
+      const records = await events();
+      assert.deepEqual(records[0].args, ["serve", "--session-owned"]);
+      assert.equal(records[0].tokenShape, true);
+      await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+      assert.ok((await events()).some(record => record.eof));
+    });
+    assert.equal(process.env.NODE_OPTIONS, "--no-warnings");
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+});
+
+test("owned preload restores Node options after a fixture callback rejects", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--no-warnings";
+  try {
+    await assert.rejects(withOwnedFixture({ preload: true }, async () => {
+      throw new Error("fixture callback rejected");
+    }), { message: "fixture callback rejected" });
+    assert.equal(process.env.NODE_OPTIONS, "--no-warnings");
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+});
+
+test("owned child authenticates every path and reload closes transport without ending conversation", async()=> {
+ await withOwnedFixture({},async({hooks,ctx,tools,events,statuses})=>{
+  await hooks.get('session_start')({},ctx);
+  await tools.get('mem_save').execute('owned-save', {title:'Test',content:'Test observation',project:'owned-project'},undefined,undefined,ctx);
+  assert.ok(statuses.some(v=>v?.includes('ready')));
+  const before=await events();
+  assert.deepEqual(before[0].args,['serve','--session-owned']);
+  assert.equal(before[0].tokenShape,true);
+  assert.ok(before.some(e=>e.path?.startsWith('/observations/save-result')));
+  assert.ok(before.filter(e=>e.path).every(e=>e.authorized));
+  await hooks.get('session_shutdown')({reason:'reload'},ctx);
+  const after=await events();assert.ok(after.some(e=>e.eof));assert.ok(!after.some(e=>e.path?.endsWith('/end')));
+ });
+});
+
+test("owned resources close even with missing session identity and preserve other hosted roots",async()=>{
+ await withOwnedFixture({},async({hooks,ctx,events})=>{
+  const second={...ctx,sessionManager:{getSessionId:()=>undefined}};
+  await hooks.get('session_start')({},ctx);await hooks.get('session_start')({},second);
+  await hooks.get('session_shutdown')({reason:'reload'},ctx);
+  assert.ok(!(await events()).some(e=>e.eof));
+  await hooks.get('session_shutdown')({},second);
+  assert.ok((await events()).some(e=>e.eof));
+ });
+});
+
+test("owned startup and cleanup never probe or terminate an existing shared fixture", async () => {
+  let requests = 0;
+  const shared = createHTTPServer((_request, response) => {
+    requests += 1;
+    response.end('{}');
+  });
+  await new Promise(resolve => shared.listen(0, '127.0.0.1', resolve));
+  try {
+    await withOwnedFixture({}, async ({ hooks, ctx }) => {
+      await hooks.get('session_start')({}, ctx);
+      await hooks.get('session_shutdown')({ reason: 'reload' }, ctx);
+      assert.equal(requests, 0);
+      const response = await fetch(`http://127.0.0.1:${shared.address().port}/health`);
+      assert.equal(response.status, 200);
+      assert.equal(requests, 1);
+    });
+  } finally {
+    await new Promise(resolve => shared.close(resolve));
+  }
+});
+
+test("owned reload cancels pending startup and leaves no child transport", async () => {
+  await withOwnedFixture({ readyDelay: 500 }, async ({ hooks, ctx, events }) => {
+    const startup = hooks.get("session_start")({}, ctx);
+    const deadline = Date.now() + 2000;
+    while ((await events()).length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+    await startup;
+    const records = await events();
+    assert.ok(records.some(record => record.eof));
+    assert.ok(!records.some(record => record.path));
+  });
+});
+
+for(const bad of ['unknown','foreign','oversize','exit']) test(`owned rejects ${bad} readiness and closes exact child`,async()=>{
+ await withOwnedFixture({bad},async({hooks,ctx,statuses,events})=>{
+  await hooks.get('session_start')({},ctx);
+  assert.ok(!statuses.some(v=>v?.includes('ready')));
+  const records = await events();
+  assert.deepEqual(records[0].args, ['serve', '--session-owned']);
+  assert.ok(!records.some(e=>e.path));
+ });
+});
+
+for(const env of [{ENGRAM_URL:'http://127.0.0.1:7437'},{ENGRAM_PORT:'7437'},{ENGRAM_SOCKET:''}]) test(`owned rejects transport conflict ${Object.keys(env)[0]} before spawn`,async()=>{
+ await withOwnedFixture({env},async({hooks,ctx,events})=>{
+  await hooks.get('session_start')({},ctx);assert.deepEqual(await events(),[]);
+ });
+});
+for(const mode of ['', 'shared','SESSION-OWNED']) test(`explicit malformed owned mode ${JSON.stringify(mode)} fails closed`,async()=>{
+ await withOwnedFixture({mode},async({hooks,ctx,events})=>{
+  await hooks.get('session_start')({},ctx);assert.deepEqual(await events(),[]);
+ });
+});
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -55,6 +254,7 @@ if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "autosync=" + (process.env.ENGRAM_CLOUD_AUTOSYNC ?? "<unset>") + "\\n");
   ${exitCode === undefined
       ? `const server = createServer(async (req, res) => {
+  if (req.url === "/runtime-contract") { res.end(${JSON.stringify(JSON.stringify(fixtureContract()))}); return; }
   if (req.url === "/sessions") {
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -194,6 +394,7 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer(async (request, response) => {
       options.requests?.push({ method: request.method, url: request.url });
+      if (request.url === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
       if (request.url === "/sessions") {
         let body = "";
         for await (const chunk of request) body += chunk;

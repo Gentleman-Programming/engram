@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -707,6 +708,12 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate-copy" {
+		if code := runMigrateCopy(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
+			exitFunc(code)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "compatibility" {
 		if code := runCompatibility(os.Args[2:], os.Stdout, os.Stderr); code != 0 {
 			exitFunc(code)
@@ -756,6 +763,15 @@ func main() {
 		}
 	}
 
+	// Reject unsupported export limits before any startup side effects.
+	if os.Args[1] == "obsidian-export" {
+		if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			exitFunc(1)
+			return
+		}
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
@@ -763,6 +779,12 @@ func main() {
 		return
 	}
 
+	if os.Args[1] == "serve" {
+		if _, err := validateSessionOwned(os.Args[2:]); err != nil {
+			fatal(err)
+			return
+		}
+	}
 	cfg, cfgErr := storeDefaultConfig()
 	if cfgErr != nil {
 		// Fallback: try to resolve home directory from environment variables
@@ -791,9 +813,19 @@ func main() {
 		return
 	}
 
+	if usesLocalSQLite(os.Args[1:]) {
+		if err := prepareSQLiteTemp(cfg.DataDir); err != nil {
+			fatal(err)
+			return
+		}
+	}
+
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
-	migrateOrphanedDatabase(cfg.DataDir)
+	owned, _ := validateSessionOwned(os.Args[2:])
+	if os.Args[1] != "serve" || !owned {
+		migrateOrphanedDatabase(cfg.DataDir)
+	}
 
 	switch os.Args[1] {
 	case "serve":
@@ -907,13 +939,41 @@ func cmdServe(cfg store.Config) error {
 		return err
 	}
 
-	s, err := storeNew(cfg)
+	// Owned EOF cancels startup lock waits as well as serving. Construction
+	// stays synchronous so cleanup cannot race abandoned live store work.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var parentEOF <-chan struct{}
+	var s *store.Store
+	if options.sessionOwned {
+		parentEOF = watchOwnedParent(os.Stdin, cancel)
+		s, err = store.NewWithContext(ctx, cfg)
+	} else {
+		s, err = storeNew(cfg)
+	}
 	if err != nil {
+		if options.sessionOwned && errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
 	defer s.Close()
+	if options.sessionOwned && ctx.Err() != nil {
+		return nil
+	}
 
 	srv := newHTTPServer(s, options.port)
+	if options.sessionOwned {
+		srv.SetSessionOwnedToken(os.Getenv("ENGRAM_TOKEN"))
+		srv.SetOnReady(func(addr net.Addr) error {
+			select {
+			case <-parentEOF:
+				return fmt.Errorf("session-owned parent closed before readiness")
+			default:
+			}
+			return emitOwnedReadiness(addr, s.InstanceID())
+		})
+	}
 	srv.SetSocketPath(options.socketPath)
 	srv.SetVersion(version)
 
@@ -923,10 +983,6 @@ func cmdServe(cfg store.Config) error {
 	srv.SetPromptBuilder(func(a, b store.ObservationSnippet) string {
 		return llmBuildPrompt(a, b)
 	})
-
-	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Try to start autosync (opt-in via ENGRAM_CLOUD_AUTOSYNC=1).
 	// BW7: tryStartAutosync returns (status provider, stop func) so the signal
@@ -962,6 +1018,8 @@ func cmdServe(cfg store.Config) error {
 	select {
 	case <-serveGenerationInvalidated(srv):
 		terminal = store.ErrDatabaseGenerationChanged
+	case <-parentEOF:
+		log.Println("[engram] session owner disconnected; shutting down...")
 	case <-sigCh:
 		log.Println("[engram] shutting down...")
 	case serveErr = <-serveResult:
@@ -995,11 +1053,19 @@ func cmdServe(cfg store.Config) error {
 }
 
 type serveOptions struct {
-	port       int
-	socketPath string
+	sessionOwned bool
+	port         int
+	socketPath   string
 }
 
 func resolveServeOptions(args []string) (serveOptions, error) {
+	owned, err := validateSessionOwned(args)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	if owned {
+		return serveOptions{sessionOwned: true, port: 0}, nil
+	}
 	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
 	portExplicit := false
 	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
@@ -1396,7 +1462,7 @@ func cmdSearch(cfg store.Config) {
 	}
 }
 
-const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]\nUntracked folders inside a HOME Git repository require --project, ENGRAM_PROJECT, or .engram/config.json project_name."
 
 type saveArgs struct {
 	title       string
@@ -1485,7 +1551,7 @@ func cmdSave(cfg store.Config) {
 	_, preflightErr := project.Resolve(project.ResolutionOptions{
 		Mode: project.ResolutionCurrent, Explicit: projectName, Directory: cwd,
 		Detect: func(dir string) project.DetectionResult {
-			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true})
+			return detectProjectFull(dir, project.DetectionOptions{InspectOnly: true, RequireExplicitHomeProject: true})
 		},
 	})
 	if preflightErr != nil {
@@ -1505,7 +1571,7 @@ func cmdSave(cfg store.Config) {
 		Explicit:  projectName,
 		Directory: cwd,
 		Detect: func(dir string) project.DetectionResult {
-			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory})
+			return detectProjectFull(dir, project.DetectionOptions{HistoryLookup: s.ProjectHistory, RequireExplicitHomeProject: true})
 		},
 	})
 	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
@@ -1534,20 +1600,27 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
-	sessionID, err := s.ResolveManualSession(projectName, cwd)
+	provenance := &store.ProjectProvenance{Source: resolved.Source, Directory: cwd}
+	if strings.TrimSpace(args.projectName) != "" {
+		provenance.RawProject = args.projectName
+	} else if override, ok := project.ProcessOverride(""); ok {
+		provenance.RawProject = override
+	}
+	sessionID, err := s.ResolveManualSession(projectName, cwd, provenance)
 	if err != nil {
 		fatal(err)
 		return
 	}
 	truncation := s.ContentTruncation(content)
 	id, err := storeAddObservation(s, store.AddObservationParams{
-		SessionID: sessionID,
-		Type:      typ,
-		Title:     title,
-		Content:   content,
-		Project:   projectName,
-		Scope:     scope,
-		TopicKey:  topicKey,
+		ProjectProvenance: provenance,
+		SessionID:         sessionID,
+		Type:              typ,
+		Title:             title,
+		Content:           content,
+		Project:           projectName,
+		Scope:             scope,
+		TopicKey:          topicKey,
 	})
 	if err != nil {
 		fatal(err)
@@ -2482,12 +2555,36 @@ func (a *storeAdapter) Stats() *store.Stats {
 	return st
 }
 
+// validateObsidianExportLimit follows the command's value consumption and stops
+// at unknown flags so preflight does not reorder existing parser errors.
+func validateObsidianExportLimit(args []string) error {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--limit" || strings.HasPrefix(args[i], "--limit=") {
+			return errors.New("--limit is not supported by obsidian-export; omit it to export all matching observations")
+		}
+		switch args[i] {
+		case "--vault", "--project", "--since", "--graph-config", "--interval":
+			if i+1 < len(args) {
+				i++
+			}
+		case "--all", "--force", "--watch":
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func cmdObsidianExport(cfg store.Config) {
+	if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		exitFunc(1)
+		return
+	}
 	// Parse flags
 	var (
 		vault       string
 		project     string
-		limit       int
 		since       string
 		force       bool
 		graphConfig string
@@ -2510,13 +2607,6 @@ func cmdObsidianExport(cfg store.Config) {
 			}
 		case "--all":
 			allProjects = true
-		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					limit = n
-				}
-				i++
-			}
 		case "--since":
 			if i+1 < len(os.Args) {
 				since = os.Args[i+1]
@@ -2586,7 +2676,6 @@ func cmdObsidianExport(cfg store.Config) {
 	exportCfg := obsidian.ExportConfig{
 		VaultPath:   vault,
 		Project:     project,
-		Limit:       limit,
 		Force:       force,
 		GraphConfig: graphMode,
 	}
@@ -2672,6 +2761,8 @@ func cmdProjects(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "alias":
+		cmdProjectsAlias(cfg)
 	case "merge":
 		cmdProjectsMerge(cfg)
 	case "consolidate":
@@ -2690,6 +2781,7 @@ func cmdProjects(cfg store.Config) {
 }
 
 func printProjectsUsage() {
+	fmt.Fprint(os.Stderr, projectAliasUsage)
 	fmt.Fprintln(os.Stderr, "usage: engram projects list")
 	fmt.Fprintln(os.Stderr, "       engram projects merge --from <source> --to <canonical> (--dry-run|--apply)")
 	fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
@@ -3820,6 +3912,7 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
+  serve --session-owned  Private ephemeral HTTP server; requires ENGRAM_TOKEN, stops on stdin EOF
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
                         Profiles: agent (%d tools), admin (%d tools), all (default, %d)
@@ -3832,6 +3925,8 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
+  migrate-copy --data-dir <absolute-source> --output-dir <new-absolute-destination> --confirm-quiescent --json
+                     Copy a stopped store completely and migrate only the copy; see docs/bundled-upgrade.md
   compatibility --data-dir <absolute-directory> --json
                      Read-only offline store observation (JSON). It never opens, migrates or repairs
                      the store, and never authorizes automatic opening; see README
@@ -3855,6 +3950,8 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
+                       repair --project P --check CODE (--plan|--dry-run|--apply)
+                       repair mutates state: only --apply writes.
   context [project] [--project PROJECT|--all] [--scope SCOPE] [--older-history]
                      Show recent context from previous sessions
   stats [--project PROJECT|--all]
@@ -3864,9 +3961,11 @@ Commands:
   import <file>      Import memories from a JSON export file
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
+  hook resolve-hook-project
+                     Inspect the absolute cwd in hook JSON on stdin without HTTP, database or binding writes
   projects list      List all projects with observation, session, and prompt counts
   projects merge --from <source> --to <canonical> (--dry-run|--apply)
-                     Preview or apply a separator or Unicode normalization variant merge
+                     Preview or apply a legacy case, separator or Unicode normalization variant merge
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
@@ -3895,7 +3994,7 @@ Commands:
                        --vault         Path to Obsidian vault root (required)
                         --project       Filter export to a single project (optional; cannot combine with --all)
                         --all           Export every project
-                       --limit         Cap exported observations at N (optional)
+                       --limit         Unsupported; rejected to protect complete reconciliation
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)
                        --graph-config  Graph layout mode: preserve|force|skip (default: preserve)
@@ -3927,8 +4026,12 @@ Environment:
   ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
                      Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
                      Falls back to system local time when unset or invalid.
+  ENGRAM_URL         Explicit nonblank URL selects client-local project inspection in native
+                     Claude/Codex hooks, including loopback SSH tunnel URLs. Unset/blank
+                     retains server resolution over local port/socket defaults. Registered
+                     owners and server permission checks remain authoritative.
   ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT
-                     Total HTTP confirmation budget for Claude/Codex PreToolUse (default: 4s).
+                     Total inspection/HTTP budget for Claude/Codex PreToolUse (default: 4s).
                      Accepts a positive Go duration, e.g. 8s or 500ms; unset, blank,
                      invalid, or nonpositive values use 4s. Increase the host hook timeout
                      too, leaving time for process startup and verdict output.

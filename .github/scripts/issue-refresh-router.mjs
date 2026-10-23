@@ -7,8 +7,28 @@ const protectedPaths = [workflowPath, '.github/scripts/issue-native-policy.mjs',
 const shaValid = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
 const text = (value) => typeof value === 'string' && value.length > 0;
+const guardReasons = new WeakMap();
 function requireEvidence(condition, message) {
-  if (!condition) throw new Error(message);
+  if (!condition) {
+    const error = new Error(message);
+    guardReasons.set(error, message);
+    throw error;
+  }
+}
+
+/** Only owned guard text and bounded HTTP metadata are safe for workflow output. */
+export function issueRefreshFailureDiagnostic(error) {
+  const seen = new Set();
+  for (let depth = 0; depth < 8 && error && typeof error === 'object' && !seen.has(error); depth += 1) {
+    seen.add(error);
+    if (guardReasons.has(error)) return { reason: 'guard', message: guardReasons.get(error) };
+    if (Number.isInteger(error.status) && error.status >= 400 && error.status <= 599) {
+      const method = error.request?.method;
+      return { reason: 'api', httpStatus: error.status, ...(['GET', 'POST'].includes(method) ? { method } : {}) };
+    }
+    error = error.cause;
+  }
+  return { reason: 'unknown' };
 }
 function binding(pull, upstream) {
   requireEvidence(positive(pull?.number) && pull.state === 'open'
@@ -26,10 +46,26 @@ function runMatches(run, pull, upstream, workflow) {
     && run.head_repository?.full_name === pull.head.repo.full_name;
 }
 function runTargetMatches(run, pull) {
+  // An absent association is not proof; both trusted job markers are always required below.
+  if (Array.isArray(run.pull_requests) && run.pull_requests.length === 0) return true;
   const target = Array.isArray(run.pull_requests) && run.pull_requests.length === 1 && run.pull_requests[0];
   return target?.number === pull.number && target.base?.ref === pull.base.ref
     && target.base?.repo?.id === pull.base.repo.id && target.head?.sha === pull.head.sha
     && target.head?.ref === pull.head.ref && target.head?.repo?.id === pull.head.repo.id;
+}
+function originalEvent(step, pull, run) {
+  try {
+    const prefix = 'Original issue event v1 ';
+    if (!step.name.startsWith(prefix) || step.status !== 'completed' || step.conclusion !== 'success') return null;
+    const record = JSON.parse(step.name.slice(prefix.length));
+    const expected = ['pull_request_target', record?.[1], pull.base.repo.id, run.id, run.run_attempt,
+      pull.number, pull.head.repo.id, pull.head.sha, pull.head.ref, pull.base.repo.id, pull.base.ref];
+    return Array.isArray(record) && record.length === expected.length
+      && ['opened', 'edited', 'labeled', 'unlabeled', 'synchronize', 'reopened'].includes(record[1])
+      && record.every((value, index) => value === expected[index]) ? JSON.stringify(record) : null;
+  } catch {
+    return null;
+  }
 }
 function policyBlob(file) {
   requireEvidence(file?.type === 'file' && file.encoding === 'base64' && shaValid(file.sha)
@@ -92,16 +128,20 @@ export async function rerunNativeIssuePolicy(github, repo, pullRequest, trustedS
     });
     requireEvidence(listing?.total_count === 2 && Array.isArray(listing.jobs) && listing.jobs.length === 2
       && new Set(listing.jobs.map((job) => job.name)).size === 2, 'native metadata-only two-job shape unavailable');
-    const sources = listing.jobs.map((job) => {
+    const proofs = listing.jobs.map((job) => {
       requireEvidence(jobNames.includes(job.name) && job.run_id === run.id
         && job.head_sha === pull.head.sha && job.status === 'completed' && Array.isArray(job.steps), 'native job binding invalid');
       const markers = job.steps.filter((step) => /^Load trusted issue policy/.test(step.name));
       const match = markers.length === 1 && /^Load trusted issue policy \(([a-f0-9]{40})\)$/.exec(markers[0].name);
       requireEvidence(match && markers[0].status === 'completed' && markers[0].conclusion === 'success', 'trusted checkout source binding unavailable');
-      return match[1];
+      const identities = job.steps.filter((step) => typeof step?.name === 'string' && step.name.startsWith('Original issue event'));
+      const event = identities.length === 1 && originalEvent(identities[0], pull, run);
+      requireEvidence(event, 'native original PR/event binding unavailable');
+      return { source: match[1], event };
     });
-    requireEvidence(sources[0] === sources[1], 'native jobs disagree on source SHA');
-    const sourceSha = sources[0];
+    requireEvidence(proofs[0].event === proofs[1].event, 'native original PR/event binding unavailable');
+    requireEvidence(proofs[0].source === proofs[1].source, 'native jobs disagree on source SHA');
+    const sourceSha = proofs[0].source;
     const comparison = await request('GET /repos/{owner}/{repo}/compare/{basehead}', { basehead: `${sourceSha}...${trustedSha}` });
     requireEvidence(['ahead', 'identical'].includes(comparison?.status)
       && comparison.merge_base_commit?.sha === sourceSha, 'policy source is not trusted ancestor');

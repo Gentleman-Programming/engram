@@ -60,7 +60,111 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
+      - name: Await selected CI proof
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CI_PROOF_CONTROL: ${{ vars.ISSUE_CI_PROOF_CI }}
+        with:
+          script: |
+            let raw = process.env.CI_PROOF_CONTROL;
+            const ref = process.env.GITHUB_HEAD_REF ?? '';
+            const proofBranch = context.eventName === 'pull_request' && ref.startsWith('ci/proof-');
+            if (!raw && !proofBranch) return;
+            const fail = () => new Error('proof-ci: bootstrap');
+            let cfg;
+            if (!proofBranch) {
+              try {
+                if (raw.length > 8192) throw fail();
+                cfg = JSON.parse(raw);
+              } catch { throw fail(); }
+              if (cfg?.enabled === false) return;
+            }
+            if (!['pull_request', 'merge_group'].includes(context.eventName)) return;
+            const pr = context.payload.pull_request;
+            const mg = context.payload.merge_group;
+            const b = { repo: `${context.repo.owner}/${context.repo.repo}`, event: context.eventName,
+              action: context.payload.action, job: process.env.GITHUB_JOB, head: context.sha,
+              checkout: pr?.base?.sha ?? mg?.base_sha, workflow: process.env.GITHUB_WORKFLOW_SHA,
+              runId: Number(process.env.GITHUB_RUN_ID), attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+              prHead: context.eventName === 'pull_request' ? pr?.head?.sha : null };
+            let route;
+            if (proofBranch) {
+              route = /^ci\/proof-([1-9]\d*)-([a-z0-9][a-z0-9._-]{0,99})$/.exec(ref);
+              const positive = (n) => Number.isSafeInteger(n) && n > 0;
+              if (raw || !route || !positive(Number(route[1])) || Number(route[1]) > 2147483647
+                || b.repo !== 'Gentleman-Programming/engram' || pr?.base?.ref !== 'main'
+                || pr?.base?.repo?.full_name !== b.repo || !positive(pr?.number)
+                || typeof pr?.head?.repo?.full_name !== 'string'
+                || !/^[\w.-]+\/[\w.-]+$/.test(pr.head.repo.full_name)
+                || pr.head.repo.full_name.toLowerCase() === b.repo.toLowerCase()
+                || !positive(b.runId) || !positive(b.attempt)
+                || typeof b.action !== 'string' || !/^[\w-]+$/.test(b.action)) throw fail();
+            } else {
+              if (cfg?.enabled !== true || !cfg.target || typeof cfg.target !== 'object') throw fail();
+              const optional = ['runId', 'attempt', 'workflow', 'head'];
+              if (Object.keys(b).some((key) => (!optional.includes(key) || key in cfg.target)
+                && cfg.target[key] !== b[key])) return;
+            }
+            const sha = (s) => typeof s === 'string' && /^[a-f0-9]{40}$/.test(s);
+            if (![b.head, b.checkout, b.workflow].every(sha)
+              || (mg && mg.head_sha !== b.head) || b.job !== 'unit-tests'
+              || (proofBranch && !sha(b.prHead))) throw fail();
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const dir = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, 'ci-proof-'));
+            const deadline = proofBranch ? Date.now() + 15000 : 0;
+            let last = deadline - 15000;
+            const remaining = () => {
+              if (!proofBranch) return;
+              const n = Date.now();
+              if (!Number.isSafeInteger(n) || n < last || n >= deadline) throw fail();
+              last = n;
+              return deadline - n;
+            };
+            const getSource = async (request) => {
+              if (!proofBranch) return github.rest.repos.getContent(request);
+              const ms = remaining(), abort = new AbortController();
+              let timer;
+              try {
+                const response = await Promise.race([
+                  github.rest.repos.getContent({ ...request, request: { timeout: ms, signal: abort.signal } }),
+                  new Promise((_, reject) => { timer = setTimeout(() => { abort.abort(); reject(fail()); }, ms); }),
+                ]);
+                remaining();
+                return response;
+              } finally { clearTimeout(timer); }
+            };
+            const pins = {
+              'issue-ci-proof-ci.mjs': '02beea7bd200bc213b1e8eb6e65784eaaee4a43cf06f0b4fcee026c2e2c500cb',
+              'issue-ci-proof-controls.mjs': '1be88a7a4874f54d0efcfd05a19a812381e216b70c8a0a71f1217579a6a74740',
+            };
+            if (proofBranch) pins['issue-ci-proof-config.mjs'] = '72673c0722df90e7229f5cc5f2d2e217600e6a83f58686eba7d178da357cc95c';
+            try {
+              for (const [file, pin] of Object.entries(pins)) {
+                const response = await getSource({ ...context.repo,
+                  path: `.github/scripts/${file}`, ref: b.checkout });
+                if (response.data?.encoding !== 'base64' || typeof response.data.content !== 'string') throw fail();
+                const bytes = Buffer.from(response.data.content, 'base64');
+                if (crypto.createHash('sha256').update(bytes).digest('hex') !== pin) throw fail();
+                fs.writeFileSync(path.join(dir, file), bytes, { flag: 'wx' });
+              }
+              if (proofBranch) {
+                const { readCIConfiguration } = require(path.join(dir, 'issue-ci-proof-config.mjs'));
+                const selected = await readCIConfiguration({ github, identity: b, prNumber: pr.number,
+                  issueNumber: Number(route[1]), caseName: route[2], deadline, now: Date.now });
+                remaining();
+                raw = selected.raw;
+                core.info(JSON.stringify(selected.receipt));
+              }
+              const { holdCI } = require(path.join(dir, 'issue-ci-proof-ci.mjs'));
+              await holdCI({ raw, identity: b, github, emit: (r) => core.info(JSON.stringify(r)) });
+            } catch { throw fail(); }
+
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -70,6 +174,9 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.25.10"
+
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
 
       - name: Verify generated templ output
         run: |
@@ -190,9 +297,21 @@ jobs:
         with:
           node-version: "24"
 
-      # No install step: test/plugin-sandbox.mjs copies the plugin into a temp
-      # directory with its own stubbed node_modules, so the suite runs from a
-      # clean checkout and never writes into plugin/pi/node_modules.
+      # Real-schema diagnostics need only the locked test dependency, not Pi peers.
+      - name: Install Pi test dependencies
+        working-directory: plugin/pi
+        run: npm ci --ignore-scripts --legacy-peer-deps
+      - name: Set up Go for Pi checks
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build release candidate checker
+        run: go build -mod=readonly -o "$RUNNER_TEMP/engram-release-candidate" ./tools/release-candidate
+
+      - name: Verify selected Pi source input projections
+        run: ENGRAM_PI_SCHEMA_REQUIRE_REAL=1 go test ./tools/release-candidate -run '^TestPiSourceEvidence$' -count=1 -v
+
       - name: Run Pi plugin tests
         working-directory: plugin/pi
         run: npm test

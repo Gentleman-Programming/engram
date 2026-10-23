@@ -22,11 +22,34 @@
 | Codex | Codex plugin assets under `plugin/codex/`; `engram setup codex` best-effort installs the marketplace plugin and writes MCP/instruction config. |
 | Pi | Pi package under `plugin/pi/` exposes Pi-native HTTP memory tools; Pi 0.99.0+ built-in MCP handles other servers, and an installed `pi-mcp-adapter` replaces it, so setup does not add it. |
 
+### Client-local project inspection
+
+`engram hook resolve-hook-project` reads existing hook JSON from stdin and uses its exact lowercase `cwd` field to inspect the local filesystem. The `cwd` must be an absolute path; relative paths return `{}`. Other hook fields are ignored. It prints canonical `project`, `project_source` and `project_path` JSON, or `{}` when input or identity is unusable. Malformed input, duplicate `cwd`, inaccessible directories, ambiguity and invalid/unbound Git identities never fall back to an HTTP lookup. Malformed Git metadata in the cwd, its ancestors or a promoted child is not treated as a plain directory. Readable non-Git directories retain basename resolution.
+
+Inspection does not open the database, initialize global configuration, create Git bindings or register sessions. Existing config and repository bindings remain authoritative. Standalone inspection uses a 1.5-second deadline, matching the native Codex prompt budget; that context does not bound reading stdin. Native callers pass their existing context directly to the shared Go inspector; inspection does not start another timeout.
+
+For native Claude PreToolUse and Codex registration, resolution, session-end, PreToolUse and prompt commands, an originally nonblank `ENGRAM_URL` selects client-local inspection—even a loopback URL used for an SSH tunnel. With an unset or blank URL, port/socket-derived transport retains server-side project resolution. External routing never asks the server to interpret the client cwd through `/project/current`. Codex Bash startup, compaction and prompt adapters preserve the original URL intent for native dispatch separately from their synthesized curl/context transport URL.
+
+Claude keeps an existing registered owner; only first registration requires inspection. Codex first reads the authoritative session: a known `project_owned` session keeps its persisted project even if cwd changes or becomes inaccessible. Shared and unknown Codex sessions require successful client inspection; shared requests retain the inspected caller project without changing the persisted owner. Failed required inspection causes no registration, runtime or prompt-persistence POST and never falls back to server filesystem detection. Codex still sends `resume: true` on registration and preserves the received-conflict-only runtime retry described below. Tool binding changes session identity only, not model-supplied project arguments or server permission checks.
+
+These native changes do not integrate the remaining Bash/PowerShell session/context consumers with the inspection action, change optional Claude capture, or repair already misattributed sessions.
+
 Pi and OpenCode activity renews the local runtime lease through their existing session registration paths. This is local SQLite liveness only: it has no timer, cloud synchronization, or cross-machine coordination.
 
 Pi sends `resume: true` for runtime-root registration and adopts only a valid acknowledged effective ID. The Go core selects numeric continuations; Pi persists the mapping in its session entries for reloads and uses it for attributed writes and shutdown `/end`. Legacy `:resume:<uuid>` mappings are re-registered as-is; an ended mapping falls back to root registration with `resume: true`. Reload does not end the session. Ownership conflicts and an older server's `409 session_already_ended` block writes rather than triggering client-generated identities.
 
 When resuming an ended, directory-bound host, new numeric continuations inherit its persisted project, directory, and ownership mode after registration ownership checks. After a received `409 runtime session scope conflict`, Codex looks up the ended root and makes at most one resolve/end request with its persisted directory and mode while retaining the caller's requested project: `shared` hosts still allow cross-project use, but `project_owned` hosts reject foreign projects. This rebinding is limited to that confirmed rejection; normal paths, unrelated errors, and uncertain transport failures do not trigger it. Fresh and live-host paths keep their existing registration and resolution behavior.
+
+### Codex Bash passive capture
+
+The synchronous `SubagentStop` hook resolves the supplied host through native
+`engram hook codex-resolve` before passive capture. Only a confirmed host or its
+numeric continuation is submitted; identity bytes remain opaque JSON data,
+including trailing newlines. Missing, invalid, foreign or unavailable confirmation
+skips capture without registering or reopening a session. Go owns live identity
+and project authority. The hook retains its exact `{}` JSON result and best-effort
+exit status; project lookup (2s), native resolution (1.5s aggregate) and capture
+(3s) network budgets fit within the existing outer 10s hook timeout.
 
 ### Codex on Windows
 - The manifest launches plugin-root `run-native-hook.ps1` through SystemRoot-qualified Windows PowerShell.
@@ -54,6 +77,18 @@ The same `engram.ts` supports OpenCode 1.x (1.18.29+) and 2.x. Its default expor
 > **Local model compatibility:** The plugin works with all models, including local ones served via llama.cpp, Ollama, or similar. The Memory Protocol is concatenated into the existing system prompt (not added as a separate system message), so models with strict Jinja templates (Qwen, Mistral/Ministral) work correctly.
 
 Both OpenCode majors register or renew with one `POST /sessions` using the root ID and `resume: true`. If the root has ended, the Go core atomically reuses a live `<root>:resume:N` continuation or creates the next numeric identity (starting at 2, without a restart cap); ended rows remain closed. The plugin caches only the acknowledged effective ID. Prompts, passive capture, attributed MCP writes, session lookups, compaction context, and disposal use it. Concurrent instances converge through the store transaction. Ownership conflicts and other failures refuse writes and warn once per root. Older servers that ignore `resume` refuse ended roots with `409 session_already_ended`; there is no client probing fallback. Failed or uncertain renewals retain cleanup ownership of previously acknowledged IDs; an unknown continuation created during an unacknowledged response may remain open rather than risk ending a guessed identity.
+
+Runtime attribution validates every parent hop before binding a write. Concrete OpenCode project IDs must match the current runtime project. On V2 only, a `global` sentinel is accepted when that session's authoritative `location.directory` is a nonempty string exactly equal to the current V2 directory; the sentinel alone, a missing/malformed location, or a different directory grants no authority. Validated same-location events may supply cached evidence; otherwise the plugin queries runtime session metadata. Once global authority has been accepted, a later session metadata event with missing/malformed/foreign location evidence or a changed/missing/malformed project ID invalidates that session and its descendants. This applies before binding and during registration: an already-dispatched registration may exist, but the write arguments remain untouched and no binding is granted. Start a new runtime session after revocation. Unrelated foreign events do not register, close or reclassify sessions. V1 and established concrete-project behavior are unchanged. No snake_case project-ID fallback or path canonicalization is used.
+
+Explicit attributed-write resolution failures keep the `could not resolve an authoritative OpenCode runtime session` prefix and add a privacy-safe category:
+
+- `global-location-missing-or-malformed`: check that V2 supplies session location metadata.
+- `global-location-mismatch` or `foreign-project`: reopen the session in the current project/directory; do not override its ownership.
+- `session-metadata-invalid`: check runtime session ID, camelCase project ID and parent metadata.
+- `session-lookup-failed`: restore runtime session lookup availability and retry.
+- `session-unavailable-or-invalid-chain`: reopen a live session; closed, invalid or cyclic parent chains cannot bind writes.
+
+These categories expose no runtime IDs, project names, paths or raw lookup errors. They describe adapter validation failures, not proof of how live runtime history acquired a global project ID.
 
 Automatic OpenCode memory operations remain fail-open. Readiness, server/import launch, transport, malformed-response, HTTP, and invalid session-end acknowledgement failures queue privacy-safe `Engram degraded` warnings for the next supported tool result. Each reason is reported once per plugin instance; pending warnings survive unsupported results. V1 string output and V2 completed string/text-or-file content are supported; tool errors and unknown result shapes are left untouched. Warnings contain no paths, raw errors, or response payloads. They do not promise automatic restart, backoff, or recovery. Expected session registration conflicts retain their specific refusal diagnostics rather than being labeled server-down.
 
@@ -117,7 +152,7 @@ engram setup claude-code
 claude --plugin-dir ./plugin/claude-code
 ```
 
-The supported plugin-and-hook setup requires `jq` and `curl` on `PATH` before installation. On Windows, `curl.exe` satisfies curl detection, but `jq` must also be installed and available to the shell Claude Code uses. Bare MCP is the MCP-only fallback: it does not install or run hooks when those prerequisites are unavailable.
+The supported plugin-and-hook setup requires Claude Code **2.1.295 or later** and Engram plugin **0.1.16 or later** for hook-failure protection, plus `jq` and `curl` on `PATH` before installation. Older Claude Code versions do not provide this guarantee and must be upgraded. MCP-only setup has no hook-failure protection. On Windows, `curl.exe` satisfies curl detection, but `jq` must also be installed and available to the shell Claude Code uses. Bare MCP is the MCP-only fallback: it does not install or run hooks when those prerequisites are unavailable.
 
 MCP registration happens during explicit installation or repair with `engram setup claude-code` (or `engram setup claude-code --mcp-only` for MCP-only repair). SessionStart does not run setup or inspect, write, or delete Claude configuration. Claude CLI owns the user-scope `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`) or `$CLAUDE_CONFIG_DIR/.claude.json` when that override is set. Setup accepts only the exact expected stdio command and arguments as configured; mismatched or unreadable entries are visible conflicts and are never overwritten. Do not edit the plugin cache manually.
 
@@ -127,7 +162,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 
 | Feature | Bare MCP | Plugin + setup |
 |---------|----------|----------------|
-| MCP tools available | 23 default (`engram mcp`) | 19 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 27 default (`engram mcp`) | 23 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
@@ -139,7 +174,7 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 ```
 plugin/claude-code/
 ├── .claude-plugin/plugin.json     # Plugin manifest
-├── hooks/hooks.json               # PreToolUse binding + SessionStart/SubagentStop/SessionEnd lifecycle hooks
+├── hooks/hooks.json               # PreToolUse binding + SessionStart (context, host-process bind)/SubagentStop/SessionEnd lifecycle hooks
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
@@ -154,12 +189,20 @@ plugin/claude-code/
 
 **Before Engram write/session MCP tools** (`PreToolUse`):
 1. `hooks/hooks.json` uses its canonical matcher and the portable `engram hook claude-pre-tool-use` command.
-   Before rewriting input, the hook confirms project-owned session registration using one shared HTTP budget (four seconds by default). Set `ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT` in the hook process environment to a positive Go duration such as `8s` or `500ms` to override it; unset, blank, invalid, overflowed, zero, or negative values use `4s`. A session that is already registered is confirmed against its registered owner project (#1717): the cwd names the project only on first registration, so writes keep succeeding wherever the shell currently is. The default leaves one second within the configured five-second hook timeout for process startup and verdict output. If increasing the budget, also raise the host's configured PreToolUse timeout above that budget with startup/output headroom; the environment variable does not change the host timeout. The same variable applies to Codex PreToolUse (whose shipped outer timeout is ten seconds), but not to Codex prompt capture. This is a slow-server mitigation, not a fix for autosync latency. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; unexplained failures retain `Claude host session registration could not be confirmed`. Denials the server explains name their cause instead: an ended session reports `host session ... already ended`, a project conflict reports `session_project_conflict` with the owner and requested projects, and a cwd the server cannot resolve for first registration reports the resolution failure with the server's reason. Registration remains mandatory on each gated call; there is no cache, bypass, or retry.
+   Before rewriting input, the hook confirms project-owned session registration using one shared inspection/HTTP budget (four seconds by default). Set `ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT` in the hook process environment to a positive Go duration such as `8s` or `500ms` to override it; unset, blank, invalid, overflowed, zero, or negative values use `4s`. A session that is already registered is confirmed against its registered owner project (#1717): the cwd names the project only on first registration, so writes keep succeeding wherever the shell currently is. The default leaves one second within the configured five-second hook timeout for process startup and verdict output. If increasing the budget, also raise the host's configured PreToolUse timeout above that budget with startup/output headroom; the environment variable does not change the host timeout. The same variable applies to Codex PreToolUse (whose shipped outer timeout is ten seconds), but not to Codex prompt capture. This is a slow-server mitigation, not a fix for autosync latency. A confirmation timeout denies the call with `Claude host session confirmation timed out (server slow or unavailable)`; unexplained failures retain `Claude host session registration could not be confirmed`. Denials the server explains name their cause instead: an ended session reports `host session ... already ended`, a project conflict reports `session_project_conflict` with the owner and requested projects, and a cwd the server cannot resolve for first registration reports the resolution failure with the server's reason. With a nonblank `ENGRAM_URL`, a failed client-local inspection reports the generic `Claude host session registration could not be confirmed` denial (or the timeout denial). Registration remains mandatory on each gated call; registration has no cache or bypass and is never retried. The managed-local recovery path below may retry the owner lookup once.
    Claude Code keeps the same `session_id` on `--resume`. When that original session has already ended, the hook binds the call to the live `<id>:resume:N` continuation that SessionStart registered, resolved from the original session's persisted project and directory. The ended session stays ended, and the hook never creates a continuation itself; with no live continuation the call is denied with `host session ... already ended`.
 2. When the registered hook runs, the transformer binds Claude's top-level `session_id` to tool input `session_id` (or `id` for `mem_session_start` and `mem_session_end`), replacing model-supplied values while preserving other arguments.
 3. The rewrite uses `updatedInput`; it does not auto-approve a permission decision.
 
-Session binding is best-effort if the host times out the PreToolUse hook: normal permission flow can continue without the rewrite, so an explicit wrong same-project session ID might be persisted. This limitation was reproduced with an induced one-second hook timeout in a scratch test; it has not been observed with the production hook timeout.
+The authoritative mutating PreToolUse hook sets `onFailure: "block"`. On supported Claude Code versions, the host blocks the matched tool call if the hook cannot start, times out, returns invalid output, or exits with a failure code; an explicit hook denial also blocks the call. This prevents a failed or cancelled rebind from permitting a write through an older binding. See Claude Code's [hook failure behavior](https://code.claude.com/docs/en/hooks#block-the-action-when-a-hook-fails). These are documented host semantics, not verified here by actual-host execution; protection requires the plugin hook to be installed, enabled, and matched.
+
+**Windows managed-local recovery (#1956).** If Claude's initial session-owner lookup receives a direct dial connection refusal from the default `127.0.0.1` endpoint, the native hook may start shared `serve`, verify `/health` identifies Engram and the same data-directory instance, then retry that read once. Explicit nonblank `ENGRAM_URL` or `ENGRAM_SOCKET`, redirects, HTTP/JSON failures from that initial lookup, other transport failures, cancellation and timeouts never authorize recovery. All existing owner, ended-session and continuation checks still apply; no memory/tool call is replayed. Instance equality establishes continuity, not authentication against a malicious local listener.
+
+After an eligible launch, readiness polling may retry HTTP 500 responses from `/health` within the existing confirmation deadline. Other HTTP statuses, redirects and malformed or mismatched identities still fail closed; a matching HTTP 200 response is required before the owner lookup can be retried. This does not authorize another launch or replay a write.
+
+Identity-lock waits, readiness and the retry share the confirmation deadline. Synchronous filesystem operations and native process creation cannot be forcibly cancelled; admission is checked before launch after preparation. Once started, the server is shared and may already have been adopted by another hook, so a caller's cancellation does not kill it. Recovery changes neither Windows Job policy nor SessionStart's shell lifecycle and cannot promise survival after host Job termination. Concurrent contenders use the existing store-startup locks and listener arbitration rather than a new service or scheduler.
+
+**Host-process session binding (#1693).** For omitted-ID MCP calls, an exec-form `SessionStart` hook (startup, resume, clear, fork) runs `engram hook claude-bind-session` and records which session the Claude process serves, as a small file under `<data dir>/host-sessions/<pid>.json` (host PID plus its process start time, so a reused PID never matches; entries of exited hosts are pruned). The hook is registered with `"args"`, so Claude Code spawns it directly with no shell: its parent is the Claude process on Linux, macOS and Windows. Shell-form hooks run through `sh -c` or Git Bash, where the parent is an intermediate shell on Ubuntu and Windows, so they are not used for the binding. `engram mcp` is a child of the same Claude process, so when a write omits `session_id` it first looks up its own parent's binding. The binding is used only if the bound session (or its live `:resume:N` continuation) is live and belongs to the same project as the write. Only absence of a verified process binding keeps the existing project/directory fallback, including its fail-closed ambiguity refusal. A verified binding naming an unknown session, another project, or an ended/unresolvable session without a live continuation rejects the write without fallback: `host session binding cannot resolve a live session for the requested project; provide session_id explicitly or restart the host session to refresh its binding`. This shared rule applies to omitted-ID `mem_save`, `mem_session_summary`, `mem_save_prompt`, and `mem_capture_passive` calls. An explicit `session_id` is never overridden. Writing the binding is best-effort: the command prints nothing, always exits 0, and never affects session start. SessionStart is not write-time freshness authority: a failed or cancelled rebind can leave the previous live binding in place. The registry alone cannot prevent that stale attribution; the supported PreToolUse gate above confirms and rewrites each matched call or blocks it on failure. Exec-form hooks were introduced in Claude Code 2.1.139, and the binding hook shipped in plugin 0.1.15; neither older minimum provides the hook-failure protection now required. The binding also needs an `engram` binary that includes the command. The measurements behind this design (Claude Code 2.1.304 on GitHub Actions, Windows/macOS/Ubuntu, npm and native installs) are in https://github.com/doblas/engram-1693-probe.
 
 **On session start** (`startup`, `resume`, `clear`, `fork`):
 1. Ensures the engram HTTP server is running
@@ -182,7 +225,7 @@ The Bash capture paths and PowerShell fallback ask the Go server's `POST /prompt
 
 **Server compatibility:** Automatic Claude prompt capture requires an Engram server with `/prompts/capture-decision`. Older servers (404), unavailable/slow servers, and malformed or invalid decisions silently skip capture; normal hooks, first-message ToolSearch, and existing save-reminder reads continue to work. There is no local classifier fallback. Decision responses must be 2xx without redirects. Adapters reject project metadata containing path separators, ASCII controls, or surrounding whitespace; these are transport sanity checks, not project normalization. Go remains the canonical-name authority, including lowercasing and repeated separator normalization; adapters never repair server metadata.
 
-1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
+1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding. After loading tools, the Bash hook and PowerShell fallback instruct the model to reuse usable prior-session context already provided by SessionStart and call `mem_context` only if that context was absent or not useful (including empty or unavailable context). This is guidance, not hook-side detection of injected context or a guarantee of model compliance.
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
 
@@ -219,6 +262,24 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 - **After compaction** — 3-step recovery: persist summary → load context → continue
 
 ---
+
+## MCP Tool Reference — mem_session_finalize
+
+MCP clients can finalize an existing exact session with required `session_id` and caller-authored `summary`, plus the optional summary project-resolution fields. One transaction saves a structured observation, ends the session, queues the normal enrolled-project mutations and records a local retry journal. The existing free-text session summary is preserved.
+
+Successful local retries return the same `summary_id` / `summary_sync_id` with `state: already_finalized` and no writes. A session ended separately rejects rather than silently dropping or backfilling the supplied summary. The journal is not synced/exported, so imported ended sessions without a local marker reject too. This MCP addition does not change host hooks or native Pi/HTTP tools. See [the full contract](../DOCS.md#mem_session_finalize).
+
+## MCP Tool Reference — mem_judge_many
+
+Available in agent and admin profiles and explicit allowlists; deferred loading avoids eager schema duplication. After `mem_save` returns `judgment_required`, prefer this tool when available; otherwise call `mem_judge` for each candidate.
+
+Submit `judgments`, an array of 1–32 objects, plus optional shared `session_id` provenance. Each object requires `judgment_id` from `candidates[]` and `relation`; optional `reason`, `evidence`, and `confidence` follow `mem_judge`. Never reuse the top-level judgment ID for all candidates.
+
+The whole array shape/count and shared session type are checked before writes. Items run in submitted order within one queued task, using independent existing judgment transactions. Malformed entries, unknown IDs, invalid verdicts and project guard failures yield individual errors without stopping subsequent items.
+
+The JSON response has `outcomes` in input order. Each has zero-based `index`, `judgment_id` (null if unavailable), and `status` (`success` or `error`). Success includes `judgment_status`, the updated `relation` row, and any other fields from the existing judgment response; error includes an `error` string. Partial failure is not a top-level tool error; invalid array shape/count is.
+
+Repeated IDs are processed in order, so later successful decisions overwrite earlier ones. Identical retries converge the persisted verdict but retain existing sync mutation refresh semantics: this is not exactly-once delivery. Existing `mem_judge` remains unchanged.
 
 ## MCP Tool Reference — mem_judge
 

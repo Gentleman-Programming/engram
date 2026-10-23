@@ -3,6 +3,33 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../workflows/issue-policy.yml', import.meta.url), 'utf8');
+test('both original event markers use typed original context only, before policy evaluation', () => {
+  const workflow = source.replace(/\r\n/g, '\n');
+  const markers = [...workflow.matchAll(/      - name: >-\n([\s\S]*?)\n        run: ':'\n/g)];
+  assert.equal(markers.length, 2);
+  const sha = 'a'.repeat(40), ref = 'topic|"quoted"';
+  const github = { event_name: 'pull_request_target', repository_id: '18', run_id: '90', run_attempt: '2',
+    event: { action: 'opened', pull_request: { number: 7, head: { sha, ref, repo: { id: 17 } }, base: { ref: 'main', repo: { id: 18 } } } } };
+  const format = (pattern, ...values) => pattern.replace(/\{(\d+)\}/g, (_, i) => String(values[Number(i)]));
+  for (const marker of markers) {
+    const name = marker[1].trim().replace(/\n\s*/g, ' ');
+    const expression = /^Original issue event v1 \$\{\{ (.*) \}\}$/.exec(name);
+    assert.ok(expression);
+    assert.doesNotMatch(expression[1], /title|body|secrets|token|github\.sha|github\.ref/);
+    const render = new Function('github', 'format', 'toJSON', 'return ' + expression[1]);
+    assert.deepEqual(JSON.parse(render(github, format, JSON.stringify)),
+      ['pull_request_target', 'opened', 18, 90, 2, 7, 17, sha, ref, 18, 'main']);
+    for (const action of ['edited', 'labeled', 'unlabeled', 'synchronize', 'reopened']) {
+      github.event.action = action;
+      assert.equal(JSON.parse(render(github, format, JSON.stringify))[1], action);
+    }
+    github.event.action = 'opened';
+    const before = workflow.slice(marker.index, marker.index + marker[0].length);
+    assert.doesNotMatch(before, /if:|continue-on-error|uses:|retries:/);
+    const next = workflow.slice(marker.index + marker[0].length);
+    assert.match(next, /^      - name: Evaluate issue (?:reference|approval)/);
+  }
+});
 for (const newline of ['LF', 'CRLF']) test(`${newline} parser and wrappers`, async (t) => {
 const input = source.replace(/\r\n/g, '\n').replace(/\n/g, newline === 'CRLF' ? '\r\n' : '\n');
 // Normalize only the test parser input, never the workflow on disk.
@@ -12,7 +39,8 @@ await t.test(`${newline}: native workflow has exactly two independent read-only 
   assert.equal(jobs.length, 2);
   assert.match(workflow, /types: \[opened, edited, labeled, unlabeled, synchronize, reopened\]/);
   assert.match(workflow, /^permissions: \{\}$/m);
-  assert.doesNotMatch(workflow, /needs:|merge_group|write|checks:|if:|continue-on-error|github\.event|github\.sha/);
+  const withoutMarkers = workflow.replace(/      - name: >-\n[\s\S]*?\n        run: ':'\n/g, '');
+  assert.doesNotMatch(withoutMarkers, /needs:|merge_group|write|checks:|if:|continue-on-error|github\.event|github\.sha/);
   assert.deepEqual(jobs.map((job) => job.match(/name: (Check[^\n]+)/)[1]), ['Check Issue Reference', 'Check Issue Has status:approved']);
   for (const job of jobs) {
     assert.match(job, /permissions:\n      contents: read\n      issues: read\n      pull-requests: read/);
@@ -40,7 +68,7 @@ for (const [index, policy] of ['reference', 'approved'].entries()) {
           if (scenario === 'null-error') throw null;
           return { data: { number: 1, state: 'open', body: scenario === 'missing' ? '' : 'Closes #9', head: { sha: scenario === 'drift' ? 'b'.repeat(40) : sha } } };
         } },
-        issues: { get: async (params) => { requests.push(['issues.get', params]); return { data: { labels: scenario === 'revoked' ? [] : [{ name: 'status:approved' }] } }; } },
+        issues: { get: async (params) => { requests.push(['issues.get', params]); return { data: { labels: scenario === 'revoked' ? [] : [{ name: 'status:approved' }], assignees: [{ login: 'owner-not-author' }] } }; } },
         checks: { create: () => assert.fail('prohibited publication') },
       } };
       let exitCode = 0;

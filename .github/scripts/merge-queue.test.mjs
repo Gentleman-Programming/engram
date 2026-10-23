@@ -236,6 +236,9 @@ test('runs non-required policy and Obsidian regression suites on PRs and merge g
   assert.match(policy, /uses: actions\/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5\r?\n        with:\r?\n          node-version: "24"/);
   assert.match(policy, /run: node --test \.github\/scripts\/merge-queue\.test\.mjs \.github\/scripts\/label-policy\.test\.mjs \.github\/scripts\/transient-artifacts\.test\.mjs/);
 
+  assert.match(policy, /run: node --test \.github\/scripts\/issue-\*\.test\.mjs/,
+    'CI must execute assigned-issue regression tests alongside existing policy suites');
+
   const obsidian = jobBody(ciWorkflow, 'obsidian-build');
   assert.doesNotMatch(obsidian, /^    if:/m, 'Obsidian tests must run unconditionally');
   assert.match(obsidian, /run: npm ci[\s\S]*?- name: Test Obsidian plugin\r?\n        working-directory: plugin\/obsidian\r?\n        run: npm test[\s\S]*?run: npm run typecheck/);

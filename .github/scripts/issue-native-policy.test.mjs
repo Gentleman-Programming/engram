@@ -6,7 +6,7 @@ import { closingIssueNumbers, evaluateIssueValidation } from './issue-validation
 const sha = 'a'.repeat(40);
 const repo = { owner: 'owner', repo: 'repo' };
 const context = (action = 'opened') => ({ repo, eventName: 'pull_request_target', sha: 'b'.repeat(40), payload: { action, pull_request: { number: 1, head: { sha }, body: 'Closes #999' } } });
-function fake({ body = 'Closes #9', labels = ['status:approved'], head = sha, change, fail, state = 'open' } = {}) {
+function fake({ body = 'Closes #9', labels = ['status:approved'], head = sha, change, fail, state = 'open', assignees = [{ login: 'owner-not-author' }] } = {}) {
   const requests = [];
   const github = { rest: {
     pulls: { get: async (params) => {
@@ -17,7 +17,7 @@ function fake({ body = 'Closes #9', labels = ['status:approved'], head = sha, ch
     issues: { get: async (params) => {
       requests.push(['issues.get', params]);
       if (fail === 'issue') throw new Error('offline');
-      return { data: { labels: labels.map((name) => ({ name })) } };
+      return { data: { labels: labels.map((name) => ({ name })), assignees } };
     } },
   } };
   for (const namespace of ['checks', 'repos', 'actions']) github.rest[namespace] = new Proxy({}, { get: () => () => assert.fail('SDK write prohibited') });
@@ -49,6 +49,16 @@ for (const policy of ['reference', 'approved']) test(`missing reference fails ${
   const f = fake({ body: 'mentions #9' });
   assert.match((await evaluateNativeIssuePolicy(f.github, context(), policy)).summary, /no closing issue reference/);
   assert.deepEqual(f.requests, expected([]));
+});
+test('native approval rejects an unassigned issue while reference remains valid', async () => {
+  for (const policy of ['reference', 'approved']) {
+    const f = fake({ assignees: [] });
+    assert.deepEqual(await evaluateNativeIssuePolicy(f.github, context(), policy), {
+      headSha: sha, conclusion: policy === 'approved' ? 'failure' : 'success',
+      summary: policy === 'approved' ? 'PR #1: issue #9 has no assignee. Assign an owner before merge.' : 'Validation passed.',
+    });
+    assert.deepEqual(f.requests, expected());
+  }
 });
 test('invalid native admission rejects without SDK requests', async () => {
   for (const ctx of [{ ...context(), eventName: 'pull_request' }, context('closed'), { ...context(), payload: { action: 'opened', pull_request: { number: 1, head: { sha: 'invalid' } } } }]) {
@@ -90,5 +100,5 @@ test('additive parser alias preserves exact grammar and evaluator public behavio
   const f = fake({ body, head: 'c'.repeat(40) });
   const results = await evaluateIssueValidation(f.github, context());
   assert.deepEqual(results, [{ headSha: 'c'.repeat(40), reference: { conclusion: 'success', summary: 'Validation passed.' }, approved: { conclusion: 'success', summary: 'Validation passed.' } }]);
-  assert.deepEqual(f.requests, expected([9, 10, 9]));
+  assert.deepEqual(f.requests, expected([9, 10, 9, 12]));
 });

@@ -1341,10 +1341,18 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 
 func (s *Store) sqliteRepairBackupPath() (string, error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
+	// Reserve privately before SQLite opens the path, including in existing directories.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", fmt.Errorf("reserve sqlite backup: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close sqlite backup reservation: %w", err)
+	}
 	return path, nil
 }
 

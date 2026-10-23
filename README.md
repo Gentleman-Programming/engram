@@ -21,6 +21,7 @@
 <a href="https://engram.gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
 <a href="#get-started"><strong>Quickstart</strong></a> &bull;
 <a href="DOCS.md"><strong>Docs</strong></a> &bull;
+<a href="docs/RELEASE-STAGING.md"><strong>Candidate staging</strong></a> &bull;
 <a href="https://gentle-ai.gentlemanprogramming.com/"><strong>Gentle-AI</strong></a> &bull;
 <a href="https://gentle-ai-wiki.gentlemanprogramming.com/"><strong>Wiki</strong></a>
 </p>
@@ -101,6 +102,8 @@ Codex mutating Engram tools require the running core's `/health` response to adv
 
 A **Go binary** with SQLite + FTS5 full-text search, exposed through CLI, HTTP API, MCP, and an interactive TUI. It works with any MCP-compatible agent, including Claude Code, OpenCode, Gemini CLI, Codex, VS Code (Copilot), Antigravity, Cursor, and Windsurf. No Node.js, Python, or Docker is required: one binary, one SQLite file.
 
+The data directory defaults to `~/.engram`; a nonblank `ENGRAM_DATA_DIR` overrides it and must be an absolute path. On Windows, local-SQLite commands (including `serve`, `mcp`, and `doctor`) create and check `<data-directory>/tmp/sqlite` before opening SQLite, then set `TEMP` and `TMP` for that process only. Startup fails with an operation-specific diagnostic if the directory cannot be used. User/system environment settings and the working directory are unchanged. The directory is shared between processes and is not cleaned by Engram; SQLite manages its own uniquely named temporary files. This preparation also covers cloud `status`, `enroll`, `unenroll`, `attest-prompt-source`, and the local-store `cloud upgrade` operations (`doctor`, `repair`, `bootstrap`, `remirror`, `status`, `rollback`). It does not run for `protocol-mode`, `setup`, `cloud serve`, `cloud config`, top-level `cloud repair` or `cloud bootstrap` (distinct from the included `cloud upgrade repair` and `cloud upgrade bootstrap`), other `cloud upgrade` subcommands, or unknown commands. Existing orphan-database migration behavior is unchanged, including for commands excluded from this preparation. Linux/macOS, config-free commands, isolated self-tests, `compatibility`, and `migrate-copy` retain their existing behavior.
+
 **[Docs →](docs/ARCHITECTURE.md)**
 
 ---
@@ -161,8 +164,8 @@ Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipb
 
 | Component | What it does |
 | :--- | :--- |
-| **[MCP tools](DOCS.md#mcp-tools-23-tools)** | Save, search, timeline, session, review, and diagnosis tools for your agent |
-| **[HTTP API](DOCS.md#http-api-endpoints)** | The same memory over local HTTP endpoints |
+| **[MCP tools](DOCS.md#mcp-tools-27-tools)** | Save, search, timeline, session, review, and diagnosis tools for your agent |
+| **[HTTP API](DOCS.md#http-api-endpoints)** | The same memory over local HTTP endpoints; [compound agent workflows](docs/HTTP-AGENT-WORKFLOWS.md) |
 | **[Doctor](docs/DOCTOR.md)** | `engram doctor` — read-only operational diagnostics |
 | **[Conflict surfacing](docs/AGENT-SETUP.md#conflict-surfacing-automatic)** | Flags related or conflicting memories so the agent can judge them |
 | **[Plugins](docs/PLUGINS.md)** | OpenCode and Claude Code plugin details |
@@ -322,8 +325,8 @@ Tool availability can vary by MCP profile. Start with the intent, then use your 
 | Save or refine durable knowledge | `mem_save`, `mem_update`, `mem_suggest_topic_key` |
 | Consolidate observations after preview and explicit confirmation | `mem_consolidate` (Go MCP server; [contract](docs/codebase/OBSERVATION-CONSOLIDATION.md#mcp-contract)) |
 | Preserve the user's request | `mem_save_prompt` |
-| Hand off or close a session | `mem_session_summary`, `mem_session_start`, `mem_session_end` |
-| Review stale knowledge or memory relationships | `mem_review`, `mem_judge`, `mem_compare` |
+| Hand off or close a session | `mem_session_summary`, `mem_session_start`, `mem_session_end`; MCP atomic close: `mem_session_finalize` |
+| Review stale knowledge or memory relationships | `mem_review`, `mem_judge`, `mem_compare`; MCP batch: `mem_judge_many` |
 | Diagnose project or store state | `mem_doctor` |
 
 For parameters and the complete, current tool reference, see [the full documentation](DOCS.md).

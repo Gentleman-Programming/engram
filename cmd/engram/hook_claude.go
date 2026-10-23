@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
+
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 // claudeEngramWriteAndSessionTools is the complete set of Engram MCP tools
@@ -61,6 +64,10 @@ var claudeHookOutput = func(response []byte) error {
 }
 
 func cmdHook(args []string) {
+	if len(args) == 1 && args[0] == "resolve-hook-project" {
+		cmdResolveHookProject()
+		return
+	}
 	if len(args) == 1 && (args[0] == "codex-register" || args[0] == "codex-resolve" || args[0] == "codex-session-end") {
 		cmdCodexLifecycle(args[0])
 		return
@@ -69,8 +76,12 @@ func cmdHook(args []string) {
 		cmdCodexUserPromptSubmit()
 		return
 	}
+	if len(args) == 1 && args[0] == "claude-bind-session" {
+		cmdClaudeBindSession()
+		return
+	}
 	if len(args) != 1 || (args[0] != "claude-pre-tool-use" && args[0] != "codex-pre-tool-use") {
-		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|codex-pre-tool-use|codex-user-prompt-submit")
+		fmt.Fprintln(os.Stderr, "usage: engram hook claude-pre-tool-use|claude-bind-session|codex-pre-tool-use|codex-user-prompt-submit|resolve-hook-project")
 		exitFunc(1)
 		return
 	}
@@ -144,6 +155,11 @@ func hookSessionConfirmationDeny(agent string, err error) []byte {
 // confirmHookSession returns the session ID writes must use: the host ID, or
 // the live continuation that SessionStart registered after a resume (#1624).
 func confirmHookSession(id, cwd string, projectOwned bool) (effective string, confirmationErr error) {
+	return confirmHookSessionForPlatform(id, cwd, projectOwned, runtime.GOOS)
+}
+
+// Keep the platform seam private; production always supplies runtime.GOOS.
+func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform string) (effective string, confirmationErr error) {
 	base, client := hookEndpointClient("")
 	if base == "" {
 		return "", errHookSessionUnconfirmed
@@ -164,6 +180,11 @@ func confirmHookSession(id, cwd string, projectOwned bool) (effective string, co
 	// lookup that fails outright denies the write: a degraded answer is not a
 	// first registration.
 	session, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
+	if lookupErr != nil && hookLocalRecoveryEligible(platform, base, base+"/sessions/"+url.PathEscape(id), lookupErr) {
+		if recoverHookLocalServer(ctx, client, base) == nil && ctx.Err() == nil {
+			session, known, lookupErr = hookSessionOwnerProject(ctx, client, base, id)
+		}
+	}
 	if lookupErr != nil {
 		return "", lookupErr
 	}
@@ -239,9 +260,23 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 	if err != nil {
 		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
 	}
-	response, err := client.Do(request)
+	// Track redirects without changing policy or the shared request context,
+	// including redirects back to exactly the original request URL.
+	lookupClient := *client
+	redirected := false
+	lookupClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		redirected = true
+		if client.CheckRedirect != nil {
+			return client.CheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	response, err := lookupClient.Do(request)
 	if err != nil || response == nil {
-		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed"}
+		return hookPersistedSession{}, false, &hookDenialError{message: "host session lookup failed", cause: err, redirected: redirected}
 	}
 	defer func() { _ = response.Body.Close() }()
 	switch {
@@ -274,11 +309,26 @@ func hookSessionOwnerProject(ctx context.Context, client *http.Client, base, id 
 	}
 }
 
-// hookResolveCwdProject derives the project for a first registration from the
-// hook cwd. A resolution failure the server explains (ambiguous directory,
-// transition conflict, invalid name) becomes a denial naming that cause
-// instead of the generic unconfirmed message.
+// hookUsesClientProject inspects the original environment, not the synthesized
+// transport URL: a loopback SSH tunnel is external, a port/socket default is not.
+func hookUsesClientProject() bool {
+	return strings.TrimSpace(os.Getenv("ENGRAM_URL")) != ""
+}
+
+// hookResolveCwdProject derives first-registration identity on the client when
+// explicitly connected to an external endpoint. Local defaults retain server
+// resolution. Both paths share the caller's existing confirmation deadline.
 func hookResolveCwdProject(ctx context.Context, client *http.Client, base, cwd string) (string, error) {
+	if hookUsesClientProject() {
+		result, err := projectpkg.InspectLocalProject(ctx, cwd)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", errHookSessionUnconfirmed
+		}
+		return result.Project, nil
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/project/current?cwd="+url.QueryEscape(cwd), nil)
 	if err != nil {
 		return "", errHookSessionUnconfirmed
@@ -332,8 +382,12 @@ func hookResolutionDenial(body []byte) error {
 // hookDenialError carries a cause-specific confirmation failure. The generic
 // unconfirmed error remains the fallback for unexplained failures.
 type hookDenialError struct {
-	message string
+	message    string
+	cause      error
+	redirected bool
 }
+
+func (e *hookDenialError) Unwrap() error { return e.cause }
 
 func (e *hookDenialError) Error() string { return e.message }
 

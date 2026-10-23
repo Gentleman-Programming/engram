@@ -8,9 +8,14 @@ const names = ['Check Issue Reference', 'Check Issue Has status:approved'];
 const paths = ['.github/workflows/issue-policy.yml', '.github/scripts/issue-native-policy.mjs', '.github/scripts/issue-validation.mjs'];
 const pull = { number: 7, state: 'open', body: 'Closes #8', head: { sha: head, ref: 'topic', repo: { id: 17, full_name: 'fork/project' } }, base: { ref: 'main', repo: { id: 18, full_name: 'upstream/project' } } };
 const clone = (value) => structuredClone(value);
+const eventPrefix = 'Original issue event v1 ';
+const eventRecord = (run, original = pull, action = 'opened') => ['pull_request_target', action,
+  original.base.repo.id, run.id, run.run_attempt, original.number, original.head.repo.id,
+  original.head.sha, original.head.ref, original.base.repo.id, original.base.ref];
+const eventStep = (run, original = pull, action) => ({ name: eventPrefix + JSON.stringify(eventRecord(run, original, action)), status: 'completed', conclusion: 'success' });
 function fixture(change = () => {}) {
   const run = { id: 90, workflow_id: 12, path: paths[0], event: 'pull_request_target', head_sha: head, head_branch: 'topic', repository: { full_name: 'upstream/project' }, head_repository: { full_name: 'fork/project' }, run_attempt: 2, status: 'completed', created_at: new Date().toISOString(), pull_requests: [{ number: pull.number, head: clone(pull.head), base: clone(pull.base) }] };
-  const jobs = names.map((name, i) => ({ id: i + 1, name, head_sha: head, run_id: 90, status: 'completed', steps: [{ name: `Load trusted issue policy (${source})`, status: 'completed', conclusion: 'success' }] }));
+  const jobs = names.map((name, i) => ({ id: i + 1, name, head_sha: head, run_id: 90, status: 'completed', steps: [{ name: `Load trusted issue policy (${source})`, status: 'completed', conclusion: 'success' }, eventStep(run)] }));
   const state = { run, jobs, current: clone(pull), final: clone(pull), compare: { status: 'ahead', merge_base_commit: { sha: source } }, workflow: { id: 12, path: paths[0], state: 'active' }, calls: [], reads: 0 };
   change(state);
   const github = { request: async (route, params) => {
@@ -55,6 +60,44 @@ test('fresh fork head with unambiguous run PR identity requests exactly one meta
   assert.deepEqual(state.calls.filter(({ route }) => route.startsWith('GET ')).map(({ route, params }) => [route, params]), expected);
 });
 
+test('multiple admissible native runs select only the newest ID from an unordered listing', async () => {
+  const { github, state } = fixture((s) => {
+    s.run.id = 92;
+    s.jobs.forEach((job) => { job.run_id = 92; job.steps[1] = eventStep(s.run); });
+    s.runs = [91, 92, 90].map((id) => ({ ...clone(s.run), id }));
+  });
+  const runs = new Map(state.runs.map((run) => [run.id, run]));
+  const jobs = new Map(state.runs.map((run) => [run.id, state.jobs.map((job, index) => ({
+    ...clone(job), id: run.id * 10 + index, run_id: run.id,
+    steps: [clone(job.steps[0]), eventStep(run)],
+  }))]));
+  const before = clone([state.runs, state.jobs, [...jobs], state.current, state.final]);
+  const request = github.request;
+  github.request = async (route, params) => {
+    const response = await request(route, params);
+    if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') {
+      return { data: clone(runs.get(params.run_id)) };
+    }
+    if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs') {
+      const selected = jobs.get(params.run_id);
+      return { data: { jobs: clone(selected), total_count: selected.length } };
+    }
+    return response;
+  };
+  assert.deepEqual(await (await load())(github, repo, pull, trusted),
+    { status: 'requested', runId: 92, headSha: head, sourceSha: source, trustedSha: trusted, attempt: 2 });
+  assert.deepEqual(writes(state), [
+    { route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 92 } },
+  ]);
+  assert.deepEqual(state.calls.filter(({ route }) => route.endsWith('/runs/{run_id}')),
+    [{ route: 'GET /repos/{owner}/{repo}/actions/runs/{run_id}', params: { ...repo, run_id: 92 } }]);
+  assert.deepEqual(state.calls.filter(({ route }) => route.endsWith('/attempts/{attempt_number}/jobs')),
+    [{ route: 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
+      params: { ...repo, run_id: 92, attempt_number: 2, per_page: 100, page: 1 } }]);
+  assert.equal(state.reads, 2);
+  assert.deepEqual([state.runs, state.jobs, [...jobs], state.current, state.final], before);
+});
+
 test('same fork/head/SHA PRs targeting different bases never rerun the other PR or fall back', async () => {
   const { github, state } = fixture((s) => {
     const intended = clone(s.run);
@@ -74,7 +117,6 @@ test('same fork/head/SHA PRs targeting different bases never rerun the other PR 
 const guards = {
   'missing head repo id': (s) => { delete s.current.head.repo.id; },
   'final base repo id drift': (s) => { s.final.base.repo.id = 19; },
-  'empty run PR association': (s) => { s.run.pull_requests = []; },
   'missing run PR association': (s) => { delete s.run.pull_requests; },
   'malformed run PR association': (s) => { s.run.pull_requests = {}; },
   'ambiguous run PR association': (s) => { s.run.pull_requests.push(clone(s.run.pull_requests[0])); },
@@ -84,7 +126,7 @@ const guards = {
   'other run PR head repository': (s) => { s.run.pull_requests[0].head.repo.id = 19; },
   'other run PR head ref': (s) => { s.run.pull_requests[0].head.ref = 'other'; },
   'other run PR head SHA': (s) => { s.run.pull_requests[0].head.sha = trusted; },
-  'fresh run PR identity drift': (s) => { s.freshRun = clone(s.run); s.freshRun.pull_requests = []; },
+  'fresh run PR identity drift': (s) => { s.freshRun = clone(s.run); s.freshRun.pull_requests[0].number = 8; },
   'initial body drift': (s) => { s.current.body = 'Closes #9'; },
   'final head drift': (s) => { s.final.head.sha = trusted; },
   'closed final target': (s) => { s.final.state = 'closed'; },
@@ -133,10 +175,75 @@ for (const [name, change] of Object.entries(guards)) test(`${name} blocks with z
 test('49 attempts and unchanged policy across unrelated main revisions remain eligible', async () => {
   const { github, state } = fixture((s) => {
     s.run.run_attempt = 49;
-    s.jobs.forEach((job) => { job.conclusion = 'failure'; });
+    s.jobs.forEach((job) => { job.conclusion = 'failure'; job.steps[1] = eventStep(s.run); });
   });
   const result = await (await load())(github, repo, pull, trusted);
   assert.equal(result.attempt, 49);
+  assert.equal(writes(state).length, 1);
+});
+
+for (const action of ['opened', 'edited', 'labeled', 'unlabeled', 'synchronize', 'reopened']) test(`trusted original ${action} event admits empty fork associations with one metadata write`, async () => {
+  const { github, state } = fixture((s) => {
+    s.run.pull_requests = [];
+    s.jobs.forEach((job) => { job.steps[1] = eventStep(s.run, pull, action); job.conclusion = 'failure'; });
+  });
+  const before = clone([state.run, state.jobs, state.current, state.final]);
+  assert.deepEqual(await (await load())(github, repo, pull, trusted),
+    { status: 'requested', runId: 90, headSha: head, sourceSha: source, trustedSha: trusted, attempt: 2 });
+  assert.deepEqual(writes(state), [{ route: 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', params: { ...repo, run_id: 90 } }]);
+  assert.equal(state.reads, 2);
+  assert.deepEqual([state.run, state.jobs, state.current, state.final], before);
+});
+
+const identityGuards = {
+  'legacy run without either marker': (s) => { s.jobs.forEach((job) => job.steps.pop()); },
+  'one job missing marker': (s) => { s.jobs[0].steps.pop(); },
+  'duplicate marker': (s) => { s.jobs[0].steps.push(clone(s.jobs[0].steps[1])); },
+  'unknown marker version': (s) => { s.jobs[0].steps[1].name = 'Original issue event v2 []'; },
+  'malformed marker JSON': (s) => { s.jobs[0].steps[1].name = eventPrefix + '{'; },
+  'marker object instead of tuple': (s) => { s.jobs[0].steps[1].name = eventPrefix + '{}'; },
+  'unsuccessful marker': (s) => { s.jobs[0].steps[1].conclusion = 'failure'; },
+  'incomplete marker': (s) => { s.jobs[0].steps[1].status = 'in_progress'; },
+  'jobs disagree on original action': (s) => { s.jobs[0].steps[1] = eventStep(s.run, pull, 'edited'); },
+};
+for (const [index, value] of [[0, 'push'], [1, 'closed'], [2, 19], [3, 91], [4, 1],
+  [5, 8], [6, 19], [7, trusted], [8, 'other'], [9, 19], [10, 'release'], [11, 'extra'], [3, '90']]) {
+  identityGuards[`marker tuple field ${index} mismatch ${JSON.stringify(value)}`] = (s) => {
+    const record = eventRecord(s.run); record[index] = value;
+    s.jobs[0].steps[1].name = eventPrefix + JSON.stringify(record);
+  };
+}
+for (const [name, change] of Object.entries(identityGuards)) test(`${name} blocks with or without API PR association`, async () => {
+  for (const empty of [false, true]) {
+    const { github, state } = fixture((s) => { if (empty) s.run.pull_requests = []; change(s); });
+    const before = clone([state.run, state.jobs, state.current, state.final]);
+    await assert.rejects((await load())(github, repo, pull, trusted),
+      /^Error: Issue refresh blocked: native original PR\/event binding unavailable$/);
+    assert.deepEqual(writes(state), []);
+    assert.equal(state.reads, 1);
+    assert.deepEqual([state.run, state.jobs, state.current, state.final], before);
+  }
+});
+
+test('same fork/head/base with another original PR never falls back to an older matching event', async () => {
+  const { github, state } = fixture((s) => {
+    const old = clone(s.run); s.run.id = 91; s.run.pull_requests = [];
+    const other = { ...pull, number: 8 };
+    s.jobs.forEach((job) => { job.run_id = 91; job.steps[1] = eventStep(s.run, other); });
+    s.runs = [old, s.run];
+  });
+  await assert.rejects((await load())(github, repo, pull, trusted), /native original PR\/event binding unavailable/);
+  assert.deepEqual(writes(state), []);
+  assert.deepEqual(state.calls.filter(({ route }) => route.endsWith('/runs/{run_id}')).map(({ params }) => params.run_id), [91]);
+});
+
+test('JSON-escaped refs are compared as data, never split on punctuation', async () => {
+  const target = clone(pull); target.head.ref = 'topic|"quoted"';
+  const { github, state } = fixture((s) => {
+    s.current = clone(target); s.final = clone(target); s.run.head_branch = target.head.ref;
+    s.run.pull_requests = []; s.jobs.forEach((job) => { job.steps[1] = eventStep(s.run, target); });
+  });
+  assert.equal((await (await load())(github, repo, target, trusted)).status, 'requested');
   assert.equal(writes(state).length, 1);
 });
 

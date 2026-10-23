@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { createHash } from "node:crypto";
 const digest = (prompt) => createHash("sha256").update(prompt.trim(), "utf8").digest("hex");
 import { test } from "node:test";
@@ -38,6 +39,7 @@ async function fixture(body) {
     const path = new URL(url).pathname;
     const payload = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, payload });
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: detectedProject }));
     if (path === "/sessions") return new Response(JSON.stringify(await registration(payload.id)));
     if (path === "/prompts") return promptResponse(payload);
