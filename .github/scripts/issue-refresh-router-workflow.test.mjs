@@ -50,14 +50,19 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // native adds only the original-event steps. CI includes the independently/native-approved
   // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b,
   // plus the approved #1994 TypeBox test bootstrap in f65380cc79ffa6fe63d4594b1e5341733d51f288.
+  // Approved #1891 adds observational Windows full-suite coverage and its contract check;
+  // prerequisite corrections declare reviewed Bash/jq/native Windows CURL selectors with fail-closed validation only.
   // #2030 adds dormant boundaries/source pins to native/legacy workflows only.
+  // Approved #1891 temp diagnostics observe existing paths without changing tools or tests.
+  // #1891 PerfRatchet observations add only owned-file controls; suite/assertions stay unchanged.
+  // #1891 adds a step-scoped observational Codex trace; the unfiltered suite still fails normally.
   // CI retains main's selected-proof bootstrap plus #2043's mandatory selected-Pi source test.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': '72606eea59e6d5cae19199cb4f50629b246c165410cb20439b2cf9d700311f94',
+    '.github/workflows/ci.yml': '1991e85ff361ec4b22802899ab7a1078e871e476b2e32264887edf54772ced23',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

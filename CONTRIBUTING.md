@@ -240,6 +240,89 @@ The original #1293 audit found 23 open PRs needing migration; that is a historic
 
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
+### Windows full-suite baseline (#1891)
+
+The candidate `Windows Unit Tests (observational)` job runs `go test ./...` on
+`windows-latest` for PRs and pushes to `main`, using the same pinned Go version
+as Linux. It does not run on merge groups during baseline collection. Existing
+Linux and selected Windows checks remain intact. This is not a required context;
+failing tests still fail the job, rather than being converted to success.
+
+The job provisions Node.js 24 for subprocess fixtures and records the checked-out
+commit (including a PR's synthetic merge), runner image, Go/environment settings,
+PowerShell version, and resolved Git/Bash/sh/Node paths in its summary. Hosted
+Windows supplies Git Bash and PowerShell. Before diagnostics or tests, the job
+selects `C:/Program Files/Git/usr/bin/bash.exe` (not the `bin` launcher) and
+`C:/ProgramData/chocolatey/lib/jq/tools/jq.exe`, the candidate Chocolatey package
+payload, and native Windows `C:/Windows/System32/curl.exe`. It validates all three
+as leaf `.exe` files and checks adjacent Git tools `cygpath`, `cat`, `dirname`,
+and `chmod` before executing version checks. Missing prerequisites or failed
+version checks fail the job with the exact path; there is no PATH fallback or
+installation. Only after validation does it export `CODEX_TEST_TRUSTED_BASH`,
+`CODEX_TEST_TRUSTED_JQ`, and `CODEX_TEST_TRUSTED_CURL`, logging selected paths and
+versions in the job log and summary. Windows handoff fixtures require the explicit
+CURL selector and retain absolute/regular/`.exe` validation; they no longer infer
+Git's `mingw64` layout. Local Windows fixture runs must also supply a reviewed
+absolute CURL executable through `CODEX_TEST_TRUSTED_CURL`.
+Neither local contract tests nor this declaration prove these paths exist on the
+hosted image (including native curl); a new hosted run remains necessary.
+Before the suite, a read-only Bash temporary-directory diagnostic compares private
+native-path, POSIX-path, and mixed-path child environments using the existing
+`RUNNER_TEMP` directory. It records `/tmp` resolution and directory checks plus
+child stdout, stderr, exit codes, and bounded-wait outcomes in the job log and
+summary. It creates no directories, changes no tools or parent environment, and
+retains privileged Bash startup isolation. These observations are not a fix or a
+passing baseline; the complete Go suite and its assertions remain unchanged.
+Windows shell fixtures retain native path spelling in `TMP` and `TEMP` for MSYS's
+`/tmp` mount, while `TMPDIR` remains POSIX for shell commands. POSIX drive paths
+in `TMP`/`TEMP` can resolve to a different, nonexistent native directory. Fixtures
+do not create an installation-level `/tmp` directory.
+A separate PerfRatchet diagnostic records PATH-selected Bash/tools and ambient
+TMPDIR/TMP/TEMP without creating ambient temporary files. Its bounded, isolated
+control creates files only in an owned workspace directory, checks creator,
+child Bash, reviewed awk, and native Windows visibility, and retains raw streams.
+Unknown tools are recorded but not executed. These controls do not reproduce the
+original test environment or establish a cause, fix, or passing baseline.
+A separate observational Codex preflight step sets `CODEX_TEST_TMP_TRACE=1` in
+Go only and runs the public isolation-preflight fixture with verbose output.
+Locally, opt in with that flag and `go test -mod=readonly ./plugin -run
+'^TestCodexShellIsolationPreflight$' -count=1 -timeout=90s -v` using reviewed tools.
+The diagnostic-only launcher copy keeps the real shebang/wrapper chain. Parent
+redirections capture each invocation's raw stderr before child startup, including
+nested jq separately; the initial Bash stderr remains an aggregate boundary.
+JSON logs record Bash/MSYS PID/PPID, Bash version, selected Bash and only
+TMPDIR/TMP/TEMP startup metadata. Native Windows PID is labeled separately for
+the initial child only. Missing metadata remains unknown; a boundary is not proof
+of which PID emitted a warning. Each stderr field is capped at 16 KiB, explicitly
+marking truncation. Nonempty stderr, missing records and execution failures still
+fail the diagnostic Go test, after records are logged. Only this new probe has
+step-scoped `continue-on-error`, preserving its true failure in the log while
+allowing the unchanged, unfiltered full Go suite to run. The flag is not exported
+to the baseline suite. No tools, installed configuration, selectors, assertions,
+private PATH, privileged startup or time limits are changed; this is not a fix.
+The test step log retains diagnostics
+and the process exit code; the final summary records success, failure, or skipped
+execution. Setup failure, cancellation, or timeout is not a passing baseline.
+
+Record actual run URLs and evidence on #1891. Classify failures as product
+portability defects, nonportable fixtures, missing prerequisites, or genuinely
+Unix-only behavior; compare baseline and candidate under equivalent environments
+before attributing regressions. Preserve assertions and document justified
+exclusions. Do not claim a hosted baseline from local workflow-contract tests.
+
+Use local focused RED/GREEN for iteration and hosted CI for broad integration.
+Platform-specific failures remain actionable within their tested scope; a remote
+run or green Linux result alone does not prove Windows correctness. Before ending
+the observational phase, the maintainer must record a stability criterion,
+comparable successful hosted evidence, any remaining exclusions and their owners,
+and an explicit promotion decision on #1891. No stability threshold or promotion
+is approved by this initial job. Required-check/ruleset activation is a separate
+administrator-authorized action; current six required contexts remain unchanged.
+
+Run `node --test .github/scripts/windows-suite.test.mjs` for local workflow
+contract checks. Publication and an actual hosted run are still needed to prove
+runner prerequisites, dependency availability, and full-suite execution.
+
 ### Merge Queue Activation (administrators)
 
 The `main` merge queue is already active. Contributors submit eligible PRs to the
@@ -613,6 +696,13 @@ command checks from execution. A green local subset is **not** a full CI or rele
 verdict. Hosted full-unit, E2E, plugin and applicable platform results remain
 pending until GitHub runs them. Documentation-only changes can use proportional
 link/command-definition checks without executing unrelated suites.
+
+If the release-candidate `TestPiSourceEvidence` preservation guard fails, it logs
+sorted fixture-relative paths with add/delete/modify status and before/after
+SHA-256 hashes and byte sizes (`absent` for a missing file), then retains the
+original fatal assertion. It does not log file contents or absolute fixture roots.
+This failure-only diagnostic identifies the observed file delta, not its cause;
+synthetic formatter tests do not reproduce a Linux CI mutation.
 
 ### Conventional Commit Format
 

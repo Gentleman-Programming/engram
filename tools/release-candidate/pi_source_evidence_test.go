@@ -9,9 +9,52 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
+
+// piSourceFixtureDelta formats preservation failures without exposing file contents.
+func piSourceFixtureDelta(root string, before, after map[string]string) string {
+	paths := make(map[string]string)
+	for path, old := range before {
+		if current, exists := after[path]; !exists || current != old {
+			rel, _ := filepath.Rel(root, path)
+			paths[filepath.ToSlash(rel)] = path
+		}
+	}
+	for path := range after {
+		if _, exists := before[path]; !exists {
+			rel, _ := filepath.Rel(root, path)
+			paths[filepath.ToSlash(rel)] = path
+		}
+	}
+	names := make([]string, 0, len(paths))
+	for name := range paths {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	metadata := func(content string, exists bool) string {
+		if !exists {
+			return "absent"
+		}
+		return fmt.Sprintf("sha256=%x size=%d", sha256.Sum256([]byte(content)), len(content))
+	}
+	var out strings.Builder
+	for _, name := range names {
+		path := paths[name]
+		old, had := before[path]
+		current, has := after[path]
+		kind := "modify"
+		if !had {
+			kind = "add"
+		} else if !has {
+			kind = "delete"
+		}
+		fmt.Fprintf(&out, "%s %s before=%s after=%s\n", kind, name, metadata(old, had), metadata(current, has))
+	}
+	return out.String()
+}
 
 func TestPiSourceEvidence(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "candidate.exe")
@@ -97,7 +140,9 @@ func main(){
 				t.Fatal(err)
 			}
 		}
-		if !reflect.DeepEqual(before, candidateSnapshot(t, repo)) {
+		after := candidateSnapshot(t, repo)
+		if !reflect.DeepEqual(before, after) {
+			t.Log(piSourceFixtureDelta(repo, before, after))
 			t.Fatal("changed original sources, dependency cache or Git state")
 		}
 		var report map[string]any
