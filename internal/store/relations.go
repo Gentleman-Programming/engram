@@ -121,6 +121,9 @@ type CandidateTimings struct {
 
 // ListRelationsOptions controls ListRelations and CountRelations queries.
 type ListRelationsOptions struct {
+	// ActionableOnly excludes pending pairs rejected by the cross-project guard.
+	// Inclusive evidence enumeration remains the default.
+	ActionableOnly bool
 	// Project filters by the project of the source OR target observation (via JOIN).
 	// Empty means no project filter (return all).
 	Project string
@@ -1216,6 +1219,18 @@ func (s *Store) CountRelations(opts ListRelationsOptions) (int, error) {
 	return total, nil
 }
 
+// Resolve ownership exactly as validateCrossProjectGuard does, independently of
+// the visibility JOINs (which intentionally omit deleted observations).
+const actionableRelationsPredicate = ` AND NOT coalesce((r.judgment_status = 'pending' AND
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.source_id) != '' AND
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.target_id) != '' AND
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.source_id) !=
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.target_id)), 0)`
+
 // buildRelationsQuery constructs the SQL for ListRelations and CountRelations.
 // When countOnly=true, generates SELECT count(*) instead of the full column list.
 func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []any) {
@@ -1237,6 +1252,9 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
 		WHERE 1=1`
 
+	if opts.ActionableOnly {
+		query += actionableRelationsPredicate
+	}
 	if opts.Project != "" {
 		query += ` AND (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)`
 		args = append(args, opts.Project, opts.Project)
@@ -1274,6 +1292,15 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 // the deferred and dead queue totals. Two queries are executed: one GROUP BY
 // and one delegated to CountDeferredAndDead.
 func (s *Store) GetRelationStats(project string) (RelationStats, error) {
+	return s.getRelationStats(project, false)
+}
+
+// GetActionableRelationStats retains judged evidence but omits known cross-project pending pairs.
+func (s *Store) GetActionableRelationStats(project string) (RelationStats, error) {
+	return s.getRelationStats(project, true)
+}
+
+func (s *Store) getRelationStats(project string, actionable bool) (RelationStats, error) {
 	stats := RelationStats{
 		Project:          project,
 		ByRelation:       map[string]int{},
@@ -1303,6 +1330,11 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 		`
 	}
 
+	if actionable {
+		q, args = buildRelationsQuery(ListRelationsOptions{Project: project, ActionableOnly: true, ExcludeNotConflict: true}, true)
+		q = strings.Replace(q, "SELECT count(*)", "SELECT r.relation, r.judgment_status, count(*)", 1)
+		q += " GROUP BY r.relation, r.judgment_status"
+	}
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return stats, fmt.Errorf("GetRelationStats: query: %w", err)
