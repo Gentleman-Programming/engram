@@ -55,7 +55,7 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #2068 adds only the existing non-mutating tidy check to required Unit Tests after Go setup.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
-    '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
+    '.github/workflows/pr-check.yml': '6e52fae73da393156fd8fde5f13ae5313a075d0565761acfbccb97de05968fe0',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
     '.github/workflows/ci.yml': 'df89830c3cf6677b6469c18c39da9ccb6c2f949f334781f016479f860f4500a0',

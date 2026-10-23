@@ -73,16 +73,23 @@ Branch names are validated by a GitHub ruleset. Pushes that don't match **will b
 
 ## PR Body Format
 
-The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain:
+The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain one of the following:
 
 ### 1. Linked Issue (REQUIRED)
+
+Closing reference (auto-closes the issue on merge) — use only when this PR completes the issue:
 
 ```markdown
 Closes #<issue-number>
 ```
 
-Valid keywords: `Closes #N`, `Fixes #N`, `Resolves #N` (case insensitive).
-Every linked issue MUST have `status:approved` and a real assignee. Approval means a maintainer accepted proportional evidence: scope/checks for trivial changes; current-remote-main SHA, reproduction, root cause, and regression tests for bugs; approved design, non-goals, and independent review for high-risk changes. Evidence can live in the issue; no separate design document is required by default.
+Non-closing reference (never closes the issue) — use only for a reviewable partial PR of an approved umbrella issue:
+
+```markdown
+Refs #<issue-number>
+```
+
+Valid keywords (case insensitive): `Closes #N`, `Fixes #N`, and `Resolves #N` close the issue on merge; `Refs #N` never closes it. Every referenced issue MUST have `status:approved` and a real assignee. Approval means a maintainer accepted proportional evidence: scope/checks for trivial changes; current-remote-main SHA, reproduction, root cause, and regression tests for bugs; approved design, non-goals, and independent review for high-risk changes. Evidence can live in the issue; no separate design document is required by default. Bare issue numbers or arbitrary prose are not accepted references.
 
 Existing PRs must comply before merge, without waiting for backlog-wide migration. Re-run native validation after issue approval/assignment changes; do not rely on stale green checks.
 
@@ -141,8 +148,8 @@ The six required contexts are listed in [CONTRIBUTING.md](../../CONTRIBUTING.md#
 
 | Check | Job name | What it verifies |
 |-------|----------|-----------------|
-| PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
-| PR Validation | `Check Issue Has status:approved` | Every linked issue is approved and assigned |
+| PR Validation | `Check Issue Reference` | Body contains closing `Closes/Fixes/Resolves #N` or non-closing `Refs #N` |
+| PR Validation | `Check Issue Has status:approved` | Every referenced issue is approved and assigned |
 | PR Label Policy | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
 | Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
 | CI | `Unit Tests` | `go test ./...` passes |

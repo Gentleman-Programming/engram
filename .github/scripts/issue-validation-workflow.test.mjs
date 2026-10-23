@@ -52,7 +52,7 @@ test('bootstrap pins PR validation including approved qualified references and r
   // Git's blob hash normalizes checkout line endings on Windows.
   const bytes = Buffer.from(read('pr-check.yml').replaceAll('\r\n', '\n').replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, ''));
   const header = Buffer.from(`blob ${bytes.length}\0`);
-  assert.equal(createHash('sha1').update(header).update(bytes).digest('hex'), '4f231cadea5ba4d56b0b6a37971cf8d46cca858a');
+  assert.equal(createHash('sha1').update(header).update(bytes).digest('hex'), 'beaf5d39603ece38ea6f37a1b94eabd36fe10a4d');
 });
 
 test('existing policy helper CI runs new regression suites without renaming checks', () => {
