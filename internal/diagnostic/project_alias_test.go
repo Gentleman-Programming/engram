@@ -57,8 +57,14 @@ func TestProjectAliasGuard(t *testing.T) {
 					if err := json.Unmarshal(report.Checks[0].Findings[0].Evidence, &ev); err != nil {
 						t.Fatal(err)
 					}
-					if len(ev["project_aliases"]) == 0 {
-						t.Fatal("missing alias diagnostic evidence")
+					var aliases store.ProjectAliasResolution
+					if err := json.Unmarshal(ev["project_aliases"], &aliases); err != nil {
+						t.Fatal(err)
+					}
+					if aliases.Project != target || aliases.Conflict || aliases.CwdAlias == nil ||
+						aliases.CwdAlias.Kind != store.ProjectAliasKindCWD ||
+						aliases.CwdAlias.Key != dir || aliases.CwdAlias.Project != target {
+						t.Fatalf("unexpected alias diagnostic evidence: %+v", aliases)
 					}
 				}
 			})
