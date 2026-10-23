@@ -245,7 +245,7 @@ try {
 ./engram-beta conflicts show <relation_id>
 ```
 
-`conflicts list` and `conflicts stats` exclude pending relations whose source and target have known, different effective projects (observation project, falling back to the session project). The same rule applies to `/conflicts` results and totals and `/conflicts/stats`. Same-project pending relations, unknown ownership, and judged evidence retain their existing behavior. Excluded rows are not deleted or judged: inspect them with `conflicts show <relation_id>` or `GET /conflicts/<relation_id>`. Judgment guards and sync behavior are unchanged.
+`conflicts list` and `conflicts stats` exclude pending relations whose source and target have known, different effective projects (observation project, falling back to the session project). The same rule applies to `/conflicts` results and totals and `/conflicts/stats`. Same-project pending relations, unknown ownership, and judged evidence retain their existing behavior. Excluded rows are not deleted or judged: inspect them with `conflicts show <relation_id>` or `GET /conflicts/<relation_id>`. Judgment guards and sync behavior are unchanged. Store relation lists (both inclusive and actionable) sort by newest `created_at` first, breaking ties by descending local numeric relation ID (`id`, not `sync_id`); this tie order is deterministic within a database, not guaranteed across synced or imported databases.
 
 The HTTP API works too. The `/conflicts/*` routes live on the **local engram serve** (port 7437) — no auth required, localhost-only. Start it in a separate terminal:
 

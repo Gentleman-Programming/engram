@@ -96,41 +96,43 @@ func TestActionableRelationsPagination(t *testing.T) {
 	_, a := addTestObs(t, s, "source", "decision", "alpha", "project")
 	_, b := addTestObs(t, s, "same project", "decision", "alpha", "project")
 	_, c := addTestObs(t, s, "other project", "decision", "beta", "project")
-	visible := map[string]bool{}
-	for _, target := range []string{b, c, b} {
-		r, err := s.SaveRelation(SaveRelationParams{SyncID: newSyncID("rel"), SourceID: a, TargetID: target})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if target == b {
-			visible[r.SyncID] = true
-		}
+	const timestamp = "2025-01-02 03:04:05"
+	data := &ExportData{}
+	ids := []string{newSyncID("rel"), newSyncID("rel"), newSyncID("rel")}
+	// Import preserves exact timestamps and legacy cross-project evidence.
+	// Slice order assigns increasing local IDs, with hidden evidence in the middle.
+	for i, target := range []string{b, c, b} {
+		data.Relations = append(data.Relations, BackupRelation{
+			SyncID: ids[i], SourceID: a, TargetID: target, Relation: RelationRelated,
+			JudgmentStatus: "pending", CreatedAt: timestamp, UpdatedAt: timestamp,
+		})
 	}
-	seen := map[string]bool{}
-	// Equal timestamps need no assumed row order: the pages must partition the visible set.
-	for offset := 0; offset <= len(visible); offset++ {
-		opts := ListRelationsOptions{ActionableOnly: true, Status: "pending", Limit: 1, Offset: offset}
-		items, err := s.ListRelations(opts)
-		want := 1
-		if offset == len(visible) {
-			want = 0
+	if _, err := s.Import(data); err != nil {
+		t.Fatal(err)
+	}
+	for _, actionable := range []bool{false, true} {
+		wantIDs := []string{ids[2], ids[1], ids[0]}
+		if actionable {
+			wantIDs = []string{ids[2], ids[0]}
 		}
-		if err != nil || len(items) != want {
-			t.Fatalf("offset %d: items=%v err=%v, want %d rows", offset, items, err, want)
-		}
-		for _, item := range items {
-			if !visible[item.SyncID] || seen[item.SyncID] {
-				t.Fatalf("offset %d: hidden or repeated relation %s", offset, item.SyncID)
+		for offset := 0; offset <= len(wantIDs); offset++ {
+			opts := ListRelationsOptions{ActionableOnly: actionable, Status: "pending", Limit: 1, Offset: offset}
+			items, err := s.ListRelations(opts)
+			want := 1
+			if offset == len(wantIDs) {
+				want = 0
 			}
-			seen[item.SyncID] = true
+			if err != nil || len(items) != want {
+				t.Fatalf("actionable %t offset %d: items=%v err=%v, want %d rows", actionable, offset, items, err, want)
+			}
+			if want == 1 && (items[0].SyncID != wantIDs[offset] || items[0].CreatedAt != timestamp) {
+				t.Fatalf("actionable %t offset %d: got %s at %s, want %s at %s", actionable, offset, items[0].SyncID, items[0].CreatedAt, wantIDs[offset], timestamp)
+			}
+			count, err := s.CountRelations(opts)
+			if err != nil || count != len(wantIDs) {
+				t.Fatalf("actionable %t offset %d: count=%d err=%v, want %d", actionable, offset, count, err, len(wantIDs))
+			}
 		}
-		count, err := s.CountRelations(opts)
-		if err != nil || count != len(visible) {
-			t.Fatalf("offset %d: count=%d err=%v, want %d", offset, count, err, len(visible))
-		}
-	}
-	if !reflect.DeepEqual(seen, visible) {
-		t.Fatalf("page union=%v, want visible set %v", seen, visible)
 	}
 }
 

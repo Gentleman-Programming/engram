@@ -1272,7 +1272,7 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 	}
 
 	if !countOnly {
-		query += ` ORDER BY r.created_at DESC`
+		query += ` ORDER BY r.created_at DESC, r.id DESC`
 		if opts.Limit > 0 {
 			query += ` LIMIT ?`
 			args = append(args, opts.Limit)
