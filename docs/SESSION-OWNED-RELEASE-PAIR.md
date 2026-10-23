@@ -7,15 +7,17 @@ It addresses the distribution gap in #1921 without implementing the coordinator 
 
 | Component | Proposed version | Candidate requirement |
 | --- | --- | --- |
-| Engram core | `3.5.0` | Real `serve --session-owned` implementation and `engram-session-owned-v1` readiness; version remains injected by a future core tag/build. |
-| `gentle-engram` | `0.5.0` | Matching source metadata and actual owned-child client; installer pin `npm:gentle-engram@0.5.0`. |
+| Engram core | `3.5.4` | Real `serve --session-owned` implementation and `engram-session-owned-v1` readiness; version remains injected by a future core tag/build. |
+| `gentle-engram` | `0.5.1` | Matching source metadata and actual owned-child client; installer pin `npm:gentle-engram@0.5.1`. |
 
 These independent version streams are deliberately not the lockstep policy proposed in #1349.
 The names were observed unused during preparation, not reserved. A maintainer must recheck
 availability before approving any release; never reuse or overwrite an immutable npm version.
 Freeze the final candidate commit, both proposed tags, core checksums and companion package
-identity before artifact validation. The preparation base is `0f2267479bb01aafdc6718fdf9e713cc8f6c492f`;
-that base reference is not the eventual release candidate or a delivered artifact.
+identity before artifact validation. The historical 3.5.0/0.5.0 preparation base was
+`0f2267479bb01aafdc6718fdf9e713cc8f6c492f`. The 3.5.3/0.5.1 preparation starts from
+`ab461b90b03264c6cb009d5ca8406219a2dc0545`. Neither base reference is the eventual
+release candidate or a delivered artifact.
 
 ## Why both sides matter
 
@@ -27,8 +29,8 @@ never fall back to adopting a detached shared server for a failed owned-child la
 
 ## Setup transition
 
-The candidate's `engram setup pi` and the companion's `pi-engram init` select companion `0.5.0`.
-Existing managed `0.4.2` pins join the previous known-pin migration list. Custom/local/object
+The candidate's `engram setup pi` and the companion's `pi-engram init` select companion `0.5.1`.
+Existing managed `0.4.2` and `0.5.0` pins join the previous known-pin migration list. Custom/local/object
 entries, unknown/future pins, unrelated settings and MCP configuration remain unchanged.
 Repeated setup is idempotent. A newer companion does not change an older installed core's pin.
 Back up relevant user configuration and retain known-good artifacts before any real upgrade;
@@ -49,7 +51,7 @@ this preparation runs setup regressions only against isolated fixture settings.
   No publication sequence, rollback guarantee or coordinator is introduced by this document.
 
 The combined candidate includes the [release policy's candidate-first guards](./RELEASE-POLICY.md#candidate-first-publication-and-manual-promotion).
-They check the actual `0.5.0` installer pin and required public companion metadata before core
+They check the actual `0.5.1` installer pin and required public companion metadata before core
 publication; source preparation alone does not prove that version is publicly available.
 Pi publication uses `candidate`; promotion to `latest` remains manual and rights-gated.
 Core's existing Homebrew behavior remains non-atomic. These guards do not transfer earlier

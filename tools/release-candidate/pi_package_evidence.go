@@ -42,12 +42,16 @@ func preparePiPackage(ctx context.Context, repo, workspace, pi, input string) *p
 }
 
 func (p *piPackageSnapshot) verify(ctx context.Context, version string) piPackageCheck {
+	return p.verifyInto(ctx, version, "")
+}
+
+func (p *piPackageSnapshot) verifyInto(ctx context.Context, version, destination string) piPackageCheck {
 	result := p.check
 	if result.TarballSHA256 == "" || ctx.Err() != nil {
 		return result
 	}
-	result.Version = version // Existing selected-pair metadata validation already passed.
-	count, err := validatePackage(p.source, version, p.archive)
+	result.Version = version // Intent; source/archive validation below checks Pi.
+	count, err := validatePackageInto(p.source, version, p.archive, destination)
 	result.State = "not-established"
 	if err == nil {
 		result.State, result.Files = "passed", count

@@ -224,9 +224,14 @@ selectors and any supplied optional filters must match the actual runtime.
 Only server `User.databaseId` in the policy snapshot with `lastEditedAt: null`
 may authorize a configuration. JSON identity claims grant nothing. Bots, edited,
 unauthorized, oversized (over 8192 UTF-8 bytes) and unrelated records cannot select
-configuration. Exactly one matching candidate in the observed window is required;
-this is neither whole-issue uniqueness nor a global replay guarantee. Never pick
-newest-wins; unrelated release/chat records are ignored. Window eviction remains
+configuration. Authorized, unedited records matching the schema, PR number, case
+and original PR head enter the uniqueness check before the remaining runtime
+selectors or optional filters are validated. Exactly one such record in the
+observed window is required. Records differing only in `runId`, `attempt` or
+other runtime selectors still make selection ambiguous. Retire the earlier
+record (edit or remove it) before adding a replacement; changing selectors alone
+does not disambiguate it. This is neither whole-issue uniqueness nor a global
+replay guarantee. Never pick newest-wins; unrelated release/chat records are ignored. Window eviction remains
 an availability limitation. An unedited observation cannot prevent later editing.
 
 The reader returns a snapshot of the existing manifest to the unchanged bridge.
