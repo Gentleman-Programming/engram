@@ -228,8 +228,10 @@ engram-beta obsidian-export --vault <path> [flags]
 
 `--limit` was previously accepted but never applied. Every explicit use now fails
 with `error: --limit is not supported by obsidian-export; omit it to export all matching observations`
-before opening the store or writing to the vault, including in watch mode. Exports
-without this flag remain unlimited within the selected project/date filters.
+before startup update checks, configuration resolution, SQLite temporary-directory
+preparation, or database migration, including in watch mode. No store or vault is
+opened for a rejected limit. Exports without this flag remain unlimited within the
+selected project/date filters.
 Truncating reconciliation reads would risk treating unexported notes as deleted;
 a safe capped export is not implemented.
 
