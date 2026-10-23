@@ -97,7 +97,22 @@ func main(){
 				t.Fatal(err)
 			}
 		}
-		if !reflect.DeepEqual(before, candidateSnapshot(t, repo)) {
+		after := candidateSnapshot(t, repo)
+		if !reflect.DeepEqual(before, after) {
+			// Report paths and hashes, never contents; retain the immutable snapshot guard.
+			for path, data := range before {
+				value, exists := after[path]
+				if !exists || value != data {
+					rel, _ := filepath.Rel(repo, path)
+					t.Logf("SNAPSHOT_CHANGED path=%q before_sha256=%x after_sha256=%x present_after=%t before_bytes=%d after_bytes=%d", rel, sha256.Sum256([]byte(data)), sha256.Sum256([]byte(value)), exists, len(data), len(value))
+				}
+			}
+			for path, data := range after {
+				if _, exists := before[path]; !exists {
+					rel, _ := filepath.Rel(repo, path)
+					t.Logf("SNAPSHOT_ADDED path=%q sha256=%x bytes=%d", rel, sha256.Sum256([]byte(data)), len(data))
+				}
+			}
 			t.Fatal("changed original sources, dependency cache or Git state")
 		}
 		var report map[string]any
