@@ -2551,7 +2551,6 @@ func cmdObsidianExport(cfg store.Config) {
 	var (
 		vault       string
 		project     string
-		limit       int
 		since       string
 		force       bool
 		graphConfig string
@@ -2561,6 +2560,11 @@ func cmdObsidianExport(cfg store.Config) {
 	)
 
 	for i := 2; i < len(os.Args); i++ {
+		if os.Args[i] == "--limit" || strings.HasPrefix(os.Args[i], "--limit=") {
+			fmt.Fprintln(os.Stderr, "error: --limit is not supported by obsidian-export; omit it to export all matching observations")
+			exitFunc(1)
+			return
+		}
 		switch os.Args[i] {
 		case "--vault":
 			if i+1 < len(os.Args) {
@@ -2574,13 +2578,6 @@ func cmdObsidianExport(cfg store.Config) {
 			}
 		case "--all":
 			allProjects = true
-		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					limit = n
-				}
-				i++
-			}
 		case "--since":
 			if i+1 < len(os.Args) {
 				since = os.Args[i+1]
@@ -2650,7 +2647,6 @@ func cmdObsidianExport(cfg store.Config) {
 	exportCfg := obsidian.ExportConfig{
 		VaultPath:   vault,
 		Project:     project,
-		Limit:       limit,
 		Force:       force,
 		GraphConfig: graphMode,
 	}
@@ -3969,7 +3965,7 @@ Commands:
                        --vault         Path to Obsidian vault root (required)
                         --project       Filter export to a single project (optional; cannot combine with --all)
                         --all           Export every project
-                       --limit         Cap exported observations at N (optional)
+                       --limit         Unsupported; rejected to protect complete reconciliation
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)
                        --graph-config  Graph layout mode: preserve|force|skip (default: preserve)
