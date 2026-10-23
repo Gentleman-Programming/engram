@@ -14,7 +14,20 @@ test('Windows full suite is independent, observational, and aligned with Linux',
   const linux = workflow.match(/^  unit-tests:\n[\s\S]*?(?=^  [\w-]+:)/m)[0];
   assert.equal(job.match(/go-version: "([^"]+)"/)[1], linux.match(/go-version: "([^"]+)"/)[1]);
   assert.match(job, /run: go test \.\/\.\.\./);
-  assert.doesNotMatch(job, /continue-on-error|needs:|GOPROXY:|TEMP:|TMP:| -skip| -run|\|\| true/);
+  const baseline = job.replace(/      - name: Trace Codex isolation preflight\n[\s\S]*?(?=      - name:)/, '');
+  assert.doesNotMatch(baseline, /continue-on-error|needs:|GOPROXY:|TEMP:|TMP:| -skip| -run|\|\| true/);
+});
+
+test('Codex trace is step-scoped and cannot suppress the complete baseline suite', () => {
+  const trace = job.match(/      - name: Trace Codex isolation preflight\n[\s\S]*?(?=      - name:)/)?.[0];
+  assert.ok(trace, 'missing observational Codex trace step');
+  assert.match(trace, /continue-on-error: true/);
+  assert.match(trace, /CODEX_TEST_TMP_TRACE: "1"/);
+  assert.match(trace, /run: go test -mod=readonly \.\/plugin -run '\^TestCodexShellIsolationPreflight\$' -count=1 -timeout=90s -v/);
+  assert.ok(job.indexOf(trace) < job.indexOf('Record Windows baseline environment'));
+  const rest = job.replace(trace, '');
+  assert.doesNotMatch(rest, /continue-on-error|CODEX_TEST_TMP_TRACE| -run/);
+  assert.match(rest, /id: suite\n\s+run: go test \.\/\.\.\./);
 });
 
 test('Windows prerequisites use reviewed real executables and fail closed before export or suite', () => {

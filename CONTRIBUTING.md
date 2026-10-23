@@ -283,6 +283,23 @@ control creates files only in an owned workspace directory, checks creator,
 child Bash, reviewed awk, and native Windows visibility, and retains raw streams.
 Unknown tools are recorded but not executed. These controls do not reproduce the
 original test environment or establish a cause, fix, or passing baseline.
+A separate observational Codex preflight step sets `CODEX_TEST_TMP_TRACE=1` in
+Go only and runs the public isolation-preflight fixture with verbose output.
+Locally, opt in with that flag and `go test -mod=readonly ./plugin -run
+'^TestCodexShellIsolationPreflight$' -count=1 -timeout=90s -v` using reviewed tools.
+The diagnostic-only launcher copy keeps the real shebang/wrapper chain. Parent
+redirections capture each invocation's raw stderr before child startup, including
+nested jq separately; the initial Bash stderr remains an aggregate boundary.
+JSON logs record Bash/MSYS PID/PPID, Bash version, selected Bash and only
+TMPDIR/TMP/TEMP startup metadata. Native Windows PID is labeled separately for
+the initial child only. Missing metadata remains unknown; a boundary is not proof
+of which PID emitted a warning. Each stderr field is capped at 16 KiB, explicitly
+marking truncation. Nonempty stderr, missing records and execution failures still
+fail the diagnostic Go test, after records are logged. Only this new probe has
+step-scoped `continue-on-error`, preserving its true failure in the log while
+allowing the unchanged, unfiltered full Go suite to run. The flag is not exported
+to the baseline suite. No tools, installed configuration, selectors, assertions,
+private PATH, privileged startup or time limits are changed; this is not a fix.
 The test step log retains diagnostics
 and the process exit code; the final summary records success, failure, or skipped
 execution. Setup failure, cancellation, or timeout is not a passing baseline.

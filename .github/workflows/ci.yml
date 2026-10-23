@@ -166,7 +166,7 @@ jobs:
         run: go test -tags e2e ./internal/server/...
 
   # Not a required context during baseline collection. Failures stay visible:
-  # do not use continue-on-error or weaken tests to make this job green.
+  # Only the separate trace probe may continue on error; the full suite may not.
   windows-unit-tests:
     name: Windows Unit Tests (observational)
     runs-on: windows-latest
@@ -230,6 +230,12 @@ jobs:
       - name: Diagnose PerfRatchet temporary visibility
         shell: pwsh
         run: ./.github/scripts/windows-perf-temp-diagnostic.ps1
+
+      - name: Trace Codex isolation preflight
+        continue-on-error: true
+        env:
+          CODEX_TEST_TMP_TRACE: "1"
+        run: go test -mod=readonly ./plugin -run '^TestCodexShellIsolationPreflight$' -count=1 -timeout=90s -v
 
       - name: Record Windows baseline environment
         shell: pwsh

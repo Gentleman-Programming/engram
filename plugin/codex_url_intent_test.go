@@ -181,8 +181,16 @@ func (f codexIntentFixture) run(t *testing.T, mode, script, intent string) strin
 			t.Fatal("create private fixture directory")
 		}
 	}
+	trace := mode == "preflight" && os.Getenv("CODEX_TEST_TMP_TRACE") == "1"
+	body := codexIntentLauncher
+	if trace {
+		if err := os.Mkdir(filepath.Join(f.root, "trace"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		body = codexIntentTraceLauncher()
+	}
 	launcher := filepath.Join(f.root, "launch.sh")
-	source := "trusted_bash=" + codexIntentQuote(f.bash) + "\nbash_alias=" + codexIntentQuote(f.alias) + "\nconverter=" + codexIntentQuote(f.cygpath) + f.tools + "\n" + codexIntentLauncher
+	source := "trusted_bash=" + codexIntentQuote(f.bash) + "\nbash_alias=" + codexIntentQuote(f.alias) + "\nconverter=" + codexIntentQuote(f.cygpath) + f.tools + "\n" + body
 	if err := os.WriteFile(launcher, []byte(source), 0600); err != nil {
 		t.Fatal("write private launcher")
 	}
@@ -212,7 +220,19 @@ func (f codexIntentFixture) run(t *testing.T, mode, script, intent string) strin
 	cmd.Stdin = strings.NewReader(string(input))
 	var out, diagnostic strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &diagnostic
-	err := cmd.Run()
+	var err error
+	if trace {
+		err = cmd.Start()
+		if err == nil {
+			err = cmd.Wait()
+		}
+		// Report every boundary before any fatal, including startup/record failures.
+		if !codexIntentTraceReport(t, f, cmd, diagnostic.String()) {
+			t.Fail()
+		}
+	} else {
+		err = cmd.Run()
+	}
 	if err != nil || diagnostic.Len() != 0 {
 		t.Fatalf("isolated command failed: exit=%v stdout=%q stderr=%q", err, out.String(), diagnostic.String())
 	}
