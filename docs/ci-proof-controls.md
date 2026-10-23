@@ -91,15 +91,14 @@ Check IDs are assigned after actual creation elsewhere, never pre-invented here.
 
 The policy implementations, guards, router, publisher, resolver and fixtures
 remain unchanged. The two producer workflows call the adapter only through
-explicit configuration; six required context names/App15368 and permissions are
-preserved. No comments, issues, Checks API results, environments, credentials,
-queue entry or merge are created/configured. Independent existing-job interlock
-#2031 remains a future phase; #2026/#1810 remain open.
+explicit configuration; six required context names/App15368 are preserved.
+The #2031 permission exception is described below. No comments, issues, Checks API results, environments, credentials,
+queue entry or merge are created/configured. #2026/#1810 remain open.
 
 Run `node --test .github/scripts/issue-ci-proof-adapter.test.mjs .github/scripts/issue-ci-proof-workflow.test.mjs .github/scripts/issue-ci-proof-controls.test.mjs`, then
 `node --test .github/scripts/issue-*.test.mjs` locally. Existing Policy Helper
 Tests discovers the new `issue-*.test.mjs` on candidate `github.sha`; no workflow
-edit is needed. Discovery is not evidence that hosted CI has actually run.
+edit is needed for discovery. Discovery is not evidence that hosted CI has actually run.
 Local fake transport/clock tests are foundation-contract evidence only, never
 canonical production proof or authorization for hosted experiments.
 
@@ -154,4 +153,39 @@ Configuration/source failures use static `proof-adapter: configuration|source`;
 transport failures are terminal, redacted foundation errors. Time never releases.
 These controls trust the Actions context/client and immutable checkout; they
 are not independent ancestry, canonical native provenance, hosted adversarial
-evidence or queue protection. #2031 and separate grants/proofs remain necessary.
+evidence or queue protection. Separate grants/proofs remain necessary.
+
+## Independent dormant Unit Tests hold (#2031)
+
+`vars.ISSUE_CI_PROOF_CI` is a separate, **unconfigured** selector. Unset or
+`{"enabled":false}` performs no helper import or API request. Unit Tests alone
+now has job-scoped `contents: read` plus human-authorized `issues: read`, even OFF.
+This is not evidence that issue-comment reads work on hosted fork/queue tokens;
+qualification requires a future separately authorized window.
+
+Before checkout or substantive commands, the existing required job awaits a
+selected hold. No new context, job skip, deployment gate or error-success escape
+is added. Original commands and merge-group identity remain intact.
+The enabled manifest uses the foundation limits plus `issueNumber` and `case`.
+Its required `target` filters are `repo,event,action,job,checkout,prHead`.
+`runId,attempt,workflow,head` are optional preselectors: when present they must
+match, but need not be guessed before run/group creation. All four actual runtime
+values remain validated and mandatory in the fresh release witness binding.
+`head` is actual `github.sha` (synthetic merge for PRs, group SHA for groups);
+`prHead` is original PR head or null for groups. `checkout` is the immutable event
+base, not candidate checkout. Without a head filter, multiple matching groups may
+be held; this is not queue isolation. A future authorized window must establish
+matching scope and group membership before drawing queue conclusions.
+
+The bootstrap reads only the bridge/core blobs at that base, verifies explicit
+SHA256 pins, and loads them from isolated runner scratch. Missing historical
+helpers, corrupt source, malformed/expired controls and failed selected reads
+fail Unit Tests itself. There is no candidate fallback. Pin changes require a
+reviewed workflow change; this is not protection against rewriting the workflow
+itself. Workflow/base source revisions and run/attempt/job/event/head are bound
+into the fresh foundation checkpoint. Authentication and bounded read rules above
+apply unchanged; arbitrary bodies/errors are never logged. Local mocks establish
+neither active transport capability, native required-gate selection nor queue safety.
+
+Focused checks: `node --test .github/scripts/issue-ci-proof-ci.test.mjs .github/scripts/issue-ci-proof-ci-workflow.test.mjs`.
+Controls remain OFF; CI, independent verification and fresh review remain required.
