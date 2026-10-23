@@ -15,7 +15,11 @@ func TestConflictsActionable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 	r, err := s.SaveRelation(store.SaveRelationParams{SyncID: "cross-evidence", SourceID: a, TargetID: b})
 	if err != nil {
 		t.Fatal(err)
