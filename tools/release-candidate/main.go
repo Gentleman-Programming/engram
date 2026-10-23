@@ -26,6 +26,7 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -pi-ref    Required full Pi tag ref with independent strict SemVer.
 -root      Candidate metadata directory (default: current directory).
 -pi-tarball Optional local .tgz to validate against candidate package contents.
+-assess    Emit rejected/blocked assessment JSON; never release approval.
 -h, --help Show this help.
 
 Reads plugin/pi/package.json and internal/setup/setup.go without writes.
@@ -35,6 +36,10 @@ Refs define an ordered metadata pair, not remote tags or compatibility proof.
 Only literal package file/directory allowlists are supported, up to 4096 files
 and 64 MiB. No archive extraction; links and unexpected/missing content reject.
 Export/validator success is not Pi parity or release approval.
+Assessment exits 1 (rejected) or 2 (blocked), with empty stderr.
+-assess cannot be combined with -pi-tarball, including an empty archive argument.
+Without -assess (or with -assess=false), legacy export/validation is unchanged.
+Invocation errors retain plain stderr and exit 1, not assessment JSON.
 No publication, version selection, or bypass flags are supported.
 `
 
@@ -42,6 +47,10 @@ var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
+		var result *assessmentExit
+		if errors.As(err, &result) {
+			os.Exit(result.code)
+		}
 		message := err.Error()
 		if errors.Is(err, errPackageRejected) {
 			message = "Pi package tarball validation failed"
@@ -59,6 +68,7 @@ func run(args []string, output io.Writer) error {
 	piRef := flags.String("pi-ref", "", "full Pi tag ref")
 	root := flags.String("root", ".", "candidate metadata directory")
 	tarball := flags.String("pi-tarball", "", "optional local Pi package tarball")
+	assess := flags.Bool("assess", false, "non-approving structured assessment")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, err = io.WriteString(output, helpText)
@@ -68,6 +78,15 @@ func run(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("positional arguments are not supported")
+	}
+	tarballProvided := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "pi-tarball" {
+			tarballProvided = true
+		}
+	})
+	if *assess && tarballProvided {
+		return errors.New("-assess and -pi-tarball cannot be combined")
 	}
 	if *coreRef == "" || *piRef == "" {
 		return errors.New("core-ref and pi-ref are required")
@@ -80,15 +99,12 @@ func run(args []string, output io.Writer) error {
 	if !ok {
 		return errors.New("invalid pi-ref: expected refs/tags/pi-v<strict-semver>")
 	}
+	if *assess {
+		return assessCandidate(*root, version, piVersion, output)
+	}
 	if err := validateMetadata(*root, piVersion); err != nil {
 		return err
 	}
-	tarballProvided := false
-	flags.Visit(func(option *flag.Flag) {
-		if option.Name == "pi-tarball" {
-			tarballProvided = true
-		}
-	})
 	if tarballProvided {
 		count, err := validatePackage(*root, piVersion, *tarball)
 		if err != nil {
@@ -152,7 +168,7 @@ func refVersion(ref, prefix string) (string, bool) {
 func validateMetadata(root, version string) error {
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "pi", "package.json"))
 	if err != nil {
-		return errors.New("cannot read plugin/pi/package.json")
+		return &metadataUnavailable{message: "cannot read plugin/pi/package.json"}
 	}
 	var manifest struct {
 		Name    string `json:"name"`
@@ -169,7 +185,7 @@ func validateMetadata(root, version string) error {
 	}
 	data, err = os.ReadFile(filepath.Join(root, "internal", "setup", "setup.go"))
 	if err != nil {
-		return errors.New("cannot read internal/setup/setup.go")
+		return &metadataUnavailable{message: "cannot read internal/setup/setup.go"}
 	}
 	file, err := parser.ParseFile(token.NewFileSet(), "setup.go", data, 0)
 	if err != nil {
