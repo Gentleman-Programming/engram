@@ -277,6 +277,12 @@ Windows shell fixtures retain native path spelling in `TMP` and `TEMP` for MSYS'
 `/tmp` mount, while `TMPDIR` remains POSIX for shell commands. POSIX drive paths
 in `TMP`/`TEMP` can resolve to a different, nonexistent native directory. Fixtures
 do not create an installation-level `/tmp` directory.
+A separate PerfRatchet diagnostic records PATH-selected Bash/tools and ambient
+TMPDIR/TMP/TEMP without creating ambient temporary files. Its bounded, isolated
+control creates files only in an owned workspace directory, checks creator,
+child Bash, reviewed awk, and native Windows visibility, and retains raw streams.
+Unknown tools are recorded but not executed. These controls do not reproduce the
+original test environment or establish a cause, fix, or passing baseline.
 The test step log retains diagnostics
 and the process exit code; the final summary records success, failure, or skipped
 execution. Setup failure, cancellation, or timeout is not a passing baseline.

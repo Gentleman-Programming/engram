@@ -227,6 +227,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/windows-bash-tmp-diagnostic.ps1
 
+      - name: Diagnose PerfRatchet temporary visibility
+        shell: pwsh
+        run: ./.github/scripts/windows-perf-temp-diagnostic.ps1
+
       - name: Record Windows baseline environment
         shell: pwsh
         run: |

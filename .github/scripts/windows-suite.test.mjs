@@ -69,6 +69,22 @@ test('Windows evidence records checkout, toolchain, prerequisites, and actual te
 });
 
 
+test('Windows PerfRatchet diagnostics separate ambient metadata from owned-file controls', () => {
+  const step = '      - name: Diagnose PerfRatchet temporary visibility';
+  assert.ok(job.includes(step), 'missing PerfRatchet diagnostic');
+  assert.ok(job.indexOf('Diagnose Git Bash temporary directory') < job.indexOf(step));
+  assert.ok(job.indexOf(step) < job.indexOf('run: go test ./...'));
+  assert.match(job, /run: \.\/\.github\/scripts\/windows-perf-temp-diagnostic\.ps1/);
+  const diagnostic = readFileSync(new URL('./windows-perf-temp-diagnostic.ps1', import.meta.url), 'utf8');
+  for (const invariant of ['GITHUB_WORKSPACE', 'Get-Command bash.exe', 'C:/Program Files/Git/bin/bash.exe', 'C:/Program Files/Git/usr/bin/bash.exe', "'ambient-metadata'", "'private-file-control'", 'Environment.Clear()', 'WaitForExit(10000)', 'Kill($true)', 'ReadToEndAsync()', 'tool_admission', 'CREATED_NATIVE=', 'CHILD_READ=', 'AWK_READ=', 'native_read', 'GITHUB_STEP_SUMMARY']) {
+    assert.ok(diagnostic.includes(invariant), `missing PerfRatchet diagnostic invariant: ${invariant}`);
+  }
+  assert.match(diagnostic, /\$case -eq 'private-file-control'/);
+  assert.match(diagnostic, /StartsWith\(\$owned/);
+  assert.doesNotMatch(diagnostic, /\$env:[\w]+\s*=|GITHUB_ENV|Remove-Item|Invoke-WebRequest|choco |go test|continue-on-error/);
+  assert.match(job, /id: suite\n\s+run: go test \.\/\.\.\./);
+});
+
 test('Windows Bash temp diagnostics are bounded, read-only, and precede the unchanged suite', () => {
   const diagnosticStep = '      - name: Diagnose Git Bash temporary directory';
   assert.ok(job.includes(diagnosticStep), 'missing read-only Bash temp diagnostic');
