@@ -50,11 +50,12 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // native adds only the original-event steps. CI includes the independently/native-approved
   // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b,
   // plus the approved #1994 TypeBox test bootstrap in f65380cc79ffa6fe63d4594b1e5341733d51f288.
+  // #2030 adds dormant boundaries/source pins to native/legacy workflows only.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
-    '.github/workflows/pr-check.yml': '963bf7f27237527df684b9d7a28894b741bf47f61a45de577327c5925abfeb00',
+    '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
-    '.github/workflows/issue-policy.yml': '1a3091c88771ecc5b51059aad6987d31c97177b48f4522bfdb8963d0c4bc952c',
+    '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
     '.github/workflows/ci.yml': '7fb879bdc7faddb36dcce9d67386accb02418c9b65d0e436a003933a104537fa',
   };
   for (const [path, expected] of Object.entries(baseline)) {

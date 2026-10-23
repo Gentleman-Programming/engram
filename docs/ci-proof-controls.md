@@ -1,9 +1,10 @@
-# Manual-release contract foundation (#2029)
+# Dormant manual-release controls (#2029 / #2030)
 
-This is a dormant CI-orchestration library, **not hosted gate evidence**.
-No producer or workflow calls it. It does not prove an in-flight evaluator pause,
-independent job hold, read ordering, native provenance, required-gate selection,
-or queue safety. Polling only waits for an explicit release.
+These are dormant CI-orchestration controls, **not hosted gate evidence**.
+The native and legacy workflows contain default-off boundary adapters. No
+repository variable or runtime control is activated by this change. Local models
+do not prove native provenance, required-gate selection or queue safety.
+Polling only waits for an explicit release; elapsed time is never a witness.
 
 ## Public API
 
@@ -88,15 +89,69 @@ Check IDs are assigned after actual creation elsewhere, never pre-invented here.
 
 ## Scope and verification
 
-Existing evaluators, validation, router, publisher, resolver, fixtures, six
-required contexts and App15368 are untouched. No comments, issues, checks,
-environments, credentials, permissions, queue entry, merge or cleanup are
-created or configured. Actual evaluator continuation (#2030) and independent
-existing-job hold (#2031) are future phases; #2026/#1810 remain open.
+The policy implementations, guards, router, publisher, resolver and fixtures
+remain unchanged. The two producer workflows call the adapter only through
+explicit configuration; six required context names/App15368 and permissions are
+preserved. No comments, issues, Checks API results, environments, credentials,
+queue entry or merge are created/configured. Independent existing-job interlock
+#2031 remains a future phase; #2026/#1810 remain open.
 
-Run `node --test .github/scripts/issue-ci-proof-controls.test.mjs`, then
+Run `node --test .github/scripts/issue-ci-proof-adapter.test.mjs .github/scripts/issue-ci-proof-workflow.test.mjs .github/scripts/issue-ci-proof-controls.test.mjs`, then
 `node --test .github/scripts/issue-*.test.mjs` locally. Existing Policy Helper
 Tests discovers the new `issue-*.test.mjs` on candidate `github.sha`; no workflow
 edit is needed. Discovery is not evidence that hosted CI has actually run.
 Local fake transport/clock tests are foundation-contract evidence only, never
 canonical production proof or authorization for hosted experiments.
+
+## Producer adapter and actual boundaries (#2030)
+
+`createGitHubProof(options)` in `issue-ci-proof-adapter.mjs` returns
+`{ client, complete(value), assert() }`. Native jobs pass `client` to the original
+evaluator: the first actual issue GET is held before its response is consumed.
+The existing final PR reread/head guard still runs. `assert()` prevents a caught
+hold error from becoming reference success. Legacy jobs await `complete(failures)`
+after original verdict reporting, before their original GHA job completes.
+No Checks API substitute is created; resolver failures/early returns are unchanged
+and emit no checkpoint. Merge-group handling never activates these adapters.
+
+Callers supply trusted `context`, host `environment` (or injected `runtime`),
+`phase`, actual trusted `checkout` SHA, and optional foundation test dependencies.
+The recorded source is `WORKFLOW_SHA/CHECKOUT_SHA`, not an assertion they are equal.
+Native workflows pin LF-normalized SHA256 digests of adapter/core before import;
+CI checks those pins. Dependency changes must update the protected workflow,
+preserving the original router source guard without extra GitHub requests.
+
+## Dormant configuration and authenticated reads
+
+`vars.ENGRAM_CI_PROOF_MANIFEST` feeds the matching environment variable.
+**Setting it or posting release comments requires separate authorization.**
+Empty/unset or JSON `{ "enabled": false }` skips helper import and all transport,
+including on older bases. Active imports use only trusted checked-out code;
+an older checkout lacking the helper must never fall back to PR code.
+
+- Raw JSON: at most 8192 characters; `enabled: true`, `case` (1–120 label
+  characters), positive `issueNumber`, and foundation
+  `actorIds/expiresAt/maxReads/intervalMs` are required.
+- Required `target`: `repo` (`owner/repo`), `prNumber`, original `head`, event
+  `action`, trusted `checkout`, and `phase`. Phases are `native-read:reference`,
+  `native-read:approved`, `legacy-completion:reference`, `legacy-completion:approved`.
+- Optional target `runId/attempt/source` narrow a known run. Otherwise these are
+  captured from Actions and still bind every release; never guess future run IDs.
+  Unrelated selectors are no-ops. Checkpoint case is `owner/repo:case`.
+
+One static GraphQL query reads the last 20 comments on the configured issue in
+the same repository. Only an allowlisted numeric `User.databaseId` from server
+`author`, with `lastEditedAt: null`, can release; JSON `actorId` is ignored.
+Bot/deleted authors, edited records, malformed/bodies over 4096 characters and
+stale/mismatching checkpoints cannot release. Comment JSON must match every
+emitted field; it is data, never code or receipt text. See GitHub's
+[IssueComment](https://docs.github.com/en/graphql/reference/issues) and
+[User](https://docs.github.com/en/graphql/reference/users) field definitions.
+
+After the immediate first read, queries are spaced 30 seconds, clamped to the
+unchanged five-minute foundation deadline (at most 10 queries/20 records each).
+Configuration/source failures use static `proof-adapter: configuration|source`;
+transport failures are terminal, redacted foundation errors. Time never releases.
+These controls trust the Actions context/client and immutable checkout; they
+are not independent ancestry, canonical native provenance, hosted adversarial
+evidence or queue protection. #2031 and separate grants/proofs remain necessary.
