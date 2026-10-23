@@ -189,3 +189,41 @@ neither active transport capability, native required-gate selection nor queue sa
 
 Focused checks: `node --test .github/scripts/issue-ci-proof-ci.test.mjs .github/scripts/issue-ci-proof-ci-workflow.test.mjs`.
 Controls remain OFF; CI, independent verification and fresh review remain required.
+
+## Authenticated configuration reader (#1810, dormant)
+
+`.github/scripts/issue-ci-proof-config.mjs` exports `readCIConfiguration`.
+This standalone reader is not wired into a workflow by this unit; normal CI,
+existing raw configuration, job permissions and bridge/core remain unchanged.
+The real `.github/ci-proof-controllers.json` contains `version: 1` and empty
+`controllerIds`: no controller is enrolled and tests are not hosted qualification.
+
+Callers supply trusted `github`, CI runtime `identity`, `prNumber`, `issueNumber`,
+`caseName` and optional absolute `deadline`/clock/timer dependencies. Malformed
+identity, including a missing or non-string action, rejects before API requests.
+The reader fixes owner/repository/path internally and snapshots policy DATA from
+CURRENT canonical `main`, recording its blob/content hashes. Historical base or
+fork policy cannot authorize controllers. Roster removal affects later reads,
+not an already snapshotted hold, and is not automatic GitHub-role synchronization.
+
+One fixed read-only GraphQL query observes the canonical issue's last 20 comments.
+Envelope fields are `schema: "ci-proof-config/v1"`, positive `prNumber`, and the
+enabled CI `manifest` described above. Case/issue, exact PR/head and selectors
+must match. Only a server `User.databaseId` in the policy with `lastEditedAt: null`
+may configure; JSON identity claims grant nothing. Bots, edited, unauthorized,
+unrelated and oversized bodies (over 8192 UTF-8 bytes) cannot select configuration.
+Exactly one matching candidate in the observed window is required; never choose
+newest-wins. This is not global uniqueness or replay prevention; window eviction
+is an availability limitation and an unedited observation cannot prevent editing.
+
+Requests share an absolute preparation budget capped at 15 seconds, with no
+retries, and acceptance is checked after responses and before returning. Active
+manifest deadline/read limits remain unchanged. Static errors are
+`proof-config: configuration|source|transport|expired`; no arbitrary body/error
+or producer value is logged. Returned `raw` is the manifest snapshot; `receipt`
+contains only `configuration-resolved`, controller ID and policy/configuration
+hashes, proving delivery only, not hold/release. Later edits/deletion/expiry never
+release a held snapshot. Read permissions and actual fork-token access still need
+separate hosted qualification; no experiment is authorized here.
+
+Run `node --test .github/scripts/issue-ci-proof-config.test.mjs`.
