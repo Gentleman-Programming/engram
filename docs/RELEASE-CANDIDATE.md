@@ -291,3 +291,23 @@ A passing checker test suite would demonstrate the rejection-only behavior and
 unchanged legacy Pi guard. It would not make current Go/Pi sources release-ready.
 Implementation validation and independent review must be observed separately;
 this guide does not claim those checks passed or authorize a PR/publication.
+
+## Reviewed staged-input admission
+
+Use `-observe-artifact-inputs` for non-executing admission of an explicitly reviewed #1928 bundle. It never starts Core or imports Pi.
+```bash
+go run ./tools/release-candidate -observe-artifact-inputs \
+  -core-ref "$CORE_REF" -pi-ref "$PI_REF" -core-source "$CORE_SOURCE" -pi-source "$PI_SOURCE" \
+  -root "$REVIEWED_REPOSITORY" -staging-bundle "$REVIEWED_ZIP" -staging-context context.json
+```
+
+Replace every context pin below with the reviewed value; the regular JSON file is limited to 4,096 bytes and unknown fields/trailing documents reject.
+```json
+{
+  "WorkflowSHA": "FULL_WORKFLOW_COMMIT", "CandidateSHA": "FULL_CORE_COMMIT",
+  "RunID": "REVIEWED_RUN_ID", "RunAttempt": "1",
+  "CoreVersion": "1.2.3", "PiVersion": "4.5.6", "ZIPHash": "REVIEWED_ZIP_SHA256"
+}
+```
+
+Refs/versions are intents, not authenticated tags or observed runtime versions. Core source must match the candidate; Pi source is selected independently and its archive bytes must validate against that raw Git snapshot. ZIP/member digests, actual host Go metadata and source-bound Pi materialization are checked, originals rechecked, and owned output removed before reporting. JSON always has outcome `blocked`, exit 2 and empty stderr; `check.state=passed` means admission only, while `workflows.state=unavailable` explicitly records no execution. Missing/mismatched/changed/unavailable evidence cannot pass. Caller-edited context/digests are not publisher authentication, execution permission or a sandbox. Without this opt-in (including false), existing modes are unchanged; do not combine it with other observation modes, assessment or tarball validation.
