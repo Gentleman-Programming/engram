@@ -33,21 +33,25 @@ type sourceCheck struct {
 
 // This is an observation view, never an importable approval credential.
 type sourceObservation struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	Outcome       string         `json:"outcome"`
-	Core          sourceIdentity `json:"core"`
-	Pi            sourceIdentity `json:"pi"`
-	Check         sourceCheck    `json:"check"`
-	PiInputs      *piInputCheck  `json:"piInputs,omitempty"`
+	SchemaVersion int             `json:"schemaVersion"`
+	Outcome       string          `json:"outcome"`
+	Core          sourceIdentity  `json:"core"`
+	Pi            sourceIdentity  `json:"pi"`
+	Check         sourceCheck     `json:"check"`
+	PiInputs      *piInputCheck   `json:"piInputs,omitempty"`
+	PiPackage     *piPackageCheck `json:"piPackage,omitempty"`
 }
 
-func observeContract(root, coreRef, piRef, version, piVersion, core, pi string, piInputs bool, output io.Writer) error {
+func observeContract(root, coreRef, piRef, version, piVersion, core, pi string, piInputs bool, archive string, output io.Writer) error {
 	r := sourceObservation{SchemaVersion: 1, Outcome: "blocked",
 		Core:  sourceIdentity{VersionIntent: version, RefIntent: coreRef, RequestedCommit: core},
 		Pi:    sourceIdentity{VersionIntent: piVersion, RefIntent: piRef, RequestedCommit: pi},
 		Check: sourceCheck{Name: "go-contract-freshness", State: "unavailable"}}
 	if piInputs {
 		r.PiInputs = &piInputCheck{Name: "pi-input-projection", State: "unavailable"}
+	}
+	if archive != "" {
+		r.PiPackage = &piPackageCheck{Name: "pi-package-source-binding", State: "unavailable"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -77,16 +81,28 @@ func observeContract(root, coreRef, piRef, version, piVersion, core, pi string, 
 	if err == nil {
 		workspace, e := os.MkdirTemp(root, ".release-source-evidence-")
 		if e == nil {
+			var pkg *piPackageSnapshot
+			if archive != "" {
+				pkg = preparePiPackage(ctx, root, workspace, r.Pi.Commit, archive)
+				r.PiPackage = &pkg.check
+			}
 			r.Check = runSourceCheck(ctx, root, workspace, r.Core.Commit, r.Pi.Commit, piVersion)
 			if piInputs && r.Check.State == "passed" {
 				check := runPiInputCheck(ctx, root, workspace, r.Core.Commit, r.Pi.Commit, r.Check.ArtifactSHA256)
 				r.PiInputs = &check
+			}
+			if pkg != nil && r.Check.State == "passed" {
+				check := pkg.verify(ctx, piVersion)
+				r.PiPackage = &check
 			}
 			// Never report success before owned workspace cleanup completes.
 			if os.RemoveAll(workspace) != nil {
 				r.Check.State = "unavailable"
 				if r.PiInputs != nil {
 					r.PiInputs.State = "unavailable"
+				}
+				if r.PiPackage != nil {
+					r.PiPackage.State, r.PiPackage.Files = "unavailable", 0
 				}
 			}
 		}

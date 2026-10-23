@@ -29,6 +29,7 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -assess    Emit rejected/blocked assessment JSON; never release approval.
 -observe-contract Execute the selected trusted core's freshness checker; never approval.
 -observe-pi-inputs Also capture trusted selected Pi inputs and verify with selected Go.
+-observe-pi-package Bind -pi-tarball bytes to selected Pi source; requires observation.
 -core-source Full lowercase core commit ID for observation (40 or 64 hex digits).
 -pi-source Full lowercase Pi commit ID, independently selected.
 -h, --help Show this help.
@@ -48,6 +49,8 @@ Observation requires operator-reviewed/trusted source; a copy is NOT a sandbox.
 It executes Go from that core commit with local cached dependencies only.
 -observe-pi-inputs also executes reviewed Pi/helper code; requires Node24 and
 fixed checkout-local TypeBox1.3.34. No installs, stub fallback, or release approval.
+-observe-pi-package reuses local archive validation, without executing package code.
+Only this explicit opt-in permits -observe-contract with a non-empty -pi-tarball.
 Ref/version labels are intents, not verified remote tags. Output always blocks.
 No publication, version selection, or bypass flags are supported.
 `
@@ -80,6 +83,7 @@ func run(args []string, output io.Writer) error {
 	assess := flags.Bool("assess", false, "non-approving structured assessment")
 	observe := flags.Bool("observe-contract", false, "observe trusted selected source; not a sandbox")
 	piInputs := flags.Bool("observe-pi-inputs", false, "opt-in selected Pi input projection; requires -observe-contract")
+	piPackage := flags.Bool("observe-pi-package", false, "opt-in selected Pi archive binding; requires -observe-contract and -pi-tarball")
 	coreSource := flags.String("core-source", "", "full core source commit ID")
 	piSource := flags.String("pi-source", "", "full Pi source commit ID")
 	if err := flags.Parse(args); err != nil {
@@ -104,8 +108,14 @@ func run(args []string, output io.Writer) error {
 	if *piInputs && !*observe {
 		return errors.New("-observe-pi-inputs requires -observe-contract")
 	}
-	if *observe && (*assess || tarballProvided) {
+	if *piPackage && !*observe {
+		return errors.New("-observe-pi-package requires -observe-contract")
+	}
+	if *observe && (*assess || (tarballProvided && !*piPackage)) {
 		return errors.New("-observe-contract cannot be combined with -assess or -pi-tarball")
+	}
+	if *piPackage && (!tarballProvided || *tarball == "") {
+		return errors.New("-observe-pi-package requires a non-empty -pi-tarball")
 	}
 	if sourceProvided && !*observe {
 		return errors.New("source commit flags require -observe-contract")
@@ -128,7 +138,11 @@ func run(args []string, output io.Writer) error {
 		return errors.New("invalid pi-ref: expected refs/tags/pi-v<strict-semver>")
 	}
 	if *observe {
-		return observeContract(*root, *coreRef, *piRef, version, piVersion, *coreSource, *piSource, *piInputs, output)
+		archive := ""
+		if *piPackage {
+			archive = *tarball
+		}
+		return observeContract(*root, *coreRef, *piRef, version, piVersion, *coreSource, *piSource, *piInputs, archive, output)
 	}
 	if *assess {
 		return assessCandidate(*root, version, piVersion, output)

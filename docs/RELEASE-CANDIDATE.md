@@ -115,7 +115,8 @@ empty stderr even when the check passes. The observed `go run` exit is a wrapper
 exit, not an inferred inner-program exit. No package execution, installed-host
 compatibility, eligibility or publication is established. Invocation errors
 retain stderr/exit 1. Source flags require observation, which refuses active
-`-assess` or any `-pi-tarball` presence before repository access. Legacy modes
+`-assess`. Without the explicit package opt-in below, any `-pi-tarball` presence
+is also rejected before repository access. Legacy modes
 are otherwise unchanged. The report is a view, not an approval credential.
 
 ### Opt-in selected-Pi input projections
@@ -149,6 +150,26 @@ CI's Plugin Tests job runs that focused test with the mandatory flag after its
 existing Node24, locked TypeBox install and Go build. A missing prerequisite or
 skipped positive capture therefore cannot satisfy that CI evidence. Hosted
 results must still be observed for the exact candidate; scheduling is not a pass.
+
+### Opt-in selected-Pi package binding
+
+Add `-observe-pi-package` and a non-empty `-pi-tarball` to the Go source
+observation. This is the only opt-in that permits that existing flag combination;
+absent/false preserves old observations, conflicts and standalone package behavior.
+The collector copies bounded compressed bytes into its owned workspace and
+materializes the selected Pi commit separately from the Pi input-capture copy.
+It reuses the existing Go archive validator on that same tarball snapshot,
+including all framing, metadata, inventory, path/link and size restrictions.
+The optional `piPackage` records state, verified Pi source commit, selected Pi
+version, actual compressed-tarball SHA-256 and valid file count when established.
+The validator runs in the collector, not as a selected-Core subprocess: no
+process exit code or selected-Core verifier identity is invented for this view.
+Observed source/archive/input changes, unreadable inputs, cancellation or owned
+cleanup failure cannot establish a passing binding. Copies are not a sandbox.
+No package entrypoint, Node/npm, dependency installation or publisher is invoked
+by this check; existing trusted Core freshness execution remains unchanged.
+Even a passing binding remains schema1/blocked/exit2/empty stderr. It is neither
+registry authenticity, reproducible-build proof, artifact execution nor eligibility.
 
 ## Separate real-schema diagnostic
 
