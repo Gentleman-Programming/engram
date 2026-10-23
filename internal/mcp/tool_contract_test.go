@@ -486,11 +486,103 @@ func TestMCPToolContractV1(t *testing.T) {
 	if err := removeApprovedOlderHistoryDelta(live); err != nil {
 		t.Fatal(err)
 	}
+	if err := removeApprovedSemanticSearchDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyMCPToolContract(fixture, live, before); err != nil {
 		t.Fatal(err)
 	}
 	if after, err := os.ReadFile("testdata/tool-contract-v1.json"); err != nil || string(before) != string(after) {
 		t.Fatalf("fixture changed: %v", err)
+	}
+}
+
+// removeApprovedSemanticSearchDelta asserts only issue #233's optional enum,
+// then removes that property from the observed schema, never the v1 fixture.
+func removeApprovedSemanticSearchDelta(live map[string]mcpToolSchema) error {
+	tool, ok := live["mem_search"]
+	if !ok {
+		return fmt.Errorf("mem_search is missing")
+	}
+	field, ok := tool.Properties["search_mode"]
+	if !ok || !slices.Equal(field.Types, []string{"string"}) ||
+		!slices.Equal(field.Enum, []string{`"lexical"`, `"semantic"`}) ||
+		len(field.Properties) != 0 || len(field.Required) != 0 || field.Items != nil || !field.Additional {
+		return fmt.Errorf("mem_search search_mode must retain the approved string enum: %#v", field)
+	}
+	if slices.Contains(tool.Required, "search_mode") {
+		return fmt.Errorf("mem_search search_mode must be optional")
+	}
+	delete(tool.Properties, "search_mode")
+	live["mem_search"] = tool
+	return nil
+}
+
+func TestApprovedSemanticSearchDeltaPreservesRatchet(t *testing.T) {
+	for _, tc := range []struct {
+		name, change, want string
+	}{
+		{"approved optional enum", "", ""},
+		{"missing tool", "tool", "mem_search is missing"},
+		{"missing option", "missing", "approved string enum"},
+		{"different type", "type", "approved string enum"},
+		{"different enum", "enum", "approved string enum"},
+		{"required option", "required", "must be optional"},
+		{"nested properties", "properties", "approved string enum"},
+		{"nested requiredness", "nested-required", "approved string enum"},
+		{"array items", "items", "approved string enum"},
+		{"additional constraints", "additional", "approved string enum"},
+		{"another search property changed", "search", "type-narrowed"},
+		{"another tool changed", "other", "type-narrowed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, live := map[string]mcpToolSchema{}, map[string]mcpToolSchema{}
+			for _, name := range []string{"mem_search", "mem_context"} {
+				const schema = `{"type":"object","properties":{"project":{"type":"string"}},"additionalProperties":true}`
+				fixture[name] = mustNormalize(t, schema)
+				live[name] = mustNormalize(t, schema)
+			}
+			live["mem_search"].Properties["search_mode"] = mustNormalize(t, `{"type":"string","enum":["lexical","semantic"]}`)
+			field := live["mem_search"].Properties["search_mode"]
+			switch tc.change {
+			case "type":
+				field.Types = []string{"number"}
+			case "enum":
+				field.Enum = []string{`"semantic"`}
+			case "properties":
+				field.Properties = map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}
+			case "nested-required":
+				field.Required = []string{"nested"}
+			case "items":
+				field.Items = &mcpToolSchema{Types: []string{"string"}}
+			case "additional":
+				field.Additional = false
+			}
+			live["mem_search"].Properties["search_mode"] = field
+			switch tc.change {
+			case "tool":
+				delete(live, "mem_search")
+			case "missing":
+				delete(live["mem_search"].Properties, "search_mode")
+			case "required":
+				tool := live["mem_search"]
+				tool.Required = []string{"search_mode"}
+				live["mem_search"] = tool
+			case "search", "other":
+				name := "mem_search"
+				if tc.change == "other" {
+					name = "mem_context"
+				}
+				live[name].Properties["project"] = mcpToolSchema{Types: []string{"number"}, Additional: true}
+			}
+			err := removeApprovedSemanticSearchDelta(live)
+			if err == nil {
+				err = compareMCPToolContract(fixture, live)
+			}
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

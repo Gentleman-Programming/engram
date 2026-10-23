@@ -503,6 +503,10 @@ func registerToolsWithQueue(srv *server.MCPServer, s *store.Store, cfg MCPConfig
 				mcp.WithString("scope",
 					mcp.Description("Filter by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
+				mcp.WithString("search_mode",
+					mcp.Enum("lexical", "semantic"),
+					mcp.Description("Retrieval mode: lexical (default) or explicit semantic. Semantic returns potentially related memories, not answer confidence; requires a configured local model and manual engram embed index. Do not combine with match_mode."),
+				),
 				mcp.WithString("match_mode",
 					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error."),
 				),
@@ -1317,6 +1321,22 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
+		searchMode := ""
+		if raw, present := req.GetArguments()["search_mode"]; present {
+			var ok bool
+			searchMode, ok = raw.(string)
+			if !ok || (searchMode != "lexical" && searchMode != "semantic") {
+				return mcp.NewToolResultError("invalid search_mode: must be lexical or semantic"), nil
+			}
+		}
+		if searchMode == "semantic" {
+			if strings.TrimSpace(query) == "" {
+				return mcp.NewToolResultError("semantic query must be a nonempty string"), nil
+			}
+			if raw, present := req.GetArguments()["match_mode"]; present && raw != "" {
+				return mcp.NewToolResultError("semantic search_mode cannot be combined with match_mode"), nil
+			}
+		}
 		responseFormat, _ := req.GetArguments()["response_format"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
@@ -1362,29 +1382,42 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		activity.RecordToolCall(sessionID)
 
 		results, err := s.SearchPreviewsContext(ctx, query, store.SearchOptions{
-			Type:      typ,
-			Project:   searchProject,
-			Scope:     scope,
-			Limit:     limit,
-			MatchMode: matchMode,
+			Type:       typ,
+			Project:    searchProject,
+			Scope:      scope,
+			Limit:      limit,
+			MatchMode:  matchMode,
+			SearchMode: searchMode,
 		})
 		if err != nil {
+			if searchMode == "semantic" {
+				return mcp.NewToolResultError(fmt.Sprintf("Semantic search error: %s. Configure ENGRAM_EMBEDDING_MODEL and ENGRAM_EMBEDDING_URL for an installed local model, then rebuild via engram embed with the same filters. No lexical fallback.", err)), nil
+			}
 			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", err)), nil
 		}
 
 		if len(results) == 0 {
 			// JW4: use respondWithProject even for empty results.
+			if searchMode == "semantic" {
+				return respondWithProject(detRes, fmt.Sprintf("No potentially related memories found for: %q", query), nil), nil
+			}
 			return respondWithProject(detRes, fmt.Sprintf("No memories found for: %q", query), nil), nil
 		}
 
 		// Batch-load optional annotations; cancellation must not become success.
 		relationsMap, relErr := s.SearchPreviewRelationsContext(ctx, results)
 		if relErr != nil {
+			if searchMode == "semantic" {
+				return mcp.NewToolResultError(fmt.Sprintf("Semantic search error: %s. Retry explicitly; no lexical fallback.", relErr)), nil
+			}
 			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", relErr)), nil
 		}
 
 		if compact {
 			resultText := fmt.Sprintf("Found %d memories.", len(results))
+			if searchMode == "semantic" {
+				resultText = fmt.Sprintf("Found %d potentially related memories; similarity is not confidence.", len(results))
+			}
 			if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
 				resultText += nudge
 			}
@@ -1393,7 +1426,11 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		var b strings.Builder
 		if !compact {
-			fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
+			if searchMode == "semantic" {
+				fmt.Fprintf(&b, "Found %d potentially related memories; similarity is not confidence:\n\n", len(results))
+			} else {
+				fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
+			}
 		}
 		anyTruncated := false
 		structuredResults := make([]map[string]any, 0, len(results))
@@ -1425,6 +1462,11 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				"state":   r.State(),
 				"scope":   r.Scope,
 				"pinned":  r.Pinned,
+			}
+			if r.Similarity != nil {
+				entry["similarity"] = *r.Similarity
+				entry["retrieval_mode"] = r.RetrievalMode
+				fmt.Fprintf(&b, "    similarity: %g | retrieval_mode: semantic\n", *r.Similarity)
 			}
 			if r.Project != nil {
 				entry["project"] = *r.Project

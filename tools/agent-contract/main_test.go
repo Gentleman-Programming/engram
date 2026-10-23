@@ -151,7 +151,7 @@ func TestProjectionMetadataCurrent(t *testing.T) {
 	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
-	if document.Revision != 1 || document.Status != "mcp-foundation" {
+	if document.Revision != 2 || document.Status != "mcp-foundation" {
 		t.Fatalf("metadata correction promoted contract: %+v", document)
 	}
 	for _, tc := range []struct {

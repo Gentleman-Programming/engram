@@ -64,6 +64,13 @@ Actual capture schemas are never projected. Expected-only policy is bounded by:
 - `internal/mcp/mcp.go:2064-2067`: positive-integer max_bytes is a **model domain**,
   not equivalence with MCP's nonpositive/fractional fallback or global coercion.
 
+The current `mem_search` Pi model surface omits the MCP-only `search_mode`
+selector. Its expected-only projection accepts exactly the optional string enum
+`lexical|semantic`; a missing field, type/enum/order/requiredness change or added
+structural keyword (including null bounds) refuses the source. The actual Pi
+capture must still omit the selector. This does not enable semantic dispatch in
+Pi, change lexical defaults, or establish transport/semantic parity.
+
 Source preconditions reject incompatible types, newly present bounds (even null),
 changed omitted-field shapes and pre-existing cwd instead of overwriting them.
 Errors are `pi input: invalid capture`, `pi input: duplicate registration`,

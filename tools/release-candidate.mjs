@@ -84,7 +84,7 @@ async function check(refs) {
     let document;
     try { document = JSON.parse(exported.stdout); } catch { reject("Malformed Go contract export; candidate rejected."); }
     const contract = document?.contract;
-    if (typeof document?.version !== "string" || typeof document?.piVersion !== "string" || document.version !== refs["--core-ref"].slice("refs/tags/v".length) || document.piVersion !== refs["--pi-ref"].slice("refs/tags/pi-v".length) || contract?.contract_id !== "engram.agent-contract/v1" || contract.revision !== 1 || contract.profile !== "agent" || !contract.operations || typeof contract.operations !== "object" || Array.isArray(contract.operations)) {
+    if (typeof document?.version !== "string" || typeof document?.piVersion !== "string" || document.version !== refs["--core-ref"].slice("refs/tags/v".length) || document.piVersion !== refs["--pi-ref"].slice("refs/tags/pi-v".length) || contract?.contract_id !== "engram.agent-contract/v1" || (contract.revision !== 1 && contract.revision !== 2) || contract.profile !== "agent" || !contract.operations || typeof contract.operations !== "object" || Array.isArray(contract.operations)) {
       reject("Unknown or malformed Go contract export; candidate rejected.");
     }
     const goNames = toolNames(Object.keys(contract.operations)).sort();

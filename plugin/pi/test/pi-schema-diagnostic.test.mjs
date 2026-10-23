@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { withPluginSandbox, importPluginFromSandbox } from "./plugin-sandbox.mjs";
@@ -88,5 +89,50 @@ test("CI installs test dependencies safely before Pi tests and retains candidate
       assert.match(text, /run: node test\/release-contract.mjs "\$RELEASE_REF"/);
       assert.match(text, /- "pi-v\*"/);
     }
+  }
+});
+
+test("public diagnostic accepts only known numeric baseline revisions", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "engram-pi-revision-"));
+  try {
+    await mkdir(join(dir, "tools"));
+    await mkdir(join(dir, "docs", "contracts"), { recursive: true });
+    const source = await readFile(cli, "utf8");
+    const originalImport = '"../plugin/pi/test/plugin-sandbox.mjs"';
+    assert.equal(source.split(originalImport).length, 2);
+    // Relocate only the fixture's helper import; run the actual CLI logic and
+    // actual installed TypeBox against an isolated baseline file.
+    const fixtureCLI = join(dir, "tools", "pi-schema-diagnostic.mjs");
+    await writeFile(fixtureCLI, source.replace(originalImport,
+      JSON.stringify(new URL("./plugin-sandbox.mjs", import.meta.url).href)));
+    const contract = JSON.parse(await readFile(new URL("../../../docs/contracts/agent-contract-v1.json", import.meta.url), "utf8"));
+    const { compareSchemas } = await import(cli);
+    const registrations = await withPluginSandbox("engram-pi-revision-capture-", async ({ sandbox }) => {
+      const tools = [];
+      (await importPluginFromSandbox(sandbox))({ registerTool: (tool) => tools.push(tool), on() {} });
+      return tools;
+    }, { realTypeBox: true });
+    const lines = compareSchemas(contract, registrations);
+    const expected = `Diagnostic only; not parity or release approval.\nStructural differences: ${lines.length}\n${lines.length ? lines.join("\n") + "\n" : ""}`;
+    const baseline = join(dir, "docs", "contracts", "agent-contract-v1.json");
+    for (const revision of [1, 2, 3, "2"]) {
+      await t.test(`baseline revision ${JSON.stringify(revision)}`, async () => {
+        const raw = JSON.stringify({ ...contract, revision });
+        await writeFile(baseline, raw);
+        const result = spawnSync(process.execPath, [fixtureCLI], { encoding: "utf8", timeout: 8000 });
+        if (revision === 1 || revision === 2) {
+          assert.equal(result.status, lines.length ? 1 : 0);
+          assert.equal(result.stderr, "");
+          assert.equal(result.stdout, expected);
+        } else {
+          assert.equal(result.status, 2);
+          assert.equal(result.stdout, "");
+          assert.equal(result.stderr, "Pi schema diagnostic failed: baseline, real TypeBox, capture or cleanup unavailable.\n");
+        }
+        assert.equal(await readFile(baseline, "utf8"), raw, "diagnostic must not rewrite its baseline");
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

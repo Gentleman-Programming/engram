@@ -43,7 +43,7 @@ export function compareSchemas(contract, registrations) {
 
 export async function diagnose() {
   const contract = JSON.parse(await readFile(new URL("../docs/contracts/agent-contract-v1.json", import.meta.url), "utf8"));
-  if (contract.contract_id !== "engram.agent-contract/v1" || contract.revision !== 1 || contract.profile !== "agent") throw new Error("Invalid baseline");
+  if (contract.contract_id !== "engram.agent-contract/v1" || (contract.revision !== 1 && contract.revision !== 2) || contract.profile !== "agent") throw new Error("Invalid baseline");
   // Return only after timer disposal and directory cleanup have both completed.
   return withPluginSandbox("engram-pi-schema-", async ({ sandbox }) => {
     const registrations = [];
