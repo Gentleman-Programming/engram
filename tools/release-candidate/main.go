@@ -30,6 +30,9 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -observe-contract Execute the selected trusted core's freshness checker; never approval.
 -observe-pi-inputs Also capture trusted selected Pi inputs and verify with selected Go.
 -observe-pi-package Bind -pi-tarball bytes to selected Pi source; requires observation.
+-observe-artifact-inputs Admit reviewed staging inputs only; never execute Core/Pi.
+-staging-bundle Explicit local #1928 ZIP; requires -observe-artifact-inputs.
+-staging-context Reviewed bounded JSON pins; requires -observe-artifact-inputs.
 -core-source Full lowercase core commit ID for observation (40 or 64 hex digits).
 -pi-source Full lowercase Pi commit ID, independently selected.
 -h, --help Show this help.
@@ -39,7 +42,10 @@ Emits version (core), piVersion (Pi), and the live Go-owned contract.
 With -pi-tarball emits both versions, validation=local-package-only, and file count.
 Refs define an ordered metadata pair, not remote tags or compatibility proof.
 Only literal package file/directory allowlists are supported, up to 4096 files
-and 64 MiB. No archive extraction; links and unexpected/missing content reject.
+and 64 MiB. Legacy validation never extracts; links/unexpected/missing content reject.
+Artifact-input observation materializes only owned validated Pi bytes, then removes them.
+It requires explicit source commits/refs and reviewed context, not publisher authentication.
+Missing/mismatched inputs remain non-passing; workflow execution stays unavailable.
 Export/validator success is not Pi parity or release approval.
 Assessment exits 1 (rejected) or 2 (blocked), with empty stderr.
 -assess cannot be combined with -pi-tarball, including an empty archive argument.
@@ -84,6 +90,9 @@ func run(args []string, output io.Writer) error {
 	observe := flags.Bool("observe-contract", false, "observe trusted selected source; not a sandbox")
 	piInputs := flags.Bool("observe-pi-inputs", false, "opt-in selected Pi input projection; requires -observe-contract")
 	piPackage := flags.Bool("observe-pi-package", false, "opt-in selected Pi archive binding; requires -observe-contract and -pi-tarball")
+	artifactInputs := flags.Bool("observe-artifact-inputs", false, "non-executing staged artifact admission")
+	bundle := flags.String("staging-bundle", "", "explicit local staging ZIP")
+	contextFile := flags.String("staging-context", "", "explicit reviewed staging context JSON")
 	coreSource := flags.String("core-source", "", "full core source commit ID")
 	piSource := flags.String("pi-source", "", "full Pi source commit ID")
 	if err := flags.Parse(args); err != nil {
@@ -96,8 +105,11 @@ func run(args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("positional arguments are not supported")
 	}
-	tarballProvided, sourceProvided := false, false
+	tarballProvided, sourceProvided, stagingProvided := false, false, false
 	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "staging-bundle" || option.Name == "staging-context" {
+			stagingProvided = true
+		}
 		if option.Name == "pi-tarball" {
 			tarballProvided = true
 		}
@@ -105,6 +117,12 @@ func run(args []string, output io.Writer) error {
 			sourceProvided = true
 		}
 	})
+	if stagingProvided && !*artifactInputs {
+		return errors.New("staging input flags require -observe-artifact-inputs")
+	}
+	if *artifactInputs && (*assess || *observe || *piInputs || *piPackage || tarballProvided) {
+		return errors.New("-observe-artifact-inputs cannot be combined with other observation modes, -assess or -pi-tarball")
+	}
 	if *piInputs && !*observe {
 		return errors.New("-observe-pi-inputs requires -observe-contract")
 	}
@@ -117,10 +135,10 @@ func run(args []string, output io.Writer) error {
 	if *piPackage && (!tarballProvided || *tarball == "") {
 		return errors.New("-observe-pi-package requires a non-empty -pi-tarball")
 	}
-	if sourceProvided && !*observe {
+	if sourceProvided && !*observe && !*artifactInputs {
 		return errors.New("source commit flags require -observe-contract")
 	}
-	if *observe && (!regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*coreSource) || !regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*piSource)) {
+	if (*observe || *artifactInputs) && (!regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*coreSource) || !regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*piSource)) {
 		return errors.New("core-source and pi-source must be full lowercase commit IDs")
 	}
 	if *assess && tarballProvided {
@@ -136,6 +154,9 @@ func run(args []string, output io.Writer) error {
 	piVersion, ok := refVersion(*piRef, "refs/tags/pi-v")
 	if !ok {
 		return errors.New("invalid pi-ref: expected refs/tags/pi-v<strict-semver>")
+	}
+	if *artifactInputs {
+		return observeArtifactInputs(*root, *coreRef, *piRef, version, piVersion, *coreSource, *piSource, *bundle, *contextFile, output)
 	}
 	if *observe {
 		archive := ""
