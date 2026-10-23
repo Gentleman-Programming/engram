@@ -203,7 +203,7 @@ Engram includes a terminal UI for browsing sessions, observations, prompts, proj
 
 ## Core resume compatibility
 
-`gentle-engram` 0.4.0 negotiates root session resume through `GET /health`:
+`gentle-engram` 0.5.1 negotiates root session resume through `GET /health`:
 `capabilities.root_session_resume: true` enables it; explicit false or malformed
 capability data disables it. When the capability is absent, a stable core version
 of **3.0.0 or newer** (optionally prefixed with `v`) is accepted. The tagged
