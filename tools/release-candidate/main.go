@@ -31,8 +31,9 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -observe-pi-inputs Also capture trusted selected Pi inputs and verify with selected Go.
 -observe-pi-package Bind -pi-tarball bytes to selected Pi source; requires observation.
 -observe-artifact-inputs Admit reviewed staging inputs only; never execute Core/Pi.
--staging-bundle Explicit local #1928 ZIP; requires -observe-artifact-inputs.
--staging-context Reviewed bounded JSON pins; requires -observe-artifact-inputs.
+-observe-artifact-workflows Execute reviewed owned Core lifecycle; Pi workflows unavailable.
+-staging-bundle Explicit local #1928 ZIP; requires an artifact observation mode.
+-staging-context Reviewed bounded JSON pins; requires an artifact observation mode.
 -core-source Full lowercase core commit ID for observation (40 or 64 hex digits).
 -pi-source Full lowercase Pi commit ID, independently selected.
 -h, --help Show this help.
@@ -91,6 +92,7 @@ func run(args []string, output io.Writer) error {
 	piInputs := flags.Bool("observe-pi-inputs", false, "opt-in selected Pi input projection; requires -observe-contract")
 	piPackage := flags.Bool("observe-pi-package", false, "opt-in selected Pi archive binding; requires -observe-contract and -pi-tarball")
 	artifactInputs := flags.Bool("observe-artifact-inputs", false, "non-executing staged artifact admission")
+	artifactWorkflows := flags.Bool("observe-artifact-workflows", false, "explicit trusted artifact execution; Node24 required")
 	bundle := flags.String("staging-bundle", "", "explicit local staging ZIP")
 	contextFile := flags.String("staging-context", "", "explicit reviewed staging context JSON")
 	coreSource := flags.String("core-source", "", "full core source commit ID")
@@ -117,10 +119,14 @@ func run(args []string, output io.Writer) error {
 			sourceProvided = true
 		}
 	})
-	if stagingProvided && !*artifactInputs {
+	artifactMode := *artifactInputs || *artifactWorkflows
+	if *artifactInputs && *artifactWorkflows {
+		return errors.New("artifact observation modes are mutually exclusive")
+	}
+	if stagingProvided && !artifactMode {
 		return errors.New("staging input flags require -observe-artifact-inputs")
 	}
-	if *artifactInputs && (*assess || *observe || *piInputs || *piPackage || tarballProvided) {
+	if artifactMode && (*assess || *observe || *piInputs || *piPackage || tarballProvided) {
 		return errors.New("-observe-artifact-inputs cannot be combined with other observation modes, -assess or -pi-tarball")
 	}
 	if *piInputs && !*observe {
@@ -135,10 +141,10 @@ func run(args []string, output io.Writer) error {
 	if *piPackage && (!tarballProvided || *tarball == "") {
 		return errors.New("-observe-pi-package requires a non-empty -pi-tarball")
 	}
-	if sourceProvided && !*observe && !*artifactInputs {
+	if sourceProvided && !*observe && !artifactMode {
 		return errors.New("source commit flags require -observe-contract")
 	}
-	if (*observe || *artifactInputs) && (!regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*coreSource) || !regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*piSource)) {
+	if (*observe || artifactMode) && (!regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*coreSource) || !regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(*piSource)) {
 		return errors.New("core-source and pi-source must be full lowercase commit IDs")
 	}
 	if *assess && tarballProvided {
@@ -155,8 +161,8 @@ func run(args []string, output io.Writer) error {
 	if !ok {
 		return errors.New("invalid pi-ref: expected refs/tags/pi-v<strict-semver>")
 	}
-	if *artifactInputs {
-		return observeArtifactInputs(*root, *coreRef, *piRef, version, piVersion, *coreSource, *piSource, *bundle, *contextFile, output)
+	if artifactMode {
+		return observeArtifactInputs(*root, *coreRef, *piRef, version, piVersion, *coreSource, *piSource, *bundle, *contextFile, *artifactWorkflows, output)
 	}
 	if *observe {
 		archive := ""
