@@ -140,6 +140,79 @@ func TestLocalImportReusesDecodedChunkAcrossRetryPasses(t *testing.T) {
 	}
 }
 
+func TestLocalImportStalledImportDoesNotReapplyCommittedChunks(t *testing.T) {
+	// Issue #1163 review finding: when apply fails on every attempt for one
+	// chunk, Import stalls and returns an error after the earlier chunks have
+	// committed. A later Import over the same manifest must skip the committed
+	// chunk entirely (no second apply, no duplicate session) and import the
+	// recovered chunk exactly once, reusing one decode per chunk per call.
+	resetSyncTestHooks(t)
+	s := newTestStore(t)
+	syncDir := t.TempDir()
+	const project = "proj-stall"
+	writeManifestFile(t, syncDir, &Manifest{Version: ownershipModeManifestVersion, Chunks: []ChunkEntry{
+		{ID: "chunk-flaky", CreatedAt: "2025-01-01T00:00:00Z"},
+		{ID: "chunk-steady", CreatedAt: "2025-01-01T00:00:01Z"},
+	}})
+	writeLocalChunkFile(t, syncDir, "chunk-flaky", reuseSessionChunk("sess-flaky", project))
+	writeLocalChunkFile(t, syncDir, "chunk-steady", reuseSessionChunk("sess-steady", project))
+
+	realApply := storeApplyPulledChunk
+	steadyDown := true
+	applyAttempts := map[string]int{}
+	applySuccesses := map[string]int{}
+	storeApplyPulledChunk = func(st *store.Store, targetKey, chunkID string, mutations []store.SyncMutation, cloud bool) error {
+		applyAttempts[chunkID]++
+		if steadyDown && chunkID == "chunk-steady" {
+			return errors.New("apply backend down for every attempt")
+		}
+		if err := realApply(st, targetKey, chunkID, mutations, cloud); err != nil {
+			return err
+		}
+		applySuccesses[chunkID]++
+		return nil
+	}
+
+	sy, counting := newReadCountingLocalSyncer(s, syncDir)
+	if _, err := sy.Import(); err == nil {
+		t.Fatalf("first import must fail while chunk-steady cannot apply on any attempt")
+	}
+	if _, err := s.GetSession("sess-flaky"); err != nil {
+		t.Fatalf("session committed before the stall must survive it: %v", err)
+	}
+	if _, err := s.GetSession("sess-steady"); err == nil {
+		t.Fatalf("session from the never-applied chunk must not exist before recovery")
+	}
+	if got := counting.readsFor("chunk-steady"); got != 1 {
+		t.Fatalf("steady chunk read %d times across the stalled import's retry passes, want 1 (one decode shared across passes)", got)
+	}
+
+	// Backend heals: the same wrapper keeps counting while steady now succeeds.
+	steadyDown = false
+	res, err := sy.Import()
+	if err != nil {
+		t.Fatalf("import after recovery: %v", err)
+	}
+	if res.ChunksImported != 1 || res.ChunksSkipped != 1 || res.SessionsImported != 1 {
+		t.Fatalf("unexpected recovery import result: %+v", res)
+	}
+	if applyAttempts["chunk-flaky"] != 1 {
+		t.Fatalf("committed chunk reapplied, apply attempts=%v, want chunk-flaky=1 from before the stall only", applyAttempts)
+	}
+	if applySuccesses["chunk-flaky"] != 1 || applySuccesses["chunk-steady"] != 1 {
+		t.Fatalf("expected each chunk applied successfully exactly once, successes=%v", applySuccesses)
+	}
+	if _, err := s.GetSession("sess-steady"); err != nil {
+		t.Fatalf("recovered session must import exactly once: %v", err)
+	}
+	if got, want := counting.readsFor("chunk-flaky"), 2; got != want {
+		t.Fatalf("committed chunk read %d times across two imports, want %d (one classification read per import)", got, want)
+	}
+	if got, want := counting.readsFor("chunk-steady"), 2; got != want {
+		t.Fatalf("recovered chunk read %d times across two imports, want %d (one decode per import call)", got, want)
+	}
+}
+
 func TestLocalImportKeepsScanningAlreadyKnownEntries(t *testing.T) {
 	// An intact known chunk is still read once for classification evidence; a
 	// missing or corrupt one is ignored and must not fail the new import.
