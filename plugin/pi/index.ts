@@ -1199,6 +1199,29 @@ function stopAbandonedChild(proc: ChildProcess | undefined): void {
   proc.unref();
 }
 
+// Gentle Shell's session scratch (extensions/session-scratch.ts) points the
+// session's TMPDIR/TMP/TEMP at a `gpXXXXXX` directory it removes when the
+// session ends, and a subagent's TMPDIR at a `gaXXXXXX` under it. A server
+// spawned detached from the Pi process outlives that session, and a temp
+// directory deleted under it breaks its SQLite temporary storage on Windows:
+// every write then fails with SQLITE_CANTOPEN (14) while reads stay healthy
+// (gentle-shell#2468). The detached serve spawn therefore drops the temp
+// variables named as a session scratch: without them the server resolves its
+// OS default temp, which nothing removes. Any other value — such as a temp the
+// user chose — is kept.
+const SESSION_SCRATCH_NAME = /^(?:gp|ga)[A-Za-z0-9]{6}$/;
+
+export function detachedServeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  // Opt into cloud autosync like the Claude Code and Codex launchers; the
+  // server skips it on its own when no cloud server or token is configured.
+  const result = { ...env, ENGRAM_CLOUD_AUTOSYNC: "1" };
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+    const value = result[key];
+    if (typeof value === "string" && SESSION_SCRATCH_NAME.test(basename(value))) delete result[key];
+  }
+  return result;
+}
+
 function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     let proc: ChildProcess | undefined;
@@ -1232,9 +1255,9 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 
     try {
       proc = spawn(ENGRAM_BIN, ["serve"], {
-        // Opt into cloud autosync like the Claude Code and Codex launchers; the
-        // server skips it on its own when no cloud server or token is configured.
-        env: { ...process.env, ENGRAM_CLOUD_AUTOSYNC: "1" },
+        // The detached server outlives the session: detachedServeEnv drops the
+        // session-scratch temp variables a deleted scratch would break (#2468).
+        env: detachedServeEnv(process.env),
         windowsHide: true,
         detached: true,
         stdio: "ignore",
