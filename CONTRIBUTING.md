@@ -697,6 +697,13 @@ verdict. Hosted full-unit, E2E, plugin and applicable platform results remain
 pending until GitHub runs them. Documentation-only changes can use proportional
 link/command-definition checks without executing unrelated suites.
 
+If the release-candidate `TestPiSourceEvidence` preservation guard fails, it logs
+sorted fixture-relative paths with add/delete/modify status and before/after
+SHA-256 hashes and byte sizes (`absent` for a missing file), then retains the
+original fatal assertion. It does not log file contents or absolute fixture roots.
+This failure-only diagnostic identifies the observed file delta, not its cause;
+synthetic formatter tests do not reproduce a Linux CI mutation.
+
 ### Conventional Commit Format
 
 ```
