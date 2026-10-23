@@ -19,6 +19,26 @@ func TestCodexShellIsolationPreflight(t *testing.T) {
 	f.run(t, "preflight", "", "unset")
 }
 
+func TestCodexShellTempEnvironment(t *testing.T) {
+	f := newCodexIntentFixture(t)
+	f.run(t, "preflight", "", "unset")
+	data, err := os.ReadFile(filepath.Join(f.root, "temp-environment"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(values) != 3 {
+		t.Fatalf("temporary environment=%q; want TMPDIR, TMP and TEMP", data)
+	}
+	if !strings.HasPrefix(values[0], "/") || !strings.HasSuffix(values[0], "/tmp") {
+		t.Fatalf("TMPDIR=%q; want the private POSIX temporary directory", values[0])
+	}
+	wantNative := filepath.ToSlash(filepath.Join(f.root, "tmp"))
+	if values[1] != wantNative || values[2] != wantNative {
+		t.Fatalf("TMP=%q TEMP=%q; want native private directory %q", values[1], values[2], wantNative)
+	}
+}
+
 func TestCodexShellNativeURLIntent(t *testing.T) {
 	for _, script := range []string{"session-start.sh", "post-compaction.sh"} {
 		for _, intent := range []string{"unset", "", " \t ", "http://127.0.0.1:19437"} {
@@ -227,7 +247,9 @@ for path in "$trusted_bash" "$cat" "$dirname" "$jq" "$chmod"; do
 done
 export HOME="$root/home" USERPROFILE="$root/home" APPDATA="$root/config" LOCALAPPDATA="$root/data"
 export XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" ENGRAM_DATA_DIR="$root/data" ENGRAM_CONFIG_DIR="$root/config"
-export CODEX_HOME="$root/config" CURL_HOME="$root/config" TMPDIR="$root/tmp" TMP="$root/tmp" TEMP="$root/tmp"
+export CODEX_HOME="$root/config" CURL_HOME="$root/config" TMPDIR="$root/tmp"
+# MSYS reads TMP/TEMP as native paths when mounting /tmp; TMPDIR stays POSIX.
+export TMP="$2/tmp" TEMP="$2/tmp"
 # Shebangs cannot contain installation paths with spaces; verify this alias.
 [ "$bash_alias" -ef "$trusted_bash" ] || exit 91
 export INTENT_MARKER="$root/native-url" INTENT_CALLS="$root/calls" INTENT_REJECTED="$root/rejected"
@@ -275,6 +297,7 @@ cwd_fs=$(convert "$INTENT_RAW_CWD")
 [ ! -f "$INTENT_RAW_CWD/.engram/manifest.json" ] || exit 98
 case "$1" in
  preflight)
+  printf '%s\n' "$TMPDIR" "$TMP" "$TEMP" > "$root/temp-environment"
   [ "$(engram instance-id)" = fixture-instance ] || exit 94
   [ "$(curl -sf http://127.0.0.1:19437/health --max-time 1)" = '{"instance_id":"fixture-instance"}' ] || exit 94
   result=$(ENGRAM_HOOK_OUTPUT=json engram hook codex-register < "$root/input.json")

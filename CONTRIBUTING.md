@@ -273,6 +273,10 @@ child stdout, stderr, exit codes, and bounded-wait outcomes in the job log and
 summary. It creates no directories, changes no tools or parent environment, and
 retains privileged Bash startup isolation. These observations are not a fix or a
 passing baseline; the complete Go suite and its assertions remain unchanged.
+Windows shell fixtures retain native path spelling in `TMP` and `TEMP` for MSYS's
+`/tmp` mount, while `TMPDIR` remains POSIX for shell commands. POSIX drive paths
+in `TMP`/`TEMP` can resolve to a different, nonexistent native directory. Fixtures
+do not create an installation-level `/tmp` directory.
 The test step log retains diagnostics
 and the process exit code; the final summary records success, failure, or skipped
 execution. Setup failure, cancellation, or timeout is not a passing baseline.
