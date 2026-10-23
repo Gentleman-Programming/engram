@@ -169,6 +169,10 @@ jobs:
           @("CODEX_TEST_TRUSTED_BASH=$bash", "CODEX_TEST_TRUSTED_JQ=$jq", "CODEX_TEST_TRUSTED_CURL=$curl") |
             Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Diagnose Git Bash temporary directory
+        shell: pwsh
+        run: ./.github/scripts/windows-bash-tmp-diagnostic.ps1
+
       - name: Record Windows baseline environment
         shell: pwsh
         run: |

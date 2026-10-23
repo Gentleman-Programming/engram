@@ -266,6 +266,13 @@ Git's `mingw64` layout. Local Windows fixture runs must also supply a reviewed
 absolute CURL executable through `CODEX_TEST_TRUSTED_CURL`.
 Neither local contract tests nor this declaration prove these paths exist on the
 hosted image (including native curl); a new hosted run remains necessary.
+Before the suite, a read-only Bash temporary-directory diagnostic compares private
+native-path, POSIX-path, and mixed-path child environments using the existing
+`RUNNER_TEMP` directory. It records `/tmp` resolution and directory checks plus
+child stdout, stderr, exit codes, and bounded-wait outcomes in the job log and
+summary. It creates no directories, changes no tools or parent environment, and
+retains privileged Bash startup isolation. These observations are not a fix or a
+passing baseline; the complete Go suite and its assertions remain unchanged.
 The test step log retains diagnostics
 and the process exit code; the final summary records success, failure, or skipped
 execution. Setup failure, cancellation, or timeout is not a passing baseline.

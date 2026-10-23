@@ -67,3 +67,19 @@ test('Windows evidence records checkout, toolchain, prerequisites, and actual te
   assert.match(job, /if: always\(\)/);
   assert.match(job, /GITHUB_STEP_SUMMARY/);
 });
+
+
+test('Windows Bash temp diagnostics are bounded, read-only, and precede the unchanged suite', () => {
+  const diagnosticStep = '      - name: Diagnose Git Bash temporary directory';
+  assert.ok(job.includes(diagnosticStep), 'missing read-only Bash temp diagnostic');
+  assert.match(job, /name: Diagnose Git Bash temporary directory\n\s+shell: pwsh\n\s+run: \.\/\.github\/scripts\/windows-bash-tmp-diagnostic\.ps1/);
+  assert.ok(job.indexOf('Select trusted Windows fixture tools') < job.indexOf(diagnosticStep));
+  assert.ok(job.indexOf(diagnosticStep) < job.indexOf('run: go test ./...'));
+  const diagnostic = readFileSync(new URL('./windows-bash-tmp-diagnostic.ps1', import.meta.url), 'utf8');
+  for (const required of ['RUNNER_TEMP', '.Environment.Clear()', "'--noprofile'", "'--norc'", "'-p'", 'native-bootstrap', 'posix-launcher', 'native-temp-posix-home', 'WaitForExit(10000)', '.Kill($true)', 'ReadToEndAsync()', 'exit_code', 'timed_out', 'stdout', 'stderr', 'tmp_native_path', 'Get-Item -LiteralPath', 'GITHUB_STEP_SUMMARY']) {
+    assert.ok(diagnostic.includes(required), `missing diagnostic invariant: ${required}`);
+  }
+  assert.doesNotMatch(diagnostic, /New-Item|CreateDirectory|mkdir|Set-Item|SetEnvironmentVariable|GITHUB_ENV|Invoke-WebRequest|choco |Set-Content|Add-Content|Remove-Item/);
+  assert.doesNotMatch(diagnostic, /\$env:[\w]+\s*=/);
+  assert.match(job, /id: suite\n\s+run: go test \.\/\.\.\./);
+});
