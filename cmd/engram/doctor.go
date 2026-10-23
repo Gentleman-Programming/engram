@@ -122,6 +122,7 @@ func cmdDoctor(cfg store.Config) {
 }
 
 func printDoctorUsage() {
+	fmt.Fprintln(os.Stdout, "note: project mismatch evidence includes local aliases; repair rereads aliases to veto contradictory moves.")
 	_, _ = fmt.Fprintln(os.Stdout, discardPromptUsage)
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
@@ -134,6 +135,7 @@ func printDoctorUsage() {
 }
 
 func printDoctorRepairUsage() {
+	fmt.Fprintln(os.Stdout, "note: project aliases veto contradictory reclassification; aliases never authorize historical moves.")
 	_, _ = fmt.Fprintln(os.Stdout, "usage: engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")

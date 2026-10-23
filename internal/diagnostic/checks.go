@@ -2,6 +2,7 @@ package diagnostic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -165,18 +166,40 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 		if !decision.shouldReportDirectoryMismatch() {
 			continue
 		}
+		aliases, err := sessionProjectAliases(scope, session.Directory)
+		if err != nil {
+			return CheckResult{}, err
+		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityWarning,
 			ReasonCode:           "session_project_directory_mismatch",
 			Message:              "Session project does not match the project inferred from its directory.",
 			Why:                  "Project/directory drift can cause agents to retrieve or save memories under the wrong project scope.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_project": session.Project, "directory": session.Directory, "directory_project": directoryProject.Project, "directory_project_source": directoryProject.Source, "directory_project_path": directoryProject.Path}),
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_project": session.Project, "directory": session.Directory, "directory_project": directoryProject.Project, "directory_project_source": directoryProject.Source, "directory_project_path": directoryProject.Path, "project_aliases": aliases}),
 			SafeNextStep:         "Review the session evidence and use explicit `--project`/MCP project overrides until the project naming is consolidated.",
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+// sessionProjectAliases uses the same root-only candidate as alias resolve.
+// Aliases are diagnostic evidence and a veto, never ownership authority.
+func sessionProjectAliases(scope Scope, directory string) (*store.ProjectAliasResolution, error) {
+	if strings.TrimSpace(directory) == "" {
+		return &store.ProjectAliasResolution{}, nil
+	}
+	candidate, err := projectpkg.DeriveRoutingCandidate(projectpkg.RoutingCandidateInput{GitRoot: projectpkg.ObserveGitRoot(directory), Directory: directory})
+	if err != nil {
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) {
+			return nil, err
+		}
+		// A legal filesystem root need not be a valid project key. It supplies
+		// no key alias evidence, but the exact cwd alias still applies.
+		candidate.Key = ""
+	}
+	return scope.Store.ResolveProjectAlias(candidate.Key, candidate.Directory)
 }
 
 func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject, directory string) (DetectedProject, bool) {
@@ -231,13 +254,17 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 		if !decision.shouldReportManualNameMismatch() {
 			continue
 		}
+		aliases, err := sessionProjectAliases(scope, session.Directory)
+		if err != nil {
+			return CheckResult{}, err
+		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityWarning,
 			ReasonCode:           "manual_session_name_project_mismatch",
 			Message:              "Manual session name suffix does not match sessions.project.",
 			Why:                  "Manual session naming drift cannot prove project ownership and must not be auto-rescued.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject}),
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject, "project_aliases": aliases}),
 			SafeNextStep:         "Review the persisted project, then use the ownership rescue command deliberately; its SQLite backup is the rollback point.",
 			RequiresConfirmation: true,
 		})

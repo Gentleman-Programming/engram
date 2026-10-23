@@ -218,6 +218,11 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 		return RepairPlan{}, fmt.Errorf("unsupported repair check %q", check)
 	}
 
+	if check == CheckSessionProjectDirectoryMismatch || check == CheckManualSessionNameProjectMismatch {
+		if err := vetoProjectAliasMoves(&plan, scope); err != nil {
+			return RepairPlan{}, err
+		}
+	}
 	dedupeAndSortRepairPlan(&plan)
 	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 && len(plan.PlaceholderSessions) == 0 && plan.OrphanedPendingRelations == nil {
 		plan.Status = "noop"
@@ -378,6 +383,33 @@ func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan,
 		plan.Counts.CorrectedMutationsPlanned = 1 + identity.Observations + identity.Prompts
 	}
 	return plan
+}
+
+// Re-read aliases and persisted directories even when the report predates an
+// alias change. This shared gate cannot create an action or select an owner.
+func vetoProjectAliasMoves(plan *RepairPlan, scope Scope) error {
+	sessions, err := scope.Store.ListDiagnosticSessions("")
+	if err != nil {
+		return err
+	}
+	directories := make(map[string]string, len(sessions))
+	for _, session := range sessions {
+		directories[session.ID] = session.Directory
+	}
+	actions := plan.Actions[:0]
+	for _, action := range plan.Actions {
+		aliases, err := sessionProjectAliases(scope, directories[action.SessionID])
+		if err != nil {
+			return err
+		}
+		if aliases.Conflict || ((aliases.KeyAlias != nil || aliases.CwdAlias != nil) && aliases.Project != action.ToProject) {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: action.SessionID, ReasonCode: "project_alias_contradicts_reclassification", Message: "Local project aliases conflict with this move; review alias evidence. Aliases never authorize historical reclassification."})
+			continue
+		}
+		actions = append(actions, action)
+	}
+	plan.Actions = actions
+	return nil
 }
 
 func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {
