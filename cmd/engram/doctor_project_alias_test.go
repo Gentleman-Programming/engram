@@ -110,7 +110,11 @@ func testDoctorProjectAliasPublic(t *testing.T, root string) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer s.Close()
+				defer func() {
+					if err := s.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
 				after, err := s.Export()
 				if err != nil {
 					t.Fatal(err)
