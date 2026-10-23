@@ -32,6 +32,15 @@ The [stable release gap audit](../.github/workflows/release-gap-audit.yml) runs 
 
 The Pi npm publish workflow also supports manual dispatch, but it only publishes when the selected GitHub ref is the full `refs/tags/pi-v<package version>` tag matching `plugin/pi/package.json`. Select that tag for a manual run: dispatching from a branch, even one named `pi-v<package version>`, fails the release preflight.
 
+## Module metadata before tagging
+
+The existing required **Unit Tests** job runs `go mod tidy -diff` with the same
+Go toolchain as the release workflow, before build checks on pull requests,
+merge groups and main pushes. Fix and commit any reported `go.mod`/`go.sum`
+drift through normal review; release packaging retains its own non-mutating
+check and never repairs tagged sources. This reuses the existing check/context,
+not a new required status or publication approval.
+
 ## Candidate-first publication and manual promotion
 
 Preparation is not publication authorization. The bounded artifact-staging work is tracked in

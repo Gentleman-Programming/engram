@@ -7,7 +7,7 @@ It addresses the distribution gap in #1921 without implementing the coordinator 
 
 | Component | Proposed version | Candidate requirement |
 | --- | --- | --- |
-| Engram core | `3.5.3` | Real `serve --session-owned` implementation and `engram-session-owned-v1` readiness; version remains injected by a future core tag/build. |
+| Engram core | `3.5.4` | Real `serve --session-owned` implementation and `engram-session-owned-v1` readiness; version remains injected by a future core tag/build. |
 | `gentle-engram` | `0.5.1` | Matching source metadata and actual owned-child client; installer pin `npm:gentle-engram@0.5.1`. |
 
 These independent version streams are deliberately not the lockstep policy proposed in #1349.
