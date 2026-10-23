@@ -250,7 +250,7 @@ func TestPRIssueReferenceContract(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var numbers []string
 			for _, match := range pattern.FindAllStringSubmatch(tt.body, -1) {
-				numbers = append(numbers, match[1])
+				numbers = append(numbers, match[3])
 			}
 			if diff := compareStringSlices(numbers, tt.want); diff != "" {
 				t.Fatal(diff)
@@ -331,7 +331,7 @@ func TestPRIssueReferenceApprovalOutcomes(t *testing.T) {
 		}
 		var failures []string
 		for _, match := range matches {
-			number := match[1]
+			number := match[3]
 			approved := false
 			for _, label := range labels[number] {
 				if label == "status:approved" {
