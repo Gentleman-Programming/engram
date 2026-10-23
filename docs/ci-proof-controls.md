@@ -190,40 +190,58 @@ neither active transport capability, native required-gate selection nor queue sa
 Focused checks: `node --test .github/scripts/issue-ci-proof-ci.test.mjs .github/scripts/issue-ci-proof-ci-workflow.test.mjs`.
 Controls remain OFF; CI, independent verification and fresh review remain required.
 
-## Authenticated configuration reader (#1810, dormant)
+## Fork PR configuration transport (#1810)
 
-`.github/scripts/issue-ci-proof-config.mjs` exports `readCIConfiguration`.
-This standalone reader is not wired into a workflow by this unit; normal CI,
-existing raw configuration, job permissions and bridge/core remain unchanged.
-The real `.github/ci-proof-controllers.json` contains `version: 1` and empty
-`controllerIds`: no controller is enrolled and tests are not hosted qualification.
+This alternative transports configuration without relying on fork `vars` visibility
+or variable refresh on rerun. It remains dormant: the versioned
+`.github/ci-proof-controllers.json` has `version: 1` and empty `controllerIds`.
+No real controller is enrolled; implementation/tests are not hosted qualification.
 
-Callers supply trusted `github`, CI runtime `identity`, `prNumber`, `issueNumber`,
-`caseName` and optional absolute `deadline`/clock/timer dependencies. Malformed
-identity, including a missing or non-string action, rejects before API requests.
-The reader fixes owner/repository/path internally and snapshots policy DATA from
-CURRENT canonical `main`, recording its blob/content hashes. Historical base or
-fork policy cannot authorize controllers. Roster removal affects later reads,
-not an already snapshotted hold, and is not automatic GitHub-role synchronization.
+Only a fork `pull_request` targeting canonical `main` may opt in with a reserved
+source branch `ci/proof-<issue>-<case>` via the standard runner `GITHUB_HEAD_REF`.
+Issue is a canonical positive decimal GraphQL Int (no leading zero); case is
+1–100 lowercase letters/digits/dots/underscores/hyphens, starting alphanumeric.
+The branch is untrusted routing, never authority. Malformed reserved routing,
+missing runtime identity or any nonempty raw variable (including explicit false)
+conflicts fail before helper import/API reads. Without this opt-in, existing raw
+configuration behavior and zero-import/API unset/false OFF remain unchanged.
+Merge groups and push events never activate this alternative.
 
-One fixed read-only GraphQL query observes the canonical issue's last 20 comments.
-Envelope fields are `schema: "ci-proof-config/v1"`, positive `prNumber`, and the
-enabled CI `manifest` described above. Case/issue, exact PR/head and selectors
-must match. Only a server `User.databaseId` in the policy with `lastEditedAt: null`
-may configure; JSON identity claims grant nothing. Bots, edited, unauthorized,
-unrelated and oversized bodies (over 8192 UTF-8 bytes) cannot select configuration.
-Exactly one matching candidate in the observed window is required; never choose
-newest-wins. This is not global uniqueness or replay prevention; window eviction
-is an availability limitation and an unedited observation cannot prevent editing.
+Executable bridge/core/config helpers are fetched only at the immutable event
+base, with exact byte SHA256 pins. Policy DATA is different: read the fixed
+controller file from current canonical `main` once and snapshot its bytes/hash.
+This avoids historical-base controller authority. Roster removal affects later
+reads, not an already snapshotted hold; it is not automatic GitHub-role revocation.
+Missing/corrupt sources fail selected Unit Tests; no candidate fallback exists.
+The bootstrap and configuration reads share a 15-second absolute preparation
+budget; requests are bounded, not retried, and checked again after responses.
+This budget does not shorten the existing hold deadline or extend its expiry.
 
-Requests share an absolute preparation budget capped at 15 seconds, with no
-retries, and acceptance is checked after responses and before returning. Active
-manifest deadline/read limits remain unchanged. Static errors are
-`proof-config: configuration|source|transport|expired`; no arbitrary body/error
-or producer value is logged. Returned `raw` is the manifest snapshot; `receipt`
-contains only `configuration-resolved`, controller ID and policy/configuration
-hashes, proving delivery only, not hold/release. Later edits/deletion/expiry never
-release a held snapshot. Read permissions and actual fork-token access still need
-separate hosted qualification; no experiment is authorized here.
+The same canonical issue supplies at most its last 20 comments. Envelope fields
+are `schema: "ci-proof-config/v1"`, positive `prNumber`, and the enabled CI
+`manifest` described above. Its case/issue, PR number, original head, mandatory
+selectors and any supplied optional filters must match the actual runtime.
+Only server `User.databaseId` in the policy snapshot with `lastEditedAt: null`
+may authorize a configuration. JSON identity claims grant nothing. Bots, edited,
+unauthorized, oversized (over 8192 UTF-8 bytes) and unrelated records cannot select
+configuration. Exactly one matching candidate in the observed window is required;
+this is neither whole-issue uniqueness nor a global replay guarantee. Never pick
+newest-wins; unrelated release/chat records are ignored. Window eviction remains
+an availability limitation. An unedited observation cannot prevent later editing.
 
-Run `node --test .github/scripts/issue-ci-proof-config.test.mjs`.
+The reader returns a snapshot of the existing manifest to the unchanged bridge.
+A separate `configuration-resolved` receipt exposes only controller ID and
+policy/configuration hashes; it proves delivery, not a checkpoint or release.
+The fresh full runtime nonce/witness authentication and five-minute ceiling remain
+unchanged. Later configuration edits/deletion/expiry never release a held snapshot.
+Explicit proof branches are experimental fixtures: missing/expired/ambiguous
+configuration fails future selected runs, not a green OFF. Normal branches do
+not look up policy/comments. No global variable is written or restored.
+
+Reader failures are static `proof-config: configuration|source|transport|expired`;
+the workflow redacts them to its existing `proof-ci: bootstrap`. No arbitrary
+body/error or producer result is logged. Existing job permissions, required
+contexts/App15368, original commands, native/legacy producers and queue stay intact.
+Run `node --test .github/scripts/issue-ci-proof-config.test.mjs .github/scripts/issue-ci-proof-ci-workflow.test.mjs`.
+Real fork-token API access and live hold/release still need separately authorized
+qualification; no comments, reruns or new experiment are authorized by these docs.
