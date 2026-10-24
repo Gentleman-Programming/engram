@@ -422,8 +422,8 @@ func TestCodexPromptStdinProbeRejectsInheritedInput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer reader.Close()
-			defer writer.Close()
+			defer func() { _ = reader.Close() }()
+			defer func() { _ = writer.Close() }()
 			if tc.input != "" {
 				if _, err := io.WriteString(writer, tc.input); err != nil {
 					t.Fatal(err)
