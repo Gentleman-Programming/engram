@@ -12,6 +12,63 @@ permissions:
   contents: read
 
 jobs:
+  govulncheck:
+    name: Go Vulnerability Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+      GOOS: linux
+      GOARCH: amd64
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+          cache: false
+      - name: Install pinned scanner
+        env:
+          GOBIN: ${{ runner.temp }}/ci-scanners
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+      - name: Scan Linux production packages
+        shell: bash
+        run: bash .github/scripts/ci-scanner.sh govulncheck "$RUNNER_TEMP/ci-scanners/govulncheck" -format=text -scan=symbol ./...
+
+  actionlint:
+    name: Workflow Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+          cache: false
+      - name: Install pinned validator
+        env:
+          GOBIN: ${{ runner.temp }}/ci-scanners
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Validate all workflow YAML
+        shell: bash
+        run: |
+          shopt -s nullglob
+          bash .github/scripts/ci-scanner.sh actionlint "$RUNNER_TEMP/ci-scanners/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml .github/workflows/*.yaml
+
   claude-jq16-compatibility:
     name: Claude jq 1.6 Compatibility
     runs-on: ubuntu-latest
@@ -89,6 +146,9 @@ jobs:
 
       - name: Run policy helper tests
         run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs
+
+      - name: Run scanner policy tests
+        run: node --test .github/scripts/ci-scanners.test.mjs
 
       - name: Run issue policy helper tests
         run: node --test .github/scripts/issue-*.test.mjs
