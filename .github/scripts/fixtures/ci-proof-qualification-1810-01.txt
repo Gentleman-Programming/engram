@@ -1,0 +1,6 @@
+Qualification case: 1810-01
+Canonical tracker: #1810
+Approved fixture issue: #2049
+Source base: 2a26104034f9d54d567ebf55a05cf3768f53262d
+Passive marker only; no runtime or workflow behavior changes.
+Retained experimental evidence; do not merge or clean up.
