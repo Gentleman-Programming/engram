@@ -649,11 +649,14 @@ func TestRemoveTopLevelTOMLKeyWhitespace(t *testing.T) {
 				preserved := key + "_extra = \"keep\"\nother = \"keep\"\n[profile]\n" + key + "\t= \"table value\"\n"
 				input := "\ufeff" + key + whitespace + "= \"legacy\"\n" + preserved
 				want := "\ufeff" + preserved
-				got := removeTopLevelTOMLKey(input, key)
+				got, err := removeTopLevelTOMLKey(input, key)
+				if err != nil {
+					t.Fatal(err)
+				}
 				if got != want {
 					t.Fatalf("got %q, want %q", got, want)
 				}
-				if again := removeTopLevelTOMLKey(got, key); again != got {
+				if again, err := removeTopLevelTOMLKey(got, key); err != nil || again != got {
 					t.Fatalf("not idempotent: %q", again)
 				}
 			})
@@ -3305,7 +3308,10 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			"command = \"other\"",
 		}, "\n")
 
-		output := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
+		output, err := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if strings.Count(output, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected one engram block, got:\n%s", output)
 		}
@@ -3316,7 +3322,10 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 
 	t.Run("upsertCodexEngramBlock from empty content", func(t *testing.T) {
 		resetSetupSeams(t)
-		output := upsertCodexEngramBlock("\n\n", "engram")
+		output, err := upsertCodexEngramBlock("\n\n", "engram")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if output != codexEngramBlock+"\n" {
 			t.Fatalf("unexpected output for empty content:\n%s", output)
 		}
