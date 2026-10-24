@@ -24,7 +24,7 @@ for (const scenario of [
   { name: 'preserves rejection of an unapproved assigned issue', body: 'Resolves #3', issues: { 3: issue('Waiting', []) }, errors: [missingApproval(3, 'Waiting')], fetched: [3] },
   { name: 'fails closed on API errors and still checks remaining issues', body: 'Closes #4, fixes #1', issues: { 1: issue('Ready') }, failAt: 4, errors: ['issue #4: could not be fetched (API unavailable)'], fetched: [4, 1] },
   { name: 'checks every linked issue and accumulates failures', body: 'Closes #5, fixes #6, resolves #7', issues: { 5: issue('Waiting', [], []), 6: issue('Ready', undefined, []), 7: issue('Done') }, errors: [missingApproval(5, 'Waiting'), missingOwner(5, 'Waiting'), missingOwner(6, 'Ready')], fetched: [5, 6, 7] },
-  { name: 'preserves rejection of a missing closing reference', body: '', issues: {}, errors: ['no closing issue reference found'], fetched: [] },
+  { name: 'preserves rejection of a missing closing reference', body: '', issues: {}, errors: ['no issue reference found'], fetched: [] },
   { name: 'does not grandfather an older PR with an unassigned issue', body: 'Closes #2', createdAt: '2020-01-01T00:00:00Z', issues: { 2: issue('Ready', undefined, []) }, errors: [missingOwner(2, 'Ready')], fetched: [2] },
 ]) test(scenario.name, async () => {
   const calls = [];

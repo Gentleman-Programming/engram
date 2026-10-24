@@ -11,9 +11,9 @@
 
 ## 🔗 Linked Issue
 
-<!-- REQUIRED: Replace the # below with the issue number. -->
-<!-- Automated check: "Check Issue Reference" verifies this exists. -->
-<!-- Automated check: "Check Issue Has status:approved" verifies the issue is approved. -->
+<!-- REQUIRED: Replace the # below with an approved issue number. -->
+<!-- Use Closes/Fixes/Resolves when this PR completes the issue; use Refs for a partial PR that must not close it. -->
+<!-- Automated checks require each referenced issue to be approved and assigned. -->
 
 Closes #
 
@@ -73,8 +73,8 @@ After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applica
 
 | Check | What it verifies | Status |
 |-------|-----------------|--------|
-| **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
-| **Check Issue Has status:approved** | Every linked issue is approved and assigned | ⏳ |
+| **Check Issue Reference** | PR body contains `Closes/Fixes/Resolves #N` (closing) or `Refs #N` (non-closing) | ⏳ |
+| **Check Issue Has status:approved** | Every referenced issue is approved and assigned | ⏳ |
 | **Check PR Has type:* Label** | Canonical labels, applicability, and cardinality | ⏳ |
 | **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
@@ -88,7 +88,7 @@ After pushing/opening the PR, GitHub CI runs the broad unit/E2E/lint and applica
 
 ## ✅ Contributor Checklist
 
-- [ ] I linked an approved issue above (`Closes #N`)
+- [ ] I linked an approved, assigned issue above with closing keywords or non-closing `Refs #N` as appropriate
 - [ ] I added exactly **one** `type:*` label to this PR
 - [ ] I recorded actual focused regression and affected package test commands/outcomes for behavior changes, or N/A for docs-only changes
 - [ ] I recorded additional applicable local checks for an unpushed/no-PR or high-risk change, and identified any missing CI evidence
