@@ -97,7 +97,7 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage             = "npm:gentle-engram@0.5.0"
+	piGentleEngramPackage             = "npm:gentle-engram@0.5.1"
 	piLegacyGentleEngramPackage       = "npm:gentle-engram@0.1.8"
 	piPreviousGentleEngramPackage     = "npm:gentle-engram@0.1.11"
 	piPriorGentleEngramPackage        = "npm:gentle-engram@0.1.12"
@@ -402,7 +402,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage, "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1", "npm:gentle-engram@0.4.2":
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage, "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1", "npm:gentle-engram@0.4.2", "npm:gentle-engram@0.5.0":
 				changed = true
 				continue
 			case piGentleEngramPackage:
@@ -1747,7 +1747,16 @@ func injectCodexMCP(configPath, command string) error {
 	}
 
 	bom, content := splitCodexBOM(string(data))
-	updated := upsertCodexEngramBlock(content, command)
+	for _, key := range []string{"model_instructions_file", "experimental_compact_prompt_file"} {
+		content, err = removeTopLevelTOMLKey(content, key)
+		if err != nil {
+			return fmt.Errorf("prepare Codex config: %w", err)
+		}
+	}
+	updated, err := upsertCodexEngramBlock(content, command)
+	if err != nil {
+		return fmt.Errorf("prepare Codex config: %w", err)
+	}
 	updated = upsertCodexWindowsHookMarker(updated, command, runtimeGOOS == "windows")
 	updated = bom + updated
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
@@ -1799,9 +1808,15 @@ func injectCodexMemoryConfig(configPath string) error {
 	}
 
 	bom, content := splitCodexBOM(string(data))
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	content = removeTopLevelTOMLKey(content, "model_instructions_file")
-	content = removeTopLevelTOMLKey(content, "experimental_compact_prompt_file")
+	for _, key := range []string{"model_instructions_file", "experimental_compact_prompt_file"} {
+		content, err = removeTopLevelTOMLKey(content, key)
+		if err != nil {
+			return fmt.Errorf("prepare Codex config: %w", err)
+		}
+	}
+	if data != nil && bom+content == string(data) {
+		return nil
+	}
 
 	if err := writeFileFn(configPath, []byte(bom+content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
@@ -1818,48 +1833,19 @@ func splitCodexBOM(content string) (string, string) {
 	return "", content
 }
 
-func upsertCodexEngramBlock(content, command string) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(content, "\n")
-
-	var kept []string
-	for i := 0; i < len(lines); {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "[mcp_servers.engram]" {
-			i++
-			for i < len(lines) {
-				next := strings.TrimSpace(lines[i])
-				if strings.HasPrefix(next, "[") && strings.HasSuffix(next, "]") {
-					break
-				}
-				i++
-			}
-			continue
-		}
-
-		kept = append(kept, lines[i])
-		i++
-	}
-
-	base := strings.TrimSpace(strings.Join(kept, "\n"))
-	block := codexEngramBlockStr(command)
-	if base == "" {
-		return block + "\n"
-	}
-
-	return base + "\n\n" + block + "\n"
-}
-
 // upsertCodexWindowsHookMarker replaces setup-owned markers only while they
 // are the first physical lines in the file. Later lookalikes are opaque TOML or
 // user content: the Windows hook reads only line 1 and must ignore them.
 func upsertCodexWindowsHookMarker(content, command string, enabled bool) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(content, "\n")
-	for len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
-		lines = lines[1:]
+	eol := codexLineEnding(content)
+	body := content
+	for strings.HasPrefix(body, windowsHookCommandMarkerPrefix) {
+		if i := strings.IndexByte(body, '\n'); i >= 0 {
+			body = body[i+1:]
+		} else {
+			body = ""
+		}
 	}
-	body := strings.Join(lines, "\n")
 
 	if !enabled {
 		return body
@@ -1873,34 +1859,9 @@ func upsertCodexWindowsHookMarker(content, command string, enabled bool) string 
 	}
 	marker := windowsHookCommandMarkerPrefix + string(encodedCommand)
 	if body == "" {
-		return marker + "\n"
+		return marker + eol
 	}
-	return marker + "\n" + body
-}
-
-// removeTopLevelTOMLKey drops any `key = ...` assignment line from the content.
-// Match the exact unquoted key with TOML space/tab whitespace before '='.
-// Preserve prefix keys, table entries, and a leading BOM.
-func removeTopLevelTOMLKey(content, key string) string {
-	bom := ""
-	if strings.HasPrefix(content, "\ufeff") {
-		bom, content = "\ufeff", strings.TrimPrefix(content, "\ufeff")
-	}
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(content, "\n")
-	kept := make([]string, 0, len(lines))
-	inTable := false
-	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "[") {
-			inTable = true
-		}
-		if !inTable && strings.HasPrefix(trimmed, key) && strings.HasPrefix(strings.TrimLeft(strings.TrimPrefix(trimmed, key), " \t"), "=") {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return bom + strings.Join(kept, "\n")
+	return marker + eol + body
 }
 
 // ─── Platform paths ──────────────────────────────────────────────────────────

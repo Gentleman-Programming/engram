@@ -763,6 +763,15 @@ func main() {
 		}
 	}
 
+	// Reject unsupported export limits before any startup side effects.
+	if os.Args[1] == "obsidian-export" {
+		if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			exitFunc(1)
+			return
+		}
+	}
+
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
 	}
@@ -2546,12 +2555,36 @@ func (a *storeAdapter) Stats() *store.Stats {
 	return st
 }
 
+// validateObsidianExportLimit follows the command's value consumption and stops
+// at unknown flags so preflight does not reorder existing parser errors.
+func validateObsidianExportLimit(args []string) error {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--limit" || strings.HasPrefix(args[i], "--limit=") {
+			return errors.New("--limit is not supported by obsidian-export; omit it to export all matching observations")
+		}
+		switch args[i] {
+		case "--vault", "--project", "--since", "--graph-config", "--interval":
+			if i+1 < len(args) {
+				i++
+			}
+		case "--all", "--force", "--watch":
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func cmdObsidianExport(cfg store.Config) {
+	if err := validateObsidianExportLimit(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		exitFunc(1)
+		return
+	}
 	// Parse flags
 	var (
 		vault       string
 		project     string
-		limit       int
 		since       string
 		force       bool
 		graphConfig string
@@ -2574,13 +2607,6 @@ func cmdObsidianExport(cfg store.Config) {
 			}
 		case "--all":
 			allProjects = true
-		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
-					limit = n
-				}
-				i++
-			}
 		case "--since":
 			if i+1 < len(os.Args) {
 				since = os.Args[i+1]
@@ -2650,7 +2676,6 @@ func cmdObsidianExport(cfg store.Config) {
 	exportCfg := obsidian.ExportConfig{
 		VaultPath:   vault,
 		Project:     project,
-		Limit:       limit,
 		Force:       force,
 		GraphConfig: graphMode,
 	}
@@ -3969,7 +3994,7 @@ Commands:
                        --vault         Path to Obsidian vault root (required)
                         --project       Filter export to a single project (optional; cannot combine with --all)
                         --all           Export every project
-                       --limit         Cap exported observations at N (optional)
+                       --limit         Unsupported; rejected to protect complete reconciliation
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)
                        --graph-config  Graph layout mode: preserve|force|skip (default: preserve)

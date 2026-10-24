@@ -219,12 +219,21 @@ engram-beta obsidian-export --vault <path> [flags]
 | `--vault <path>` | ✅ | — | Path to your Obsidian vault root. The exporter writes inside `{vault}/engram/` only. |
 | `--project <name>` | No | current project | Export only observations from this known project. |
 | `--all` | No | false | Explicitly export observations from every project. |
-| `--limit <n>` | No | 0 (no limit) | Maximum observations per source query. |
+| `--limit` | Unsupported | — | Rejected with exit code 1; omit it to export all matching observations. |
 | `--since <date>` | No | (state file) | Export only observations updated after this date. Format: RFC3339 (`2026-04-06T14:30:00Z`) or `YYYY-MM-DD`. |
 | `--force` | No | false | Re-export everything, ignoring the incremental state file. |
 | `--graph-config <mode>` | No | `preserve` | Bootstrap the Obsidian graph view config. See [Graph Config](#graph-config) below. |
 | `--watch` | No | false | Run as a daemon — exports on a fixed interval until interrupted. |
 | `--interval <duration>` | No | `10m` | Sync interval for `--watch` mode. Go duration format (`30s`, `5m`, `1h`). Minimum: `1m`. |
+
+`--limit` was previously accepted but never applied. Every explicit use now fails
+with `error: --limit is not supported by obsidian-export; omit it to export all matching observations`
+before startup update checks, configuration resolution, SQLite temporary-directory
+preparation, or database migration, including in watch mode. No store or vault is
+opened for a rejected limit. Exports without this flag remain unlimited within the
+selected project/date filters.
+Truncating reconciliation reads would risk treating unexported notes as deleted;
+a safe capped export is not implemented.
 
 ### Examples
 

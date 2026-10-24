@@ -514,6 +514,14 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     function stopAbandonedChild(proc) {
       ${extractFunctionBody("stopAbandonedChild", "{\n  if (proc === undefined) return;")}
     }
+    function basename(path) {
+      const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\\\"));
+      return index === -1 ? path : path.slice(index + 1);
+    }
+    const SESSION_SCRATCH_NAME = /^(?:gp|ga)[A-Za-z0-9]{6}$/;
+    function detachedServeEnv(env) {
+      ${extractFunctionBody("detachedServeEnv", "{\n  // Opt into cloud autosync")}
+    }
     function spawnAndWaitForEngram(deadline, expectedID = "") {
       ${spawnBody}
     }
@@ -2450,4 +2458,13 @@ test("concurrent owned startups share one in-flight start so no child is orphane
   assert.equal(starts, 2, "a finished start does not block a later restart");
   release();
   await restart;
+});
+
+test("the detached serve spawn does not hand the session scratch temp to the server", () => {
+  const start = source.indexOf('proc = spawn(ENGRAM_BIN, ["serve"]');
+  assert.notEqual(start, -1, "detached serve spawn not found");
+  const call = source.slice(start, source.indexOf("});", start));
+  assert.match(call, /env: detachedServeEnv\(process\.env\)/);
+  assert.doesNotMatch(call, /\.\.\.process\.env/);
+  assert.match(source, /const SESSION_SCRATCH_NAME = \/\^\(\?:gp\|ga\)\[A-Za-z0-9\]\{6\}\$\//);
 });

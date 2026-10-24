@@ -560,6 +560,8 @@ FORMAT for content — use this structured format:
   **Where**: [files/paths affected, e.g. src/auth/middleware.ts, internal/store/store.go]
   **Learned**: [any gotchas, edge cases, or decisions made — omit if none]
 
+If candidate_detection_status is incomplete, the observation was saved but conflict detection failed or only partially persisted. Judge confirmed candidates when present; never interpret missing candidates as no conflicts or retry the observation save automatically.
+
 TITLE should be short and searchable, like: "JWT auth middleware", "FTS5 query sanitization", "Fixed N+1 in user list"
 
 Examples:
@@ -1699,7 +1701,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 
 		// Post-transaction conflict candidate detection (REQ-001).
-		// Errors are logged and swallowed — detection failure never fails the save.
+		// Detection failure does not fail the committed save, but must remain visible.
 		extra := map[string]any{"truncation": truncation}
 		// Build CandidateOptions, forwarding any MCPConfig overrides.
 		// nil fields mean "use store defaults"; explicit pointer values override.
@@ -1717,8 +1719,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		candidates, candErr := s.FindCandidates(savedID, candOpts)
 		if candErr != nil {
-			// Log only — do not fail the save.
 			fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+			extra["candidate_detection_status"] = "incomplete"
+			msg += "\nCONFLICT DETECTION INCOMPLETE — observation saved; pending relations may be partially persisted. Returned candidates include only confirmed pending judgments."
 		}
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
@@ -1754,7 +1757,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			extra["candidates"] = candList
 
 			msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
-		} else {
+		} else if candErr == nil {
 			extra["judgment_required"] = false
 		}
 

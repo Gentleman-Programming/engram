@@ -649,11 +649,14 @@ func TestRemoveTopLevelTOMLKeyWhitespace(t *testing.T) {
 				preserved := key + "_extra = \"keep\"\nother = \"keep\"\n[profile]\n" + key + "\t= \"table value\"\n"
 				input := "\ufeff" + key + whitespace + "= \"legacy\"\n" + preserved
 				want := "\ufeff" + preserved
-				got := removeTopLevelTOMLKey(input, key)
+				got, err := removeTopLevelTOMLKey(input, key)
+				if err != nil {
+					t.Fatal(err)
+				}
 				if got != want {
 					t.Fatalf("got %q, want %q", got, want)
 				}
-				if again := removeTopLevelTOMLKey(got, key); again != got {
+				if again, err := removeTopLevelTOMLKey(got, key); err != nil || again != got {
 					t.Fatalf("not idempotent: %q", again)
 				}
 			})
@@ -816,7 +819,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	}
 	// Pi >= 0.99.0 ships built-in MCP and an installed pi-mcp-adapter replaces it,
 	// so setup must never install the adapter.
-	wantCommands := []string{"pi install npm:gentle-engram@0.5.0"}
+	wantCommands := []string{"pi install npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -831,7 +834,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	if want := []string{"npm:gentle-engram@0.5.0"}; !reflect.DeepEqual(settings.Packages, want) {
+	if want := []string{"npm:gentle-engram@0.5.1"}; !reflect.DeepEqual(settings.Packages, want) {
 		t.Fatalf("expected fresh settings packages %#v without pi-mcp-adapter, got %#v", want, settings.Packages)
 	}
 
@@ -885,7 +888,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings after install: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.5.0"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("expected settings packages to preserve unrelated entries and migrate legacy pins: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -982,7 +985,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatalf("parse migrated settings: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.5.0"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("unexpected migrated packages: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -999,7 +1002,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 func TestEnsurePiPackageSettingsDoesNotAddMCPAdapter(t *testing.T) {
 	resetSetupSeams(t)
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.5.0"]}`), 0644); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.5.1"]}`), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 	original, err := os.ReadFile(settingsPath)
@@ -1029,7 +1032,7 @@ func TestInstallPiCommandFailure(t *testing.T) {
 		return []byte("boom"), errors.New("exit 1")
 	}
 	_, err := Install("pi")
-	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.5.0") {
+	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.5.1") {
 		t.Fatalf("expected pi install error, got %v", err)
 	}
 }
@@ -3305,7 +3308,10 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			"command = \"other\"",
 		}, "\n")
 
-		output := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
+		output, err := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if strings.Count(output, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected one engram block, got:\n%s", output)
 		}
@@ -3316,7 +3322,10 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 
 	t.Run("upsertCodexEngramBlock from empty content", func(t *testing.T) {
 		resetSetupSeams(t)
-		output := upsertCodexEngramBlock("\n\n", "engram")
+		output, err := upsertCodexEngramBlock("\n\n", "engram")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if output != codexEngramBlock+"\n" {
 			t.Fatalf("unexpected output for empty content:\n%s", output)
 		}

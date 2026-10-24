@@ -1313,6 +1313,7 @@ func TestCmdSyncStatusExportAndImport(t *testing.T) {
 }
 
 func TestCmdSyncDefaultProjectNoData(t *testing.T) {
+	t.Setenv(project.EnvProjectOverride, "")
 	fixtureParent := t.TempDir()
 	t.Setenv("GIT_CEILING_DIRECTORIES", fixtureParent)
 	workDir := filepath.Join(fixtureParent, "repo-name")
@@ -3189,7 +3190,7 @@ func TestObsidianExportMissingVault(t *testing.T) {
 
 // TestObsidianExportCallsInjectedExporter verifies that when --vault is provided,
 // the injected newObsidianExporter is called with the correct config
-// (REQ-EXPORT-01: happy path with all flags).
+// (REQ-EXPORT-01: happy path with supported flags).
 func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	cfg := testConfig(t)
 	vaultDir := t.TempDir()
@@ -3210,7 +3211,6 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	withArgs(t, "engram", "obsidian-export",
 		"--vault", vaultDir,
 		"--project", "eng",
-		"--limit", "50",
 		"--since", "2026-01-01",
 	)
 
@@ -3225,8 +3225,8 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	if capturedCfg.Project != "eng" {
 		t.Fatalf("expected Project=%q, got %q", "eng", capturedCfg.Project)
 	}
-	if capturedCfg.Limit != 50 {
-		t.Fatalf("expected Limit=50, got %d", capturedCfg.Limit)
+	if capturedCfg.Limit != 0 {
+		t.Fatalf("expected unlimited export (Limit=0), got %d", capturedCfg.Limit)
 	}
 	if capturedCfg.Since.IsZero() {
 		t.Fatalf("expected Since to be set from --since 2026-01-01, got zero")

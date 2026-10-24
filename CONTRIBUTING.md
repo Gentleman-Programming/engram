@@ -137,7 +137,7 @@ The active required contexts run automatically on every PR and merge queue group
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | Every linked issue has `status:approved` and at least one assignee |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
-| **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
+| **Unit Tests** | First runs non-mutating `go mod tidy -diff` with the release Go toolchain on PRs, merge groups and main pushes; runs `go test ./...` (except `//go:build e2e`) and `make deadcode-check` |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
 | **Plugin Tests** | The Pi plugin test suite runs from a clean checkout |
 
@@ -703,6 +703,24 @@ SHA-256 hashes and byte sizes (`absent` for a missing file), then retains the
 original fatal assertion. It does not log file contents or absolute fixture roots.
 This failure-only diagnostic identifies the observed file delta, not its cause;
 synthetic formatter tests do not reproduce a Linux CI mutation.
+
+### Claude jq 1.6 response compatibility
+
+The Linux **Claude jq 1.6 Compatibility** job verifies the SHA-256 and version of
+an official jq 1.6 binary in runner-temporary storage, then runs only the HTTP
+response-validation cases and the selector's wrong-version regression. It does
+not replace the system jq or change native Windows coverage.
+
+To select a real jq 1.6 delegate locally on POSIX systems:
+
+```bash
+ENGRAM_TEST_JQ16=/absolute/path/to/jq-1.6 go test ./plugin -run '^(TestClaudeHookResponseValidation|TestClaudeJQ16SelectorRejectsWrongVersion)$' -count=1 -v -timeout=120s
+```
+
+A nonempty selector must be an absolute executable path reporting `jq-1.6`;
+missing or wrong-version delegates fail rather than skip. When unset, the wrapper
+still delegates to `/usr/bin/jq` and emulates only jq 1.6's empty-input `-e`
+behavior, not full jq 1.6 compatibility. The POSIX wrapper still skips on Windows.
 
 ### Conventional Commit Format
 

@@ -2025,7 +2025,7 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 		t.Fatalf("expected needs_review state, got %v", entry["state"])
 	}
 
-	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=engram", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
 	markReq.Header.Set("Content-Type", "application/json")
 	markRec := httptest.NewRecorder()
 	h.ServeHTTP(markRec, markReq)
@@ -2090,7 +2090,7 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 		t.Fatalf("backdate review_after: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=engram", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

@@ -22,7 +22,7 @@ func TestInstallPiMigratesPublishedSessionOwnedPredecessor(t *testing.T) {
 		return nil, nil
 	}
 	settingsPath := filepath.Join(agentDir, "settings.json")
-	original := `{"packages":["npm:existing","npm:gentle-engram@0.4.2","./local-engram",{"source":"./custom-engram","autoUpdate":false},"npm:gentle-engram@9.9.9","npm:gentle-engram@0.4.2"],"theme":"dark","npmCommand":["custom-npm"],"custom":{"keep":true}}`
+	original := `{"packages":["npm:existing","npm:gentle-engram@0.5.0","./local-engram",{"source":"./custom-engram","autoUpdate":false},"npm:gentle-engram@9.9.9","npm:gentle-engram@0.4.2"],"theme":"dark","npmCommand":["custom-npm"],"custom":{"keep":true}}`
 	if err := os.WriteFile(settingsPath, []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestInstallPiMigratesPublishedSessionOwnedPredecessor(t *testing.T) {
 	if err := json.Unmarshal(after, &got); err != nil {
 		t.Fatal(err)
 	}
-	expected := `{"packages":["npm:existing","./local-engram",{"source":"./custom-engram","autoUpdate":false},"npm:gentle-engram@9.9.9","npm:gentle-engram@0.5.0"],"theme":"dark","npmCommand":["custom-npm"],"custom":{"keep":true}}`
+	expected := `{"packages":["npm:existing","./local-engram",{"source":"./custom-engram","autoUpdate":false},"npm:gentle-engram@9.9.9","npm:gentle-engram@0.5.1"],"theme":"dark","npmCommand":["custom-npm"],"custom":{"keep":true}}`
 	if err := json.Unmarshal([]byte(expected), &want); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestInstallPiMigratesPublishedSessionOwnedPredecessor(t *testing.T) {
 	if err != nil || !bytes.Equal(mcp, mcpAfter) {
 		t.Errorf("unrelated MCP config changed: %s, %v", mcpAfter, err)
 	}
-	wantCommands := []string{"pi install npm:gentle-engram@0.5.0", "pi install npm:gentle-engram@0.5.0"}
+	wantCommands := []string{"pi install npm:gentle-engram@0.5.1", "pi install npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Errorf("commands = %#v; want %#v", commands, wantCommands)
 	}

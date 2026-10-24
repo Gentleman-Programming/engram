@@ -27,6 +27,21 @@ filename, TEMP location or Win32 error, distinguish permission from resource
 failures, or establish the unexplained cause of #1937. That issue remains open;
 this diagnostic scope is tracked separately in #2025.
 
+## Project alias evidence and repair veto
+
+Directory and manual-name mismatch findings include `project_aliases` evidence.
+Doctor resolves the exact session cwd and the actual Git-root candidate key,
+not the remote label or private project binding (see [aliases](PROJECT-ALIASES.md)).
+An unavailable or invalid root key supplies no key-alias evidence; the exact cwd
+alias is still inspected. Such a root does not invalidate independent repair evidence.
+Repair planning reads aliases afresh: conflicting key/cwd aliases or an alias
+pointing away from the proposed target produce a
+`project_alias_contradicts_reclassification` skip. With no remaining actions,
+even `--apply` is a nonmutating `noop`. Thus `"from_project": "my-name",` /
+`"to_project": "upstream-name",` is not proposed when a relevant alias contradicts it.
+Aliases never establish historical ownership or authorize moves; agreeing aliases
+only leave an independently supported repair eligible. No-alias behavior is unchanged.
+
 ## Automatic repair backup privacy
 
 On Unix, automatic SQLite repair snapshots under `<ENGRAM_DATA_DIR>/backups/` are reserved with mode `0600` before SQLite writes to them. New backup directories are created with mode `0700`. Reservation or close errors stop the backup before repair proceeds. Windows access remains governed by inherited ACLs.

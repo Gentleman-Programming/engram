@@ -57,12 +57,17 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #1891 PerfRatchet observations add only owned-file controls; suite/assertions stay unchanged.
   // #1891 adds a step-scoped observational Codex trace; the unfiltered suite still fails normally.
   // CI retains main's selected-proof bootstrap plus #2043's mandatory selected-Pi source test.
+  // #1810 adds the dormant authenticated fork configuration path; other guards stay exact.
+  // #2068 adds only the existing non-mutating tidy check to required Unit Tests after Go setup.
+  // #2071 adds an isolated, read-only jq 1.6 compatibility job; existing CI jobs stay exact.
+  // #1891's pinned-main integration retains that job, tidy check and fork-proof bootstrap
+  // together with the feature parent's exact observational Windows job and contract step.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': '1991e85ff361ec4b22802899ab7a1078e871e476b2e32264887edf54772ced23',
+    '.github/workflows/ci.yml': '220de72220284cd6ac133a823d3521e120c3504f19a93e966cdbf3e23502e995',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

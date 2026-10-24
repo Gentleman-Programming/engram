@@ -790,6 +790,14 @@ Response:
 
 Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--help`, and `-h`. `engram tui` performs its single update check from inside the TUI. Set `ENGRAM_NO_UPDATE_CHECK=1` to disable every update check, including the TUI check.
 
+Only plain release versions (`X.Y.Z`, optionally prefixed with `v`) are compared.
+Development labels such as `main`, Go pseudo-versions, prereleases, and build
+metadata are not comparable: the check reports that the current version does not
+map to a plain release version, without contacting GitHub or recommending an
+update. Invalid release tags returned by GitHub also produce a check failure,
+not an update notice. The existing `dev` and unknown-version diagnostics remain
+unchanged.
+
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_MEM_SAVE_TIMING`        | Set to exactly `1` in the MCP server environment to log one privacy-safe stage timing record per `mem_save` invocation to stderr. See [mem_save timing diagnostics](#mem_save-timing-diagnostics). | (unset — disabled) |
@@ -1422,6 +1430,8 @@ Save structured observations. The tool description teaches agents the format:
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count` and attributing it to the latest writer session.
 Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle. Content is redacted before the configured storage limit is applied; that limit and truncation metadata (`original_bytes`, `limit_bytes`) are UTF-8 bytes. MCP save/update responses include `truncated`, and warn when truncation occurs.
+
+MCP `mem_save` runs conflict candidate detection after saving the observation. If detection or pending-relation persistence fails, the save still succeeds and returns `candidate_detection_status: "incomplete"` with a `CONFLICT DETECTION INCOMPLETE` warning. Any returned `candidates[]` identify confirmed pending judgments and still require review (`judgment_required: true`). With no confirmed candidates, `judgment_required` is omitted rather than falsely reporting `false`. Earlier successful relation inserts remain stored; a failure reading an insert's affected-row count may also leave a stored relation that is not in the confirmed candidate list. Neither an empty list nor an incomplete result means “no conflicts” or rollback. Do not retry the observation save automatically. Healthy save responses are unchanged.
 
 ### mem_update
 
