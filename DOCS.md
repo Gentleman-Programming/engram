@@ -790,6 +790,14 @@ Response:
 
 Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--help`, and `-h`. `engram tui` performs its single update check from inside the TUI. Set `ENGRAM_NO_UPDATE_CHECK=1` to disable every update check, including the TUI check.
 
+Only plain release versions (`X.Y.Z`, optionally prefixed with `v`) are compared.
+Development labels such as `main`, Go pseudo-versions, prereleases, and build
+metadata are not comparable: the check reports that the current version does not
+map to a plain release version, without contacting GitHub or recommending an
+update. Invalid release tags returned by GitHub also produce a check failure,
+not an update notice. The existing `dev` and unknown-version diagnostics remain
+unchanged.
+
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_MEM_SAVE_TIMING`        | Set to exactly `1` in the MCP server environment to log one privacy-safe stage timing record per `mem_save` invocation to stderr. See [mem_save timing diagnostics](#mem_save-timing-diagnostics). | (unset — disabled) |
