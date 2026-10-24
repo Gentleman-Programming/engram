@@ -64,6 +64,7 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // together with the feature parent's observational Windows job and contract step.
   // #2019 adds independent read-only scanner jobs and their policy-test step only.
   // #2096 adds only guarded workflow-level concurrency; existing CI jobs stay exact.
+  // #2107 updates the nine explicit CI toolchain pins to Go 1.26.10; job guards stay exact.
   // Incoming main's Go 1.26.10 toolchain also applies to the observational Windows job.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
