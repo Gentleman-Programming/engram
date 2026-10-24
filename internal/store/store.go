@@ -3501,7 +3501,7 @@ func continuationSessionTx(tx *sql.Tx, root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	prefix := root + ":resume:"
+	prefix := root + continuationSessionMarker
 	rows, err := tx.Query(continuationSessionsQuery, prefix+"0", prefix+":")
 	if err != nil {
 		return "", err
