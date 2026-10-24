@@ -79,6 +79,9 @@ func TestClaudeHookResponseValidation(t *testing.T) {
 				{"valid health", `{"instance_id":"expected"}`, "engram_health_matches_instance expected", "", 0},
 				{"empty project", "", "resolve_project /work", "", 1},
 				{"valid project", `{"project":"client","project_source":"config"}`, "resolve_project /work", "client\n", 0},
+				{"invalid project", `{"project":"client","project_source":"invalid"}`, "resolve_project /work", "", 1},
+				{"multiple projects", `{"project":"a","project_source":"config"} {"project":"b","project_source":"config"}`, "resolve_project /work", "", 1},
+				{"valid project followed by malformed JSON", `{"project":"client","project_source":"config"} {`, "resolve_project /work", "", 1},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					var requests atomic.Int64
