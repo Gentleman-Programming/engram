@@ -2,6 +2,8 @@ package setup
 
 import (
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,7 +21,14 @@ func TestInstallCodexTOMLPreservation(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			resetSetupSeams(t)
-			useIsolatedProfile(t)
+			profile := useIsolatedProfile(t)
+			expectedMarker := ""
+			if tt.name == "CRLF and BOM" {
+				runtimeGOOS = "windows"
+				command := filepath.Join(profile, "engram.exe")
+				osExecutable = func() (string, error) { return command, nil }
+				expectedMarker = windowsHookCommandMarkerPrefix + strconv.Quote(command) + "\r\n"
+			}
 			path := codexConfigPath()
 			if err := os.MkdirAll(strings.TrimSuffix(path, "config.toml"), 0755); err != nil {
 				t.Fatal(err)
@@ -47,6 +56,14 @@ func TestInstallCodexTOMLPreservation(t *testing.T) {
 					t.Fatal(err)
 				}
 				got := string(raw)
+				if expectedMarker != "" {
+					if !strings.HasPrefix(strings.TrimPrefix(got, "\ufeff"), expectedMarker) {
+						t.Fatalf("expected exact Windows marker with CRLF %q, got %q", expectedMarker, got)
+					}
+					if strings.Contains(strings.ReplaceAll(got, "\r\n", ""), "\n") {
+						t.Fatalf("expected CRLF throughout Windows config, got %q", got)
+					}
+				}
 				if !strings.Contains(got, tt.keep) || tt.absent != "" && strings.Contains(got, tt.absent) {
 					t.Fatalf("content changed incorrectly:\n%s", got)
 				}
@@ -80,6 +97,9 @@ func TestInstallCodexTOMLRejectedUnchanged(t *testing.T) {
 		"[mcp_servers]\nengram.command = 'old'\n",
 		"[mcp_servers]\nengram = { command = 'old' }\n",
 		"[[mcp_servers]]\ncommand = 'old'\n",
+		"model_instructions_file = 'old' junk\n",
+		"notes = \"\"\"a\"\"\"\"\"\"\n",
+		"\"model_instructions_\\xfile\" = 'old'\n",
 	} {
 		t.Run(input, func(t *testing.T) {
 			resetSetupSeams(t)
