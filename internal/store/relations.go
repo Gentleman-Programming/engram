@@ -374,8 +374,10 @@ type JudgeRelationParams struct {
 // sync_id is exposed as Candidate.JudgmentID.
 // Candidates with an existing judged relation in either direction are excluded.
 //
-// Errors from this method are expected to be logged and swallowed by callers —
-// detection failure must never fail the originating save.
+// Detection failure must never roll back the originating save. In insertion mode,
+// a non-nil error can accompany confirmed candidates and already-persisted relations.
+// A RowsAffected error leaves that insert's outcome unknown; it is not returned as
+// a confirmed candidate. Callers must report incomplete detection, not no conflicts.
 func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
 	if opts.Timings != nil {
 		*opts.Timings = CandidateTimings{}
@@ -497,6 +499,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		defer func() { opts.Timings.Inserts = time.Since(started) }()
 	}
 	candidates := make([]Candidate, 0, len(raw))
+	var insertErrors []error
 	for _, rc := range raw {
 		judgmentID := newSyncID("rel")
 		result, err := s.execHook(s.db, `
@@ -510,13 +513,12 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			)
 		`, judgmentID, sourceSyncID, rc.syncID, sourceSyncID, rc.syncID, rc.syncID, sourceSyncID)
 		if err != nil {
-			// Log and skip — don't fail the whole detection.
-			log.Printf("[store] FindCandidates: conditional insert src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			insertErrors = append(insertErrors, fmt.Errorf("FindCandidates: conditional insert src=%s cand=%s: %w", sourceSyncID, rc.syncID, err))
 			continue
 		}
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
-			log.Printf("[store] FindCandidates: conditional insert rows affected src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			insertErrors = append(insertErrors, fmt.Errorf("FindCandidates: conditional insert rows affected src=%s cand=%s: %w", sourceSyncID, rc.syncID, err))
 			continue
 		}
 		if rowsAffected != 1 {
@@ -533,7 +535,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		})
 	}
 
-	return candidates, nil
+	return candidates, errors.Join(insertErrors...)
 }
 
 // ─── SaveRelation ─────────────────────────────────────────────────────────────
