@@ -6448,6 +6448,7 @@ func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
 	}
 	sess, err := s.GetSession("root")
 	if err != nil || sess.Project != "same-a" || sess.OwnershipMode != store.SessionOwnershipProjectOwned || sess.Directory != filepath.Join(parent, "same-a") {
+		t.Logf("expected_directory=%q actual_session=%#v", filepath.Join(parent, "same-a"), sess)
 		t.Fatalf("incorrect converged association: %#v %v", sess, err)
 	}
 }
@@ -6566,6 +6567,7 @@ func TestMemSave_AmbiguousUnknownSessionRecovery(t *testing.T) {
 	}
 	sess, err := s.GetSession("runtime-root")
 	if err != nil || sess.Project != "recovery-b" || sess.Directory != filepath.Join(parent, "recovery-b") {
+		t.Logf("expected_directory=%q actual_session=%#v", filepath.Join(parent, "recovery-b"), sess)
 		t.Fatalf("wrong recovered association: %#v %v", sess, err)
 	}
 }
@@ -6609,6 +6611,7 @@ func TestMemSave_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 		t.Fatalf("expected explicit user choice envelope, got %v", body)
 	}
 	if body["project_path"] != filepath.Join(parent, "repo-choice-b") {
+		t.Logf("expected_project_path=%q actual_project_path=%#v", filepath.Join(parent, "repo-choice-b"), body["project_path"])
 		t.Fatalf("expected project_path to point at selected repo root, got %v", body)
 	}
 	obs, err := s.Search("chosen project memory", store.SearchOptions{Project: "repo-choice-b", Limit: 5})
@@ -6870,6 +6873,7 @@ func TestMemSave_AmbiguousChoiceRequiresExactAvailableProject(t *testing.T) {
 		t.Fatalf("expected exact ambiguous recovery project, got %v", body)
 	}
 	if body["project_path"] != filepath.Join(parent, "baz__qux") {
+		t.Logf("expected_project_path=%q actual_project_path=%#v", filepath.Join(parent, "baz__qux"), body["project_path"])
 		t.Fatalf("expected project_path to selected exact repo root, got %v", body)
 	}
 }
@@ -7354,6 +7358,7 @@ func TestMemSavePrompt_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 		t.Fatalf("expected explicit user choice envelope, got %v", body)
 	}
 	if body["project_path"] != filepath.Join(parent, "repo-prompt-a") {
+		t.Logf("expected_project_path=%q actual_project_path=%#v", filepath.Join(parent, "repo-prompt-a"), body["project_path"])
 		t.Fatalf("expected project_path to point at selected prompt repo root, got %v", body)
 	}
 	prompts, err := s.RecentPrompts("repo-prompt-a", 5)
