@@ -240,6 +240,26 @@ The original #1293 audit found 23 open PRs needing migration; that is a historic
 
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
+### CI concurrency
+
+CI uses a workflow-namespaced PR-number concurrency group with cancellation
+only for ordinary `pull_request` runs: the head branch must not start with
+`ci/proof-` (case-insensitive), and raw `vars.ISSUE_CI_PROOF_CI` must be empty.
+Every other run uses a workflow-namespaced `run_id`/`run_attempt` group with
+cancellation disabled. This isolates protected pending slots as well as running
+work: disabling cancellation alone would not prevent pending-run replacement.
+Merge groups, main pushes, reserved proof branches and PRs with any nonempty
+selector (including OFF, malformed or unmatched values) are isolated conservatively.
+Ordinary PR reruns share their PR group; protected reruns get a distinct attempt
+group. No newest-commit ordering is guaranteed.
+
+This is workflow admission, not the job's parsed controller selection. Controllers
+and their bootstrap remain unchanged and OFF. Fork/rerun variable visibility,
+control transitions and scheduling by commit recency are not hosted-qualified;
+no savings have been measured. See [proof boundaries](docs/ci-proof-controls.md#workflow-admission-concurrency-2096).
+Local routing checks: `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
+Hosted experiments require separate authorization.
+
 ### CI scanners (initially non-required)
 
 **Go Vulnerability Check** and **Workflow Validation** run independently on PRs,

@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'ci/proof-') && vars.ISSUE_CI_PROOF_CI == '' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'ci/proof-') && vars.ISSUE_CI_PROOF_CI == '' }}
+
 permissions:
   contents: read
 
