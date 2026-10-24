@@ -1,0 +1,2 @@
+ci-proof-case:1810-late-legacy-01 issue:2112
+P0 inert fixture; no hold or qualification claimed.
