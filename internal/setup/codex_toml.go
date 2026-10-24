@@ -151,7 +151,7 @@ func codexTOMLKey(s string) ([]string, error) {
 			end := 0
 			for end < len(s) {
 				c := s[end]
-				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+				if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
 					break
 				}
 				end++
