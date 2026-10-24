@@ -27,6 +27,10 @@ func stagedIntegrity(b []byte) string {
 // This authored, never-executed program supplies synthetic Go metadata only.
 // It is not a production workflow, source authenticity or runtime fixture.
 func stagedMetadataFixture(t *testing.T) ([]byte, string, string) {
+	return stagedProgramFixture(t, "package main\nfunc main() {}\n")
+}
+
+func stagedProgramFixture(t *testing.T, program string) ([]byte, string, string) {
 	t.Helper()
 	root := t.TempDir()
 	write := func(name, s string) {
@@ -40,7 +44,7 @@ func stagedMetadataFixture(t *testing.T) ([]byte, string, string) {
 		}
 	}
 	write("go.mod", "module github.com/Gentleman-Programming/engram/v3\n\ngo 1.23\n")
-	write("cmd/engram/main.go", "package main\nfunc main() {}\n")
+	write("cmd/engram/main.go", program)
 	command := func(name string, args ...string) string {
 		t.Helper()
 		c := exec.Command(name, args...)

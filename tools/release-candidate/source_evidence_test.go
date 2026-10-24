@@ -2,11 +2,14 @@ package main_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -46,7 +49,7 @@ func TestSourceEvidence(t *testing.T) {
 	git("add", ".")
 	git("commit", "--quiet", "-m", "fixture pi")
 	pi := git("rev-parse", "HEAD")
-	run := func(coreSource string, extra ...string) (map[string]any, string, int) {
+	run := func(t *testing.T, coreSource string, extra ...string) (map[string]any, string, int) {
 		t.Helper()
 		before := candidateSnapshot(t, repo)
 		args := []string{"-root", repo, "-observe-contract", "-core-ref", "refs/tags/v3.0.0", "-pi-ref", "refs/tags/pi-v0.5.0", "-core-source", coreSource, "-pi-source", pi}
@@ -63,8 +66,39 @@ func TestSourceEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if !reflect.DeepEqual(before, candidateSnapshot(t, repo)) {
-			t.Fatal("collector changed original Git state or sources")
+		after := candidateSnapshot(t, repo)
+		if !reflect.DeepEqual(before, after) {
+			paths := make(map[string]bool)
+			for path := range before {
+				paths[path] = true
+			}
+			for path := range after {
+				paths[path] = true
+			}
+			var changed []string
+			for path := range paths {
+				old, existed := before[path]
+				current, exists := after[path]
+				if existed != exists || old != current {
+					changed = append(changed, path)
+				}
+			}
+			sort.Strings(changed)
+			var delta strings.Builder
+			for _, path := range changed {
+				rel, err := filepath.Rel(repo, path)
+				if err != nil {
+					t.Fatal("collector changed original Git state or sources: relative path unavailable")
+				}
+				fingerprint := func(snapshot map[string]string) string {
+					if data, exists := snapshot[path]; exists {
+						return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(data)))
+					}
+					return "absent"
+				}
+				fmt.Fprintf(&delta, "\n%s before=%s after=%s", filepath.ToSlash(rel), fingerprint(before), fingerprint(after))
+			}
+			t.Fatalf("collector changed original Git state or sources%s", delta.String())
 		}
 		var report map[string]any
 		if out.Len() != 0 {
@@ -75,7 +109,7 @@ func TestSourceEvidence(t *testing.T) {
 		return report, diagnostic.String(), code
 	}
 	t.Run("independent identities and real selected source execution", func(t *testing.T) {
-		r, stderr, code := run(core)
+		r, stderr, code := run(t, core)
 		if code != 2 || stderr != "" || r["outcome"] != "blocked" || r["schemaVersion"] != float64(1) {
 			t.Fatalf("want non-approving JSON/exit2/empty stderr; got %v %q %d", r, stderr, code)
 		}
@@ -91,13 +125,13 @@ func TestSourceEvidence(t *testing.T) {
 		}
 	})
 	t.Run("nonzero checker does not establish freshness", func(t *testing.T) {
-		r, stderr, code := run(pi)
+		r, stderr, code := run(t, pi)
 		if code != 2 || stderr != "" || r["check"].(map[string]any)["state"] != "not-established" || r["check"].(map[string]any)["exitCode"] != float64(1) {
 			t.Fatalf("unestablished check: %v %q %d", r, stderr, code)
 		}
 	})
 	t.Run("missing commit is not a verified identity", func(t *testing.T) {
-		r, stderr, code := run(strings.Repeat("0", 40))
+		r, stderr, code := run(t, strings.Repeat("0", 40))
 		if code != 2 || stderr != "" || r["core"].(map[string]any)["commit"] != nil || r["check"].(map[string]any)["state"] != "unavailable" {
 			t.Fatalf("invented source proof: %v %q %d", r, stderr, code)
 		}
@@ -111,7 +145,7 @@ func TestSourceEvidence(t *testing.T) {
 		{"assessment conflict", core, "-observe-contract cannot be combined with -assess or -pi-tarball\n", []string{"-assess"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, stderr, code := run(tc.source, tc.extra...)
+			r, stderr, code := run(t, tc.source, tc.extra...)
 			if code != 1 || stderr != tc.diagnostic || r != nil {
 				t.Fatalf("invocation: %v %q %d", r, stderr, code)
 			}
@@ -119,7 +153,7 @@ func TestSourceEvidence(t *testing.T) {
 	}
 	t.Run("local tag mismatch prevents execution", func(t *testing.T) {
 		git("tag", "v3.0.0", pi)
-		r, stderr, code := run(core)
+		r, stderr, code := run(t, core)
 		git("tag", "-d", "v3.0.0")
 		if code != 2 || stderr != "" || r["check"].(map[string]any)["state"] != "unavailable" {
 			t.Fatalf("mismatched ref produced evidence: %v %q %d", r, stderr, code)
@@ -134,7 +168,7 @@ func TestSourceEvidence(t *testing.T) {
 			t.Run(pair.name, func(t *testing.T) {
 				git("replace", pair.from, pair.to)
 				defer git("replace", "-d", pair.from)
-				r, stderr, code := run(core)
+				r, stderr, code := run(t, core)
 				if code != 2 || stderr != "" || r["core"].(map[string]any)["commit"] != core || r["pi"].(map[string]any)["commit"] != pi || r["check"].(map[string]any)["state"] != "passed" || r["check"].(map[string]any)["exitCode"] != float64(0) {
 					t.Fatalf("replacement redirected immutable source: %v %q %d", r, stderr, code)
 				}
@@ -145,7 +179,7 @@ func TestSourceEvidence(t *testing.T) {
 		candidateWrite(t, repo, "tools/agent-contract/main.go", "package main\nimport \"os\"\nfunc main(){if os.WriteFile(\"changed\",nil,0600)!=nil{os.Exit(9)}}\n")
 		git("add", ".")
 		git("commit", "--quiet", "-m", "fixture mutation")
-		r, stderr, code := run(git("rev-parse", "HEAD"))
+		r, stderr, code := run(t, git("rev-parse", "HEAD"))
 		if code != 2 || stderr != "" || r["check"].(map[string]any)["state"] != "unavailable" {
 			t.Fatalf("mutated source passed: %v %q %d", r, stderr, code)
 		}
@@ -157,14 +191,14 @@ func TestSourceEvidence(t *testing.T) {
 		candidateWrite(t, repo, "tools/agent-contract/main.go", "package main\nimport \"os\"\nfunc main(){_ = os.WriteFile(os.Getenv(\"EVIDENCE_FIXTURE_MARKER\"),[]byte(\"unsafe\"),0600)}\n")
 		git("add", "tools/agent-contract/main.go")
 		git("commit", "--quiet", "-m", "fixture link")
-		r, stderr, code := run(git("rev-parse", "HEAD"))
+		r, stderr, code := run(t, git("rev-parse", "HEAD"))
 		data, err := os.ReadFile(marker)
 		if code != 2 || stderr != "" || r["check"].(map[string]any)["state"] != "unavailable" || err != nil || string(data) != "selected-core" {
 			t.Fatalf("unsafe source executed: %v %q %d %q %v", r, stderr, code, data, err)
 		}
 	})
 	t.Run("conflict rejected before repository access", func(t *testing.T) {
-		r, stderr, code := run(core, "-pi-tarball=", "-root", filepath.Join(repo, "absent"))
+		r, stderr, code := run(t, core, "-pi-tarball=", "-root", filepath.Join(repo, "absent"))
 		if code != 1 || stderr != "-observe-contract cannot be combined with -assess or -pi-tarball\n" || r != nil {
 			t.Fatalf("conflict result: %v %q %d", r, stderr, code)
 		}
