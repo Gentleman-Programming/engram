@@ -268,8 +268,26 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	binDir := t.TempDir()
 	codexFixtureProject(t, binDir, "test-project")
 	markerPath := filepath.Join(binDir, "stdin-result")
+	releasePath := filepath.Join(binDir, "stdin-release")
+	// Release even on failure so the detached fixture cannot remain spinning.
+	defer func() { _ = os.WriteFile(releasePath, nil, 0o600) }()
 	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "cat"), "#!/bin/bash\nprintf '%s' "+"'"+fmt.Sprintf(`{"cwd":%q,"session_id":"stdin-pipe-test","prompt":"capture this"}`, filepath.ToSlash(binDir))+"'\n")
-	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *'/sessions'*) printf '%s\\n201' '{\"id\":\"stdin-pipe-test\",\"status\":\"created\"}' ;;\n  *'/prompts'*) if IFS= read -r _; then printf data > \"$PROMPT_STDIN_MARKER\"; else printf eof > \"$PROMPT_STDIN_MARKER\"; fi ;;\n  *) exit 0 ;;\nesac\n")
+	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), `#!/bin/bash
+case "$*" in
+  *'/project/current'*) printf '%s' '{"project":"test-project","project_source":"config"}' ;;
+  *'/sessions'*) printf '%s\n201' '{"id":"stdin-pipe-test","status":"created"}' ;;
+  *'/prompts'*)
+    if IFS= read -r _; then result=data; else result=eof; fi
+    exec 3> "$PROMPT_STDIN_MARKER"
+    # Keep the empty-file publication window open until the reader observes it.
+    while [[ -d "${PROMPT_STDIN_RELEASE%/*}" && ! -f "$PROMPT_STDIN_RELEASE" ]]; do :; done
+    [[ -f "$PROMPT_STDIN_RELEASE" ]] || exit 1
+    printf '%s' "$result" >&3
+    exec 3>&-
+    ;;
+  *) exit 0 ;;
+esac
+`)
 
 	stdinReader, stdinWriter, err := os.Pipe()
 	if err != nil {
@@ -293,7 +311,7 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	}))
 	defer server.Close()
 	run.Dir = binDir
-	run.Env = append(codexPromptTestEnv(t, strings.TrimPrefix(server.URL, "http://127.0.0.1:")), "PROMPT_STDIN_MARKER="+markerPath)
+	run.Env = append(codexPromptTestEnv(t, strings.TrimPrefix(server.URL, "http://127.0.0.1:")), "PROMPT_STDIN_MARKER="+markerPath, "PROMPT_STDIN_RELEASE="+releasePath)
 	run.Stdin = stdinReader
 	if err := run.Start(); err != nil {
 		_ = stdinWriter.Close()
@@ -313,24 +331,37 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(time.Second)
+	released := false
 	for {
 		marker, err := os.ReadFile(markerPath)
 		if err == nil {
-			if string(marker) != "eof" {
-				t.Fatalf("detached curl stdin = %q, want EOF from /dev/null", marker)
-			}
-			select {
-			case err := <-waitDone:
-				waited = true
-				if err != nil {
-					t.Fatalf("run adapter: %v", err)
+			if !released {
+				if len(marker) != 0 {
+					t.Fatalf("probe published before release: %q", marker)
 				}
-			case <-time.After(time.Second):
-				t.Fatal("adapter did not exit after the stdin probe")
+				if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+					t.Fatalf("release stdin probe publication: %v", err)
+				}
+				released = true
 			}
-			return
+			complete, resultErr := codexPromptStdinProbeResult(marker)
+			if resultErr != nil {
+				t.Fatal(resultErr)
+			}
+			if complete {
+				select {
+				case err := <-waitDone:
+					waited = true
+					if err != nil {
+						t.Fatalf("run adapter: %v", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("adapter did not exit after the stdin probe")
+				}
+				return
+			}
 		}
-		if !os.IsNotExist(err) {
+		if err != nil && !os.IsNotExist(err) {
 			t.Fatalf("read stdin probe result: %v", err)
 		}
 		if time.Now().After(deadline) {
@@ -338,6 +369,40 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestCodexPromptStdinProbeResult(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		marker    string
+		complete  bool
+		wantError bool
+	}{
+		{name: "created but unpublished", marker: ""},
+		{name: "detached EOF", marker: "eof", complete: true},
+		{name: "inherited data", marker: "data", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			complete, err := codexPromptStdinProbeResult([]byte(tc.marker))
+			if complete != tc.complete || (err != nil) != tc.wantError {
+				t.Fatalf("probe result = (%t, %v), want (%t, error=%t)", complete, err, tc.complete, tc.wantError)
+			}
+			if tc.wantError && err.Error() != `detached curl stdin = "data", want EOF from /dev/null` {
+				t.Fatalf("probe error = %q", err)
+			}
+		})
+	}
+}
+
+func codexPromptStdinProbeResult(marker []byte) (bool, error) {
+	// Redirection creates the file before printf publishes the probe result.
+	if len(marker) == 0 {
+		return false, nil
+	}
+	if string(marker) != "eof" {
+		return false, fmt.Errorf("detached curl stdin = %q, want EOF from /dev/null", marker)
+	}
+	return true, nil
 }
 
 func writeCodexPromptProbeCommand(t *testing.T, path, content string) {
