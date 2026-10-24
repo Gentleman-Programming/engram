@@ -151,6 +151,9 @@ jobs:
       - name: Run policy helper tests
         run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs
 
+      - name: Run PostgreSQL CI policy tests
+        run: node --test .github/scripts/postgres-ci.test.mjs
+
       - name: Run scanner policy tests
         run: node --test .github/scripts/ci-scanners.test.mjs
 
@@ -297,6 +300,62 @@ jobs:
 
       - name: Run binary quick self-test
         run: go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick
+
+  postgres-tests:
+    name: PostgreSQL Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: engram_test
+          POSTGRES_PASSWORD: disposable_test_password
+          POSTGRES_DB: engram_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U engram_test -d engram_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CLOUDSTORE_TEST_DSN: postgres://engram_test:disposable_test_password@127.0.0.1:5432/engram_test?sslmode=disable
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Record revision and verify database connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          go version
+          node --version
+          psql "$CLOUDSTORE_TEST_DSN" -v ON_ERROR_STOP=1 -c 'SELECT version();'
+
+      - name: Run PostgreSQL integration suites and verify execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud/cloudserver ./cmd/engram | tee "$RUNNER_TEMP/postgres-tests.json"
+          node .github/scripts/postgres-ci-evidence.mjs "$RUNNER_TEMP/postgres-tests.json"
 
   e2e-tests:
     name: E2E Tests
