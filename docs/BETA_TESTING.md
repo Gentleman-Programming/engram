@@ -28,7 +28,7 @@ Reset anytime with the cleanup section at the end.
 ## Prerequisites
 
 - Docker + Docker Compose
-- Go 1.25+ (to build the beta binary — see `go.mod`)
+- Go 1.26+ (to build the beta binary — see `go.mod`)
 - For Phase 4 testing: `claude` or `opencode` CLI installed and authenticated (whichever you already use)
 - On Windows: PowerShell 7+ for the PowerShell commands below
 

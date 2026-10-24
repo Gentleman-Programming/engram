@@ -323,6 +323,37 @@ Run `node --test .github/scripts/windows-suite.test.mjs` for local workflow
 contract checks. Publication and an actual hosted run are still needed to prove
 runner prerequisites, dependency availability, and full-suite execution.
 
+### CI concurrency
+
+CI uses a workflow-namespaced PR-number concurrency group with cancellation
+only for ordinary `pull_request` runs: the head branch must not start with
+`ci/proof-` (case-insensitive), and raw `vars.ISSUE_CI_PROOF_CI` must be empty.
+Every other run uses a workflow-namespaced `run_id`/`run_attempt` group with
+cancellation disabled. This isolates protected pending slots as well as running
+work: disabling cancellation alone would not prevent pending-run replacement.
+Merge groups, main pushes, reserved proof branches and PRs with any nonempty
+selector (including OFF, malformed or unmatched values) are isolated conservatively.
+Ordinary PR reruns share their PR group; protected reruns get a distinct attempt
+group. No newest-commit ordering is guaranteed.
+
+This is workflow admission, not the job's parsed controller selection. Controllers
+and their bootstrap remain unchanged and OFF. Fork/rerun variable visibility,
+control transitions and scheduling by commit recency are not hosted-qualified;
+no savings have been measured. See [proof boundaries](docs/ci-proof-controls.md#workflow-admission-concurrency-2096).
+Local routing checks: `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
+Hosted experiments require separate authorization.
+
+### CI scanners (initially non-required)
+
+**Go Vulnerability Check** and **Workflow Validation** run independently on PRs,
+merge groups and main pushes. They preserve finding and tooling-failure exits;
+non-required does not mean failures are ignored. Existing required gates remain
+unchanged. See [scanner setup, real-tool tests and result interpretation](docs/ci-scanners.md)
+for pinned Go 1.26.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
+Mocked wrapper tests are distinct from opt-in real-tool integration tests; neither
+is hosted rollout evidence. Review findings without blanket suppressions or
+unapproved dependency upgrades.
+
 ### Merge Queue Activation (administrators)
 
 The `main` merge queue is already active. Contributors submit eligible PRs to the

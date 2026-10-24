@@ -2173,7 +2173,7 @@ Register-ScheduledTask `
 
 The SQLite driver is paired with `modernc.org/libc` v1.75.6 in `go.mod`;
 update these together rather than overriding libc independently. The module
-retains Go 1.25.10.
+requires Go 1.26.10.
 
 ### OpenCode Plugin
 
