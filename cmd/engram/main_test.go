@@ -1313,6 +1313,7 @@ func TestCmdSyncStatusExportAndImport(t *testing.T) {
 }
 
 func TestCmdSyncDefaultProjectNoData(t *testing.T) {
+	t.Setenv(project.EnvProjectOverride, "")
 	fixtureParent := t.TempDir()
 	t.Setenv("GIT_CEILING_DIRECTORIES", fixtureParent)
 	workDir := filepath.Join(fixtureParent, "repo-name")
