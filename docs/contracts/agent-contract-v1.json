@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "6bc86a93f10ffbcbfc03070ba45a5eba1b8bab213f71768d82c310b95310c1a8",
+  "digest": "3658b4cbc2594d3e9b9aec610365c4eb48e53ef9e654ccd7e255b7706898cef6",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -497,7 +497,12 @@
       },
       "description": "List every project known to Engram, with per-project observation/session/prompt counts, ordered by observation count (same view as `engram projects list`). Use for cross-project discovery when the working directory matches no known project: pick the right project, then scope mem_search/mem_context to it. Returns a successful empty list when nothing is stored yet; a store failure returns a tool error.",
       "input_schema": {
-        "properties": {},
+        "properties": {
+          "org": {
+            "description": "Filter by org — a free-text grouping axis orthogonal to scope. Omit to apply no org filter.",
+            "type": "string"
+          }
+        },
         "required": [],
         "type": "object"
       },
@@ -620,6 +625,10 @@
           },
           "observation": {
             "description": "Backward-compatible alias for content. Prefer content for new clients.",
+            "type": "string"
+          },
+          "org": {
+            "description": "Optional org — a free-text grouping axis orthogonal to scope. Overrides the org inherited from .engram/config.json for the current directory, if any.",
             "type": "string"
           },
           "project": {
@@ -762,6 +771,10 @@
           },
           "match_mode": {
             "description": "Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error.",
+            "type": "string"
+          },
+          "org": {
+            "description": "Filter by org — a free-text grouping axis orthogonal to scope. Omit to apply no org filter.",
             "type": "string"
           },
           "project": {
