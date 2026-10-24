@@ -12,6 +12,42 @@ permissions:
   contents: read
 
 jobs:
+  claude-jq16-compatibility:
+    name: Claude jq 1.6 Compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+
+      - name: Verify pinned jq 1.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          bindir="$RUNNER_TEMP/engram-jq16"
+          mkdir -p "$bindir"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 \
+            https://github.com/jqlang/jq/releases/download/jq-1.6/jq-linux64 -o "$bindir/jq"
+          printf '%s  %s\n' af986793a515d500ab2d35f8d2aecd656e764504b789b66d7e1a0b727a124c44 "$bindir/jq" | sha256sum -c -
+          chmod +x "$bindir/jq"
+          version=$("$bindir/jq" --version)
+          test "$version" = jq-1.6
+          printf '%s\n' "$version"
+          printf 'ENGRAM_TEST_JQ16=%s\n' "$bindir/jq" >> "$GITHUB_ENV"
+          printf '%s\n' "$bindir" >> "$GITHUB_PATH"
+
+      - name: Run focused Claude response compatibility tests
+        run: go test ./plugin -run '^(TestClaudeHookResponseValidation|TestClaudeJQ16SelectorRejectsWrongVersion)$' -count=1 -v -timeout=120s
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

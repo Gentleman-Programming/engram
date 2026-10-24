@@ -614,6 +614,24 @@ verdict. Hosted full-unit, E2E, plugin and applicable platform results remain
 pending until GitHub runs them. Documentation-only changes can use proportional
 link/command-definition checks without executing unrelated suites.
 
+### Claude jq 1.6 response compatibility
+
+The Linux **Claude jq 1.6 Compatibility** job verifies the SHA-256 and version of
+an official jq 1.6 binary in runner-temporary storage, then runs only the HTTP
+response-validation cases and the selector's wrong-version regression. It does
+not replace the system jq or change native Windows coverage.
+
+To select a real jq 1.6 delegate locally on POSIX systems:
+
+```bash
+ENGRAM_TEST_JQ16=/absolute/path/to/jq-1.6 go test ./plugin -run '^(TestClaudeHookResponseValidation|TestClaudeJQ16SelectorRejectsWrongVersion)$' -count=1 -v -timeout=120s
+```
+
+A nonempty selector must be an absolute executable path reporting `jq-1.6`;
+missing or wrong-version delegates fail rather than skip. When unset, the wrapper
+still delegates to `/usr/bin/jq` and emulates only jq 1.6's empty-input `-e`
+behavior, not full jq 1.6 compatibility. The POSIX wrapper still skips on Windows.
+
 ### Conventional Commit Format
 
 ```

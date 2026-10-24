@@ -15,15 +15,31 @@ import (
 )
 
 // jq 1.6 exits successfully on an empty input stream even with -e. Emulate
-// only that difference, delegating all JSON processing to the installed jq.
+// only that difference, delegating JSON processing to an explicitly verified
+// jq 1.6 when configured, or the installed jq otherwise.
 func jq16CompatibilityPath(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("jq compatibility wrapper requires POSIX bash and /usr/bin/jq")
 	}
-	if _, err := os.Stat("/usr/bin/jq"); err != nil {
-		t.Skipf("jq compatibility delegate unavailable: %v", err)
+	delegate := os.Getenv("ENGRAM_TEST_JQ16")
+	if delegate != "" {
+		if !filepath.IsAbs(delegate) {
+			t.Fatal("ENGRAM_TEST_JQ16 must be an absolute path to jq-1.6")
+		}
+		version, err := exec.Command(delegate, "--version").Output()
+		if err != nil || string(version) != "jq-1.6\n" {
+			t.Fatalf("ENGRAM_TEST_JQ16 delegate must report version jq-1.6: got %q, error: %v", version, err)
+		}
+		t.Logf("verified jq-1.6 delegate: %s", delegate)
+	} else {
+		delegate = "/usr/bin/jq"
+		if _, err := os.Stat(delegate); err != nil {
+			t.Skipf("jq compatibility delegate unavailable: %v", err)
+		}
 	}
+	// Single-quote the literal path; never interpolate it as shell syntax.
+	quotedDelegate := "'" + strings.ReplaceAll(delegate, "'", "'\"'\"'") + "'"
 	dir := t.TempDir()
 	wrapper := `#!/bin/bash
 exit_status=0
@@ -43,10 +59,35 @@ if [ "$exit_status" = 1 ] && [ ! -s "$input_file" ]; then
 fi
 /usr/bin/jq "$@" < "$input_file"
 `
+	wrapper = strings.ReplaceAll(wrapper, "/usr/bin/jq", quotedDelegate)
 	if err := os.WriteFile(filepath.Join(dir, "jq"), []byte(wrapper), 0o755); err != nil {
 		t.Fatalf("write jq compatibility wrapper: %v", err)
 	}
 	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+func TestClaudeJQ16SelectorRejectsWrongVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("jq selector regression requires POSIX bash")
+	}
+	requireHookBinaries(t)
+	delegate := filepath.Join(t.TempDir(), "wrong 'jq")
+	if err := os.WriteFile(delegate, []byte("#!/bin/sh\nprintf 'jq-0.0.0\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENGRAM_TEST_JQ16", delegate)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binary, "-test.run=^TestClaudeHookResponseValidation$/^jq16=true$", "-test.v")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 1 || !strings.Contains(stdout.String(), "ENGRAM_TEST_JQ16 delegate must report version jq-1.6") || stderr.String() != "" || strings.Contains(stdout.String(), "--- SKIP:") {
+		t.Fatalf("wrong-version child: error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
 }
 
 func TestClaudeHooksJQ16Compatibility(t *testing.T) {
