@@ -57,12 +57,13 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #2071 adds an isolated, read-only jq 1.6 compatibility job; existing CI jobs stay exact.
   // #2019 adds independent read-only scanner jobs and their policy-test step only.
   // #2096 adds only guarded workflow-level concurrency; existing CI jobs stay exact.
+  // #2107 updates the nine explicit CI toolchain pins to Go 1.26.10; job guards stay exact.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'd8a6b92f6cb264581d3483c90f1d4f946cab16a194c19be4acdfc2f04934eca1',
+    '.github/workflows/ci.yml': '74d5a8541ca1326dd5208bdb5b5995573cba1a06e851bd41473ad0744c475f63',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
