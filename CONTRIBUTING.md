@@ -240,6 +240,17 @@ The original #1293 audit found 23 open PRs needing migration; that is a historic
 
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
+### CI scanners (initially non-required)
+
+**Go Vulnerability Check** and **Workflow Validation** run independently on PRs,
+merge groups and main pushes. They preserve finding and tooling-failure exits;
+non-required does not mean failures are ignored. Existing required gates remain
+unchanged. See [scanner setup, real-tool tests and result interpretation](docs/ci-scanners.md)
+for pinned Go 1.25.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
+Mocked wrapper tests are distinct from opt-in real-tool integration tests; neither
+is hosted rollout evidence. Review findings without blanket suppressions or
+unapproved dependency upgrades.
+
 ### Merge Queue Activation (administrators)
 
 The `main` merge queue is already active. Contributors submit eligible PRs to the

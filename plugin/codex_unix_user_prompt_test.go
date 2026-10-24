@@ -262,32 +262,37 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 }
 
 func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
+	testCodexPromptPersistenceStdin(t, false)
+}
+
+func TestCodexUnixUserPromptSubmitStdinProbeWaitsForStartup(t *testing.T) {
+	testCodexPromptPersistenceStdin(t, true)
+}
+
+func testCodexPromptPersistenceStdin(t *testing.T, delayStartup bool) {
+	t.Helper()
 	bashPath := codexTestBash(t)
 	requireCodexUnixTools(t, bashPath)
 	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh")
 	binDir := t.TempDir()
 	codexFixtureProject(t, binDir, "test-project")
 	markerPath := filepath.Join(binDir, "stdin-result")
+	readyPath := filepath.Join(binDir, "stdin-ready")
 	releasePath := filepath.Join(binDir, "stdin-release")
-	// Release even on failure so the detached fixture cannot remain spinning.
+	// Preserve the deterministic publication regression from #2072.
 	defer func() { _ = os.WriteFile(releasePath, nil, 0o600) }()
 	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "cat"), "#!/bin/bash\nprintf '%s' "+"'"+fmt.Sprintf(`{"cwd":%q,"session_id":"stdin-pipe-test","prompt":"capture this"}`, filepath.ToSlash(binDir))+"'\n")
-	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), `#!/bin/bash
-case "$*" in
-  *'/project/current'*) printf '%s' '{"project":"test-project","project_source":"config"}' ;;
-  *'/sessions'*) printf '%s\n201' '{"id":"stdin-pipe-test","status":"created"}' ;;
-  *'/prompts'*)
-    if IFS= read -r _; then result=data; else result=eof; fi
-    exec 3> "$PROMPT_STDIN_MARKER"
-    # Keep the empty-file publication window open until the reader observes it.
-    while [[ -d "${PROMPT_STDIN_RELEASE%/*}" && ! -f "$PROMPT_STDIN_RELEASE" ]]; do :; done
-    [[ -f "$PROMPT_STDIN_RELEASE" ]] || exit 1
-    printf '%s' "$result" >&3
-    exec 3>&-
-    ;;
-  *) exit 0 ;;
-esac
-`)
+	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *'/sessions'*) printf '%s\\n201' '{\"id\":\"stdin-pipe-test\",\"status\":\"created\"}' ;;\n  *'/prompts'*) "+codexPromptStdinProbe+" ;;\n  *) exit 0 ;;\nesac\n")
+
+	if delayStartup {
+		// Builtins only: the fixture deliberately excludes ambient executables.
+		path := filepath.Join(binDir, "curl")
+		probe, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeCodexPromptProbeCommand(t, path, strings.Replace(string(probe), "printf '%s' '{\"project\"", "start=$SECONDS; while (( SECONDS - start < 3 )); do :; done; printf '%s' '{\"project\"", 1))
+	}
 
 	stdinReader, stdinWriter, err := os.Pipe()
 	if err != nil {
@@ -311,7 +316,7 @@ esac
 	}))
 	defer server.Close()
 	run.Dir = binDir
-	run.Env = append(codexPromptTestEnv(t, strings.TrimPrefix(server.URL, "http://127.0.0.1:")), "PROMPT_STDIN_MARKER="+markerPath, "PROMPT_STDIN_RELEASE="+releasePath)
+	run.Env = append(codexPromptTestEnv(t, strings.TrimPrefix(server.URL, "http://127.0.0.1:")), "PROMPT_STDIN_MARKER="+markerPath, "PROMPT_STDIN_READY="+readyPath, "PROMPT_STDIN_RELEASE="+filepath.ToSlash(releasePath))
 	run.Stdin = stdinReader
 	if err := run.Start(); err != nil {
 		_ = stdinWriter.Close()
@@ -330,44 +335,135 @@ esac
 		}
 	}()
 
-	deadline := time.Now().Add(time.Second)
-	released := false
+	if err := observeCodexPromptStdin(readyPath, markerPath, releasePath, 10*time.Second, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-waitDone:
+		waited = true
+		if err != nil {
+			t.Fatalf("run adapter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("adapter did not exit after the stdin probe")
+	}
+}
+
+// Announce readiness immediately before the actual read, not at adapter launch.
+// A read timeout is never used as a substitute for EOF.
+const codexPromptStdinProbe = `printf ready > "$PROMPT_STDIN_READY"
+if IFS= read -r input || [ -n "$input" ]; then result=data; else result=eof; fi
+exec 3> "$PROMPT_STDIN_MARKER"
+if [[ -n "${PROMPT_STDIN_RELEASE:-}" ]]; then
+  # Hold publication until the observer has sampled the empty file.
+  while [[ -d "${PROMPT_STDIN_RELEASE%/*}" && ! -f "$PROMPT_STDIN_RELEASE" ]]; do :; done
+  [[ -f "$PROMPT_STDIN_RELEASE" ]] || exit 1
+fi
+printf '%s' "$result" >&3
+exec 3>&-`
+
+func observeCodexPromptStdin(readyPath, resultPath, releasePath string, startupBudget, readBudget time.Duration) error {
+	if _, err := waitCodexProbeMarker(readyPath, startupBudget, false); err != nil {
+		return fmt.Errorf("stdin probe did not become ready: %w", err)
+	}
+	deadline := time.Now().Add(readBudget)
+	if releasePath != "" {
+		marker, err := waitCodexProbeMarker(resultPath, time.Until(deadline), true)
+		if err != nil {
+			return fmt.Errorf("stdin probe did not open publication marker: %w", err)
+		}
+		if len(marker) != 0 {
+			return fmt.Errorf("probe published before release: %q", marker)
+		}
+		if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+			return fmt.Errorf("release stdin probe publication: %w", err)
+		}
+	}
+	result, err := waitCodexProbeMarker(resultPath, time.Until(deadline), false)
+	if err != nil {
+		return fmt.Errorf("stdin probe did not finish after readiness: %w", err)
+	}
+	_, err = codexPromptStdinProbeResult(result)
+	return err
+}
+
+func waitCodexProbeMarker(path string, budget time.Duration, allowEmpty bool) ([]byte, error) {
+	deadline := time.Now().Add(budget)
 	for {
-		marker, err := os.ReadFile(markerPath)
-		if err == nil {
-			if !released {
-				if len(marker) != 0 {
-					t.Fatalf("probe published before release: %q", marker)
-				}
-				if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
-					t.Fatalf("release stdin probe publication: %v", err)
-				}
-				released = true
-			}
-			complete, resultErr := codexPromptStdinProbeResult(marker)
-			if resultErr != nil {
-				t.Fatal(resultErr)
-			}
-			if complete {
-				select {
-				case err := <-waitDone:
-					waited = true
-					if err != nil {
-						t.Fatalf("run adapter: %v", err)
-					}
-				case <-time.After(time.Second):
-					t.Fatal("adapter did not exit after the stdin probe")
-				}
-				return
-			}
+		value, err := os.ReadFile(path)
+		// Opening a marker precedes writing it; an empty file is not a result.
+		if err == nil && (allowEmpty || len(value) > 0) {
+			return value, nil
 		}
 		if err != nil && !os.IsNotExist(err) {
-			t.Fatalf("read stdin probe result: %v", err)
+			return nil, err
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("prompt persistence did not finish the stdin probe")
+			return nil, fmt.Errorf("timed out waiting for %s", filepath.Base(path))
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCodexPromptStdinProbeRejectsInheritedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, wantError string
+		closeInput             bool
+	}{
+		{name: "EOF", closeInput: true},
+		{name: "data", input: "unexpected\n", wantError: `detached curl stdin = "data", want EOF from /dev/null`},
+		{name: "unterminated data", input: "unexpected", closeInput: true, wantError: `detached curl stdin = "data", want EOF from /dev/null`},
+		{name: "open pipe", wantError: "stdin probe did not finish after readiness:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			ready, result := filepath.Join(root, "ready"), filepath.Join(root, "result")
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = reader.Close() }()
+			defer func() { _ = writer.Close() }()
+			if tc.input != "" {
+				if _, err := io.WriteString(writer, tc.input); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.closeInput {
+				_ = writer.Close()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			run := exec.CommandContext(ctx, codexTestBash(t), "-c", codexPromptStdinProbe)
+			run.Env = append(codexHandoffEnv(t, root, "http://127.0.0.1:1"), "PROMPT_STDIN_READY="+ready, "PROMPT_STDIN_MARKER="+result)
+			run.Stdin = reader
+			var stdout, stderr strings.Builder
+			run.Stdout, run.Stderr = &stdout, &stderr
+			if err := run.Start(); err != nil {
+				t.Fatal(err)
+			}
+			probeErr := observeCodexPromptStdin(ready, result, "", 10*time.Second, time.Second)
+			if tc.name == "open pipe" {
+				if _, err := os.Stat(result); !os.IsNotExist(err) {
+					t.Errorf("open pipe published a result before EOF: %v", err)
+				}
+			}
+			// Release a deliberately blocked read only after observing the failure.
+			_ = writer.Close()
+			if err := run.Wait(); err != nil {
+				t.Fatalf("probe exit: %v", err)
+			}
+			if stdout.String() != "" || stderr.String() != "" {
+				t.Fatalf("probe output stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if tc.wantError == "" {
+				if probeErr != nil {
+					t.Fatal(probeErr)
+				}
+			} else if probeErr == nil || !strings.HasPrefix(probeErr.Error(), tc.wantError) {
+				t.Fatalf("probe error = %v, want %q", probeErr, tc.wantError)
+			}
+		})
 	}
 }
 
