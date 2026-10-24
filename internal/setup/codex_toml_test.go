@@ -1,9 +1,9 @@
 package setup
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -25,9 +25,13 @@ func TestInstallCodexTOMLPreservation(t *testing.T) {
 			expectedMarker := ""
 			if tt.name == "CRLF and BOM" {
 				runtimeGOOS = "windows"
-				command := filepath.Join(profile, "engram.exe")
+				command := filepath.Join(profile, "engram&test.exe")
 				osExecutable = func() (string, error) { return command, nil }
-				expectedMarker = windowsHookCommandMarkerPrefix + strconv.Quote(command) + "\r\n"
+				encodedCommand, err := json.Marshal(command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedMarker = windowsHookCommandMarkerPrefix + string(encodedCommand) + "\r\n"
 			}
 			path := codexConfigPath()
 			if err := os.MkdirAll(strings.TrimSuffix(path, "config.toml"), 0755); err != nil {
