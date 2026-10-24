@@ -266,7 +266,7 @@ Hosted experiments require separate authorization.
 merge groups and main pushes. They preserve finding and tooling-failure exits;
 non-required does not mean failures are ignored. Existing required gates remain
 unchanged. See [scanner setup, real-tool tests and result interpretation](docs/ci-scanners.md)
-for pinned Go 1.25.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
+for pinned Go 1.26.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
 Mocked wrapper tests are distinct from opt-in real-tool integration tests; neither
 is hosted rollout evidence. Review findings without blanket suppressions or
 unapproved dependency upgrades.

@@ -1,6 +1,6 @@
 module github.com/Gentleman-Programming/engram/v3
 
-go 1.25.10
+go 1.26.10
 
 tool github.com/a-h/templ/cmd/templ
 

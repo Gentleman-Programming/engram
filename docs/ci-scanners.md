@@ -8,7 +8,7 @@ hosted execution or required-gate proof.
 
 ## Reproduce locally
 
-Use Node.js 24 and Go **1.25.10** (the release/CI toolchain). Install pinned tools
+Use Node.js 24 and Go **1.26.10** (the release/CI toolchain). Install pinned tools
 in isolated scratch, not the repository module. These Bash commands run from the
 repository root; Go's normal toolchain/module caches may also be populated.
 
@@ -18,15 +18,15 @@ printf '*\n' > .repro-2019/.gitignore
 export GOBIN="$PWD/.repro-2019/bin"
 # Git Bash on Windows requires a native absolute GOBIN:
 if command -v cygpath >/dev/null; then export GOBIN="$(cygpath -w "$GOBIN")"; fi
-GOTOOLCHAIN=go1.25.10 go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
-GOTOOLCHAIN=go1.25.10 go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+GOTOOLCHAIN=go1.26.10 go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+GOTOOLCHAIN=go1.26.10 go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 ```
 
-Put Go 1.25.10's `bin` directory on `PATH` (CI uses `actions/setup-go`), then:
+Put Go 1.26.10's `bin` directory on `PATH` (CI uses `actions/setup-go`), then:
 
 ```bash
 export GOTOOLCHAIN=local
-go version                         # must report go1.25.10
+go version                         # must report go1.26.10
 "$GOBIN/govulncheck" -version       # v1.7.0
 "$GOBIN/actionlint" -version        # 1.7.12
 CI_SCANNER_BIN_DIR="$GOBIN" node --test .github/scripts/ci-scanners.integration.test.mjs

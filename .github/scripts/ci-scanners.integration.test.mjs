@@ -57,7 +57,7 @@ test('real pinned scanner CLI contracts', { skip: !bin && 'Set CI_SCANNER_BIN_DI
     assert.equal(typeof result.stderr, 'string');
     return result;
   };
-  assert.match(run('go', ['version']).stdout, /^go version go1\.25\.10 /);
+  assert.match(run('go', ['version']).stdout, /^go version go1\.26\.10 /);
   assert.match(run(executable('govulncheck'), ['-version']).stdout, /v1\.7\.0/);
   assert.match(run(executable('actionlint'), ['-version']).stdout, /1\.7\.12/);
   write('go.mod', 'module example.com/scanner-fixture\n\ngo 1.25.10\n\nrequire example.com/fake v1.0.0\n');

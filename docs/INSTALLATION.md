@@ -237,7 +237,7 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 
 ## Requirements
 
-- **Go 1.24+** to build from source (not needed if installing via Homebrew or downloading a binary)
+- **Go 1.26+** to build from source (not needed if installing via Homebrew or downloading a binary)
 - That's it. No runtime dependencies.
 
 The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure Go, no CGO). Works natively on **macOS**, **Linux**, and **Windows** (x86_64 and ARM64).
