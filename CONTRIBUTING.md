@@ -605,6 +605,8 @@ relative to the repository root.
 | PR policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs` | Merge-queue, label, artifact and PR-size helper logic; not live GitHub permissions or event delivery. |
 | Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy helper suites; not live approval-refresh behavior. |
 
+The **Unit Tests** job provides Node.js 24 for the Go-owned Core lifecycle tests.
+
 The [CI workflow](.github/workflows/ci.yml) is authoritative for hosted commands,
 setup steps and platform coverage; the [Makefile](Makefile) defines the existing
 lint and quality-ratchet targets. This map does not replace either definition.
