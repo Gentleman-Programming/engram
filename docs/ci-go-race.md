@@ -69,14 +69,25 @@ local store measurement. This supports a candidate budget, not identical hosted
 performance or proof that all order-dependent contention is absent. No packages
 were omitted and no assertions or production synchronization were changed.
 
-## Successful hosted full-suite baseline: pending
+## Successful hosted full-suite baseline
 
-The **30-minute job timeout remains provisional**. A successful hosted run of
-the corrected full suite and its runtime are still pending. The local package
-run is not a full-module, hosted or release verdict.
-Record the run URL, exact tested revision, runner image, Go/compiler versions,
-job wall duration and GNU-time output after publication. Inspect failures and
-skips, then qualify or revise the budgets with explicit margin.
+[Hosted run 40147453688](https://github.com/Gentleman-Programming/engram/actions/runs/40147453688)
+succeeded on 2026-10-25 at PR head
+`b64205b3cfe9f4377726e097bc96384e57f46306`, testing synthetic checkout
+`8f5373e2d027f521b3e40b330cd861cf3ce6082e`. The runner used Ubuntu 24.04
+image `20261012.334.1`, Go 1.26.10 linux/amd64, GCC 13.3.0 and CGO enabled.
+
+The **Go Race Tests job took 19m04s**. GNU time reported real 1128.50s,
+user 2675.69s and sys 197.98s. The slowest package, `internal/store`, passed
+in 915.533s (15m15.533s), within the explicit 20-minute per-binary timeout.
+No packages failed and no `WARNING: DATA RACE` appeared in the retained log.
+
+The **30-minute job timeout remains provisional**: this is one successful
+representative run, not a stable runtime guarantee or a release verdict.
+The non-verbose log reports package completions, not an individual-test skip
+inventory; the default-tag, platform and prerequisite boundaries above remain.
+Keep classifying future failures and reviewing observed margins before changing
+budgets or execution scope.
 
 Classify results separately:
 

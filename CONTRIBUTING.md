@@ -265,8 +265,9 @@ Hosted experiments require separate authorization.
 The candidate **Go Race Tests** job runs the full default-tag Go suite with
 `go test -race -timeout=20m ./...` on Linux, independently of existing suites.
 CGO and GCC are enabled; test failures remain failures. The 20-minute per-binary
-budget follows a corrected local store race run of 14m04s; the separate 30-minute
-job budget stays provisional. A successful hosted full-suite baseline is pending.
+budget follows a corrected local store race run of 14m04s. The successful
+[hosted full-suite run](https://github.com/Gentleman-Programming/engram/actions/runs/40147453688)
+at head `b64205b3` took 19m04s; the separate 30-minute job budget stays provisional.
 No required-check settings change. See [scope, local reproduction and failure
 classification](docs/ci-go-race.md).
 Local structural checks: `node --test .github/scripts/issue-go-race-ci.test.mjs`.
