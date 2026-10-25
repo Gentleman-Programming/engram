@@ -16,17 +16,19 @@ import (
 	"testing"
 )
 
-func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false, false, false) }
+func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false, false, false, false) }
 
-func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false, false, false) }
+func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false, false, false, false) }
 
-func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true, false, false) }
+func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true, false, false, false) }
 
-func TestArtifactConsolidation(t *testing.T) { testArtifactInputCLI(t, true, true, true, false) }
+func TestArtifactConsolidation(t *testing.T) { testArtifactInputCLI(t, true, true, true, false, false) }
 
-func TestArtifactJudgments(t *testing.T) { testArtifactInputCLI(t, true, true, true, true) }
+func TestArtifactJudgments(t *testing.T) { testArtifactInputCLI(t, true, true, true, true, false) }
 
-func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgments bool) {
+func TestArtifactFinalization(t *testing.T) { testArtifactInputCLI(t, true, true, true, true, true) }
+
+func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgments, finalization bool) {
 	started := filepath.Join(t.TempDir(), "core-started")
 	marker, err := json.Marshal(started)
 	if err != nil {
@@ -78,6 +80,9 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgme
 				extra := artifactConsolidationFixture
 				if judgments {
 					extra += artifactJudgmentFixture
+				}
+				if finalization {
+					extra += artifactFinalizationFixture
 				}
 				fixture = strings.Replace(fixture, "  host.registerTool(", extra+"\n  host.registerTool(", 1)
 			}
@@ -197,6 +202,10 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgme
 			runtimeModes[tc.name] = strconv.Itoa(150 + i)
 		}
 	}
+	if finalization {
+		cases = []struct{ name, state string }{{"finalization original receipt", "passed"}, {"finalization rejects changed receipt", "passed"}}
+		runtimeModes[cases[0].name], runtimeModes[cases[1].name] = "153", "154"
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			helperMutation := topics && strings.Contains(tc.name, " helper ")
@@ -310,7 +319,7 @@ export const syntheticPeer = true;
 				}
 				t.Log("confirmed owned helper change/removal and both exit0 joins:", tc.name)
 			}
-			if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != tc.state || result["workflows"].(map[string]any)["state"] != "unavailable" {
+			if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != tc.state || (!finalization && result["workflows"].(map[string]any)["state"] != "unavailable") {
 				t.Fatalf("unexpected report: %s", out)
 			}
 			if bootstrap {
@@ -444,14 +453,49 @@ export const syntheticPeer = true;
 							break
 						}
 					}
-					if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+					if _, err := os.Stat(topicMarker); !os.IsNotExist(err) && !finalization {
 						t.Fatal("unexpected judgment mutation marker")
 					}
 					for _, pending := range pendingCases {
-						if value := pending.(map[string]any); value["coreRuntime"] != nil || value["piRuntime"] != nil {
-							t.Fatal("continued after unavailable phase or executed finalization")
+						if value := pending.(map[string]any); !finalization && (value["coreRuntime"] != nil || value["piRuntime"] != nil) {
+							if tc.name != "judgment plans" || value["coreRuntime"] == nil || value["piRuntime"] == nil {
+								t.Fatal("continued after unavailable phase")
+							}
+							// This older proxy intentionally has no finalization tool. Its four
+							// completed phases permit the new fifth phase to start, not pass.
+							core, pi := value["coreRuntime"].(map[string]any), value["piRuntime"].(map[string]any)
+							if core["joined"] != true || core["exitCode"] != float64(0) || core["cleanup"] != "passed" || pi["state"] != "unavailable" || pi["joined"] != true || pi["exitCode"] != float64(1) || pi["cleanup"] != "failed" {
+								t.Fatalf("missing unavailable finalization-tool evidence: %s", out)
+							}
 						}
 					}
+				}
+				if finalization {
+					last := cases[4].(map[string]any)
+					state, exit, cleanup := "passed", float64(0), "passed"
+					if tc.name == "finalization rejects changed receipt" {
+						state, exit, cleanup = "unavailable", 1, "failed"
+					}
+					if last["state"] != state || last["coreRuntime"] == nil || last["piRuntime"] == nil {
+						t.Fatalf("missing finalization execution: %s", out)
+					}
+					core, pi := last["coreRuntime"].(map[string]any), last["piRuntime"].(map[string]any)
+					if core["state"] != "passed" || core["joined"] != true || core["exitCode"] != float64(0) || core["cleanup"] != "passed" || pi["state"] != state || pi["joined"] != true || pi["exitCode"] != exit || pi["cleanup"] != cleanup || result["workflows"].(map[string]any)["state"] != state {
+						t.Fatalf("wrong finalization termination or aggregate: %s", out)
+					}
+					if exit == 1 {
+						marker, err := os.ReadFile(topicMarker)
+						if err != nil || string(marker) != "finalization receipt changed" {
+							t.Fatal("actual changed finalization receipt not observed")
+						}
+						if err := os.Remove(topicMarker); err != nil {
+							t.Fatal(err)
+						}
+						t.Log("confirmed changed finalization receipt and observed Core0/Pi1 joins")
+					} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+						t.Fatal("positive finalization changed original receipt")
+					}
+					pendingCases = nil
 				}
 				for _, pending := range pendingCases {
 					if pending.(map[string]any)["state"] != "unavailable" {

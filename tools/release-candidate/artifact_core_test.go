@@ -50,14 +50,17 @@ func main() {
  var mutex sync.Mutex
  observations:=[]map[string]any{}
  relations:=[]map[string]any{}
+ registered,finalized:=false,false
+ summaryID:=0
  nextID:=0
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
   if r.Header.Get("Authorization")!="Bearer "+token && !strings.Contains(cwd,"-128-") { w.WriteHeader(401); _=json.NewEncoder(w).Encode(map[string]any{"error":"unauthorized"}); return }
   mutex.Lock(); defer mutex.Unlock()
-  judgmentFixture:=strings.Contains(cwd,"engram-core-150-") || strings.Contains(cwd,"engram-core-151-") || strings.Contains(cwd,"engram-core-152-")
+  finalizationFixture:=strings.Contains(cwd,"engram-core-153-") || strings.Contains(cwd,"engram-core-154-")
+  judgmentFixture:=finalizationFixture || strings.Contains(cwd,"engram-core-150-") || strings.Contains(cwd,"engram-core-151-") || strings.Contains(cwd,"engram-core-152-")
   consolidationFixture:=judgmentFixture || strings.Contains(cwd,"engram-core-148-") || strings.Contains(cwd,"engram-core-149-")
   topicFixture:=false
-  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149","150","151","152"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149","150","151","152","153","154"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
   if judgmentFixture && strings.HasPrefix(r.URL.Path,"/conflicts") {
    switch r.URL.Path {
    case "/conflicts/scan":
@@ -118,9 +121,22 @@ func main() {
      observations=[]map[string]any{{"id":nextID,"title":params["new_title"],"content":params["new_content"]}}
      _=json.NewEncoder(w).Encode(map[string]any{"status":"consolidated","soft_deleted_ids":params["ids_to_delete"]}); return
     }
+   case "/sessions/real-host/finalize":
+    if finalizationFixture {
+     if !registered { w.WriteHeader(404); _=json.NewEncoder(w).Encode(map[string]any{"error":"session not registered"}); return }
+     var params map[string]any; _=json.NewDecoder(r.Body).Decode(&params)
+     state,marker:="already_finalized",""
+     if !finalized {
+      state="finalized"; nextID++; summaryID=nextID; finalized=true
+      observations=append(observations,map[string]any{"id":summaryID,"type":"session_summary","session_id":"real-host","content":params["summary"]})
+     } else if strings.Contains(cwd,"engram-core-154-") { summaryID++; marker="finalization receipt changed" }
+     _=json.NewEncoder(w).Encode(map[string]any{"state":state,"session_id":"real-host","summary_id":summaryID,"summary_sync_id":"fixture-summary","fixture_mutated":marker}); return
+    }
    case "/observations":
     if consolidationFixture {
      if r.Method=="POST" {
+      if finalizationFixture && finalized { w.WriteHeader(409); _=json.NewEncoder(w).Encode(map[string]any{"error":"session finalized"}); return }
+      if finalizationFixture { registered=true }
       var value map[string]any
       _=json.NewDecoder(r.Body).Decode(&value)
       nextID++; value["id"]=nextID; observations=append(observations,value)
@@ -131,6 +147,10 @@ func main() {
     if r.Method=="POST" { written.Store(true); _=json.NewEncoder(w).Encode(map[string]any{"id":1}); return }
     if written.Load() { _=json.NewEncoder(w).Encode([]any{map[string]any{"id":1}}) } else { _=json.NewEncoder(w).Encode([]any{}) }; return
    case "/sessions/real-host":
+    if finalizationFixture && registered {
+     ended:=""; if finalized { ended="fixture-ended" }
+     _=json.NewEncoder(w).Encode(map[string]any{"id":"real-host","ended_at":ended}); return
+    }
     w.WriteHeader(404); _=json.NewEncoder(w).Encode(map[string]any{"error":"not found"}); return
    }
   }

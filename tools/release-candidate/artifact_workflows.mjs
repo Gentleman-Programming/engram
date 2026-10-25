@@ -7,7 +7,8 @@ import { join } from "node:path";
 const project = "integration-1348";
 export async function runArtifactWorkflow(register, workflow) {
   const run = workflow === "topics" ? topicVectors : workflow === "consolidation" ? consolidate
-    : workflow === "batch-errors" ? batchErrors : workflow === "judgments" ? judgments : undefined;
+    : workflow === "batch-errors" ? batchErrors : workflow === "judgments" ? judgments
+    : workflow === "finalization" ? finalizeSession : undefined;
   assert.ok(run, "fixed workflow phase");
   mkdirSync(join(process.cwd(), ".engram"), { mode: 0o700 });
   writeFileSync(join(process.cwd(), ".engram", "config.json"), JSON.stringify({ project_name: project }), { mode: 0o600, flag: "wx" });
@@ -29,7 +30,7 @@ export async function runArtifactWorkflow(register, workflow) {
     const result = await request("/observations?all_projects=true&limit=100");
     assert.equal(result.status, 200); return result.data;
   };
-  await run({ tool, request, rows });
+  await run({ tool, request, rows, events, ctx });
 }
 
 async function topicVectors({ tool, request, rows }) {
@@ -177,4 +178,31 @@ async function judgments({ tool, request, rows }) {
   assert.deepEqual(await request(`/conflicts/${second.id}`), secondRead);
   assert.deepEqual(await stats(), afterStats);
   assert.deepEqual(await rows(), observations);
+}
+
+async function finalizeSession({ tool, request, rows, events, ctx }) {
+  const unregistered = await tool("mem_session_finalize", { summary: "No session yet" });
+  assert.equal(unregistered.isError, true); assert.deepEqual(await rows(), []);
+  assert.equal((await request("/sessions/real-host")).status, 404);
+  await save(tool, "Before finalization", "Owned source record.");
+  const unauthorized = await request("/sessions/real-host/finalize", { project, summary: "Unauthorized" }, false);
+  assert.equal(unauthorized.status, 401);
+  const before = await rows();
+  const finalized = await tool("mem_session_finalize", { summary: "Goal: completed real HTTP proof" });
+  assert.notEqual(finalized.isError, true, JSON.stringify(finalized));
+  assert.equal(finalized.details.data.state, "finalized"); assert.equal(finalized.details.data.session_id, "real-host");
+  const retry = await tool("mem_session_finalize", { summary: "Different retry text" });
+  assert.notEqual(retry.isError, true, JSON.stringify(retry));
+  assert.equal(retry.details.data.state, "already_finalized");
+  assert.equal(retry.details.data.summary_id, finalized.details.data.summary_id);
+  assert.equal(retry.details.data.summary_sync_id, finalized.details.data.summary_sync_id);
+  const session = await request("/sessions/real-host"); assert.equal(session.status, 200); assert.ok(session.data.ended_at);
+  const after = await rows(); assert.equal(after.length, before.length + 1);
+  const summary = after.find(value => value.id === finalized.details.data.summary_id);
+  assert.equal(summary.type, "session_summary"); assert.equal(summary.session_id, "real-host");
+  assert.equal(summary.content, "Goal: completed real HTTP proof");
+  assert.equal((await tool("mem_save", { title: "Late", content: "Must not save" })).isError, true);
+  await events.get("session_shutdown")({}, ctx);
+  assert.deepEqual(await rows(), after);
+  assert.deepEqual(await request("/sessions/real-host"), session);
 }

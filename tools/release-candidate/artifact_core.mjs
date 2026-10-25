@@ -45,7 +45,7 @@ async function join(child, exited, observation) {
   }
 }
 try {
-  if ((workflow && !["topics", "consolidation", "batch-errors", "judgments"].includes(workflow)) || Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
+  if ((workflow && !["topics", "consolidation", "batch-errors", "judgments", "finalization"].includes(workflow)) || Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
   const keys = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"];
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   env.ENGRAM_TOKEN = token; // Never serialize the token or forward child diagnostics.

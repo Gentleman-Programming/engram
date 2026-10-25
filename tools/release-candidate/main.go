@@ -31,7 +31,7 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -observe-pi-inputs Also capture trusted selected Pi inputs and verify with selected Go.
 -observe-pi-package Bind -pi-tarball bytes to selected Pi source; requires observation.
 -observe-artifact-inputs Admit reviewed staging inputs only; never execute Core/Pi.
--observe-artifact-workflows Execute owned Core/Pi bootstrap and fixed topic/consolidation/batch/judgment workflows; finalization unavailable.
+-observe-artifact-workflows Execute owned Core/Pi bootstrap and five fixed HTTP workflows; observations never approve release.
 -staging-bundle Explicit local #1928 ZIP; requires an artifact observation mode.
 -staging-context Reviewed bounded JSON pins; requires an artifact observation mode.
 -core-source Full lowercase core commit ID for observation (40 or 64 hex digits).

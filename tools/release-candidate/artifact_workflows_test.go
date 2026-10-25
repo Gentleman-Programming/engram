@@ -1,6 +1,18 @@
 package main
 
 // Synthetic tool proxy only. Actual selected Pi execution is a separate proof.
+const artifactFinalizationFixture = `
+  const finalize = async params => {
+    const response = await fetch(new URL('/sessions/real-host/finalize', process.env.ENGRAM_URL), { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.ENGRAM_HTTP_TOKEN }, body: JSON.stringify(params) });
+    const data = await response.json();
+    if (data.fixture_mutated === 'finalization receipt changed') writeFileSync("$TOPIC_MARKER$", data.fixture_mutated, { flag: 'wx' });
+    return response.status === 200 ? { content: [], details: { data } } : { isError: true, content: [{ type: 'text', text: data.error }], details: { http_status: response.status } };
+  };
+  host.registerTool({ name: 'mem_session_finalize', execute(_id, params) { return finalize(params); } });
+  host.on('session_shutdown', async () => { await finalize({ summary: 'shutdown' }); });
+`
+
 const artifactJudgmentFixture = `
   host.registerTool({ name: 'mem_judge_many', async execute(_id, params) {
     const response = await fetch(new URL('/conflicts/judge-many', process.env.ENGRAM_URL), { method: 'POST',
@@ -18,7 +30,7 @@ const artifactConsolidationFixture = `
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.ENGRAM_HTTP_TOKEN }, body: JSON.stringify(params) });
       const data = await response.json();
       if (data.fixture_mutated === true) writeFileSync("$TOPIC_MARKER$", 'consolidation preview mutation', { flag: 'wx' });
-      return { content: [], details: { data } };
+      return response.status === 200 ? { content: [], details: { data } } : { isError: true, content: [{ type: 'text', text: data.error }], details: { http_status: response.status } };
     } });
   }
 `

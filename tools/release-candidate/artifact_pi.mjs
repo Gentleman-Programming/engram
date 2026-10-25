@@ -54,7 +54,7 @@ try {
   } });
   const selected = await import(pathToFileURL(process.argv[2]).href);
   const workflow = process.argv[3] || "";
-  if (workflow && !["topics", "consolidation", "batch-errors", "judgments"].includes(workflow)) throw new Error("fixed phase");
+  if (workflow && !["topics", "consolidation", "batch-errors", "judgments", "finalization"].includes(workflow)) throw new Error("fixed phase");
   if (workflow) await runArtifactWorkflow(selected.default, workflow);
   if (parentGone) throw new Error("parent ended before acknowledgement");
   bootstrapped = true;
