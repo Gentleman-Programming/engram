@@ -252,7 +252,7 @@ Non-required PR checks include the Claude plugin version guard, lint, Windows se
 
 ### Windows full-suite baseline (#1891)
 
-The candidate `Windows Unit Tests (observational)` job runs `go test ./...` on
+The candidate `Windows Unit Tests (observational)` job runs `go test -json ./...` on
 `windows-latest` for PRs and pushes to `main`, using the same pinned Go version
 as Linux. It does not run on merge groups during baseline collection. Existing
 Linux and selected Windows checks remain intact. This is not a required context;
@@ -310,9 +310,11 @@ step-scoped `continue-on-error`, preserving its true failure in the log while
 allowing the unchanged, unfiltered full Go suite to run. The flag is not exported
 to the baseline suite. No tools, installed configuration, selectors, assertions,
 private PATH, privileged startup or time limits are changed; this is not a fix.
-The test step log retains diagnostics
-and the process exit code; the final summary records success, failure, or skipped
-execution. Setup failure, cancellation, or timeout is not a passing baseline.
+The test step log retains JSON events for test starts, results, and elapsed times,
+alongside diagnostics and the process exit code. A package timeout does not prove
+that the active test consumed its whole budget; unfinished tests have no final result.
+The final summary records success, failure, or skipped execution. Setup failure,
+cancellation, or timeout is not a passing baseline.
 
 Record actual run URLs and evidence on #1891. Classify failures as product
 portability defects, nonportable fixtures, missing prerequisites, or genuinely

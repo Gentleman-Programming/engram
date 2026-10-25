@@ -13,7 +13,9 @@ test('Windows full suite is independent, observational, and aligned with Linux',
   assert.match(job, /ref: \$\{\{ github.sha \}\}/);
   const linux = workflow.match(/^  unit-tests:\n[\s\S]*?(?=^  [\w-]+:)/m)[0];
   assert.equal(job.match(/go-version: "([^"]+)"/)[1], linux.match(/go-version: "([^"]+)"/)[1]);
-  assert.match(job, /run: go test \.\/\.\.\./);
+  assert.match(job, /run: go test -json \.\/\.\.\.\n/);
+  assert.ok(job.includes("'Command: `go test -json ./...`'"));
+  assert.match(job, /timeout-minutes: 30\n/);
   const baseline = job.replace(/      - name: Trace Codex isolation preflight\n[\s\S]*?(?=      - name:)/, '');
   assert.doesNotMatch(baseline, /continue-on-error|needs:|GOPROXY:|TEMP:|TMP:| -skip| -run|\|\| true/);
 });
@@ -27,7 +29,7 @@ test('Codex trace is step-scoped and cannot suppress the complete baseline suite
   assert.ok(job.indexOf(trace) < job.indexOf('Record Windows baseline environment'));
   const rest = job.replace(trace, '');
   assert.doesNotMatch(rest, /continue-on-error|CODEX_TEST_TMP_TRACE| -run/);
-  assert.match(rest, /id: suite\n\s+run: go test \.\/\.\.\./);
+  assert.match(rest, /id: suite\n\s+run: go test -json \.\/\.\.\.\n/);
 });
 
 test('Windows prerequisites use reviewed real executables and fail closed before export or suite', () => {
@@ -54,7 +56,7 @@ test('Windows prerequisites use reviewed real executables and fail closed before
   assert.match(setup, /GITHUB_STEP_SUMMARY/);
   assert.doesNotMatch(setup, /Get-Command|where.exe|Get-ChildItem|choco |Invoke-WebRequest|continue-on-error/);
   assert.ok(job.indexOf(setup) < job.indexOf('Record Windows baseline environment'));
-  assert.ok(job.indexOf(setup) < job.indexOf('run: go test ./...'));
+  assert.ok(job.indexOf(setup) < job.indexOf('run: go test -json ./...'));
 });
 
 test('Windows CURL selection is explicit, reviewed, and validated before export', () => {
@@ -76,7 +78,7 @@ test('Windows evidence records checkout, toolchain, prerequisites, and actual te
   for (const evidence of ['git rev-parse HEAD', 'go version', 'go env', 'bash --version', 'node --version', '$PSVersionTable', 'steps.suite.outcome']) {
     assert.ok(job.includes(evidence), `missing evidence: ${evidence}`);
   }
-  assert.match(job, /id: suite\n\s+run: go test \.\/\.\.\./);
+  assert.match(job, /id: suite\n\s+run: go test -json \.\/\.\.\.\n/);
   assert.match(job, /if: always\(\)/);
   assert.match(job, /GITHUB_STEP_SUMMARY/);
 });
@@ -86,7 +88,7 @@ test('Windows PerfRatchet diagnostics separate ambient metadata from owned-file 
   const step = '      - name: Diagnose PerfRatchet temporary visibility';
   assert.ok(job.includes(step), 'missing PerfRatchet diagnostic');
   assert.ok(job.indexOf('Diagnose Git Bash temporary directory') < job.indexOf(step));
-  assert.ok(job.indexOf(step) < job.indexOf('run: go test ./...'));
+  assert.ok(job.indexOf(step) < job.indexOf('run: go test -json ./...'));
   assert.match(job, /run: \.\/\.github\/scripts\/windows-perf-temp-diagnostic\.ps1/);
   const diagnostic = readFileSync(new URL('./windows-perf-temp-diagnostic.ps1', import.meta.url), 'utf8');
   for (const invariant of ['GITHUB_WORKSPACE', 'Get-Command bash.exe', 'C:/Program Files/Git/bin/bash.exe', 'C:/Program Files/Git/usr/bin/bash.exe', "'ambient-metadata'", "'private-file-control'", 'Environment.Clear()', 'WaitForExit(10000)', 'Kill($true)', 'ReadToEndAsync()', 'tool_admission', 'CREATED_NATIVE=', 'CHILD_READ=', 'AWK_READ=', 'native_read', 'GITHUB_STEP_SUMMARY']) {
@@ -95,7 +97,7 @@ test('Windows PerfRatchet diagnostics separate ambient metadata from owned-file 
   assert.match(diagnostic, /\$case -eq 'private-file-control'/);
   assert.match(diagnostic, /StartsWith\(\$owned/);
   assert.doesNotMatch(diagnostic, /\$env:[\w]+\s*=|GITHUB_ENV|Remove-Item|Invoke-WebRequest|choco |go test|continue-on-error/);
-  assert.match(job, /id: suite\n\s+run: go test \.\/\.\.\./);
+  assert.match(job, /id: suite\n\s+run: go test -json \.\/\.\.\.\n/);
 });
 
 test('Windows Bash temp diagnostics are bounded, read-only, and precede the unchanged suite', () => {
@@ -103,12 +105,12 @@ test('Windows Bash temp diagnostics are bounded, read-only, and precede the unch
   assert.ok(job.includes(diagnosticStep), 'missing read-only Bash temp diagnostic');
   assert.match(job, /name: Diagnose Git Bash temporary directory\n\s+shell: pwsh\n\s+run: \.\/\.github\/scripts\/windows-bash-tmp-diagnostic\.ps1/);
   assert.ok(job.indexOf('Select trusted Windows fixture tools') < job.indexOf(diagnosticStep));
-  assert.ok(job.indexOf(diagnosticStep) < job.indexOf('run: go test ./...'));
+  assert.ok(job.indexOf(diagnosticStep) < job.indexOf('run: go test -json ./...'));
   const diagnostic = readFileSync(new URL('./windows-bash-tmp-diagnostic.ps1', import.meta.url), 'utf8');
   for (const required of ['RUNNER_TEMP', '.Environment.Clear()', "'--noprofile'", "'--norc'", "'-p'", 'native-bootstrap', 'posix-launcher', 'native-temp-posix-home', 'WaitForExit(10000)', '.Kill($true)', 'ReadToEndAsync()', 'exit_code', 'timed_out', 'stdout', 'stderr', 'tmp_native_path', 'Get-Item -LiteralPath', 'GITHUB_STEP_SUMMARY']) {
     assert.ok(diagnostic.includes(required), `missing diagnostic invariant: ${required}`);
   }
   assert.doesNotMatch(diagnostic, /New-Item|CreateDirectory|mkdir|Set-Item|SetEnvironmentVariable|GITHUB_ENV|Invoke-WebRequest|choco |Set-Content|Add-Content|Remove-Item/);
   assert.doesNotMatch(diagnostic, /\$env:[\w]+\s*=/);
-  assert.match(job, /id: suite\n\s+run: go test \.\/\.\.\./);
+  assert.match(job, /id: suite\n\s+run: go test -json \.\/\.\.\.\n/);
 });
