@@ -65,7 +65,11 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 			t.Error("open fixture cleanup observer failed")
 			return
 		}
-		defer observer.Close()
+		defer func() {
+			if err := observer.Close(); err != nil {
+				t.Error("close fixture cleanup observer failed")
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		var exists bool
