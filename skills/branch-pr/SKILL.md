@@ -20,6 +20,8 @@ Use this skill when:
 
 ## Critical Rules
 
+The [contribution policy transition](../../docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE**; the active rules below still apply.
+
 1. **Every PR MUST link an approved issue** — no exceptions
 2. **Every PR MUST have exactly one `type:*` label**
 3. **All required automated checks must pass** before merge is possible

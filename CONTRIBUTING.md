@@ -2,6 +2,8 @@
 
 Thanks for contributing. Engram enforces a strict **issue-first workflow** — every change starts with an approved issue.
 
+[Contribution policy transition](docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE** target guidance; the active requirements below remain unchanged.
+
 ---
 
 ## Contribution Workflow

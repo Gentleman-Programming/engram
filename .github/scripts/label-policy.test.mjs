@@ -245,6 +245,31 @@ test('aligns proportional evidence and per-merge migration across contribution s
   }
 });
 
+test('keeps the active PR template concise without activating staged admission policy', () => {
+  const template = fs.readFileSync('.github/PULL_REQUEST_TEMPLATE.md', 'utf8');
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+
+  assert.match(template, /What problem does this solve/);
+  assert.match(template, /compatibility, data\/security\/shared-contract/);
+  assert.doesNotMatch(template, /^\s*\||^- \[[ x]\]/m, 'no copied tables or checkbox classification/checklists');
+  assert.match(template, /^Closes #$/m);
+  assert.match(template, /every PR requires a closing issue reference/);
+  assert.match(template, /exactly one canonical type:\* PR label/);
+  assert.match(template, /All required checks must pass before merge, including for existing PRs/);
+  assert.match(template, /\*\*PRE-CUTOVER \/ NOT ACTIVE\*\*: optional issue\/type policy does not apply yet/);
+  assert.match(template, /actual commands\/steps and outcomes/);
+  assert.match(template, /focused regression and affected package tests/);
+  assert.match(template, /checks not run and missing CI evidence/);
+  assert.match(template, /CONTRIBUTING's proportional evidence policy; evidence may live in the issue/);
+  assert.match(contributing, /no separate design document is required by default/);
+
+  const links = [...template.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].map((match) => match[1]);
+  assert.deepEqual(links, ['../CONTRIBUTING.md', '../docs/contribution-policy-transition.md']);
+  for (const link of links) {
+    assert.ok(fs.statSync(new URL(link, new URL('../PULL_REQUEST_TEMPLATE.md', import.meta.url))).isFile(), link);
+  }
+});
+
 test('documents singleton-safe duplicate status transitions', () => {
   const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
   const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
