@@ -16,7 +16,13 @@ import (
 )
 
 func TestArtifactInputCLI(t *testing.T) {
-	core, revision, repo := stagedProgramFixture(t, artifactCoreFixture) // Synthetic child; never production proof.
+	started := filepath.Join(t.TempDir(), "core-started")
+	marker, err := json.Marshal(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := strings.Replace(artifactCoreFixture, "func main() {", "func main() {\n if os.WriteFile("+string(marker)+", []byte(\"started\"), 0600) != nil { os.Exit(25) }", 1)
+	core, revision, repo := stagedProgramFixture(t, program) // Synthetic child; never production proof.
 	write := func(name string, data []byte) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
@@ -226,6 +232,56 @@ func TestArtifactInputCLI(t *testing.T) {
 			c, ctxErr := os.ReadFile(contextFile)
 			if err != nil || before != after || readErr != nil || !bytes.Equal(b, payload) || ctxErr != nil || !bytes.Equal(c, data) {
 				t.Fatal("changed source/Git/input or left owned workspace")
+			}
+		})
+	}
+	for _, target := range []string{"bundle", "context"} {
+		t.Run("changed "+target+" before execution", func(t *testing.T) {
+			write(bundle, archive.Bytes())
+			write(contextFile, encode(want))
+			if err := os.Remove(started); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			filename := bundle
+			if target == "context" {
+				filename = contextFile
+			}
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wrapper, mutated := artifactMutationGit(t)
+			t.Setenv("PATH", wrapper+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ARTIFACT_TEST_REAL_GIT", realGit)
+			t.Setenv("ARTIFACT_TEST_MUTATE", filename)
+			t.Setenv("ARTIFACT_TEST_MUTATED", mutated)
+			before, err := sourceTreeDigest(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, diagnostic, code := invoke([]string{"-root", repo, "-core-ref", "refs/tags/v1.2.3", "-pi-ref", "refs/tags/pi-v4.5.6", "-core-source", revision, "-pi-source", piRevision, "-observe-artifact-workflows", "-staging-bundle", bundle, "-staging-context", contextFile})
+			var result artifactInputObservation
+			if err := json.Unmarshal([]byte(out), &result); err != nil || code != 2 || diagnostic != "" || strings.Count(out, "\n") != 1 {
+				t.Fatalf("invalid public report: code=%d stdout=%q stderr=%q err=%v", code, out, diagnostic, err)
+			}
+			if proof, err := os.ReadFile(mutated); err != nil || string(proof) != "mutated" {
+				t.Fatalf("mutation did not occur after admission: %q %v", proof, err)
+			}
+			if _, err := os.Stat(started); !os.IsNotExist(err) {
+				t.Fatalf("Core executed after original %s changed: %v", target, err)
+			}
+			if result.Outcome != "blocked" || result.Check.State != "unavailable" || result.PiPackage == nil || result.PiPackage.State != "unavailable" || result.PiPackage.Files != 0 || result.Workflows.State != "unavailable" || result.CoreRuntime == nil || result.CoreRuntime.State != "unavailable" || result.CoreRuntime.Cleanup != "not-started" || !result.CoreRuntime.Joined {
+				t.Fatalf("changed input must prevent execution: %s", out)
+			}
+			after, digestErr := sourceTreeDigest(repo)
+			current, readErr := os.ReadFile(filename)
+			other, expected := contextFile, encode(want)
+			if target == "context" {
+				other, expected = bundle, archive.Bytes()
+			}
+			unchanged, otherErr := os.ReadFile(other)
+			if digestErr != nil || before != after || readErr != nil || string(current) != "tampered" || otherErr != nil || !bytes.Equal(unchanged, expected) {
+				t.Fatal("collector changed source/Git or rewrote original inputs")
 			}
 		})
 	}

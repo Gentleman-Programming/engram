@@ -128,9 +128,19 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 	check := pkg.verifyInto(ctx, r.Pi.VersionIntent, filepath.Join(workspace, "materialized-pi"))
 	r.PiPackage, r.Check.State = &check, check.State
 	if r.runCore && check.State == "passed" {
+		// Admission may precede source materialization by several reads. Reject
+		// changed originals before starting Core, not only after it has run.
+		verified := pkg.verify(ctx, r.Pi.VersionIntent)
+		_, archiveErr := readStagedArtifacts(ctx, bundle, want)
+		current, contextErr := stagingContext(contextFile)
+		if verified.State != "passed" || archiveErr != nil || contextErr != nil || !bytes.Equal(raw, current) || ctx.Err() != nil {
+			r.Check.State, r.PiPackage.State, r.PiPackage.Files = "unavailable", "unavailable", 0
+			r.CoreRuntime.State = "unavailable"
+			return
+		}
 		before, beforeErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
 		r.CoreRuntime = runArtifactCore(ctx, measured.Core, measured.CoreSHA256, want.RunID)
-		verified := pkg.verify(ctx, r.Pi.VersionIntent)
+		verified = pkg.verify(ctx, r.Pi.VersionIntent)
 		after, afterErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
 		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" {
 			r.Check.State, r.PiPackage.State, r.CoreRuntime.State = "unavailable", "unavailable", "unavailable"
