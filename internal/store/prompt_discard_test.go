@@ -400,6 +400,20 @@ func TestLegacyEmptyPromptDiscardRollback(t *testing.T) {
 	}
 }
 
+// Resolve only the existing parent: the requested backup does not exist yet.
+func discardExpectedBackupPath(t *testing.T, requested string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(parent, filepath.Base(absolute))
+}
+
 func TestLegacyEmptyPromptDiscardRevalidationErrors(t *testing.T) {
 	for _, phase := range []string{"preflight", "post-backup"} {
 		t.Run(phase, func(t *testing.T) {
@@ -428,6 +442,7 @@ func TestLegacyEmptyPromptDiscardRevalidationErrors(t *testing.T) {
 				breakQuery()
 			}
 			path := filepath.Join(t.TempDir(), "revalidation.db")
+			expectedBackup := discardExpectedBackupPath(t, path)
 			result, err := s.ApplyLegacyEmptyPromptDiscard(plan, path)
 			discardExec(t, s, `ALTER TABLE sync_enrolled_projects RENAME COLUMN unavailable_project TO project`)
 			discardUnchanged(t, s, before)
@@ -436,7 +451,7 @@ func TestLegacyEmptyPromptDiscardRevalidationErrors(t *testing.T) {
 			}
 			if phase == "post-backup" {
 				info, statErr := os.Stat(path)
-				if !backedUp || result.BackupPath != path || statErr != nil || info.Size() == 0 {
+				if !backedUp || result.BackupPath != expectedBackup || statErr != nil || info.Size() == 0 {
 					t.Fatalf("transactional revalidation not reached: backedUp=%v result=%+v stat=%v", backedUp, result, statErr)
 				}
 			} else if _, statErr := os.Lstat(path); backedUp || result.BackupPath != "" || !os.IsNotExist(statErr) {
@@ -471,10 +486,11 @@ func TestLegacyEmptyPromptDiscardPostBackupStale(t *testing.T) {
 		return result, err
 	}
 	path := filepath.Join(t.TempDir(), "before-change.db")
+	expectedBackup := discardExpectedBackupPath(t, path)
 	result, err := s.ApplyLegacyEmptyPromptDiscard(plan, path)
 	discardCode(t, err, "stale_plan")
 	discardUnchanged(t, s, expected)
-	if result.BackupPath != path || result.Status != "" {
+	if result.BackupPath != expectedBackup || result.Status != "" {
 		t.Fatalf("bad failure result: %+v", result)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -551,12 +567,13 @@ func TestLegacyEmptyPromptDiscardSuccess(t *testing.T) {
 		t.Fatalf("fixture lacks WAL writes: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "backup.db")
+	expectedBackup := discardExpectedBackupPath(t, path)
 	result, err := s.ApplyLegacyEmptyPromptDiscard(plan, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Status != "delete_queued" || result.DeleteSeq <= plan.Sequences[1] ||
-		result.BackupPath != path || !reflect.DeepEqual(result.Sequences, plan.Sequences) {
+		result.BackupPath != expectedBackup || !reflect.DeepEqual(result.Sequences, plan.Sequences) {
 		t.Fatalf("bad result: %+v", result)
 	}
 	for _, original := range originals {
