@@ -6,8 +6,8 @@ backlog-wide migration is not an activation prerequisite.
 See CONTRIBUTING for the current workflow, proportional evidence and required checks.
 -->
 
-Current rules: [CONTRIBUTING](../CONTRIBUTING.md).
-The [staged contribution policy](../docs/contribution-policy-transition.md) is
+Current rules: [CONTRIBUTING](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md).
+The [staged contribution policy](https://github.com/Gentleman-Programming/engram/blob/main/docs/contribution-policy-transition.md) is
 **PRE-CUTOVER / NOT ACTIVE**: optional issue/type policy does not apply yet.
 
 ## Problem and result

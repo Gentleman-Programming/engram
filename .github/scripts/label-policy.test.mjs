@@ -264,10 +264,11 @@ test('keeps the active PR template concise without activating staged admission p
   assert.match(contributing, /no separate design document is required by default/);
 
   const links = [...template.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].map((match) => match[1]);
-  assert.deepEqual(links, ['../CONTRIBUTING.md', '../docs/contribution-policy-transition.md']);
-  for (const link of links) {
-    assert.ok(fs.statSync(new URL(link, new URL('../PULL_REQUEST_TEMPLATE.md', import.meta.url))).isFile(), link);
-  }
+  // The template is copied into PR bodies, where file-relative links lose their base.
+  assert.deepEqual(links, [
+    'https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md',
+    'https://github.com/Gentleman-Programming/engram/blob/main/docs/contribution-policy-transition.md',
+  ]);
 });
 
 test('aligns branch PR body guidance with the canonical template and active prerequisites', () => {
