@@ -58,6 +58,7 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #2019 adds independent read-only scanner jobs and their policy-test step only.
   // #2096 adds only guarded workflow-level concurrency; existing CI jobs stay exact.
   // #2107 updates the nine explicit CI toolchain pins to Go 1.26.10; job guards stay exact.
+  // #2017 adds only the isolated PostgreSQL job and its policy-test step; existing guards stay exact.
   // #2018 adds the independent Linux race job with its measured 20m per-binary budget;
   // existing jobs stay exact.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
@@ -65,7 +66,7 @@ test('workflow baselines retain readiness guards and pin original-event identity
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'a27452c56dfc6651a9559a2602623644377d6c28d57b07e2c009fda50952bfe9',
+    '.github/workflows/ci.yml': 'f5b4230a10f2f9cabb6b508187c8a6d7b25c3e7f0e23a5991746677dc23eaa12',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
