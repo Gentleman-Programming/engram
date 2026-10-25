@@ -1293,8 +1293,15 @@ func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error 
 	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals(sigCh)
 	done := make(chan struct{})
-	defer close(done)
+	watcherDone := make(chan struct{})
+	defer func() {
+		close(done)
+		// Closing done requests exit; join the watcher before returning so
+		// neither shutdown nor test cleanup can outlive its lifecycle owner.
+		<-watcherDone
+	}()
 	go func() {
+		defer close(watcherDone)
 		select {
 		case <-sigCh:
 			log.Println("[engram] shutting down...")

@@ -74,6 +74,19 @@ go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud
 node .github/scripts/postgres-ci-evidence.mjs "$evidence"
 ```
 
+For the migration fixture cleanup regression alone, use the same disposable
+service and `CLOUDSTORE_TEST_DSN`, then run:
+
+```sh
+go test ./internal/cloud/cloudstore -run '^(TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns|TestMigrationFixtureCleanup)$' -count=1 -v -timeout=120s
+```
+
+The regression checks schema absence after both success and an intentional failure
+after schema creation. It launches the test binary in a subprocess so the expected
+failure does not fail the parent suite. `ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE` is
+an internal subprocess test control; do not set it for ordinary test runs. Cleanup
+errors fail the test with bounded messages that omit driver connection details.
+
 Save the console output before exiting if evidence is needed; the trap removes
 the container, its anonymous data volume and the temporary JSON file. No named
 volume or host data directory is mounted.

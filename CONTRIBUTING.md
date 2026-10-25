@@ -2,6 +2,8 @@
 
 Thanks for contributing. Engram enforces a strict **issue-first workflow** — every change starts with an approved issue.
 
+[Contribution policy transition](docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE** target guidance; the active requirements below remain unchanged.
+
 ---
 
 ## Contribution Workflow
@@ -342,6 +344,18 @@ control transitions and scheduling by commit recency are not hosted-qualified;
 no savings have been measured. See [proof boundaries](docs/ci-proof-controls.md#workflow-admission-concurrency-2096).
 Local routing checks: `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
 Hosted experiments require separate authorization.
+
+### Go race detection (initially non-required)
+
+The candidate **Go Race Tests** job runs the full default-tag Go suite with
+`go test -race -timeout=20m ./...` on Linux, independently of existing suites.
+CGO and GCC are enabled; test failures remain failures. The 20-minute per-binary
+budget follows a corrected local store race run of 14m04s. The successful
+[hosted full-suite run](https://github.com/Gentleman-Programming/engram/actions/runs/40147453688)
+at head `b64205b3` took 19m04s; the separate 30-minute job budget stays provisional.
+No required-check settings change. See [scope, local reproduction and failure
+classification](docs/ci-go-race.md).
+Local structural checks: `node --test .github/scripts/issue-go-race-ci.test.mjs`.
 
 ### CI scanners (initially non-required)
 

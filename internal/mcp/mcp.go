@@ -333,10 +333,10 @@ type coreToolDesc struct {
 }
 
 var coreTools = []coreToolDesc{
-	{"mem_save", "mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)"},
+	{"mem_save", "mem_save — save verified durable conclusions, grouped by topic"},
 	{"mem_search", "mem_search — find past work, decisions, or context from previous sessions"},
-	{"mem_context", "mem_context — get recent session history (call at session start or after compaction)"},
-	{"mem_session_summary", "mem_session_summary — save end-of-session summary (MANDATORY before saying \"done\")"},
+	{"mem_context", "mem_context — get recent history for useful recall or relevant recovery"},
+	{"mem_session_summary", "mem_session_summary — significant explicit closure or handoff; ordinary completion does not require it"},
 	{"mem_get_observation", "mem_get_observation — get full untruncated content of a search result by ID"},
 	{"mem_save_prompt", "mem_save_prompt — save user prompt for context"},
 	{"mem_current_project", "mem_current_project — detect current project from cwd (recommended first call)"},
@@ -403,7 +403,7 @@ func buildServerInstructions(allowlist map[string]bool) string {
 	}
 
 	if shouldRegister("mem_save", allowlist) {
-		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
+		b.WriteString("PROACTIVE SAVE RULE: Persist verified durable knowledge costly to reconstruct; group related conclusions, not every event.\n\n")
 	}
 	if hasRegisteredMemoryWriter(allowlist) {
 		b.WriteString("## DELIVERY GUARANTEE\n\n" +

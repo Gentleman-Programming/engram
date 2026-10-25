@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -48,6 +49,46 @@ func TestServerInstructionsStaysUnderClientTruncationLimit(t *testing.T) {
 			if runes >= clientTruncationCeiling {
 				t.Errorf("profile %q instructions is %d runes (>=%d) — exceeds the documented 2048-rune MCP client truncation ceiling. Trim prose.",
 					name, runes, clientTruncationCeiling)
+			}
+		})
+	}
+}
+
+// Exercise delivered initialize instructions rather than source literals. These
+// assertions establish prose alignment, not actual client/model compliance.
+func TestServerInstructionsSelectiveMemoryCadence(t *testing.T) {
+	core := make(map[string]bool, len(coreTools))
+	for _, tool := range coreTools {
+		core[tool.name] = true
+	}
+	for name, allowlist := range map[string]map[string]bool{
+		"all":   nil,
+		"core":  core,
+		"agent": ProfileAgent,
+		"custom": {
+			"mem_save": true, "mem_search": true, "mem_session_summary": true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			instructions := strings.Join(strings.Fields(buildServerInstructions(allowlist)), " ")
+			for _, rule := range []struct{ name, pattern string }{
+				{"verified durable selection", `(?i)verified.{0,80}durable.{0,80}costly[ -]to[ -]reconstruct`},
+				{"deliberate topic grouping", `(?i)group.{0,60}(related )?(conclusions|topics)`},
+				{"significant explicit closure or handoff", `(?i)significant.{0,60}explicit.{0,60}(clos|handoff)`},
+				{"ordinary completion is not closure", `(?i)(ordinary.{0,40}(completion|done).{0,80}(not|no)|not.{0,40}(ordinary completion|merely saying|saying).{0,30}done)`},
+			} {
+				if !regexp.MustCompile(rule.pattern).MatchString(instructions) {
+					t.Errorf("initialize instructions missing %s", rule.name)
+				}
+			}
+			for _, pattern := range []string{
+				`(?i)immediately after ANY`,
+				`(?i)(mandatory|must).{0,40}before saying.{0,10}done`,
+				`(?i)after every (task|event|decision|bug fix|discovery)`,
+			} {
+				if regexp.MustCompile(pattern).MatchString(instructions) {
+					t.Errorf("initialize instructions retain universal mandate %q", pattern)
+				}
 			}
 		})
 	}

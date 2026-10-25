@@ -12,6 +12,27 @@ const fs = require("node:fs")
 
 const source = readFileSync(new URL("./engram.ts", import.meta.url), "utf8")
 
+// Prose contract only: these checks do not establish actual model compliance.
+test("selective cadence preserves OpenCode session-only recovery and adapter ownership", () => {
+  const block = source.match(/const MEMORY_INSTRUCTIONS = `([\s\S]*?)\n`/)
+  assert.ok(block, "delivered OpenCode instructions must exist")
+  const instructions = block[1].replaceAll("\\`", "`").replace(/\s+/g, " ")
+  assert.match(instructions, /verified.{0,100}durable.{0,100}costly to reconstruct/i)
+  assert.match(instructions, /not every (task|response|event)|no per-(task|event)/i)
+  assert.doesNotMatch(instructions, /after EVERY task|Call `mem_save` IMMEDIATELY|When completing a task or subtask, include/i)
+  assert.match(instructions, /session-only compaction context.{0,120}Do not automatically call `mem_context`/)
+  assert.match(instructions, /mem_context.{0,120}project-scoped.{0,120}only when explicitly requested/)
+  assert.match(instructions, /IMMEDIATELY call `mem_session_summary` with the compacted summary content/)
+  assert.match(instructions, /server-confirmed identity.{0,100}authoritative root session/)
+  assert.match(instructions, /Do not invent or override this value/)
+  assert.match(instructions, /adapter owns session registration and lifecycle closure/i)
+  assert.match(instructions, /read-only tools are unchanged/i)
+  assert.match(instructions, /eligible.{0,120}(delegated|subagent).{0,120}server-side extraction/i)
+  assert.match(instructions, /Ordinary responses.{0,100}not automatically captured/i)
+  assert.match(instructions, /section alone does not guarantee storage/i)
+  assert.match(instructions, /explicit extraction path is a safety net, not a replacement/i)
+})
+
 let runtimeImport = 0
 const PROJECT_ID = "project-1"
 const MODEL_SESSION_ID = "model-invented"
@@ -1455,8 +1476,9 @@ for (const system of [[], ["base prompt"], ["base prompt", "host override"]]) {
     assert.match(instructions, /The agent MUST follow this protocol without waiting for activation/)
     assert.match(instructions, /engram_mem_save/)
     assert.doesNotMatch(instructions, /ToolSearch|Deferred tools|mcp__engram__|permissions allowlist/)
-    assert.match(instructions, /User confirms/)
-    assert.match(instructions, /User rejects/)
+    assert.match(instructions, /verified knowledge that is durable and costly to reconstruct/)
+    assert.match(instructions, /decisions with rationale/)
+    assert.match(instructions, /Group related conclusions deliberately, not every task, response, or event/)
     assert.match(instructions, /Summary persistence does not end the session/)
     assert.match(instructions, /If memory work fails or needs follow-up, still send the answer/)
   })

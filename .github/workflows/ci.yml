@@ -16,6 +16,37 @@ permissions:
   contents: read
 
 jobs:
+  race-tests:
+    name: Go Race Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: "1"
+      CC: gcc
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Record tested revision
+        run: git rev-parse HEAD
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Verify C compiler prerequisite
+        run: gcc --version
+
+      - name: Run full race suite with elapsed time
+        run: /usr/bin/time -p go test -race -timeout=20m ./...
+
   govulncheck:
     name: Go Vulnerability Check
     runs-on: ubuntu-latest
