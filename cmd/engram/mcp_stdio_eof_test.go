@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
@@ -382,46 +383,51 @@ func TestMCPStdioWaitsForSignalWatcher(t *testing.T) {
 		log.SetOutput(oldLog)
 	})
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	defer unblock()
-	log.SetOutput(gatedShutdownLogWriter{entered: entered, release: release})
-	notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) { ch <- syscall.SIGTERM }
-	stopSignals = func(chan<- os.Signal) {}
+	// Keep global restoration on the parent: Test joins every bubble goroutine,
+	// including a broken, unjoined watcher, before these cleanups can run.
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		log.SetOutput(gatedShutdownLogWriter{entered: entered, release: release})
+		notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) { ch <- syscall.SIGTERM }
+		stopSignals = func(chan<- os.Signal) {}
 
-	stopped := make(chan struct{}, 2)
-	mcpStdioStopAutosync = func() { stopped <- struct{}{} }
-	listenMCPStdio = func(context.Context, *mcpserver.MCPServer, io.Reader, io.Writer) error {
-		<-entered
-		return nil
-	}
-	runDone := make(chan error, 1)
-	go func() { runDone <- runMCPStdio(mcpserver.NewMCPServer("test", "1")) }()
-	waitForSignal(t, entered, "signal watcher to enter shutdown")
-	returned := false
-	select {
-	case err := <-runDone:
-		returned = true
-		t.Errorf("runMCPStdio returned before signal watcher completed: %v", err)
-	case <-time.After(100 * time.Millisecond):
-		// The watcher is deliberately blocked; the serving call must wait.
-	}
-	unblock()
-	if !returned {
+		stopped := make(chan struct{}, 2)
+		mcpStdioStopAutosync = func() { stopped <- struct{}{} }
+		listenMCPStdio = func(context.Context, *mcpserver.MCPServer, io.Reader, io.Writer) error {
+			<-entered
+			return nil
+		}
+		runDone := make(chan error, 1)
+		go func() { runDone <- runMCPStdio(mcpserver.NewMCPServer("test", "1")) }()
+		waitForSignal(t, entered, "signal watcher to enter shutdown")
+		// Log entry alone does not prove Listen's caller reached cleanup. Wait
+		// lets it run until it exits or durably blocks on the watcher join.
+		// The writer blocks on a bubble-local channel; the fake Listen does no
+		// I/O, and runMCPStdio's bubble-local EOF timer is stopped, not pending.
+		synctest.Wait()
+		select {
+		case err := <-runDone:
+			t.Fatalf("runMCPStdio returned before signal watcher completed: %v", err)
+		default:
+		}
+		unblock()
+		synctest.Wait()
 		select {
 		case err := <-runDone:
 			if err != nil {
 				t.Fatalf("runMCPStdio returned error: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		default:
 			t.Fatal("runMCPStdio did not return after signal watcher completed")
 		}
-	}
-	if got := len(stopped); got != 1 {
-		t.Fatalf("autosync stop calls = %d, want 1", got)
-	}
+		if got := len(stopped); got != 1 {
+			t.Fatalf("autosync stop calls = %d, want 1", got)
+		}
+	})
 }
 
 // constErrReader always returns the configured error.
