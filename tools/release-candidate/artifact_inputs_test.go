@@ -16,13 +16,15 @@ import (
 	"testing"
 )
 
-func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false) }
+func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false, false) }
 
-func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false) }
+func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false, false) }
 
-func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true) }
+func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true, false) }
 
-func testArtifactInputCLI(t *testing.T, bootstrap, topics bool) {
+func TestArtifactConsolidation(t *testing.T) { testArtifactInputCLI(t, true, true, true) }
+
+func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation bool) {
 	started := filepath.Join(t.TempDir(), "core-started")
 	marker, err := json.Marshal(started)
 	if err != nil {
@@ -69,7 +71,11 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics bool) {
 			body = append(body, []byte("\nif (cwd.includes('-139-')) writeFileSync("+string(encode(origin))+", '// mutated original peer');\n")...)
 		}
 		if topics && name == "index.ts" {
-			body = []byte(strings.ReplaceAll(artifactTopicFixture, `"$TOPIC_MARKER$"`, string(encode(topicMarker))))
+			fixture := artifactTopicFixture
+			if consolidation {
+				fixture = strings.Replace(fixture, "  host.registerTool(", artifactConsolidationFixture+"\n  host.registerTool(", 1)
+			}
+			body = []byte(strings.ReplaceAll(fixture, `"$TOPIC_MARKER$"`, string(encode(topicMarker))))
 		}
 		if name == "package.json" {
 			body = encode(map[string]any{"name": "gentle-engram", "version": "4.5.6", "files": packageRuntimeFiles})
@@ -174,6 +180,10 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics bool) {
 				runtimeModes[name] = strconv.Itoa(142 + i*2 + j)
 			}
 		}
+	}
+	if consolidation {
+		cases = []struct{ name, state string }{{"consolidation plan", "passed"}, {"consolidation rejects preview mutation", "passed"}}
+		runtimeModes["consolidation plan"], runtimeModes["consolidation rejects preview mutation"] = "148", "149"
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,13 +368,40 @@ export const syntheticPeer = true;
 					if err := os.Remove(topicMarker); err != nil {
 						t.Fatal(err)
 					}
-				} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+				} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) && !consolidation {
 					t.Fatal("positive topic case mutated the fixture")
 				}
 				if core["exitCode"] != float64(0) || core["cleanup"] != "passed" || pi["exitCode"] != piExit || pi["cleanup"] != piCleanup {
 					t.Fatalf("wrong case termination: %s", out)
 				}
-				for _, pending := range cases[1:] {
+				pendingCases := cases[1:]
+				if consolidation {
+					second := cases[1].(map[string]any)
+					state, exit, cleanup := "passed", float64(0), "passed"
+					if tc.name == "consolidation rejects preview mutation" {
+						state, exit, cleanup = "unavailable", 1, "failed"
+					}
+					if second["name"] != "real Pi consolidation previews without mutation and confirms the exact Go plan" || second["state"] != state || second["coreRuntime"] == nil || second["piRuntime"] == nil {
+						t.Fatalf("missing consolidation execution: %s", out)
+					}
+					core, pi := second["coreRuntime"].(map[string]any), second["piRuntime"].(map[string]any)
+					if core["joined"] != true || core["exitCode"] != float64(0) || core["cleanup"] != "passed" || pi["joined"] != true || pi["exitCode"] != exit || pi["cleanup"] != cleanup {
+						t.Fatalf("incorrect consolidation termination: %s", out)
+					}
+					if exit == 1 {
+						marker, err := os.ReadFile(topicMarker)
+						if err != nil || string(marker) != "consolidation preview mutation" {
+							t.Fatal("preview mutation prerequisite not observed")
+						}
+						if err := os.Remove(topicMarker); err != nil {
+							t.Fatal(err)
+						}
+					} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+						t.Fatal("positive consolidation mutated preview")
+					}
+					pendingCases = cases[2:]
+				}
+				for _, pending := range pendingCases {
 					if pending.(map[string]any)["state"] != "unavailable" {
 						t.Fatal("unimplemented case reported passing")
 					}

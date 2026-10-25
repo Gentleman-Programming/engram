@@ -2,8 +2,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import { registerHooks } from "node:module";
-import { runTopicVectors } from "./pi-workflows.mjs";
-// Fixed bootstrap and closed topic phase, never installed-SDK execution.
+import { runArtifactWorkflow } from "./pi-workflows.mjs";
+// Fixed bootstrap and closed workflow phases, never installed-SDK execution.
 let bootstrapped = false, parentGone = false, stopping = false;
 function stop(code) {
   if (code !== 0 || process.exitCode === undefined) process.exitCode = code;
@@ -54,10 +54,10 @@ try {
   } });
   const selected = await import(pathToFileURL(process.argv[2]).href);
   const workflow = process.argv[3] || "";
-  if (workflow && workflow !== "topics") throw new Error("fixed phase");
-  if (workflow) await runTopicVectors(selected.default);
+  if (workflow && !["topics", "consolidation"].includes(workflow)) throw new Error("fixed phase");
+  if (workflow) await runArtifactWorkflow(selected.default, workflow);
   if (parentGone) throw new Error("parent ended before acknowledgement");
   bootstrapped = true;
-  process.send({ protocol: workflow ? "engram-pi-topics-v1" : "engram-pi-bootstrap-v1",
+  process.send({ protocol: workflow ? `engram-pi-${workflow}-v1` : "engram-pi-bootstrap-v1",
     substitutions: [...(uiUsed ? ["@earendil-works/pi-tui.Text"] : []), ...(workflow ? ["Pi registration host"] : [])] });
 } catch { stop(1); }

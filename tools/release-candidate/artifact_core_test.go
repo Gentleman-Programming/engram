@@ -27,6 +27,7 @@ import (
  "net/http"
  "os"
  "strings"
+ "sync"
  "sync/atomic"
 )
 func main() {
@@ -45,10 +46,15 @@ func main() {
  if err!=nil { os.Exit(24) }
  instance:="synthetic-owned-instance"
  var written atomic.Bool
+ var mutex sync.Mutex
+ observations:=[]map[string]any{}
+ nextID:=0
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
-  if r.Header.Get("Authorization")!="Bearer "+token && !strings.Contains(cwd,"-128-") { w.WriteHeader(401); return }
+  if r.Header.Get("Authorization")!="Bearer "+token && !strings.Contains(cwd,"-128-") { w.WriteHeader(401); _=json.NewEncoder(w).Encode(map[string]any{"error":"unauthorized"}); return }
+  mutex.Lock(); defer mutex.Unlock()
+  consolidationFixture:=strings.Contains(cwd,"engram-core-148-") || strings.Contains(cwd,"engram-core-149-")
   topicFixture:=false
-  for _,run:=range []string{"140","141","142","143","144","145","146","147"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
   if topicFixture {
    switch r.URL.Path {
    case "/topic-keys/suggest":
@@ -56,7 +62,30 @@ func main() {
     _=json.NewDecoder(r.Body).Decode(&params)
     if params["title"]==nil && params["content"]==nil { w.WriteHeader(400); _=json.NewEncoder(w).Encode(map[string]any{"error":"provide title or content to suggest a topic_key"}); return }
     _=json.NewEncoder(w).Encode(map[string]any{"topic_key":"architecture/auth-model"}); return
+   case "/observations/consolidate":
+    if consolidationFixture {
+     var params map[string]any
+     _=json.NewDecoder(r.Body).Decode(&params)
+     if params["confirm"]!=true {
+      mutated:=strings.Contains(cwd,"engram-core-149-")
+      if mutated && len(observations)>0 { observations[0]["content"]="mutated preview" }
+      _=json.NewEncoder(w).Encode(map[string]any{"status":"preview","plan":map[string]any{"fingerprint":"fixture-plan"},"fixture_mutated":mutated}); return
+     }
+     if params["fingerprint"]!="fixture-plan" { w.WriteHeader(400); return }
+     nextID++
+     observations=[]map[string]any{{"id":nextID,"title":params["new_title"],"content":params["new_content"]}}
+     _=json.NewEncoder(w).Encode(map[string]any{"status":"consolidated","soft_deleted_ids":params["ids_to_delete"]}); return
+    }
    case "/observations":
+    if consolidationFixture {
+     if r.Method=="POST" {
+      var value map[string]any
+      _=json.NewDecoder(r.Body).Decode(&value)
+      nextID++; value["id"]=nextID; observations=append(observations,value)
+      _=json.NewEncoder(w).Encode(map[string]any{"id":nextID}); return
+     }
+     _=json.NewEncoder(w).Encode(observations); return
+    }
     if r.Method=="POST" { written.Store(true); _=json.NewEncoder(w).Encode(map[string]any{"id":1}); return }
     if written.Load() { _=json.NewEncoder(w).Encode([]any{map[string]any{"id":1}}) } else { _=json.NewEncoder(w).Encode([]any{}) }; return
    case "/sessions/real-host":

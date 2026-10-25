@@ -4,8 +4,10 @@ import { join } from "node:path";
 
 // Fixed registration substitute, not an installed Pi SDK. Original HTTP assertions
 // come from plugin/pi/test/real-agent-workflows.test.mjs; no fixture server is used.
-export async function runTopicVectors(register) {
-  const project = "integration-1348";
+const project = "integration-1348";
+export async function runArtifactWorkflow(register, workflow) {
+  const run = workflow === "topics" ? topicVectors : workflow === "consolidation" ? consolidate : undefined;
+  assert.ok(run, "fixed workflow phase");
   mkdirSync(join(process.cwd(), ".engram"), { mode: 0o700 });
   writeFileSync(join(process.cwd(), ".engram", "config.json"), JSON.stringify({ project_name: project }), { mode: 0o600, flag: "wx" });
   const tools = new Map(), events = new Map(), entries = [];
@@ -26,6 +28,10 @@ export async function runTopicVectors(register) {
     const result = await request("/observations?all_projects=true&limit=100");
     assert.equal(result.status, 200); return result.data;
   };
+  await run({ tool, request, rows });
+}
+
+async function topicVectors({ tool, request, rows }) {
   for (const params of [{ type: "architecture", title: "Auth model" }, { type: "bugfix", title: "Fix café / Unicode" },
     { type: "decision", content: "Use SQLite for local state" }, { title: "X".repeat(120) }]) {
     const expected = await request("/topic-keys/suggest", params);
@@ -40,4 +46,31 @@ export async function runTopicVectors(register) {
   assert.equal(invalid.content[0].text, "provide title or content to suggest a topic_key");
   assert.deepEqual(await rows(), []);
   assert.equal((await request("/sessions/real-host")).status, 404);
+}
+
+async function save(tool, title, content) {
+  const result = await tool("mem_save", { title, content, project });
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  assert.ok(Number.isSafeInteger(result.details.data.id));
+  return result.details.data.id;
+}
+
+async function consolidate({ tool, request, rows }) {
+  const ids = [await save(tool, "First design", "First independent source record."),
+    await save(tool, "Second design", "Second independent source record.")];
+  const params = { ids_to_delete: ids, new_title: "Combined design", new_content: "Consolidated public summary", expected_project: project };
+  const before = await rows();
+  const unauthorized = await request("/observations/consolidate", params, false);
+  assert.equal(unauthorized.status, 401); assert.deepEqual(await rows(), before);
+  const preview = await tool("mem_consolidate", params);
+  assert.notEqual(preview.isError, true, JSON.stringify(preview));
+  assert.equal(preview.details.data.status, "preview");
+  assert.ok(preview.details.data.plan.fingerprint);
+  assert.deepEqual(await rows(), before);
+  const confirmed = await tool("mem_consolidate", { ...params, confirm: true, fingerprint: preview.details.data.plan.fingerprint });
+  assert.notEqual(confirmed.isError, true, JSON.stringify(confirmed));
+  assert.equal(confirmed.details.data.status, "consolidated");
+  const after = await rows(); assert.equal(after.length, 1);
+  assert.equal(after[0].title, params.new_title); assert.match(after[0].content, /Consolidated public summary/);
+  assert.deepEqual([...confirmed.details.data.soft_deleted_ids].sort(), [...ids].sort());
 }

@@ -8,7 +8,7 @@ const token = randomBytes(32).toString("hex");
 const workflow = process.argv[4] || "";
 let core, exited, pi, piExited, parentGone = false;
 let coreStopRequested = false, coreEndedEarly = false;
-if (process.argv[3]) result.piBootstrap = { name: workflow ? "pi-workflow-topics" : "pi-module-bootstrap-only", state: "unavailable", cleanup: "not-started", joined: true };
+if (process.argv[3]) result.piBootstrap = { name: workflow ? `pi-workflow-${workflow}` : "pi-module-bootstrap-only", state: "unavailable", cleanup: "not-started", joined: true };
 process.stdin.on("end", () => {
   parentGone = true;
   if (pi) pi.stdin.end(); // Core remains available through ordered Pi cleanup.
@@ -45,7 +45,7 @@ async function join(child, exited, observation) {
   }
 }
 try {
-  if ((workflow && workflow !== "topics") || Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
+  if ((workflow && !["topics", "consolidation"].includes(workflow)) || Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
   const keys = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"];
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   env.ENGRAM_TOKEN = token; // Never serialize the token or forward child diagnostics.
@@ -104,7 +104,7 @@ try {
         pi.once("error", reject);
         pi.once("exit", () => reject(new Error("early exit")));
         pi.once("message", message => {
-          if (message?.protocol !== (workflow ? "engram-pi-topics-v1" : "engram-pi-bootstrap-v1")) return reject(new Error("protocol"));
+          if (message?.protocol !== (workflow ? `engram-pi-${workflow}-v1` : "engram-pi-bootstrap-v1")) return reject(new Error("protocol"));
           observation.substitutions = ["@earendil-works/pi-tui.Text", "Pi registration host"].filter(value => message.substitutions?.includes(value));
           resolve();
         });

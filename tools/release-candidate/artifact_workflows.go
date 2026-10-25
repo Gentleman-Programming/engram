@@ -27,13 +27,16 @@ func observeArtifactWorkflows(ctx context.Context, core []byte, digest, run stri
 	} {
 		r.Cases = append(r.Cases, artifactWorkflowCase{Name: name, State: "unavailable"})
 	}
-	first := &r.Cases[0]
-	first.PiRuntime = &artifactPiCheck{Name: "pi-workflow-topics", State: "unavailable", Cleanup: "not-started", Joined: true}
-	first.CoreRuntime = runArtifactPiCase(ctx, core, digest, run, materialize, first.PiRuntime, "topics")
-	if first.CoreRuntime.State == "passed" && first.PiRuntime.State == "passed" {
-		first.State = "passed"
+	for i, workflow := range []string{"topics", "consolidation"} {
+		c := &r.Cases[i]
+		c.PiRuntime = &artifactPiCheck{Name: "pi-workflow-" + workflow, State: "unavailable", Cleanup: "not-started", Joined: true}
+		c.CoreRuntime = runArtifactPiCase(ctx, core, digest, run, materialize, c.PiRuntime, workflow)
+		if c.CoreRuntime.State != "passed" || c.PiRuntime.State != "passed" {
+			break // Never continue after unavailable execution or integrity evidence.
+		}
+		c.State = "passed"
 	}
-	return r // Remaining four families are not implemented or qualified yet.
+	return r // Remaining three families are not implemented or qualified yet.
 }
 
 func (r *artifactInputObservation) invalidateWorkflowCases() {

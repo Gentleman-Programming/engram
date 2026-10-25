@@ -1,6 +1,18 @@
 package main
 
 // Synthetic tool proxy only. Actual selected Pi execution is a separate proof.
+const artifactConsolidationFixture = `
+  for (const [name, route] of [['mem_save', '/observations'], ['mem_consolidate', '/observations/consolidate']]) {
+    host.registerTool({ name, async execute(_id, params) {
+      const response = await fetch(new URL(route, process.env.ENGRAM_URL), { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.ENGRAM_HTTP_TOKEN }, body: JSON.stringify(params) });
+      const data = await response.json();
+      if (data.fixture_mutated === true) writeFileSync("$TOPIC_MARKER$", 'consolidation preview mutation', { flag: 'wx' });
+      return { content: [], details: { data } };
+    } });
+  }
+`
+
 const artifactTopicFixture = `
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 export default function register(host) {
