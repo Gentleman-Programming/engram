@@ -139,6 +139,47 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 	cs.Close()
 }
 
+func migrationFixtureCleanupDiagnostic(output string) string {
+	for _, diagnostic := range []string{
+		"open fixture cleanup observer failed",
+		"close fixture cleanup observer failed",
+		"query fixture schema cleanup failed",
+		"migration fixture schema remains after cleanup",
+		"close migration fixture admin database failed",
+		"drop migration fixture schema failed",
+	} {
+		if strings.Contains(output, diagnostic) {
+			return diagnostic
+		}
+	}
+	return ""
+}
+
+func TestMigrationFixtureCleanupDiagnostics(t *testing.T) {
+	const removed = "migration fixture schema removed\n"
+	const intentional = "intentional failure after migration fixture creation\n"
+	for _, diagnostic := range []string{
+		"open fixture cleanup observer failed",
+		"close fixture cleanup observer failed",
+		"query fixture schema cleanup failed",
+		"migration fixture schema remains after cleanup",
+		"close migration fixture admin database failed",
+		"drop migration fixture schema failed",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			output := intentional + diagnostic + "\n" + removed
+			if got := migrationFixtureCleanupDiagnostic(output); got != diagnostic {
+				t.Errorf("cleanup diagnostic = %q, want %q", got, diagnostic)
+			}
+		})
+	}
+	for _, output := range []string{removed, intentional + removed} {
+		if got := migrationFixtureCleanupDiagnostic(output); got != "" {
+			t.Errorf("healthy cleanup reported diagnostic %q", got)
+		}
+	}
+}
+
 func TestMigrationFixtureCleanup(t *testing.T) {
 	dsn := os.Getenv("CLOUDSTORE_TEST_DSN")
 	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
@@ -172,6 +213,9 @@ func TestMigrationFixtureCleanup(t *testing.T) {
 			}
 			if exitCode != scenario.wantExit {
 				t.Errorf("exit code = %d, want %d", exitCode, scenario.wantExit)
+			}
+			if diagnostic := migrationFixtureCleanupDiagnostic(string(output)); diagnostic != "" {
+				t.Errorf("subprocess reported cleanup error: %s", diagnostic)
 			}
 			if !strings.Contains(string(output), "migration fixture schema removed") {
 				t.Error("subprocess did not confirm schema removal")
