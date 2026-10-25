@@ -45,7 +45,7 @@ jobs:
         run: gcc --version
 
       - name: Run full race suite with elapsed time
-        run: /usr/bin/time -p go test -race ./...
+        run: /usr/bin/time -p go test -race -timeout=20m ./...
 
   govulncheck:
     name: Go Vulnerability Check

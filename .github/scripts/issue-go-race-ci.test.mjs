@@ -14,7 +14,7 @@ test('full-suite race CI has a supported Linux toolchain and explicit compiler',
   assert.match(body, /GOTOOLCHAIN: local/);
   assert.match(body, /go-version: "1.26.10"/);
   assert.match(body, /run: gcc --version/);
-  assert.match(body, /run: \/usr\/bin\/time -p go test -race \.\/\.\.\./);
+  assert.match(body, /run: \/usr\/bin\/time -p go test -race -timeout=20m \.\/\.\.\.\n/);
 });
 
 test('race job keeps failures visible, timing and an exact revision without scope exclusions', () => {
@@ -29,7 +29,8 @@ test('race job keeps failures visible, timing and an exact revision without scop
 });
 
 test('existing suites, event coverage and policy-test discovery remain intact', () => {
-  assert.match(job('unit-tests'), /run: go test \.\/\.\.\./);
+  assert.match(job('unit-tests'), /run: go test \.\/\.\.\.\n/);
+  assert.doesNotMatch(job('unit-tests'), /-timeout=20m/);
   assert.match(job('e2e-tests'), /run: go test -tags e2e \.\/internal\/server\/\.\.\./);
   assert.match(job('plugin-tests'), /run: npm test/);
   assert.match(workflow, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main/);

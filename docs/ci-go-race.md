@@ -2,8 +2,9 @@
 
 ## Candidate scope
 
-The candidate **Go Race Tests** job runs `go test -race ./...` independently
-on `ubuntu-24.04`, with Go 1.26.10, `CGO_ENABLED=1` and `CC=gcc`.
+The candidate **Go Race Tests** job runs
+`go test -race -timeout=20m ./...` independently on `ubuntu-24.04`, with
+Go 1.26.10, `CGO_ENABLED=1` and `CC=gcc`.
 The runner must provide GCC and `/usr/bin/time`; compiler preflight failures
 fail the job. Existing unit, E2E and plugin suites remain unchanged.
 The race command uses the default build tags: it does not run tests requiring
@@ -24,24 +25,58 @@ Use Go 1.26.10, GCC, GNU time and the repository's existing test prerequisites
 git rev-parse HEAD
 go version
 gcc --version
-CGO_ENABLED=1 CC=gcc GOTOOLCHAIN=local /usr/bin/time -p go test -race ./...
+CGO_ENABLED=1 CC=gcc GOTOOLCHAIN=local /usr/bin/time -p go test -race -timeout=20m ./...
 ```
 
 The printed revision identifies the tested checkout. On pull requests this is
 normally GitHub's synthetic merge revision, not merely the fork head.
 GNU time writes `real`, `user` and `sys` seconds to stderr even on test failure
-and returns the command's failure status. The existing Go default timeout is
-10 minutes per test binary; the separate job budget includes setup, downloads,
+and returns the command's failure status. The explicit 20-minute timeout applies
+to each race-instrumented test binary; it does not change the uninstrumented
+suites' defaults. The separate 30-minute job budget includes setup, downloads,
 compilation and test execution.
 
-## Hosted baseline: pending
+## Measurements and budget rationale
 
-The initial **30-minute job timeout is provisional**, not a measured baseline.
-No representative hosted execution or race-free result is claimed yet.
-After an authorized publication, record the run URL, exact tested revision,
-runner image, Go/compiler versions, job wall duration and GNU-time output.
-Inspect failures and skips, then choose the final timeout with explicit margin.
-A local structural test pass is not hosted or race execution evidence.
+The [first hosted run](https://github.com/Gentleman-Programming/engram/actions/runs/40142405437)
+failed at head `4d53464159f3a6c59d0b064bf18a783f4de99180`, testing synthetic merge
+`ef88b0cd76c31312d4b114e2d6ac545f2974d85a` on Ubuntu 24.04.5
+(image `20261012.334.1`), Go 1.26.10 and GCC 13.3.0. Its race command took
+778.29 seconds and the job took 13m14s. It exposed a test-only SQLite varargs
+`checkptr` failure and exhausted Go's default 10-minute store-package timeout;
+it did not exhaust the 30-minute job limit. This is failure evidence, not a
+successful full-suite baseline.
+
+After correcting the test helper to use libc-owned TLS storage and `libc.VaList`
+without disabling checkptr, a local WSL2 Ubuntu 24.04.5 run with the same Go/GCC
+versions executed:
+
+```sh
+CGO_ENABLED=1 CC=gcc GOTOOLCHAIN=local go test -race ./internal/store -count=1 -json -timeout=20m
+```
+
+Its source was the same base tree plus the two reviewed helper/startup test
+changes included in this candidate. Store passed in **843.887 seconds (14m04s)**;
+command wall time was 857.89 seconds. There were 961 passing top-level tests
+(2,131 passing events including subtests), no failures or race warnings, and
+empty command stderr. Three top-level skips were existing subprocess-only
+helper entrypoints; their corresponding parent tests passed. Source manifests
+were unchanged before/after execution. The slowest top-level test took 35.67s;
+the prompts test active at the hosted timeout passed in 0.99s here.
+
+The 20-minute race-only per-binary budget provides about 42% margin over this
+local store measurement. This supports a candidate budget, not identical hosted
+performance or proof that all order-dependent contention is absent. No packages
+were omitted and no assertions or production synchronization were changed.
+
+## Successful hosted full-suite baseline: pending
+
+The **30-minute job timeout remains provisional**. A successful hosted run of
+the corrected full suite and its runtime are still pending. The local package
+run is not a full-module, hosted or release verdict.
+Record the run URL, exact tested revision, runner image, Go/compiler versions,
+job wall duration and GNU-time output after publication. Inspect failures and
+skips, then qualify or revise the budgets with explicit margin.
 
 Classify results separately:
 
