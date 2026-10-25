@@ -27,6 +27,7 @@ import (
  "net/http"
  "os"
  "strings"
+ "sync/atomic"
 )
 func main() {
  cwd, err := os.Getwd()
@@ -43,8 +44,25 @@ func main() {
  listener, err:=net.Listen("tcp","127.0.0.1:0")
  if err!=nil { os.Exit(24) }
  instance:="synthetic-owned-instance"
+ var written atomic.Bool
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
   if r.Header.Get("Authorization")!="Bearer "+token && !strings.Contains(cwd,"-128-") { w.WriteHeader(401); return }
+  topicFixture:=false
+  for _,run:=range []string{"140","141","142","143","144","145","146","147"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  if topicFixture {
+   switch r.URL.Path {
+   case "/topic-keys/suggest":
+    var params map[string]any
+    _=json.NewDecoder(r.Body).Decode(&params)
+    if params["title"]==nil && params["content"]==nil { w.WriteHeader(400); _=json.NewEncoder(w).Encode(map[string]any{"error":"provide title or content to suggest a topic_key"}); return }
+    _=json.NewEncoder(w).Encode(map[string]any{"topic_key":"architecture/auth-model"}); return
+   case "/observations":
+    if r.Method=="POST" { written.Store(true); _=json.NewEncoder(w).Encode(map[string]any{"id":1}); return }
+    if written.Load() { _=json.NewEncoder(w).Encode([]any{map[string]any{"id":1}}) } else { _=json.NewEncoder(w).Encode([]any{}) }; return
+   case "/sessions/real-host":
+    w.WriteHeader(404); _=json.NewEncoder(w).Encode(map[string]any{"error":"not found"}); return
+   }
+  }
   identity:=instance
   if strings.Contains(cwd,"-124-") { identity="different-instance" }
   _=json.NewEncoder(w).Encode(map[string]any{"status":"ok","service":"engram","version":"fixture-observed","instance_id":identity})
@@ -248,6 +266,7 @@ syncBuiltinESMExports();
 			preload := "import \"data:text/javascript;base64," + base64.StdEncoding.EncodeToString([]byte(hook)) + "\";\n"
 			write("owner.mjs", append([]byte(preload), artifactCoreOwner...))
 			write("pi-owner.mjs", artifactPiOwner)
+			write("pi-workflows.mjs", artifactPiWorkflows)
 			write("index.ts", []byte("export const synthetic = true;\n"))
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()

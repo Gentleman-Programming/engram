@@ -16,11 +16,13 @@ import (
 	"testing"
 )
 
-func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false) }
+func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false) }
 
-func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true) }
+func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false) }
 
-func testArtifactInputCLI(t *testing.T, bootstrap bool) {
+func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true) }
+
+func testArtifactInputCLI(t *testing.T, bootstrap, topics bool) {
 	started := filepath.Join(t.TempDir(), "core-started")
 	marker, err := json.Marshal(started)
 	if err != nil {
@@ -55,6 +57,7 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 		}
 		return strings.TrimSpace(string(out))
 	}
+	topicMarker := filepath.Join(repo, "topic-mutation-observed")
 	var packed bytes.Buffer
 	gz := gzip.NewWriter(&packed)
 	tw := tar.NewWriter(gz)
@@ -64,6 +67,9 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 			body = []byte(artifactPiFixture)
 			origin := filepath.Join(repo, "plugin", "pi", "node_modules", "typebox", "index.js")
 			body = append(body, []byte("\nif (cwd.includes('-139-')) writeFileSync("+string(encode(origin))+", '// mutated original peer');\n")...)
+		}
+		if topics && name == "index.ts" {
+			body = []byte(strings.ReplaceAll(artifactTopicFixture, `"$TOPIC_MARKER$"`, string(encode(topicMarker))))
 		}
 		if name == "package.json" {
 			body = encode(map[string]any{"name": "gentle-engram", "version": "4.5.6", "files": packageRuntimeFiles})
@@ -158,8 +164,20 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 			runtimeModes[tc.name] = strconv.Itoa(131 + i)
 		}
 	}
+	if topics {
+		cases = []struct{ name, state string }{{"topic vectors", "passed"}, {"topic rejects mutation", "passed"}}
+		runtimeModes["topic vectors"], runtimeModes["topic rejects mutation"] = "140", "141"
+		for i, helper := range []string{"workflow", "Pi", "Core"} {
+			for j, operation := range []string{"mutation", "removal"} {
+				name := helper + " helper " + operation
+				cases = append(cases, struct{ name, state string }{name, "unavailable"})
+				runtimeModes[name] = strconv.Itoa(142 + i*2 + j)
+			}
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			helperMutation := topics && strings.Contains(tc.name, " helper ")
 			var peerOrigin string
 			var peerOriginal []byte
 			if strings.HasPrefix(tc.name, "pi bootstrap peer") {
@@ -247,14 +265,43 @@ export const syntheticPeer = true;
 					t.Fatal(err)
 				}
 			}
+			if topics {
+				inventory, ok := result["workflows"].(map[string]any)["cases"].([]any)
+				if !ok || len(inventory) != 5 {
+					t.Fatalf("missing original workflow inventory: %s", out)
+				}
+			}
+			if helperMutation {
+				first := result["workflows"].(map[string]any)["cases"].([]any)[0].(map[string]any)
+				for _, key := range []string{"coreRuntime", "piRuntime"} {
+					child := first[key].(map[string]any)
+					if child["joined"] != true || child["exitCode"] != float64(0) || child["cleanup"] != "passed" {
+						t.Fatalf("helper mutation prerequisite did not complete cleanly: %s", out)
+					}
+				}
+				marker, err := os.ReadFile(topicMarker)
+				if err != nil || string(marker) != tc.name {
+					t.Fatal("actual owned helper mutation not observed")
+				}
+				if err := os.Remove(topicMarker); err != nil {
+					t.Fatal(err)
+				}
+				t.Log("confirmed owned helper change/removal and both exit0 joins:", tc.name)
+			}
 			if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != tc.state || result["workflows"].(map[string]any)["state"] != "unavailable" {
 				t.Fatalf("unexpected report: %s", out)
 			}
 			if bootstrap {
 				observed, ok := result["piBootstrap"].(map[string]any)
 				state, cleanup := "unavailable", "passed"
-				if tc.name == "pi bootstrap healthy" || tc.name == "pi bootstrap peer healthy" {
+				if topics || tc.name == "pi bootstrap healthy" || tc.name == "pi bootstrap peer healthy" {
 					state = "passed"
+				}
+				if helperMutation {
+					state = "unavailable"
+					if result["piPackage"].(map[string]any)["state"] != "unavailable" {
+						t.Fatal("helper mutation left package evidence passing")
+					}
 				}
 				if tc.name == "pi bootstrap peer version" {
 					cleanup = "not-started"
@@ -282,6 +329,45 @@ export const syntheticPeer = true;
 				}
 				if strings.Contains(out, "synthetic-private-diagnostic") || strings.Contains(out, "inherited") {
 					t.Fatal("child output leaked")
+				}
+			}
+			if topics {
+				cases, ok := result["workflows"].(map[string]any)["cases"].([]any)
+				if !ok || len(cases) != 5 {
+					t.Fatalf("missing original workflow inventory: %s", out)
+				}
+				first := cases[0].(map[string]any)
+				state := "passed"
+				if helperMutation || tc.name == "topic rejects mutation" {
+					state = "unavailable"
+				}
+				if first["name"] != "real Pi topic vectors match Go without registering sessions or creating observations" || first["state"] != state || first["coreRuntime"].(map[string]any)["joined"] != true || first["piRuntime"].(map[string]any)["joined"] != true {
+					t.Fatalf("incorrect topic workflow observation: %s", out)
+				}
+				core, pi := first["coreRuntime"].(map[string]any), first["piRuntime"].(map[string]any)
+				if helperMutation && (core["state"] != "unavailable" || pi["state"] != "unavailable") {
+					t.Fatalf("helper mutation left runtime evidence passing: %s", out)
+				}
+				piExit, piCleanup := float64(0), "passed"
+				if tc.name == "topic rejects mutation" {
+					piExit, piCleanup = 1, "failed"
+					marker, err := os.ReadFile(topicMarker)
+					if err != nil || string(marker) != "mutation accepted" {
+						t.Fatal("semantic mutation prerequisite not observed")
+					}
+					if err := os.Remove(topicMarker); err != nil {
+						t.Fatal(err)
+					}
+				} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+					t.Fatal("positive topic case mutated the fixture")
+				}
+				if core["exitCode"] != float64(0) || core["cleanup"] != "passed" || pi["exitCode"] != piExit || pi["cleanup"] != piCleanup {
+					t.Fatalf("wrong case termination: %s", out)
+				}
+				for _, pending := range cases[1:] {
+					if pending.(map[string]any)["state"] != "unavailable" {
+						t.Fatal("unimplemented case reported passing")
+					}
 				}
 			}
 			if tc.state == "passed" {

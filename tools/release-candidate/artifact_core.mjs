@@ -5,9 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const result = { name: "production-core-lifecycle", state: "unavailable", cleanup: "not-started", joined: true, nodeVersion: process.versions.node };
 const token = randomBytes(32).toString("hex");
+const workflow = process.argv[4] || "";
 let core, exited, pi, piExited, parentGone = false;
 let coreStopRequested = false, coreEndedEarly = false;
-if (process.argv[3]) result.piBootstrap = { name: "pi-module-bootstrap-only", state: "unavailable", cleanup: "not-started", joined: true };
+if (process.argv[3]) result.piBootstrap = { name: workflow ? "pi-workflow-topics" : "pi-module-bootstrap-only", state: "unavailable", cleanup: "not-started", joined: true };
 process.stdin.on("end", () => {
   parentGone = true;
   if (pi) pi.stdin.end(); // Core remains available through ordered Pi cleanup.
@@ -44,7 +45,7 @@ async function join(child, exited, observation) {
   }
 }
 try {
-  if (Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
+  if ((workflow && workflow !== "topics") || Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
   const keys = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"];
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   env.ENGRAM_TOKEN = token; // Never serialize the token or forward child diagnostics.
@@ -90,8 +91,8 @@ try {
   if (result.piBootstrap) {
     const observation = result.piBootstrap;
     const piEnv = { ...env, ENGRAM_URL: endpoint.href, ENGRAM_HTTP_TOKEN: token,
-      ENGRAM_EXPECTED_INSTANCE: ready.instance_id, ENGRAM_STARTUP_POLICY: "deny" };
-    pi = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", fileURLToPath(new URL("./pi-owner.mjs", import.meta.url)), process.argv[3]], {
+      ENGRAM_EXPECTED_INSTANCE: ready.instance_id, ENGRAM_STARTUP_POLICY: workflow ? "allow" : "deny" };
+    pi = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", fileURLToPath(new URL("./pi-owner.mjs", import.meta.url)), process.argv[3], workflow], {
       cwd: process.cwd(), env: piEnv, stdio: ["pipe", "ignore", "ignore", "ipc"],
     });
     pi.stdin.on("error", () => {});
@@ -103,11 +104,11 @@ try {
         pi.once("error", reject);
         pi.once("exit", () => reject(new Error("early exit")));
         pi.once("message", message => {
-          if (message?.protocol !== "engram-pi-bootstrap-v1") return reject(new Error("protocol"));
-          if (message.substitutions?.length === 1 && message.substitutions[0] === "@earendil-works/pi-tui.Text") observation.substitutions = message.substitutions;
+          if (message?.protocol !== (workflow ? "engram-pi-topics-v1" : "engram-pi-bootstrap-v1")) return reject(new Error("protocol"));
+          observation.substitutions = ["@earendil-works/pi-tui.Text", "Pi registration host"].filter(value => message.substitutions?.includes(value));
           resolve();
         });
-      }), 2000);
+      }), workflow ? 30000 : 2000);
       if (!parentGone && core.exitCode === null && core.signalCode === null) observation.state = "passed";
     } catch { observation.state = "unavailable"; }
   }

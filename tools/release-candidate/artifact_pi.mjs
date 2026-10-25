@@ -2,9 +2,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import { registerHooks } from "node:module";
-// Fixed native module bootstrap, not Pi registration or installed-SDK execution.
-let bootstrapped = false, parentGone = false;
-process.stdin.on("end", () => { parentGone = true; if (bootstrapped) process.exit(0); });
+import { runTopicVectors } from "./pi-workflows.mjs";
+// Fixed bootstrap and closed topic phase, never installed-SDK execution.
+let bootstrapped = false, parentGone = false, stopping = false;
+function stop(code) {
+  if (code !== 0 || process.exitCode === undefined) process.exitCode = code;
+  if (stopping) return;
+  stopping = true;
+  process.stdin.pause();
+  process.stdin.destroy();
+  if (process.connected) process.disconnect();
+}
+process.stdin.on("end", () => { parentGone = true; if (bootstrapped) stop(0); });
 process.stdin.resume();
 try {
   if (Number(process.versions.node.split(".")[0]) !== 24) throw new Error("prerequisite");
@@ -43,8 +52,12 @@ try {
     if (!allowed) throw new Error("module boundary");
     return resolved;
   } });
-  await import(pathToFileURL(process.argv[2]).href);
-  if (parentGone) process.exit(1);
+  const selected = await import(pathToFileURL(process.argv[2]).href);
+  const workflow = process.argv[3] || "";
+  if (workflow && workflow !== "topics") throw new Error("fixed phase");
+  if (workflow) await runTopicVectors(selected.default);
+  if (parentGone) throw new Error("parent ended before acknowledgement");
   bootstrapped = true;
-  process.send({ protocol: "engram-pi-bootstrap-v1", substitutions: uiUsed ? ["@earendil-works/pi-tui.Text"] : [] });
-} catch { process.exit(1); }
+  process.send({ protocol: workflow ? "engram-pi-topics-v1" : "engram-pi-bootstrap-v1",
+    substitutions: [...(uiUsed ? ["@earendil-works/pi-tui.Text"] : []), ...(workflow ? ["Pi registration host"] : [])] });
+} catch { stop(1); }
