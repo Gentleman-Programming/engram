@@ -18,6 +18,8 @@ type artifactInputObservation struct {
 	sourceObservation
 	ArtifactInputs *artifactInputCheck `json:"artifactInputs,omitempty"`
 	Workflows      *sourceCheck        `json:"workflows"`
+	CoreRuntime    *artifactCoreCheck  `json:"coreRuntime,omitempty"`
+	runCore        bool
 }
 
 type artifactInputCheck struct {
@@ -53,12 +55,16 @@ func stagingContext(filename string) ([]byte, error) {
 	return b, nil
 }
 
-func observeArtifactInputs(root, coreRef, piRef, version, piVersion, core, pi, bundle, contextFile string, output io.Writer) error {
+func observeArtifactInputs(root, coreRef, piRef, version, piVersion, core, pi, bundle, contextFile string, execute bool, output io.Writer) error {
 	r := artifactInputObservation{sourceObservation: sourceObservation{SchemaVersion: 1, Outcome: "blocked",
 		Core:  sourceIdentity{VersionIntent: version, RefIntent: coreRef, RequestedCommit: core},
 		Pi:    sourceIdentity{VersionIntent: piVersion, RefIntent: piRef, RequestedCommit: pi},
 		Check: sourceCheck{Name: "staged-artifact-admission", State: "unavailable"}},
 		Workflows: &sourceCheck{Name: "artifact-workflows", State: "unavailable"}}
+	r.runCore = execute
+	if execute {
+		r.CoreRuntime = &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	admitArtifactInputs(ctx, root, bundle, contextFile, &r)
@@ -121,11 +127,33 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 	pkg := preparePiPackage(ctx, root, workspace, r.Pi.Commit, input)
 	check := pkg.verifyInto(ctx, r.Pi.VersionIntent, filepath.Join(workspace, "materialized-pi"))
 	r.PiPackage, r.Check.State = &check, check.State
+	if r.runCore && check.State == "passed" {
+		// Admission may precede source materialization by several reads. Reject
+		// changed originals before starting Core, not only after it has run.
+		verified := pkg.verify(ctx, r.Pi.VersionIntent)
+		_, archiveErr := readStagedArtifacts(ctx, bundle, want)
+		current, contextErr := stagingContext(contextFile)
+		if verified.State != "passed" || archiveErr != nil || contextErr != nil || !bytes.Equal(raw, current) || ctx.Err() != nil {
+			r.Check.State, r.PiPackage.State, r.PiPackage.Files = "unavailable", "unavailable", 0
+			r.CoreRuntime.State = "unavailable"
+			return
+		}
+		before, beforeErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
+		r.CoreRuntime = runArtifactCore(ctx, measured.Core, measured.CoreSHA256, want.RunID)
+		verified = pkg.verify(ctx, r.Pi.VersionIntent)
+		after, afterErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
+		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" {
+			r.Check.State, r.PiPackage.State, r.CoreRuntime.State = "unavailable", "unavailable", "unavailable"
+		}
+	}
 	// Recheck original measured inputs after source binding/materialization. This
 	// observes changes; neither copies nor hashes protect against hostile ABA.
 	_, archiveErr := readStagedArtifacts(ctx, bundle, want)
 	current, contextErr := stagingContext(contextFile)
 	if archiveErr != nil || contextErr != nil || !bytes.Equal(raw, current) || ctx.Err() != nil {
 		r.Check.State, r.PiPackage.State, r.PiPackage.Files = "unavailable", "unavailable", 0
+		if r.CoreRuntime != nil {
+			r.CoreRuntime.State = "unavailable"
+		}
 	}
 }

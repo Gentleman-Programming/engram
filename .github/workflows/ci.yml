@@ -44,6 +44,11 @@ jobs:
       - name: Verify C compiler prerequisite
         run: gcc --version
 
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
       - name: Run full race suite with elapsed time
         run: /usr/bin/time -p go test -race -timeout=20m ./...
 
@@ -180,7 +185,7 @@ jobs:
           node-version: "24"
 
       - name: Run policy helper tests
-        run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs
+        run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs .github/scripts/ci-unit-node.test.mjs
 
       - name: Run PostgreSQL CI policy tests
         run: node --test .github/scripts/postgres-ci.test.mjs
@@ -328,6 +333,11 @@ jobs:
 
       - name: Run dead-code ratchet
         run: make deadcode-check
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
 
       - name: Run unit tests
         run: go test ./...

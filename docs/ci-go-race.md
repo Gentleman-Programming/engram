@@ -5,6 +5,8 @@
 The candidate **Go Race Tests** job runs
 `go test -race -timeout=20m ./...` independently on `ubuntu-24.04`, with
 Go 1.26.10, `CGO_ENABLED=1` and `CC=gcc`.
+Pinned Node.js 24 is provisioned before the suite for the owned Core lifecycle tests;
+local reproduction needs the same Node prerequisite, not the runner's ambient version.
 The runner must provide GCC and `/usr/bin/time`; compiler preflight failures
 fail the job. Existing unit, E2E and plugin suites remain unchanged.
 The race command uses the default build tags: it does not run tests requiring

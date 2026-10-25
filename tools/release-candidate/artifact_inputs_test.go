@@ -16,7 +16,13 @@ import (
 )
 
 func TestArtifactInputCLI(t *testing.T) {
-	core, revision, repo := stagedMetadataFixture(t) // Compiled metadata only; never executed.
+	started := filepath.Join(t.TempDir(), "core-started")
+	marker, err := json.Marshal(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := strings.Replace(artifactCoreFixture, "func main() {", "func main() {\n if os.WriteFile("+string(marker)+", []byte(\"started\"), 0600) != nil { os.Exit(25) }", 1)
+	core, revision, repo := stagedProgramFixture(t, program) // Synthetic child; never production proof.
 	write := func(name string, data []byte) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
@@ -115,6 +121,7 @@ func TestArtifactInputCLI(t *testing.T) {
 	invoke := func(args []string) (string, string, int) {
 		t.Helper()
 		cmd := exec.Command(bin, args...)
+		cmd.Env = append(os.Environ(), "ENGRAM_TOKEN=inherited-not-private", "ENGRAM_URL=http://example.invalid", "ENGRAM_PORT=7", "ENGRAM_SOCKET=forbidden", "ENGRAM_HTTP_TOKEN=inherited", "ENGRAM_CLOUD_AUTOSYNC=1", "ENGRAM_CLOUD_TOKEN=inherited", "ENGRAM_CLOUD_SERVER=http://example.invalid", "OPENAI_API_KEY=inherited", "HTTP_PROXY=http://example.invalid", "NODE_OPTIONS=forbidden-inherited-option")
 		var out, diagnostic bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &diagnostic
 		code := 0
@@ -127,13 +134,23 @@ func TestArtifactInputCLI(t *testing.T) {
 		}
 		return out.String(), diagnostic.String(), code
 	}
+	runtimeModes := map[string]string{"core healthy": "123", "core identity": "124", "core protocol": "125", "core shutdown": "126", "core startup": "127", "core auth": "128", "core PID": "129", "core nonloopback": "130"}
 	for _, tc := range []struct{ name, state string }{
 		{"matching", "passed"}, {"missing context", "unavailable"}, {"malformed context", "unavailable"},
 		{"context mismatch", "unavailable"}, {"digest mismatch", "unavailable"}, {"Pi source mismatch", "not-established"},
 		{"context boundary", "passed"}, {"context oversized", "unavailable"},
+		{"core healthy", "passed"}, {"core identity", "passed"}, {"core protocol", "passed"}, {"core shutdown", "passed"},
+		{"core startup", "passed"}, {"core auth", "passed"}, {"core PID", "passed"}, {"core nonloopback", "passed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			expected, pi := want, piRevision
+			payload, mode := archive.Bytes(), "-observe-artifact-inputs"
+			if run, active := runtimeModes[tc.name]; active {
+				expected.RunID, mode = run, "-observe-artifact-workflows"
+				payload = runtimeFixtureZIP(t, payload, run)
+				expected.ZIPHash = stagedDigest(payload)
+			}
+			write(bundle, payload)
 			if tc.name == "context mismatch" {
 				expected.RunID = "124"
 			}
@@ -163,7 +180,7 @@ func TestArtifactInputCLI(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"-root", repo, "-core-ref", "refs/tags/v1.2.3", "-pi-ref", "refs/tags/pi-v4.5.6", "-core-source", revision, "-pi-source", pi, "-observe-artifact-inputs", "-staging-bundle", bundle, "-staging-context", contextPath}
+			args := []string{"-root", repo, "-core-ref", "refs/tags/v1.2.3", "-pi-ref", "refs/tags/pi-v4.5.6", "-core-source", revision, "-pi-source", pi, mode, "-staging-bundle", bundle, "-staging-context", contextPath}
 			out, diagnostic, code := invoke(args)
 			if code != 2 || diagnostic != "" {
 				t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, diagnostic)
@@ -178,15 +195,93 @@ func TestArtifactInputCLI(t *testing.T) {
 			if tc.state == "passed" {
 				measured := result["artifactInputs"].(map[string]any)
 				pkg := result["piPackage"].(map[string]any)
-				if measured["zipSha256"] != want.ZIPHash || measured["coreSha256"] != stagedDigest(core) || measured["piSha256"] != stagedDigest(packed.Bytes()) || measured["platform"] != runtime.GOOS+"/"+runtime.GOARCH || pkg["files"] != float64(len(packageRuntimeFiles)) || pkg["state"] != "passed" || result["core"].(map[string]any)["commit"] != revision || result["pi"].(map[string]any)["commit"] != piRevision {
+				if measured["zipSha256"] != expected.ZIPHash || measured["coreSha256"] != stagedDigest(core) || measured["piSha256"] != stagedDigest(packed.Bytes()) || measured["platform"] != runtime.GOOS+"/"+runtime.GOARCH || pkg["files"] != float64(len(packageRuntimeFiles)) || pkg["state"] != "passed" || result["core"].(map[string]any)["commit"] != revision || result["pi"].(map[string]any)["commit"] != piRevision {
 					t.Fatalf("wrong measured evidence: %s", out)
+				}
+			}
+			if tc.name == "matching" {
+				x, y, z := invoke(append(args, "-observe-artifact-workflows=false"))
+				if x != out || y != diagnostic || z != code {
+					t.Fatal("false execution flag changed admission")
+				}
+			}
+			if _, active := runtimeModes[tc.name]; !active && result["coreRuntime"] != nil {
+				t.Fatal("read-only mode executed Core")
+			}
+			if _, active := runtimeModes[tc.name]; active {
+				observed := result["coreRuntime"].(map[string]any)
+				state, cleanup := "unavailable", "passed"
+				if tc.name == "core healthy" {
+					state = "passed"
+				}
+				if tc.name == "core shutdown" {
+					cleanup = "killed"
+				}
+				if observed["state"] != state || observed["cleanup"] != cleanup || observed["joined"] != true {
+					t.Fatalf("wrong runtime: %s", out)
+				}
+				if state == "passed" && (observed["reportedVersion"] != "fixture-observed" || observed["instanceId"] != "synthetic-owned-instance") {
+					t.Fatalf("invented runtime identity/version: %s", out)
+				}
+				if _, leaked := observed["token"]; leaked || strings.Contains(out, "inherited-not-private") {
+					t.Fatal("private transport leaked")
 				}
 			}
 			after, err := sourceTreeDigest(repo)
 			b, readErr := os.ReadFile(bundle)
 			c, ctxErr := os.ReadFile(contextFile)
-			if err != nil || before != after || readErr != nil || !bytes.Equal(b, archive.Bytes()) || ctxErr != nil || !bytes.Equal(c, data) {
+			if err != nil || before != after || readErr != nil || !bytes.Equal(b, payload) || ctxErr != nil || !bytes.Equal(c, data) {
 				t.Fatal("changed source/Git/input or left owned workspace")
+			}
+		})
+	}
+	for _, target := range []string{"bundle", "context"} {
+		t.Run("changed "+target+" before execution", func(t *testing.T) {
+			write(bundle, archive.Bytes())
+			write(contextFile, encode(want))
+			if err := os.Remove(started); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			filename := bundle
+			if target == "context" {
+				filename = contextFile
+			}
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wrapper, mutated := artifactMutationGit(t)
+			t.Setenv("PATH", wrapper+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ARTIFACT_TEST_REAL_GIT", realGit)
+			t.Setenv("ARTIFACT_TEST_MUTATE", filename)
+			t.Setenv("ARTIFACT_TEST_MUTATED", mutated)
+			before, err := sourceTreeDigest(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, diagnostic, code := invoke([]string{"-root", repo, "-core-ref", "refs/tags/v1.2.3", "-pi-ref", "refs/tags/pi-v4.5.6", "-core-source", revision, "-pi-source", piRevision, "-observe-artifact-workflows", "-staging-bundle", bundle, "-staging-context", contextFile})
+			var result artifactInputObservation
+			if err := json.Unmarshal([]byte(out), &result); err != nil || code != 2 || diagnostic != "" || strings.Count(out, "\n") != 1 {
+				t.Fatalf("invalid public report: code=%d stdout=%q stderr=%q err=%v", code, out, diagnostic, err)
+			}
+			if proof, err := os.ReadFile(mutated); err != nil || string(proof) != "mutated" {
+				t.Fatalf("mutation did not occur after admission: %q %v", proof, err)
+			}
+			if _, err := os.Stat(started); !os.IsNotExist(err) {
+				t.Fatalf("Core executed after original %s changed: %v", target, err)
+			}
+			if result.Outcome != "blocked" || result.Check.State != "unavailable" || result.PiPackage == nil || result.PiPackage.State != "unavailable" || result.PiPackage.Files != 0 || result.Workflows.State != "unavailable" || result.CoreRuntime == nil || result.CoreRuntime.State != "unavailable" || result.CoreRuntime.Cleanup != "not-started" || !result.CoreRuntime.Joined {
+				t.Fatalf("changed input must prevent execution: %s", out)
+			}
+			after, digestErr := sourceTreeDigest(repo)
+			current, readErr := os.ReadFile(filename)
+			other, expected := contextFile, encode(want)
+			if target == "context" {
+				other, expected = bundle, archive.Bytes()
+			}
+			unchanged, otherErr := os.ReadFile(other)
+			if digestErr != nil || before != after || readErr != nil || string(current) != "tampered" || otherErr != nil || !bytes.Equal(unchanged, expected) {
+				t.Fatal("collector changed source/Git or rewrote original inputs")
 			}
 		})
 	}
@@ -215,7 +310,7 @@ func TestArtifactInputCLI(t *testing.T) {
 		} {
 			command := append(append([]string{}, args...), mode.flags...)
 			a, b, c := invoke(command)
-			x, y, z := invoke(append(command, "-observe-artifact-inputs=false"))
+			x, y, z := invoke(append(command, "-observe-artifact-inputs=false", "-observe-artifact-workflows=false"))
 			if c != mode.code || !reflect.DeepEqual([]any{a, b, c}, []any{x, y, z}) {
 				t.Fatalf("legacy %v changed: exits %d/%d, stdout equal %v, stderr equal %v", mode.flags, c, z, a == x, b == y)
 			}

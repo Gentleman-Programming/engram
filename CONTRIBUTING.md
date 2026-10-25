@@ -240,6 +240,14 @@ The original #1293 audit found 23 open PRs needing migration; that is a historic
 
 > **Repo admin note:** The active `main` ruleset requires exactly these six contexts: `E2E Tests`, `Unit Tests`, `Plugin Tests`, `Check Issue Has status:approved`, `Check Issue Reference`, and `Check PR Has type:* Label`.
 
+The transient-artifact workflow subscribes to opening, edits, synchronization
+and reopening, but not label changes. Its job runs for base edits and skips
+title/body-only edits before checkout or API reads. Base edits remain relevant
+to both the diff and its trusted base policy. Both this check and PR Size Notice
+retain their trusted `pull_request_target` checkout boundaries; neither executes
+PR-head code. Local event-matrix tests do not prove hosted event delivery or
+measured savings; verify actual runs after integration on the trusted branch.
+
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
 ### Windows full-suite baseline (#1891)
@@ -651,8 +659,10 @@ presence represents the existing maintainer-owned policy; automated validation
 does not verify who applied the label. Maintainers remain responsible for grants.
 
 One consistently named informational check writes a fresh job summary on PR
-opening, edits (including base-branch retargeting), reopening, synchronization,
-and label addition/removal, including drafts.
+opening, base-branch edits, reopening, synchronization, and addition/removal of
+`size:exception`, including drafts. Title/body-only edits and unrelated label
+changes skip the job before checkout or API reads; subscribed events may still
+create workflow runs with a skipped job.
 It refreshes when the diff shrinks or the exception changes; it does not post PR
 comments or run on merge groups. Actions retains historical runs, not one mutable
 summary across all revisions. Unavailable or invalid current metadata produces
@@ -732,6 +742,8 @@ relative to the repository root.
 | Obsidian plugin | `plugin/obsidian` | Node.js 24, npm, and dependencies installed with `npm ci` under the existing [dependency policy](#npm-dependency-hygiene) | `npm test`, `npm run typecheck`, `npm run build` | Plugin tests, TypeScript checking, and bundle generation; not an interactive Obsidian smoke test. See [scripts](plugin/obsidian/package.json). |
 | PR policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs` | Merge-queue, label, artifact and PR-size helper logic; not live GitHub permissions or event delivery. |
 | Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy helper suites; not live approval-refresh behavior. |
+
+The **Unit Tests** job provides Node.js 24 for the Go-owned Core lifecycle tests.
 
 The [CI workflow](.github/workflows/ci.yml) is authoritative for hosted commands,
 setup steps and platform coverage; the [Makefile](Makefile) defines the existing
