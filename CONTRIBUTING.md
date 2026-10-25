@@ -735,6 +735,15 @@ original fatal assertion. It does not log file contents or absolute fixture root
 This failure-only diagnostic identifies the observed file delta, not its cause;
 synthetic formatter tests do not reproduce a Linux CI mutation.
 
+### PostgreSQL integration CI
+
+The candidate **PostgreSQL Integration Tests** job runs the existing cloudstore,
+cloudserver and CLI runtime suites against a disposable PostgreSQL 16 service.
+It verifies database-backed execution rather than treating missing-DSN skips as
+coverage. It does not activate a required check. See the
+[scope, evidence and local cleanup guide](docs/postgres-ci.md) for commands,
+intentional exclusions and the pending hosted-proof boundary.
+
 ### Claude jq 1.6 response compatibility
 
 The Linux **Claude jq 1.6 Compatibility** job verifies the SHA-256 and version of
