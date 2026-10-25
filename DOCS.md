@@ -1675,7 +1675,14 @@ Behavior:
 
 ## Memory Protocol
 
-The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
+This is the canonical living prose contract for repository-owned memory guidance.
+The source/consumer map above distinguishes manually maintained host instructions from
+OpenCode's source-to-embedded copy. Review these consumers together for semantic alignment,
+not identical formatting. External harness policies are independent and are not changed by
+editing this repository; a host may supply additional obligations.
+
+The protocol teaches agents **when** and **how** to use Engram's tools. Add the appropriate
+host instructions to your prompt file (see [Agent Setup](docs/AGENT-SETUP.md)).
 
 The agent MUST follow this protocol without waiting for activation.
 
@@ -1689,28 +1696,16 @@ If tools are unavailable, use `engram setup <agent>` with the supported host nam
 and restart that host. Setup repairs host-specific registration; do not assume
 Claude MCP names or permission allowlists on every host.
 
-### WHEN TO SAVE (mandatory)
+### SELECTIVE MEMORY
 
-Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
-- Bug fix completed (include root cause)
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Non-obvious discovery about the codebase, gotcha, or edge case found
-- Configuration change or environment setup
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-- User confirms a recommendation ("go with that", "sounds good", "agreed", or the equivalent in the user's language)
-- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
-- User makes a decision after presented tradeoffs or options
-- A discussion concludes with a clear direction chosen, even if the agent proposed it
-
-After every task, ask whether a decision, confirmation, preference, bug fix,
-discovery, or convention needs saving; if so, call `mem_save` now.
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
 
 Format for `mem_save`:
 
@@ -1729,10 +1724,12 @@ Format for `mem_save`:
 
 ### Topic update rules (mandatory)
 
-- Different topics MUST NOT overwrite each other (e.g. architecture vs bugfix)
-- Reuse the same `topic_key` to update an evolving topic instead of creating new observations
-- If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
-- Use `mem_update` when you have an exact observation ID to correct
+- Use mem_search on the bounded topic in the intended project and scope before writing.
+- Read candidates in full with mem_get_observation; snippets are not identity evidence.
+- For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact, and record superseded facts as history.
+- For a genuinely new topic use mem_save with a deliberate, distinct topic_key. If already covered, write nothing.
+- On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save. A failed read is not evidence of absence.
+- A suggested topic_key is a hint, not proof of identity. Never merge across projects or scopes.
 
 ### DELIVERY GUARANTEE
 
@@ -1746,40 +1743,17 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
 
-Also search memory PROACTIVELY when:
-
-- Starting work on something that might have been done before
-- The user mentions a topic you have no context on — check if past sessions covered it
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+Narrow by project/type after broad recall as needed.
 
 ### SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST call `mem_session_summary` with this structure:
-
-```
-## Goal
-[What we were working on this session]
-
-## Instructions
-[User preferences or constraints discovered — skip if none]
-
-## Discoveries
-- [Technical findings, gotchas, non-obvious learnings]
-
-## Accomplished
-- [Completed items with key details]
-
-## Next Steps
-- [What remains to be done — for the next session]
-
-## Relevant Files
-- path/to/file — [what it does or what changed]
-```
-
-This is NOT OPTIONAL. If you skip this, the next session starts blind.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
 Summary persistence does not end the session. Follow the host-specific lifecycle
 contract: Claude/Codex SessionEnd hooks and the OpenCode adapter own closure;
 Pi uses its explicit closure contract; Gemini additionally requires
-`mem_session_end` after `mem_session_summary` succeeds.
+`mem_session_end` after `mem_session_summary` succeeds, only at actual session closure.
 
 Codex registers the native PreToolUse command `engram hook codex-pre-tool-use`
 for `mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. It resolves the
@@ -1796,22 +1770,12 @@ explicit-session contract.
 
 ### PASSIVE CAPTURE
 
-When completing a task or subtask, include a `## Key Learnings:` section with
-numbered items. Automatic capture is adapter-specific: Claude/Codex SubagentStop
+Automatic capture is adapter-specific: Claude/Codex SubagentStop
 hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
 output for server-side extraction. Other adapters may support eligible tool
 outputs through their own contracts. Ordinary responses are not universally
 captured; a learning section alone does not guarantee storage. Use `mem_save`
 as the primary path for significant, verified knowledge.
-
-Example:
-
-```
-## Key Learnings:
-
-1. bcrypt cost=12 is the right balance for our server performance
-2. JWT refresh tokens need atomic rotation to prevent race conditions
-```
 
 You can also call `mem_capture_passive(content)` directly, when available, with
 text containing a learning section. This explicit extraction path is a safety

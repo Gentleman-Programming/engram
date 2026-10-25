@@ -533,26 +533,42 @@ Pi sends eligible non-Engram tool results to Engram for passive scanning after r
 
 The agent MUST follow this protocol without waiting for activation.
 
-The Pi-native Memory Protocol requires proactive `mem_save` for significant decisions,
-conventions, workflow/tool choices, completed non-obvious work, discoveries and
-preferences, including user confirmation or rejection and a self-check after every
-task. Save verified conclusions, not routine progress or sensitive content.
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
+
+For selected writes, use mem_search on the bounded topic in the intended project and scope before writing.
+Read candidates in full with mem_get_observation; snippets are not identity evidence.
+For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact,
+and record superseded facts as history. For a genuinely new topic use mem_save with a deliberate,
+distinct topic_key. If already covered, write nothing.
+On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save.
+A failed read is not evidence of absence. A suggested topic_key is a hint, not proof of identity.
+Never merge across projects or scopes.
 
 Memory attribution comes from Pi's host session and confirmed Engram registration,
 not a model-supplied `session_id`. Use native `mem_*` tools rather than alternative
-MCP names. Recall starts with `mem_context`; ordinary search is project-scoped AND.
+MCP names. Search when materially useful for recall or related work; mere project mentions do not require a search.
+Recall starts with mem_context, then mem_search; ordinary search is project-scoped AND.
 An empty scoped search gets one `match_mode: "any", all_projects: true` retry before
-concluding that no memory exists.
+concluding that no memory exists. Narrow follow-ups by project/type, then use
+mem_get_observation for full content.
 
-Explicit session closure or handoff requires a structured `mem_session_summary`;
-ordinary task completion or saying "done" does not summarize or end the session.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary
+or end the session; merely saying "done" is not closure.
 Outcome-specific [compaction guidance](#compaction-recovery) takes precedence over
-manual fallback instructions. Memory failure MUST NOT prevent the user-facing answer.
+manual fallback instructions. Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
+Memory failure MUST NOT prevent the user-facing answer.
+If memory work fails or needs follow-up, still send the answer.
 
 Automatic passive scanning covers eligible tool outputs, **not final assistant
 responses**. A final `## Key Learnings:` section alone is not persisted by Pi; save
-significant response learnings explicitly with `mem_save` or `mem_capture_passive`
-before replying. Protocol sandbox tests check instruction delivery, not autonomous
+significant response learnings through the selected-write workflow before replying.
+Passive capture remains a redacted, adapter-owned safety net, not a substitute for that workflow. Protocol sandbox tests check instruction delivery, not autonomous
 agent compliance.
 
 ### Automatic user-prompt capture

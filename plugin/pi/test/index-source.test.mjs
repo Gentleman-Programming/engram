@@ -729,7 +729,9 @@ test("memory protocol enforces the canonical topic workflow", () => {
   assert.match(workflow, /hint, not proof of identity/);
 
   assert.doesNotMatch(workflow, /Call `mem_save` IMMEDIATELY/);
-  assert.match(source, /Bug fix completed[\s\S]*Architecture or design decision made[\s\S]*User preference or constraint learned/);
+  assert.match(workflow, /verified knowledge that is durable and costly to reconstruct/);
+  assert.match(workflow, /decisions with rationale[\s\S]*non-obvious root causes[\s\S]*real constraints/);
+  assert.match(workflow, /Group related conclusions deliberately, not every task, response, or event/);
   assert.match(source, /Format for \\`mem_update\\`:/);
   assert.match(source, /expected_project[\s\S]*project that owns the observation/);
   assert.match(source, /full rewritten content including every still-valid fact/);
