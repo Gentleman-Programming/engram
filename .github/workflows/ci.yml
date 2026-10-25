@@ -8,10 +8,45 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'ci/proof-') && vars.ISSUE_CI_PROOF_CI == '' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'ci/proof-') && vars.ISSUE_CI_PROOF_CI == '' }}
+
 permissions:
   contents: read
 
 jobs:
+  race-tests:
+    name: Go Race Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: "1"
+      CC: gcc
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Record tested revision
+        run: git rev-parse HEAD
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Verify C compiler prerequisite
+        run: gcc --version
+
+      - name: Run full race suite with elapsed time
+        run: /usr/bin/time -p go test -race -timeout=20m ./...
+
   govulncheck:
     name: Go Vulnerability Check
     runs-on: ubuntu-latest
@@ -31,7 +66,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
           cache: false
       - name: Install pinned scanner
         env:
@@ -57,7 +92,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
           cache: false
       - name: Install pinned validator
         env:
@@ -84,7 +119,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Verify pinned jq 1.6
         shell: bash
@@ -122,7 +157,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
@@ -146,6 +181,9 @@ jobs:
 
       - name: Run policy helper tests
         run: node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs .github/scripts/ci-unit-node.test.mjs
+
+      - name: Run PostgreSQL CI policy tests
+        run: node --test .github/scripts/postgres-ci.test.mjs
 
       - name: Run scanner policy tests
         run: node --test .github/scripts/ci-scanners.test.mjs
@@ -269,7 +307,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Verify module metadata is tidy
         run: go mod tidy -diff
@@ -299,6 +337,62 @@ jobs:
       - name: Run binary quick self-test
         run: go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick
 
+  postgres-tests:
+    name: PostgreSQL Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: engram_test
+          POSTGRES_PASSWORD: disposable_test_password
+          POSTGRES_DB: engram_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U engram_test -d engram_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CLOUDSTORE_TEST_DSN: postgres://engram_test:disposable_test_password@127.0.0.1:5432/engram_test?sslmode=disable
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Record revision and verify database connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          go version
+          node --version
+          psql "$CLOUDSTORE_TEST_DSN" -v ON_ERROR_STOP=1 -c 'SELECT version();'
+
+      - name: Run PostgreSQL integration suites and verify execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud/cloudserver ./cmd/engram | tee "$RUNNER_TEMP/postgres-tests.json"
+          node .github/scripts/postgres-ci-evidence.mjs "$RUNNER_TEMP/postgres-tests.json"
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -311,7 +405,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
@@ -329,7 +423,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Run Windows-specific setup test
         run: go test ./internal/setup/ -run 'TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath|TestResolveEngramCommandMiseInstall|TestCanonicalEngramCommand|TestEnsurePiMCPConfigRepairsDeadEngramCommand' -count=1
@@ -345,7 +439,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
       - run: go test ./tools/ -run '^TestCloudSync(Wrappers|PowerShellMissingEngram)$' -v
 
   obsidian-build:
@@ -435,7 +529,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Compare store benchmarks with the previous main revision
         shell: bash

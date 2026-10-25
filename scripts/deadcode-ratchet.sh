@@ -38,7 +38,7 @@ run_analyzer() {
 			print version
 		}
 	' "${repo_root}/go.mod")"; then
-		printf 'deadcode requires a valid go directive in %s/go.mod (for example, go 1.25.10); fix the module minimum before retrying\n' "${repo_root}" >&2
+		printf 'deadcode requires a valid go directive in %s/go.mod (for example, go 1.26.10); fix the module minimum before retrying\n' "${repo_root}" >&2
 		return 1
 	fi
 	if ! GOTOOLCHAIN="go${go_version}+auto" go run "golang.org/x/tools/cmd/deadcode@${analyzer_version}" "$@"; then

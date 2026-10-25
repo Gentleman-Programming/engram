@@ -19,7 +19,7 @@ const expectedGoreleaserJob = `  goreleaser:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Verify module metadata is tidy
         run: go mod tidy -diff

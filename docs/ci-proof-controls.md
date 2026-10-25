@@ -6,6 +6,37 @@ repository variable or runtime control is activated by this change. Local models
 do not prove native provenance, required-gate selection or queue safety.
 Polling only waits for an explicit release; elapsed time is never a witness.
 
+## Workflow admission concurrency (#2096)
+
+CI coalesces only ordinary `pull_request` runs into a workflow-namespaced
+PR-number group, with cancellation enabled. Admission requires both an empty
+raw `vars.ISSUE_CI_PROOF_CI` and a head branch not starting with `ci/proof-`.
+GitHub's `startsWith` is case-insensitive: malformed reserved names and uppercase
+variants are protected too. No controller JSON is parsed at workflow admission.
+Any nonempty variable, including explicit OFF, malformed JSON or an unmatched
+selector, conservatively isolates all PR runs that observe it. This guard does
+not activate or authorize a controller; job-level parsed selection is unchanged.
+
+All protected runs use a workflow-namespaced `run_id`/`run_attempt` group with
+cancellation disabled, including merge groups and main pushes. Unique groups
+protect pending slots as well as running work: `cancel-in-progress: false` alone
+would still allow replacement of another pending run in a shared group.
+Protected reruns have distinct attempt groups; ordinary PR reruns still share
+the PR group and may cancel other runs for that PR. Different PR numbers and
+workflow names remain isolated, even when fork branch names match.
+
+Local tests check the expression shape and a limited routing model, not hosted
+admission or cancellation. Fork/rerun variable visibility, control transitions
+(including empty/nonempty changes between attempts), and scheduling by commit
+recency are **not hosted-qualified**. GitHub scheduling is not a newest-commit
+ordering guarantee. A workflow-level guard cannot rely on a selector parsed later
+inside a job. Controllers remain unchanged and OFF; there is no measured savings
+claim or hosted gate/queue proof. Controller activation, reruns and other hosted
+experiments require separate authorization.
+
+Run `node --test .github/scripts/issue-ci-concurrency.test.mjs` for local routing
+regressions; retain the producer and proof-control suites below.
+
 ## Public API
 
 `.github/scripts/issue-ci-proof-controls.mjs` exports only

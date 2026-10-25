@@ -2,6 +2,8 @@
 
 Thanks for contributing. Engram enforces a strict **issue-first workflow** — every change starts with an approved issue.
 
+[Contribution policy transition](docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE** target guidance; the active requirements below remain unchanged.
+
 ---
 
 ## Contribution Workflow
@@ -240,13 +242,45 @@ The original #1293 audit found 23 open PRs needing migration; that is a historic
 
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
+### CI concurrency
+
+CI uses a workflow-namespaced PR-number concurrency group with cancellation
+only for ordinary `pull_request` runs: the head branch must not start with
+`ci/proof-` (case-insensitive), and raw `vars.ISSUE_CI_PROOF_CI` must be empty.
+Every other run uses a workflow-namespaced `run_id`/`run_attempt` group with
+cancellation disabled. This isolates protected pending slots as well as running
+work: disabling cancellation alone would not prevent pending-run replacement.
+Merge groups, main pushes, reserved proof branches and PRs with any nonempty
+selector (including OFF, malformed or unmatched values) are isolated conservatively.
+Ordinary PR reruns share their PR group; protected reruns get a distinct attempt
+group. No newest-commit ordering is guaranteed.
+
+This is workflow admission, not the job's parsed controller selection. Controllers
+and their bootstrap remain unchanged and OFF. Fork/rerun variable visibility,
+control transitions and scheduling by commit recency are not hosted-qualified;
+no savings have been measured. See [proof boundaries](docs/ci-proof-controls.md#workflow-admission-concurrency-2096).
+Local routing checks: `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
+Hosted experiments require separate authorization.
+
+### Go race detection (initially non-required)
+
+The candidate **Go Race Tests** job runs the full default-tag Go suite with
+`go test -race -timeout=20m ./...` on Linux, independently of existing suites.
+CGO and GCC are enabled; test failures remain failures. The 20-minute per-binary
+budget follows a corrected local store race run of 14m04s. The successful
+[hosted full-suite run](https://github.com/Gentleman-Programming/engram/actions/runs/40147453688)
+at head `b64205b3` took 19m04s; the separate 30-minute job budget stays provisional.
+No required-check settings change. See [scope, local reproduction and failure
+classification](docs/ci-go-race.md).
+Local structural checks: `node --test .github/scripts/issue-go-race-ci.test.mjs`.
+
 ### CI scanners (initially non-required)
 
 **Go Vulnerability Check** and **Workflow Validation** run independently on PRs,
 merge groups and main pushes. They preserve finding and tooling-failure exits;
 non-required does not mean failures are ignored. Existing required gates remain
 unchanged. See [scanner setup, real-tool tests and result interpretation](docs/ci-scanners.md)
-for pinned Go 1.25.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
+for pinned Go 1.26.10, govulncheck v1.7.0 and actionlint v1.7.12 commands.
 Mocked wrapper tests are distinct from opt-in real-tool integration tests; neither
 is hosted rollout evidence. Review findings without blanket suppressions or
 unapproved dependency upgrades.
@@ -626,6 +660,15 @@ command checks from execution. A green local subset is **not** a full CI or rele
 verdict. Hosted full-unit, E2E, plugin and applicable platform results remain
 pending until GitHub runs them. Documentation-only changes can use proportional
 link/command-definition checks without executing unrelated suites.
+
+### PostgreSQL integration CI
+
+The candidate **PostgreSQL Integration Tests** job runs the existing cloudstore,
+cloudserver and CLI runtime suites against a disposable PostgreSQL 16 service.
+It verifies database-backed execution rather than treating missing-DSN skips as
+coverage. It does not activate a required check. See the
+[scope, evidence and local cleanup guide](docs/postgres-ci.md) for commands,
+intentional exclusions and the pending hosted-proof boundary.
 
 ### Claude jq 1.6 response compatibility
 

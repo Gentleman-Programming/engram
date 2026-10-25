@@ -21,7 +21,7 @@ for (const [id, name, version] of [
     assert.match(body, /persist-credentials: false/);
     assert.match(body, /timeout-minutes: 15/);
     assert.ok(body.includes(version));
-    assert.match(body, /go-version: "1.25.10"/);
+    assert.match(body, /go-version: "1.26.10"/);
     assert.match(body, /GOTOOLCHAIN: local/);
     assert.match(body, /      - name: Install pinned (?:scanner|validator)\n        env:\n          GOBIN: \$\{\{ runner.temp \}\}\/ci-scanners/);
     assert.doesNotMatch(body.split('    steps:')[0], /runner\.temp/);
