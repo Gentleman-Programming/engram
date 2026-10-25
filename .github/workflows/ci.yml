@@ -44,6 +44,11 @@ jobs:
       - name: Verify C compiler prerequisite
         run: gcc --version
 
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
       - name: Run full race suite with elapsed time
         run: /usr/bin/time -p go test -race -timeout=20m ./...
 
