@@ -51,10 +51,6 @@ type artifactCoreCheck struct {
 	HelperSHA256    string `json:"helperSha256"`
 }
 
-func runArtifactCore(ctx context.Context, core []byte, digest, run string) *artifactCoreCheck {
-	return runArtifactCoreWithPi(ctx, core, digest, run, nil, nil)
-}
-
 // materialize uses only the admitted Go archive authority, before any import.
 func runArtifactCoreWithPi(ctx context.Context, core []byte, digest, run string, materialize func(string) bool, pi *artifactPiCheck) *artifactCoreCheck {
 	return runArtifactPiCase(ctx, core, digest, run, materialize, pi, "")

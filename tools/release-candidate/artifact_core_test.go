@@ -264,7 +264,7 @@ process.exit = finish;
 	t.Cleanup(func() { artifactCoreOwner = original })
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	result := runArtifactCore(ctx, core, stagedDigest(core), "126")
+	result := runArtifactCoreWithPi(ctx, core, stagedDigest(core), "126", nil, nil)
 	data, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("fixture has no observed own-child exit: %v", err)
