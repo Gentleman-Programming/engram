@@ -35,6 +35,18 @@ func TestSourceEvidence(t *testing.T) {
 	git("config", "user.name", "Evidence Fixture")
 	git("config", "user.email", "fixture@example.invalid")
 	git("config", "commit.gpgsign", "false")
+	// Fixture commits must not leave a detached maintenance worker mutating
+	// .git while the public collector's preservation assertion takes snapshots.
+	git("config", "maintenance.auto", "false")
+	git("config", "gc.auto", "0")
+	t.Run("fixture disables automatic maintenance", func(t *testing.T) {
+		for key, want := range map[string]string{"maintenance.auto": "false", "gc.auto": "0"} {
+			out, err := exec.Command("git", "-C", repo, "config", "--local", "--get", key).CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != want {
+				t.Fatalf("fixture must disable %s before commits: %v, output=%q", key, err, out)
+			}
+		}
+	})
 	candidateWrite(t, repo, ".gitattributes", "tools/agent-contract/main.go export-ignore\n")
 	candidateWrite(t, repo, "docs/contracts/agent-contract-v1.json", "{\"status\":\"mcp-foundation\"}\n")
 	candidateWrite(t, repo, "go.mod", "module example.invalid/evidencefixture\n\ngo 1.25.0\n")
