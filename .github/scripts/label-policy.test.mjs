@@ -270,6 +270,30 @@ test('keeps the active PR template concise without activating staged admission p
   }
 });
 
+test('aligns branch PR body guidance with the canonical template and active prerequisites', () => {
+  const skill = fs.readFileSync('skills/branch-pr/SKILL.md', 'utf8');
+  const body = skill.split('## PR Body Format')[1]?.split('## Automated Checks')[0];
+  assert.ok(body, 'PR body guidance exists');
+  assert.match(body, /\[canonical PR template\]\(\.\.\/\.\.\/\.github\/PULL_REQUEST_TEMPLATE\.md\)/);
+  assert.doesNotMatch(body, /^\s*\||^- \[[ x]\]|Changes Table|Contributor Checklist|All boxes must be checked|Check exactly ONE/m);
+  assert.match(body, /MUST contain a closing reference/);
+  assert.match(body, /Closes #<issue-number>/);
+  assert.match(body, /Fixes #N.*Resolves #N/);
+  assert.match(body, /Every linked issue MUST have `status:approved` and a real assignee/);
+  assert.match(body, /exactly one canonical `type:\*` PR label/);
+  assert.match(body, /All required automated checks must pass before merge/);
+  assert.match(body, /proportional evidence/);
+  assert.match(body, /no separate design document is required by default/);
+  assert.match(body, /Existing PRs must comply before merge, without waiting for backlog-wide migration/);
+  assert.match(body, /Re-run native validation after issue approval\/assignment changes/);
+  assert.match(body, /actual verification commands\/steps and observed outcomes/);
+  assert.match(body, /focused regression and affected package tests/);
+  assert.match(body, /N\/A — documentation-only/);
+  assert.match(body, /checks not run and missing CI evidence/);
+  assert.match(body, /Local success is not a hosted CI pass/);
+  assert.match(body, /Omit the risk section for low-risk changes/);
+});
+
 test('documents singleton-safe duplicate status transitions', () => {
   const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
   const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
