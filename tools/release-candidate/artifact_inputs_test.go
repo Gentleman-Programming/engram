@@ -62,6 +62,8 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 		body := []byte("throw new Error('archive must not execute');\n")
 		if bootstrap && name == "index.ts" {
 			body = []byte(artifactPiFixture)
+			origin := filepath.Join(repo, "plugin", "pi", "node_modules", "typebox", "index.js")
+			body = append(body, []byte("\nif (cwd.includes('-139-')) writeFileSync("+string(encode(origin))+", '// mutated original peer');\n")...)
 		}
 		if name == "package.json" {
 			body = encode(map[string]any{"name": "gentle-engram", "version": "4.5.6", "files": packageRuntimeFiles})
@@ -151,13 +153,36 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 		{"core startup", "passed"}, {"core auth", "passed"}, {"core PID", "passed"}, {"core nonloopback", "passed"},
 	}
 	if bootstrap {
-		cases = []struct{ name, state string }{{"pi bootstrap healthy", "passed"}, {"pi bootstrap import failure", "passed"}, {"pi bootstrap mutation", "unavailable"}, {"pi bootstrap stalled", "passed"}, {"pi bootstrap ancestor dependency", "passed"}}
+		cases = []struct{ name, state string }{{"pi bootstrap healthy", "passed"}, {"pi bootstrap import failure", "passed"}, {"pi bootstrap mutation", "unavailable"}, {"pi bootstrap stalled", "passed"}, {"pi bootstrap ancestor dependency", "passed"}, {"pi bootstrap peer healthy", "passed"}, {"pi bootstrap peer version", "passed"}, {"pi bootstrap peer mutation", "unavailable"}, {"pi bootstrap peer origin mutation", "unavailable"}}
 		for i, tc := range cases {
 			runtimeModes[tc.name] = strconv.Itoa(131 + i)
 		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var peerOrigin string
+			var peerOriginal []byte
+			if strings.HasPrefix(tc.name, "pi bootstrap peer") {
+				version := "1.3.34"
+				if tc.name == "pi bootstrap peer version" {
+					version = "2.0.0"
+				}
+				peer := filepath.Join(repo, "plugin", "pi", "node_modules", "typebox")
+				write(filepath.Join(peer, "package.json"), encode(map[string]string{"name": "typebox", "version": version, "type": "module", "exports": "./index.js"}))
+				// Synthetic cache only; never genuine TypeBox qualification.
+				write(filepath.Join(peer, "index.js"), []byte(`import { writeFileSync } from 'node:fs';
+if (process.cwd().includes('-138-')) writeFileSync(new URL('./index.js', import.meta.url), '// mutated peer');
+export const syntheticPeer = true;
+`))
+				if tc.name == "pi bootstrap peer origin mutation" {
+					peerOrigin = filepath.Join(peer, "index.js")
+					var err error
+					peerOriginal, err = os.ReadFile(peerOrigin)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			var ancestorMarker string
 			var ancestorJoined bool
 			if tc.name == "pi bootstrap ancestor dependency" {
@@ -209,14 +234,30 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 			if err := json.Unmarshal([]byte(out), &result); err != nil || strings.Count(out, "\n") != 1 {
 				t.Fatalf("not one JSON line: %q", out)
 			}
+			if peerOrigin != "" {
+				if result["coreRuntime"].(map[string]any)["joined"] != true || result["piBootstrap"].(map[string]any)["joined"] != true {
+					t.Fatalf("unknown joins; retain original-cache mutation fixture: %s", out)
+				}
+				changed, err := os.ReadFile(peerOrigin)
+				if err != nil || string(changed) != "// mutated original peer" {
+					t.Fatalf("original-cache mutation did not execute: %q %v", changed, err)
+				}
+				// Restore only this known test-owned input after observing mutation and joins.
+				if err := os.WriteFile(peerOrigin, peerOriginal, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != tc.state || result["workflows"].(map[string]any)["state"] != "unavailable" {
 				t.Fatalf("unexpected report: %s", out)
 			}
 			if bootstrap {
 				observed, ok := result["piBootstrap"].(map[string]any)
 				state, cleanup := "unavailable", "passed"
-				if tc.name == "pi bootstrap healthy" {
+				if tc.name == "pi bootstrap healthy" || tc.name == "pi bootstrap peer healthy" {
 					state = "passed"
+				}
+				if tc.name == "pi bootstrap peer version" {
+					cleanup = "not-started"
 				}
 				if tc.name == "pi bootstrap stalled" {
 					cleanup = "killed"
@@ -232,6 +273,9 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 				}
 				if !ok || observed["name"] != "pi-module-bootstrap-only" || observed["state"] != state || observed["cleanup"] != cleanup || observed["joined"] != true {
 					t.Fatalf("missing or incorrect bootstrap-only observation: %s", out)
+				}
+				if tc.name == "pi bootstrap peer healthy" && (observed["typeBoxVersion"] != "1.3.34" || len(observed["typeBoxTreeSha256"].(string)) != 64 || !reflect.DeepEqual(observed["substitutions"], []any{"@earendil-works/pi-tui.Text"})) {
+					t.Fatalf("missing measured fixed-peer/substitution evidence: %s", out)
 				}
 				if cleanup == "failed" && observed["exitCode"] != float64(1) {
 					t.Fatalf("missing actual failed child exit: %s", out)
@@ -261,6 +305,9 @@ func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 				state, cleanup := "unavailable", "passed"
 				if tc.name == "core healthy" || bootstrap {
 					state = "passed"
+				}
+				if tc.name == "pi bootstrap peer version" {
+					state, cleanup = "unavailable", "not-started"
 				}
 				if tc.name == "core shutdown" {
 					cleanup = "killed"

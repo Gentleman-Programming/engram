@@ -102,7 +102,11 @@ try {
       await bounded(new Promise((resolve, reject) => {
         pi.once("error", reject);
         pi.once("exit", () => reject(new Error("early exit")));
-        pi.once("message", message => message?.protocol === "engram-pi-bootstrap-v1" ? resolve() : reject(new Error("protocol")));
+        pi.once("message", message => {
+          if (message?.protocol !== "engram-pi-bootstrap-v1") return reject(new Error("protocol"));
+          if (message.substitutions?.length === 1 && message.substitutions[0] === "@earendil-works/pi-tui.Text") observation.substitutions = message.substitutions;
+          resolve();
+        });
       }), 2000);
       if (!parentGone && core.exitCode === null && core.signalCode === null) observation.state = "passed";
     } catch { observation.state = "unavailable"; }

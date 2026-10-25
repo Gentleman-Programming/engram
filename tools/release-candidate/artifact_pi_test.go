@@ -71,6 +71,11 @@ console.log('synthetic-private-diagnostic');
 if (cwd.includes('-132-')) throw new Error('synthetic import failure');
 if (cwd.includes('-133-')) writeFileSync(new URL(import.meta.url), '// mutated');
 if (cwd.includes('-135-')) await import('synthetic-2055-ancestor');
+if (/-13[6789]-/.test(cwd)) {
+  const peer = await import('typebox');
+  const ui = await import('@earendil-works/pi-tui');
+  if (peer.syntheticPeer !== true || typeof ui.Text !== 'function') throw new Error('fixed peer unavailable');
+}
 if (cwd.includes('-134-')) await new Promise(() => { setInterval(() => {}, 1000); });
 export default marker;
 `

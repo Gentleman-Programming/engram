@@ -144,11 +144,33 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 			return
 		}
 		before, beforeErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
+		peerSource := filepath.Join(root, "plugin", "pi", "node_modules", "typebox")
+		var peerBefore [32]byte
+		peerMeasured := false
 		r.CoreRuntime = runArtifactCoreWithPi(ctx, measured.Core, measured.CoreSHA256, want.RunID, func(destination string) bool {
-			return pkg.verifyInto(ctx, r.Pi.VersionIntent, destination).State == "passed"
+			if pkg.verifyInto(ctx, r.Pi.VersionIntent, destination).State != "passed" {
+				return false
+			}
+			if _, err := os.Lstat(peerSource); os.IsNotExist(err) {
+				return true // Dependency-free synthetic modules retain their existing path.
+			} else if err != nil {
+				return false
+			}
+			var err error
+			peerBefore, err = sourceTreeDigest(peerSource)
+			if err != nil || copyPinnedTypeBox(root, filepath.Dir(destination)) != nil {
+				return false
+			}
+			peerMeasured = true
+			return true
 		}, r.PiBootstrap)
+		if peerMeasured {
+			after, err := sourceTreeDigest(peerSource)
+			r.PiBootstrap.mutated = r.PiBootstrap.mutated || err != nil || after != peerBefore
+		}
 		if r.PiBootstrap.mutated {
 			r.Check.State, r.PiPackage.State = "unavailable", "unavailable"
+			r.PiBootstrap.State = "unavailable"
 		}
 		verified = pkg.verify(ctx, r.Pi.VersionIntent)
 		after, afterErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))

@@ -21,15 +21,18 @@ var artifactCoreOwner []byte
 var artifactPiOwner []byte
 
 type artifactPiCheck struct {
-	Name         string `json:"name"`
-	State        string `json:"state"`
-	Cleanup      string `json:"cleanup"`
-	Joined       bool   `json:"joined"`
-	HelperSHA256 string `json:"helperSha256"`
-	TreeSHA256   string `json:"treeSha256,omitempty"`
-	ExitCode     *int   `json:"exitCode,omitempty"`
-	Retained     bool   `json:"retained,omitempty"`
-	mutated      bool
+	Name              string   `json:"name"`
+	State             string   `json:"state"`
+	Cleanup           string   `json:"cleanup"`
+	Joined            bool     `json:"joined"`
+	HelperSHA256      string   `json:"helperSha256"`
+	TreeSHA256        string   `json:"treeSha256,omitempty"`
+	TypeBoxVersion    string   `json:"typeBoxVersion,omitempty"`
+	TypeBoxTreeSHA256 string   `json:"typeBoxTreeSha256,omitempty"`
+	Substitutions     []string `json:"substitutions,omitempty"`
+	ExitCode          *int     `json:"exitCode,omitempty"`
+	Retained          bool     `json:"retained,omitempty"`
+	mutated           bool
 }
 
 type artifactCoreCheck struct {
@@ -84,7 +87,9 @@ func runArtifactCoreWithPi(ctx context.Context, core []byte, digest, run string,
 		executable += ".exe"
 	}
 	piTree := filepath.Join(root, "materialized-pi")
-	var treeBefore [32]byte
+	var treeBefore, peerBefore [32]byte
+	peerTree := filepath.Join(root, "plugin", "pi", "node_modules", "typebox")
+	peerMeasured := false
 	if pi != nil {
 		pi.HelperSHA256 = fmt.Sprintf("%x", sha256.Sum256(artifactPiOwner))
 		if materialize == nil || !materialize(piTree) {
@@ -95,6 +100,15 @@ func runArtifactCoreWithPi(ctx context.Context, core []byte, digest, run string,
 			return r
 		}
 		pi.TreeSHA256 = fmt.Sprintf("%x", treeBefore)
+		if _, peerErr := os.Lstat(peerTree); peerErr == nil {
+			peerBefore, err = sourceTreeDigest(peerTree)
+			if err != nil {
+				return r
+			}
+			peerMeasured = true
+		} else if !os.IsNotExist(peerErr) {
+			return r
+		}
 		if os.WriteFile(filepath.Join(root, "pi-owner.mjs"), artifactPiOwner, 0600) != nil {
 			return r
 		}
@@ -159,6 +173,11 @@ func runArtifactCoreWithPi(ctx context.Context, core []byte, digest, run string,
 		pi.HelperSHA256, pi.TreeSHA256 = helperHash, fmt.Sprintf("%x", treeBefore)
 		after, treeErr := sourceTreeDigest(piTree)
 		pi.mutated = treeErr != nil || after != treeBefore
+		if peerMeasured {
+			pi.TypeBoxVersion, pi.TypeBoxTreeSHA256 = "1.3.34", fmt.Sprintf("%x", peerBefore)
+			afterPeer, peerErr := sourceTreeDigest(peerTree)
+			pi.mutated = pi.mutated || peerErr != nil || afterPeer != peerBefore
+		}
 		if pi.mutated || !pi.Joined || pi.Cleanup != "passed" || ctx.Err() != nil {
 			pi.State = "unavailable"
 		}
