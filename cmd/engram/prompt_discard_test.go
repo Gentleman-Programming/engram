@@ -205,6 +205,20 @@ func TestDoctorDiscardEmptyPromptPreview(t *testing.T) {
 	}
 }
 
+// Resolve only the existing parent: the requested backup does not exist yet.
+func discardCLIExpectedBackupPath(t *testing.T, requested string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(parent, filepath.Base(absolute))
+}
+
 func TestDoctorDiscardEmptyPromptApply(t *testing.T) {
 	cfg, db, seq := discardCLIFixture(t)
 	var payload, occurred, source string
@@ -213,10 +227,11 @@ func TestDoctorDiscardEmptyPromptApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := filepath.Join(t.TempDir(), "unused.db")
+	expectedBackup := discardCLIExpectedBackupPath(t, backup)
 	out, code := discardCLI(t, cfg, "--project", "project", "--seq", fmt.Sprint(seq),
 		"--apply", "--backup", backup, "--json")
 	r := discardCLIJSON(t, out)
-	if code != 0 || r["status"] != "delete_queued" || r["backup_path"] != backup ||
+	if code != 0 || r["status"] != "delete_queued" || r["backup_path"] != expectedBackup ||
 		r["delete_seq"].(float64) <= float64(seq) || r["tombstone"] != true || r["remote_confirmation"] != false {
 		t.Fatalf("code=%d report=%v", code, r)
 	}
@@ -397,10 +412,11 @@ func TestDoctorDiscardEmptyPromptBackupErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	retained := filepath.Join(t.TempDir(), "reserved.db")
+	expectedRetained := discardCLIExpectedBackupPath(t, retained)
 	out, code := discardCLI(t, cfg, "--project", "project", "--seq", fmt.Sprint(seq),
 		"--apply", "--backup", retained, "--json")
 	r := discardCLIJSON(t, out)
-	if code != 1 || r["backup_path"] != retained ||
+	if code != 1 || r["backup_path"] != expectedRetained ||
 		!strings.Contains(r["backup_path_meaning"].(string), "INTENDED") ||
 		!strings.Contains(r["backup_path_meaning"].(string), "not proof") {
 		t.Fatalf("retained path report: %s code=%d", out, code)
