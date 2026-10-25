@@ -46,7 +46,8 @@ Only literal package file/directory allowlists are supported, up to 4096 files
 and 64 MiB. Legacy validation never extracts; links/unexpected/missing content reject.
 Artifact-input observation materializes only owned validated Pi bytes, then removes them.
 It requires explicit source commits/refs and reviewed context, not publisher authentication.
-Missing/mismatched inputs remain non-passing; workflow execution stays unavailable.
+Missing/mismatched inputs remain non-passing. Admission alone never executes Core/Pi.
+Workflow opt-in reports observed cases; synthetic tests are not artifact execution proof.
 Export/validator success is not Pi parity or release approval.
 Assessment exits 1 (rejected) or 2 (blocked), with empty stderr.
 -assess cannot be combined with -pi-tarball, including an empty archive argument.
