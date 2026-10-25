@@ -16,15 +16,17 @@ import (
 	"testing"
 )
 
-func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false, false) }
+func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false, false, false, false) }
 
-func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false, false) }
+func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true, false, false, false) }
 
-func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true, false) }
+func TestArtifactTopics(t *testing.T) { testArtifactInputCLI(t, true, true, false, false) }
 
-func TestArtifactConsolidation(t *testing.T) { testArtifactInputCLI(t, true, true, true) }
+func TestArtifactConsolidation(t *testing.T) { testArtifactInputCLI(t, true, true, true, false) }
 
-func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation bool) {
+func TestArtifactJudgments(t *testing.T) { testArtifactInputCLI(t, true, true, true, true) }
+
+func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgments bool) {
 	started := filepath.Join(t.TempDir(), "core-started")
 	marker, err := json.Marshal(started)
 	if err != nil {
@@ -73,7 +75,11 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation bool) {
 		if topics && name == "index.ts" {
 			fixture := artifactTopicFixture
 			if consolidation {
-				fixture = strings.Replace(fixture, "  host.registerTool(", artifactConsolidationFixture+"\n  host.registerTool(", 1)
+				extra := artifactConsolidationFixture
+				if judgments {
+					extra += artifactJudgmentFixture
+				}
+				fixture = strings.Replace(fixture, "  host.registerTool(", extra+"\n  host.registerTool(", 1)
 			}
 			body = []byte(strings.ReplaceAll(fixture, `"$TOPIC_MARKER$"`, string(encode(topicMarker))))
 		}
@@ -184,6 +190,12 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation bool) {
 	if consolidation {
 		cases = []struct{ name, state string }{{"consolidation plan", "passed"}, {"consolidation rejects preview mutation", "passed"}}
 		runtimeModes["consolidation plan"], runtimeModes["consolidation rejects preview mutation"] = "148", "149"
+	}
+	if judgments {
+		cases = []struct{ name, state string }{{"judgment plans", "passed"}, {"batch rejects item order", "passed"}, {"judgment rejects lost persistence", "passed"}}
+		for i, tc := range cases {
+			runtimeModes[tc.name] = strconv.Itoa(150 + i)
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,10 +408,50 @@ export const syntheticPeer = true;
 						if err := os.Remove(topicMarker); err != nil {
 							t.Fatal(err)
 						}
-					} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+					} else if _, err := os.Stat(topicMarker); !os.IsNotExist(err) && !judgments {
 						t.Fatal("positive consolidation mutated preview")
 					}
 					pendingCases = cases[2:]
+				}
+				if judgments {
+					for i, phase := range []string{"batch-errors", "judgments"} {
+						index := i + 2
+						observed := cases[index].(map[string]any)
+						state, exit, cleanup, markerText := "passed", float64(0), "passed", ""
+						if i == 0 && tc.name == "batch rejects item order" {
+							state, exit, cleanup, markerText = "unavailable", 1, "failed", "batch item order"
+						}
+						if i == 1 && tc.name == "judgment rejects lost persistence" {
+							state, exit, cleanup, markerText = "unavailable", 1, "failed", "persisted judgment changed"
+						}
+						if observed["state"] != state || observed["coreRuntime"] == nil || observed["piRuntime"] == nil {
+							t.Fatalf("missing %s execution: %s", phase, out)
+						}
+						core, pi := observed["coreRuntime"].(map[string]any), observed["piRuntime"].(map[string]any)
+						if core["state"] != "passed" || core["joined"] != true || core["exitCode"] != float64(0) || core["cleanup"] != "passed" || pi["state"] != state || pi["joined"] != true || pi["exitCode"] != exit || pi["cleanup"] != cleanup {
+							t.Fatalf("wrong %s termination: %s", phase, out)
+						}
+						pendingCases = cases[index+1:]
+						if exit == 1 {
+							marker, err := os.ReadFile(topicMarker)
+							if err != nil || string(marker) != markerText {
+								t.Fatalf("actual %s prerequisite not observed", phase)
+							}
+							if err := os.Remove(topicMarker); err != nil {
+								t.Fatal(err)
+							}
+							t.Log("confirmed owned semantic marker and observed Core0/Pi1 joins:", markerText)
+							break
+						}
+					}
+					if _, err := os.Stat(topicMarker); !os.IsNotExist(err) {
+						t.Fatal("unexpected judgment mutation marker")
+					}
+					for _, pending := range pendingCases {
+						if value := pending.(map[string]any); value["coreRuntime"] != nil || value["piRuntime"] != nil {
+							t.Fatal("continued after unavailable phase or executed finalization")
+						}
+					}
 				}
 				for _, pending := range pendingCases {
 					if pending.(map[string]any)["state"] != "unavailable" {

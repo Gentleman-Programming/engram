@@ -1,6 +1,16 @@
 package main
 
 // Synthetic tool proxy only. Actual selected Pi execution is a separate proof.
+const artifactJudgmentFixture = `
+  host.registerTool({ name: 'mem_judge_many', async execute(_id, params) {
+    const response = await fetch(new URL('/conflicts/judge-many', process.env.ENGRAM_URL), { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.ENGRAM_HTTP_TOKEN }, body: JSON.stringify(params) });
+    const data = await response.json();
+    if (typeof data.fixture_mutated === 'string' && data.fixture_mutated.length > 0) writeFileSync("$TOPIC_MARKER$", data.fixture_mutated, { flag: 'wx' });
+    return response.status === 200 ? { content: [], details: { data } } : { isError: true, content: [{ type: 'text', text: data.error }], details: { http_status: response.status } };
+  } });
+`
+
 const artifactConsolidationFixture = `
   for (const [name, route] of [['mem_save', '/observations'], ['mem_consolidate', '/observations/consolidate']]) {
     host.registerTool({ name, async execute(_id, params) {

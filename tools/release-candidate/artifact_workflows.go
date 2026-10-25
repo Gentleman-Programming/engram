@@ -27,7 +27,7 @@ func observeArtifactWorkflows(ctx context.Context, core []byte, digest, run stri
 	} {
 		r.Cases = append(r.Cases, artifactWorkflowCase{Name: name, State: "unavailable"})
 	}
-	for i, workflow := range []string{"topics", "consolidation"} {
+	for i, workflow := range []string{"topics", "consolidation", "batch-errors", "judgments"} {
 		c := &r.Cases[i]
 		c.PiRuntime = &artifactPiCheck{Name: "pi-workflow-" + workflow, State: "unavailable", Cleanup: "not-started", Joined: true}
 		c.CoreRuntime = runArtifactPiCase(ctx, core, digest, run, materialize, c.PiRuntime, workflow)
@@ -36,7 +36,7 @@ func observeArtifactWorkflows(ctx context.Context, core []byte, digest, run stri
 		}
 		c.State = "passed"
 	}
-	return r // Remaining three families are not implemented or qualified yet.
+	return r // Finalization is not implemented or qualified yet.
 }
 
 func (r *artifactInputObservation) invalidateWorkflowCases() {

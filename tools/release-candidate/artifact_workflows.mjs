@@ -6,7 +6,8 @@ import { join } from "node:path";
 // come from plugin/pi/test/real-agent-workflows.test.mjs; no fixture server is used.
 const project = "integration-1348";
 export async function runArtifactWorkflow(register, workflow) {
-  const run = workflow === "topics" ? topicVectors : workflow === "consolidation" ? consolidate : undefined;
+  const run = workflow === "topics" ? topicVectors : workflow === "consolidation" ? consolidate
+    : workflow === "batch-errors" ? batchErrors : workflow === "judgments" ? judgments : undefined;
   assert.ok(run, "fixed workflow phase");
   mkdirSync(join(process.cwd(), ".engram"), { mode: 0o700 });
   writeFileSync(join(process.cwd(), ".engram", "config.json"), JSON.stringify({ project_name: project }), { mode: 0o600, flag: "wx" });
@@ -73,4 +74,107 @@ async function consolidate({ tool, request, rows }) {
   const after = await rows(); assert.equal(after.length, 1);
   assert.equal(after[0].title, params.new_title); assert.match(after[0].content, /Consolidated public summary/);
   assert.deepEqual([...confirmed.details.data.soft_deleted_ids].sort(), [...ids].sort());
+}
+
+async function batchErrors({ tool, request, rows }) {
+  await save(tool, "Batch source", "Existing observation must remain unchanged.");
+  const before = await rows();
+  const conflicts = await request(`/conflicts?project=${project}`); assert.equal(conflicts.status, 200);
+  const invalid = await tool("mem_judge_many", { judgments: [] });
+  assert.equal(invalid.isError, true); assert.equal(invalid.details.http_status, 400);
+  const judgments = [{ judgment_id: "missing-first", relation: "compatible", confidence: 0 },
+    { judgment_id: "missing-second", relation: "related" }];
+  const unauthorized = await request("/conflicts/judge-many", { judgments }, false);
+  assert.equal(unauthorized.status, 401);
+  const result = await tool("mem_judge_many", { judgments });
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  const outcomes = result.details.data.outcomes;
+  assert.equal(outcomes.length, 2);
+  assert.deepEqual(outcomes.map(value => [value.index, value.judgment_id, value.status]),
+    [[0, "missing-first", "error"], [1, "missing-second", "error"]]);
+  assert.ok(outcomes.every(value => typeof value.error === "string" && value.error.length));
+  assert.deepEqual(await rows(), before);
+  assert.deepEqual(await request(`/conflicts?project=${project}`), conflicts);
+  // No public pending-relation seed is established here; this does not prove a successful batch judgment write.
+}
+
+async function judgments({ tool, request, rows }) {
+  for (const title of ["JWT authentication token session management policy",
+    "Session token JWT authentication management approach",
+    "Authentication JWT session token policy decision"]) {
+    await save(tool, title, `JWT auth content for ${title}`);
+  }
+  const observations = await rows();
+  const scan = await request("/conflicts/scan", { project, apply: true });
+  assert.equal(scan.status, 200);
+  assert.ok(scan.data.inserted >= 2, JSON.stringify(scan));
+  assert.equal(scan.data.dry_run, false);
+  for (const key of ["semantic_judged", "semantic_skipped", "semantic_errors"]) assert.equal(scan.data[key], 0);
+  const listed = await request(`/conflicts?project=${project}&status=pending`);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.total, scan.data.inserted);
+  const [first, second] = listed.data.relations;
+  // Judge extra candidates publicly so exactly two remain pending.
+  for (const extra of listed.data.relations.slice(2)) {
+    const seeded = await tool("mem_judge_many", { judgments: [
+      { judgment_id: extra.sync_id, relation: "related", confidence: 0.5 },
+    ] });
+    assert.notEqual(seeded.isError, true, JSON.stringify(seeded));
+    assert.equal(seeded.details.data.outcomes[0].status, "success");
+  }
+  const stats = async () => {
+    const result = await request(`/conflicts/stats?project=${project}`);
+    assert.equal(result.status, 200); return result.data;
+  };
+  const beforeStats = await stats();
+  assert.equal(beforeStats.by_judgment_status.pending, 2);
+  const success = await tool("mem_judge_many", { judgments: [
+    { judgment_id: first.sync_id, relation: "compatible", confidence: 0 },
+  ] });
+  assert.notEqual(success.isError, true, JSON.stringify(success));
+  assert.deepEqual(success.details.data.outcomes.map(({ index, judgment_id, status, judgment_status }) =>
+    ({ index, judgment_id, status, judgment_status })),
+  [{ index: 0, judgment_id: first.sync_id, status: "success", judgment_status: "judged" }]);
+  const persisted = await request(`/conflicts/${first.id}`);
+  assert.equal(persisted.status, 200);
+  assert.equal(persisted.data.relation, "compatible");
+  assert.equal(persisted.data.judgment_status, "judged");
+  assert.equal(success.details.data.outcomes[0].relation.confidence, 0);
+  const invalidVerb = 'JudgeRelation: invalid relation verb "invalid" — must be one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict';
+  const mixed = await tool("mem_judge_many", { judgments: [
+    { judgment_id: "missing-before", relation: "related" },
+    { judgment_id: second.sync_id, relation: "conflicts_with", confidence: 1 },
+    { judgment_id: second.sync_id, relation: "invalid" },
+    { judgment_id: second.sync_id, relation: "related", confidence: -0.01 },
+  ] });
+  assert.notEqual(mixed.isError, true, JSON.stringify(mixed));
+  const outcomes = mixed.details.data.outcomes;
+  assert.deepEqual(outcomes.map(({ index, judgment_id, status }) => ({ index, judgment_id, status })), [
+    { index: 0, judgment_id: "missing-before", status: "error" },
+    { index: 1, judgment_id: second.sync_id, status: "success" },
+    { index: 2, judgment_id: second.sync_id, status: "error" },
+    { index: 3, judgment_id: second.sync_id, status: "error" },
+  ]);
+  assert.equal(outcomes[0].error, 'JudgeRelation: relation "missing-before" not found');
+  assert.equal(outcomes[2].error, invalidVerb);
+  assert.equal(outcomes[3].error, "confidence must be a number between 0.0 and 1.0");
+  assert.equal(outcomes[1].relation.confidence, 1);
+  const secondRead = await request(`/conflicts/${second.id}`);
+  assert.equal(secondRead.status, 200);
+  assert.equal(secondRead.data.relation, "conflicts_with");
+  assert.equal(secondRead.data.judgment_status, "judged");
+  const afterStats = await stats();
+  assert.equal(Object.hasOwn(afterStats.by_judgment_status, "pending"), false);
+  assert.equal(afterStats.by_judgment_status.pending ?? 0, beforeStats.by_judgment_status.pending - 2);
+  assert.equal(afterStats.by_judgment_status.judged, (beforeStats.by_judgment_status.judged ?? 0) + 2);
+  assert.equal(afterStats.by_relation.compatible, (beforeStats.by_relation.compatible ?? 0) + 1);
+  assert.equal(afterStats.by_relation.conflicts_with, (beforeStats.by_relation.conflicts_with ?? 0) + 1);
+  // A rejected envelope never undoes the earlier independently committed item.
+  const invalid = await tool("mem_judge_many", { judgments: [] });
+  assert.equal(invalid.isError, true);
+  assert.equal(invalid.details.http_status, 400);
+  assert.equal(invalid.content[0].text, "judgments must be an array containing 1..32 items");
+  assert.deepEqual(await request(`/conflicts/${second.id}`), secondRead);
+  assert.deepEqual(await stats(), afterStats);
+  assert.deepEqual(await rows(), observations);
 }

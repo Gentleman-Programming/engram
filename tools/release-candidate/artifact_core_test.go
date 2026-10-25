@@ -20,6 +20,7 @@ import (
 // Authored process fixture only: it is never production artifact evidence.
 const artifactCoreFixture = `package main
 import (
+ "fmt"
  "encoding/hex"
  "encoding/json"
  "io"
@@ -48,13 +49,54 @@ func main() {
  var written atomic.Bool
  var mutex sync.Mutex
  observations:=[]map[string]any{}
+ relations:=[]map[string]any{}
  nextID:=0
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
   if r.Header.Get("Authorization")!="Bearer "+token && !strings.Contains(cwd,"-128-") { w.WriteHeader(401); _=json.NewEncoder(w).Encode(map[string]any{"error":"unauthorized"}); return }
   mutex.Lock(); defer mutex.Unlock()
-  consolidationFixture:=strings.Contains(cwd,"engram-core-148-") || strings.Contains(cwd,"engram-core-149-")
+  judgmentFixture:=strings.Contains(cwd,"engram-core-150-") || strings.Contains(cwd,"engram-core-151-") || strings.Contains(cwd,"engram-core-152-")
+  consolidationFixture:=judgmentFixture || strings.Contains(cwd,"engram-core-148-") || strings.Contains(cwd,"engram-core-149-")
   topicFixture:=false
-  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149","150","151","152"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  if judgmentFixture && strings.HasPrefix(r.URL.Path,"/conflicts") {
+   switch r.URL.Path {
+   case "/conflicts/scan":
+    relations=[]map[string]any{{"id":1,"sync_id":"fixture-first","relation":"related","judgment_status":"pending"},{"id":2,"sync_id":"fixture-second","relation":"related","judgment_status":"pending"}}
+    _=json.NewEncoder(w).Encode(map[string]any{"inserted":2,"dry_run":false,"semantic_judged":0,"semantic_skipped":0,"semantic_errors":0}); return
+   case "/conflicts":
+    _=json.NewEncoder(w).Encode(map[string]any{"total":len(relations),"relations":relations}); return
+   case "/conflicts/stats":
+    statuses,verbs:=map[string]int{},map[string]int{}
+    for _,value:=range relations { statuses[value["judgment_status"].(string)]++; verbs[value["relation"].(string)]++ }
+    _=json.NewEncoder(w).Encode(map[string]any{"by_judgment_status":statuses,"by_relation":verbs}); return
+   case "/conflicts/judge-many":
+    var params struct { Judgments []map[string]any }
+    _=json.NewDecoder(r.Body).Decode(&params)
+    if len(params.Judgments)==0 { w.WriteHeader(400); _=json.NewEncoder(w).Encode(map[string]any{"error":"judgments must be an array containing 1..32 items"}); return }
+    outcomes:=[]map[string]any{}
+    marker:=""
+    for i,item:=range params.Judgments {
+     id,_:=item["judgment_id"].(string); verb,_:=item["relation"].(string)
+     errorText:=""
+     if confidence,found:=item["confidence"]; found { if number,ok:=confidence.(float64); !ok || number<0 || number>1 { errorText="confidence must be a number between 0.0 and 1.0" } }
+     if errorText=="" { switch verb { case "related","compatible","scoped","conflicts_with","supersedes","not_conflict": default: errorText=fmt.Sprintf("JudgeRelation: invalid relation verb %q — must be one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict",verb) } }
+     var found map[string]any
+     if errorText=="" { for _,value:=range relations { if value["sync_id"]==id { found=value } }; if found==nil { errorText=fmt.Sprintf("JudgeRelation: relation %q not found",id) } }
+     outcome:=map[string]any{"index":i,"judgment_id":id,"status":"error","error":errorText}
+     if errorText=="" {
+      found["relation"],found["judgment_status"]=verb,"judged"
+      if confidence,ok:=item["confidence"]; ok { found["confidence"]=confidence }
+      if strings.Contains(cwd,"engram-core-152-") && verb=="conflicts_with" { found["relation"]="related"; marker="persisted judgment changed" }
+      outcome=map[string]any{"index":i,"judgment_id":id,"status":"success","judgment_status":"judged","relation":found}
+     }
+     outcomes=append(outcomes,outcome)
+    }
+    if strings.Contains(cwd,"engram-core-151-") && len(relations)==0 && len(outcomes)==2 { outcomes[0],outcomes[1]=outcomes[1],outcomes[0]; marker="batch item order" }
+    _=json.NewEncoder(w).Encode(map[string]any{"outcomes":outcomes,"fixture_mutated":marker}); return
+   default:
+    for _,value:=range relations { if r.URL.Path==fmt.Sprintf("/conflicts/%v",value["id"]) { _=json.NewEncoder(w).Encode(value); return } }
+   }
+  }
   if topicFixture {
    switch r.URL.Path {
    case "/topic-keys/suggest":
