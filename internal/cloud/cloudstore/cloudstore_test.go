@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -57,15 +58,51 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 	}
 
 	schema := fmt.Sprintf("cloudstore_modern_%d", time.Now().UnixNano())
+	// Registered first so this observes the schema after all fixture cleanups.
+	t.Cleanup(func() {
+		observer, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Error("open fixture cleanup observer failed")
+			return
+		}
+		defer observer.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var exists bool
+		if err := observer.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, schema).Scan(&exists); err != nil {
+			t.Error("query fixture schema cleanup failed")
+			return
+		}
+		if exists {
+			t.Error("migration fixture schema remains after cleanup")
+			return
+		}
+		t.Log("migration fixture schema removed")
+	})
 	adminDB, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open admin db: %v", err)
 	}
-	defer adminDB.Close()
+	// Cleanups run in reverse registration order: drop the schema before closing.
+	t.Cleanup(func() {
+		if err := adminDB.Close(); err != nil {
+			t.Error("close migration fixture admin database failed")
+		}
+	})
 	if _, err := adminDB.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	t.Cleanup(func() { _, _ = adminDB.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := adminDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+			// Driver errors may include connection details; keep diagnostics bounded.
+			t.Error("drop migration fixture schema failed")
+		}
+	})
+	if os.Getenv("ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE") == "1" {
+		t.Fatal("intentional failure after migration fixture creation")
+	}
 
 	testDSN := dsn + "?search_path=" + schema
 	if strings.Contains(dsn, "?") {
@@ -96,6 +133,53 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 		t.Fatalf("New should migrate modern cloud_chunks without imported_at/sessions/memories/prompts: %v", err)
 	}
 	cs.Close()
+}
+
+func TestMigrationFixtureCleanup(t *testing.T) {
+	dsn := os.Getenv("CLOUDSTORE_TEST_DSN")
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		t.Skip("requires URL-style CLOUDSTORE_TEST_DSN and disposable PostgreSQL")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		name     string
+		fail     string
+		wantExit int
+	}{
+		{name: "success", fail: "0", wantExit: 0},
+		{name: "failure_after_creation", fail: "1", wantExit: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns$", "-test.v", "-test.timeout=20s")
+			cmd.Env = append(os.Environ(), "ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE="+scenario.fail)
+			output, err := cmd.CombinedOutput()
+			exitCode := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run migration fixture subprocess: %v", err)
+				}
+				exitCode = exitErr.ExitCode()
+			}
+			if exitCode != scenario.wantExit {
+				t.Errorf("exit code = %d, want %d", exitCode, scenario.wantExit)
+			}
+			if !strings.Contains(string(output), "migration fixture schema removed") {
+				t.Error("subprocess did not confirm schema removal")
+			}
+			if strings.Contains(string(output), "intentional failure after migration fixture creation") != (scenario.fail == "1") {
+				t.Error("subprocess did not reach the expected success/failure path")
+			}
+			if t.Failed() {
+				t.Logf("migration fixture subprocess output:\n%s", output)
+			}
+		})
+	}
 }
 
 func TestMaterializedMutationBatchChunkIncludesObservationAlongsidePromptAndSession(t *testing.T) {
