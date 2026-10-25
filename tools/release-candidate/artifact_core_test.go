@@ -2,13 +2,16 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +182,134 @@ process.exit = finish;
 	}
 	if info, err := os.Stat(proof.Root); err != nil || !info.IsDir() {
 		t.Fatal("unknown termination did not retain runtime")
+	}
+}
+
+func TestArtifactPiLifetime(t *testing.T) {
+	core, _, _ := stagedProgramFixture(t, artifactCoreFixture)
+	for _, mode := range []string{"parent EOF", "early clean Core exit"} {
+		t.Run(mode, func(t *testing.T) {
+			root, err := os.MkdirTemp("", "engram-lifetime-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Unknown joins retain this root; never clean a possibly live runtime.
+			marker := filepath.Join(root, "core-stop-order.json")
+			encoded, _ := json.Marshal(marker)
+			eof := mode == "parent EOF"
+			hook := `
+import cp from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { writeFileSync } from "node:fs";
+const spawn = cp.spawn;
+let core, requested = false, piExited = false, coreClosedEarly = false;
+cp.spawn = (...args) => {
+  const child = spawn(...args);
+  if (!core) { core = child; return child; }
+  child.once("exit", () => { piExited = true; });
+  const end = child.stdin.end.bind(child.stdin);
+  if (` + strconv.FormatBool(eof) + `) {
+    const coreEnd = core.stdin.end.bind(core.stdin);
+    core.stdin.end = (...args) => {
+      coreClosedEarly ||= !piExited;
+      writeFileSync(` + string(encoded) + `, JSON.stringify({ piExited: !coreClosedEarly }));
+      return coreEnd(...args);
+    };
+    child.stdin.end = (...args) => {
+      if (!requested) {
+        requested = true;
+        process.stdout.write("synthetic-pi-joining\n");
+        return child.stdin;
+      }
+      return end(...args);
+    };
+    process.stdin.once("end", () => end());
+  } else {
+    child.stdin.end = (...args) => {
+      if (!requested) {
+        requested = true;
+        core.once("exit", () => end(...args));
+        core.stdin.end(); // Real creation handle requests a synthetic clean exit.
+      }
+      return child.stdin;
+    };
+  }
+  return child;
+};
+syncBuiltinESMExports();
+`
+			write := func(name string, body []byte) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, name), body, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("core.exe", core)
+			preload := "import \"data:text/javascript;base64," + base64.StdEncoding.EncodeToString([]byte(hook)) + "\";\n"
+			write("owner.mjs", append([]byte(preload), artifactCoreOwner...))
+			write("pi-owner.mjs", artifactPiOwner)
+			write("index.ts", []byte("export const synthetic = true;\n"))
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "node", filepath.Join(root, "owner.mjs"), filepath.Join(root, "core.exe"), filepath.Join(root, "index.ts"))
+			cmd.Dir, cmd.Env = root, []string{}
+			for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"} {
+				dir := filepath.Join(root, key)
+				if err := os.Mkdir(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				cmd.Env = append(cmd.Env, key+"="+dir)
+			}
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdin.Close()
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var diagnostic bytes.Buffer
+			cmd.Stderr = &diagnostic
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			reader := bufio.NewReader(stdout)
+			if eof {
+				line, err := reader.ReadString('\n')
+				if err != nil || line != "synthetic-pi-joining\n" {
+					t.Fatalf("missing join synchronization: %q %v", line, err)
+				}
+				if err := stdin.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output, readErr := io.ReadAll(reader)
+			err = cmd.Wait()
+			if err != nil || readErr != nil || diagnostic.Len() != 0 {
+				t.Fatalf("owner exit=%v read=%v stdout=%q stderr=%q retained=%s", err, readErr, output, diagnostic.String(), root)
+			}
+			var report struct {
+				artifactCoreCheck
+				PiBootstrap artifactPiCheck `json:"piBootstrap"`
+			}
+			if json.Unmarshal(output, &report) != nil || bytes.Count(output, []byte("\n")) != 1 || !report.Joined || !report.PiBootstrap.Joined {
+				t.Fatalf("unknown joins: %s retained=%s", output, root)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(root); err != nil {
+					t.Error(err)
+				}
+			})
+			if report.State != "unavailable" || report.PiBootstrap.State != "unavailable" || report.Cleanup != "passed" || report.PiBootstrap.Cleanup != "passed" || report.ExitCode == nil || *report.ExitCode != 0 || report.PiBootstrap.ExitCode == nil || *report.PiBootstrap.ExitCode != 0 {
+				t.Errorf("lifetime violation falsely passed: %s", output)
+			}
+			if eof {
+				proof, err := os.ReadFile(marker)
+				if err != nil || string(proof) != `{"piExited":true}` {
+					t.Errorf("Core stdin closed before actual Pi exit: %s %v", proof, err)
+				}
+			}
+		})
 	}
 }

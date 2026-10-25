@@ -19,6 +19,7 @@ type artifactInputObservation struct {
 	ArtifactInputs *artifactInputCheck `json:"artifactInputs,omitempty"`
 	Workflows      *sourceCheck        `json:"workflows"`
 	CoreRuntime    *artifactCoreCheck  `json:"coreRuntime,omitempty"`
+	PiBootstrap    *artifactPiCheck    `json:"piBootstrap,omitempty"`
 	runCore        bool
 }
 
@@ -63,6 +64,7 @@ func observeArtifactInputs(root, coreRef, piRef, version, piVersion, core, pi, b
 		Workflows: &sourceCheck{Name: "artifact-workflows", State: "unavailable"}}
 	r.runCore = execute
 	if execute {
+		r.PiBootstrap = &artifactPiCheck{Name: "pi-module-bootstrap-only", State: "unavailable", Cleanup: "not-started", Joined: true}
 		r.CoreRuntime = &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -118,6 +120,9 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 			if r.PiPackage != nil {
 				r.PiPackage.State, r.PiPackage.Files = "unavailable", 0
 			}
+			if r.PiBootstrap != nil {
+				r.PiBootstrap.State = "unavailable"
+			}
 		}
 	}()
 	input := filepath.Join(workspace, "bundle-pi.tgz")
@@ -139,11 +144,17 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 			return
 		}
 		before, beforeErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
-		r.CoreRuntime = runArtifactCore(ctx, measured.Core, measured.CoreSHA256, want.RunID)
+		r.CoreRuntime = runArtifactCoreWithPi(ctx, measured.Core, measured.CoreSHA256, want.RunID, func(destination string) bool {
+			return pkg.verifyInto(ctx, r.Pi.VersionIntent, destination).State == "passed"
+		}, r.PiBootstrap)
+		if r.PiBootstrap.mutated {
+			r.Check.State, r.PiPackage.State = "unavailable", "unavailable"
+		}
 		verified = pkg.verify(ctx, r.Pi.VersionIntent)
 		after, afterErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
 		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" {
 			r.Check.State, r.PiPackage.State, r.CoreRuntime.State = "unavailable", "unavailable", "unavailable"
+			r.PiBootstrap.State = "unavailable"
 		}
 	}
 	// Recheck original measured inputs after source binding/materialization. This
@@ -154,6 +165,9 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 		r.Check.State, r.PiPackage.State, r.PiPackage.Files = "unavailable", "unavailable", 0
 		if r.CoreRuntime != nil {
 			r.CoreRuntime.State = "unavailable"
+		}
+		if r.PiBootstrap != nil {
+			r.PiBootstrap.State = "unavailable"
 		}
 	}
 }

@@ -11,11 +11,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-func TestArtifactInputCLI(t *testing.T) {
+func TestArtifactInputCLI(t *testing.T) { testArtifactInputCLI(t, false) }
+
+func TestArtifactPiBootstrap(t *testing.T) { testArtifactInputCLI(t, true) }
+
+func testArtifactInputCLI(t *testing.T, bootstrap bool) {
 	started := filepath.Join(t.TempDir(), "core-started")
 	marker, err := json.Marshal(started)
 	if err != nil {
@@ -55,6 +60,9 @@ func TestArtifactInputCLI(t *testing.T) {
 	tw := tar.NewWriter(gz)
 	for _, name := range packageRuntimeFiles {
 		body := []byte("throw new Error('archive must not execute');\n")
+		if bootstrap && name == "index.ts" {
+			body = []byte(artifactPiFixture)
+		}
 		if name == "package.json" {
 			body = encode(map[string]any{"name": "gentle-engram", "version": "4.5.6", "files": packageRuntimeFiles})
 		}
@@ -135,14 +143,26 @@ func TestArtifactInputCLI(t *testing.T) {
 		return out.String(), diagnostic.String(), code
 	}
 	runtimeModes := map[string]string{"core healthy": "123", "core identity": "124", "core protocol": "125", "core shutdown": "126", "core startup": "127", "core auth": "128", "core PID": "129", "core nonloopback": "130"}
-	for _, tc := range []struct{ name, state string }{
+	cases := []struct{ name, state string }{
 		{"matching", "passed"}, {"missing context", "unavailable"}, {"malformed context", "unavailable"},
 		{"context mismatch", "unavailable"}, {"digest mismatch", "unavailable"}, {"Pi source mismatch", "not-established"},
 		{"context boundary", "passed"}, {"context oversized", "unavailable"},
 		{"core healthy", "passed"}, {"core identity", "passed"}, {"core protocol", "passed"}, {"core shutdown", "passed"},
 		{"core startup", "passed"}, {"core auth", "passed"}, {"core PID", "passed"}, {"core nonloopback", "passed"},
-	} {
+	}
+	if bootstrap {
+		cases = []struct{ name, state string }{{"pi bootstrap healthy", "passed"}, {"pi bootstrap import failure", "passed"}, {"pi bootstrap mutation", "unavailable"}, {"pi bootstrap stalled", "passed"}, {"pi bootstrap ancestor dependency", "passed"}}
+		for i, tc := range cases {
+			runtimeModes[tc.name] = strconv.Itoa(131 + i)
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var ancestorMarker string
+			var ancestorJoined bool
+			if tc.name == "pi bootstrap ancestor dependency" {
+				ancestorMarker = artifactPiAncestorFixture(t, &ancestorJoined)
+			}
 			expected, pi := want, piRevision
 			payload, mode := archive.Bytes(), "-observe-artifact-inputs"
 			if run, active := runtimeModes[tc.name]; active {
@@ -192,6 +212,34 @@ func TestArtifactInputCLI(t *testing.T) {
 			if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != tc.state || result["workflows"].(map[string]any)["state"] != "unavailable" {
 				t.Fatalf("unexpected report: %s", out)
 			}
+			if bootstrap {
+				observed, ok := result["piBootstrap"].(map[string]any)
+				state, cleanup := "unavailable", "passed"
+				if tc.name == "pi bootstrap healthy" {
+					state = "passed"
+				}
+				if tc.name == "pi bootstrap stalled" {
+					cleanup = "killed"
+				}
+				if tc.name == "pi bootstrap import failure" || ancestorMarker != "" {
+					cleanup = "failed"
+				}
+				if ancestorMarker != "" && ok {
+					ancestorJoined = observed["joined"] == true && result["coreRuntime"].(map[string]any)["joined"] == true
+					if _, err := os.Stat(ancestorMarker); !os.IsNotExist(err) {
+						t.Errorf("undeclared ancestor package executed: %v", err)
+					}
+				}
+				if !ok || observed["name"] != "pi-module-bootstrap-only" || observed["state"] != state || observed["cleanup"] != cleanup || observed["joined"] != true {
+					t.Fatalf("missing or incorrect bootstrap-only observation: %s", out)
+				}
+				if cleanup == "failed" && observed["exitCode"] != float64(1) {
+					t.Fatalf("missing actual failed child exit: %s", out)
+				}
+				if strings.Contains(out, "synthetic-private-diagnostic") || strings.Contains(out, "inherited") {
+					t.Fatal("child output leaked")
+				}
+			}
 			if tc.state == "passed" {
 				measured := result["artifactInputs"].(map[string]any)
 				pkg := result["piPackage"].(map[string]any)
@@ -211,7 +259,7 @@ func TestArtifactInputCLI(t *testing.T) {
 			if _, active := runtimeModes[tc.name]; active {
 				observed := result["coreRuntime"].(map[string]any)
 				state, cleanup := "unavailable", "passed"
-				if tc.name == "core healthy" {
+				if tc.name == "core healthy" || bootstrap {
 					state = "passed"
 				}
 				if tc.name == "core shutdown" {
@@ -234,6 +282,9 @@ func TestArtifactInputCLI(t *testing.T) {
 				t.Fatal("changed source/Git/input or left owned workspace")
 			}
 		})
+	}
+	if bootstrap {
+		return
 	}
 	for _, target := range []string{"bundle", "context"} {
 		t.Run("changed "+target+" before execution", func(t *testing.T) {
