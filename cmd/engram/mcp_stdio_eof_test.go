@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -355,6 +356,72 @@ func TestCmdMCPStdioSIGTERMRunsGracefulShutdown(t *testing.T) {
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 
 	requireGracefulOutcome(t, stderr, recovered, runStarted, stopCalled)
+}
+
+// gatedShutdownLogWriter holds the signal watcher before it cancels the
+// transport, allowing Listen to return first without scheduler-dependent luck.
+type gatedShutdownLogWriter struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w gatedShutdownLogWriter) Write(p []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return len(p), nil
+}
+
+// TestMCPStdioWaitsForSignalWatcher pins issue #2119: returning from Listen
+// must not leave a signal watcher able to access lifecycle seams after cleanup.
+func TestMCPStdioWaitsForSignalWatcher(t *testing.T) {
+	stubMCPStdioLifecycle(t)
+	oldNotify, oldStop := notifySignals, stopSignals
+	oldLog := log.Writer()
+	t.Cleanup(func() {
+		notifySignals, stopSignals = oldNotify, oldStop
+		log.SetOutput(oldLog)
+	})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	log.SetOutput(gatedShutdownLogWriter{entered: entered, release: release})
+	notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) { ch <- syscall.SIGTERM }
+	stopSignals = func(chan<- os.Signal) {}
+
+	stopped := make(chan struct{}, 2)
+	mcpStdioStopAutosync = func() { stopped <- struct{}{} }
+	listenMCPStdio = func(context.Context, *mcpserver.MCPServer, io.Reader, io.Writer) error {
+		<-entered
+		return nil
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- runMCPStdio(mcpserver.NewMCPServer("test", "1")) }()
+	waitForSignal(t, entered, "signal watcher to enter shutdown")
+	returned := false
+	select {
+	case err := <-runDone:
+		returned = true
+		t.Errorf("runMCPStdio returned before signal watcher completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// The watcher is deliberately blocked; the serving call must wait.
+	}
+	unblock()
+	if !returned {
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Fatalf("runMCPStdio returned error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("runMCPStdio did not return after signal watcher completed")
+		}
+	}
+	if got := len(stopped); got != 1 {
+		t.Fatalf("autosync stop calls = %d, want 1", got)
+	}
 }
 
 // constErrReader always returns the configured error.
