@@ -109,6 +109,8 @@ jobs:
           set -euo pipefail
           # Short, private socket paths; never a user home or store. The VM owns this root.
           state=$(mktemp -d /tmp/eg-mac.XXXXXX)
+          state=$(cd "$state" && pwd -P)
+          printf 'Physical test root=%s\n' "$state"
           mkdir -p "$state/home" "$state/tmp" "$state/store"
           ln -s "$state/home" "$state/link"
           test -d "$state/link"
@@ -150,6 +152,7 @@ jobs:
               'Windows process routing', 'Windows startup failures', 'native Windows SQLite temporary routing',
               'PowerShell wrapper test is Windows-only', 'Git for Windows discovery',
               'requires native Windows cmd.exe and PowerShell', 'requires Windows PowerShell', 'requires PowerShell',
+              'requires Windows external commands', 'requires native Windows and Git Bash',
               'Unix socket hook transport requires a Linux test process'];
             const capability = ['fixture filesystem does not expose a case alias', 'case spelling identifies a distinct directory',
               'temp filesystem is case-sensitive; case-only aliases are distinct',
@@ -170,7 +173,9 @@ jobs:
               else if (foreign.some(x => reason.includes(x))) classification = 'foreign-os';
               else if (capability.some(x => reason.includes(x))) classification = 'filesystem-capability';
               else if (['CLOUDSTORE_TEST_DSN not set', 'requires URL-style CLOUDSTORE_TEST_DSN and disposable PostgreSQL',
-                'requires disposable PostgreSQL via CLOUDSTORE_TEST_DSN'].some(x => reason.includes(x))) classification = 'excluded-postgres';
+                'requires disposable PostgreSQL via CLOUDSTORE_TEST_DSN',
+                'set ENGRAM_DASHBOARD_BENCH_DSN to the documented owned fixture',
+                'set ENGRAM_PAUSE_BENCH_DSN to the owned measurement fixture'].some(x => reason.includes(x))) classification = 'excluded-postgres';
               else if (reason.includes('unsupported-runtime regression requires Node.js <24')) classification = 'foreign-runtime';
               else if (reason.includes('TUI has no entry serialization')) classification = 'no-serialization';
               else if (/runs only as a child of Test(StoreContentionAcrossProcesses|ConcurrentColdStartProcesses)/.test(reason)) classification = 'child-helper';

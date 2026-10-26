@@ -34,8 +34,10 @@ not install a delegate, fabricate a system path or claim genuine jq 1.6 coverage
 Absent `/usr/bin/jq` is an explicit preflight failure and incomplete coverage;
 runner-label documentation does not prove that fixture prerequisite exists.
 
-A private `/tmp/eg-mac.XXXXXX` root keeps Unix socket paths short. HOME,
-TMPDIR/TMP/TEMP and the fallback store live there; symlink creation is checked.
+A private `/tmp/eg-mac.XXXXXX` root keeps Unix socket paths short. Resolve it
+with `pwd -P` before deriving any fixture path, so HOME, TMPDIR/TMP/TEMP and
+the fallback store share the physical `/private/tmp` spelling on macOS;
+this uses the real filesystem, not path emulation. Record that physical root; symlink creation is checked.
 Existing tests retain their own temporary homes, stores, listeners, processes
 and cleanup. The disposable runner VM owns the outer root; no real user store
 is opened and no unrelated process is killed. Go caches use their explicitly
@@ -81,7 +83,7 @@ or the outer job timeout may prevent reporting: absence is not success.
 | `cmd/engram/serve_owned_test.go`, `serve_socket_test.go`, Unix server tests | Owned-process lifecycle and real socket cleanup; injected SIGTERM is not real OS signal delivery. |
 | `internal/setup`, `internal/store/project_alias_test.go` | Config preservation/idempotence and temporary SQLite write/reopen/read persistence. |
 | Windows-only files/runtime cases; Linux-only Claude socket subtest | Foreign-OS exclusions; build-tag-excluded files do not emit skip events. |
-| DSN-gated cloud/CLI PostgreSQL integration | Explicitly excluded; no service-container PostgreSQL copy. |
+| DSN-gated cloud/CLI PostgreSQL integration | Explicitly excluded; includes owned dashboard/pause fixtures gated by ENGRAM_DASHBOARD_BENCH_DSN / ENGRAM_PAUSE_BENCH_DSN. No service-container PostgreSQL copy. |
 | Pi real-schema capture needing locked TypeBox | Optional capture only; native Pi/OpenCode placement remains #2150. Missing Node for portable Core lifecycle is **not** optional. |
 | Node <24 rejection case; child-only helper entrypoints; TUI entry without serialization | Explicit foreign-runtime/helper/not-applicable skips, not evidence of those alternate executions. |
 
@@ -116,3 +118,32 @@ prerequisite or resource limitation; establish comparable revision/environment
 evidence before calling anything a regression. Then make an explicit
 **promotion, focused-fix or defer disposition**. No indefinite informational
 qualification loop, automatic required-context promotion or settings change.
+
+## First normal PR observation: failed, not qualified
+
+[Run 40391005166, attempt 1](https://github.com/Gentleman-Programming/engram/actions/runs/40391005166)
+tested PR head `d7aa661d13e7137d302c86adf5f4fdccf2711bb9` through synthetic
+checkout `4fb6c78f3654cd7334f0648f564f83b77b7d741a`. The actual runner was
+macOS 15.7.9 ARM64, image `20260907.0337.1`, Go 1.26.10 and Node 24.20.0.
+Preflight passed, including real `/usr/bin/jq` (`jq-1.7.1-apple`).
+Darwin adapter tests executed and passed; this is native execution, not a
+successful full baseline.
+
+The native job failed in 4m30s; the suite took 235.92s, without exhausting either
+ceiling. JSON recorded **8,401 pass / 33 fail / 127 skip test/subtest events**
+and **27 pass / 7 fail / 4 skip package events**. These are event counts, not
+unique top-level tests. Original test failures and incomplete summary status
+remain authoritative.
+
+Observed issues include logical/physical temporary-path comparisons, an
+existing Darwin update-instruction test/implementation disagreement, a hook
+POST timeout and Core fixture cleanup failures. Thirteen skips were also
+unclassified: eleven owned PostgreSQL-fixture cases and two foreign Windows
+cases. The reporting correction recognizes only those existing exclusion
+messages; it does not hide failed tests or unavailable mandatory prerequisites.
+
+Physical-root canonicalization and corrected reporting still need a normal
+hosted execution on the new candidate. No rerun, assertion weakening, product
+change or larger budget is implied. Hook/Core and version-owner fixes remain
+separate scope decisions. Merge-group/main samples and a green, stable native
+baseline are still missing; do not promote the job from this failed sample.

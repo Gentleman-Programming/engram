@@ -275,3 +275,36 @@ test('PostgreSQL exclusions do not hide process prerequisites', () => {
   const missing = summarize([...passed, event('output', 'TestProcess', 'process start unavailable\n'), event('skip', 'TestProcess')]);
   assert.equal(missing.status, 1, missing.stdout);
 });
+
+test('native isolation resolves the real temporary root before deriving fixture paths', () => {
+  const check = text => {
+    const body = job(text, 'macos-native-tests');
+    const create = body.indexOf('state=$(mktemp -d /tmp/eg-mac.XXXXXX)');
+    const physical = body.indexOf('state=$(cd "$state" && pwd -P)');
+    const derive = body.indexOf('mkdir -p "$state/home" "$state/tmp" "$state/store"');
+    assert.ok(create >= 0 && physical > create && derive > physical, 'physical root before homes, stores and TMPDIR');
+    assert.ok(body.indexOf('echo "TMPDIR=$state/tmp"') > physical);
+  };
+  check(source);
+  assert.throws(() => check(source.replace('state=$(cd "$state" && pwd -P)', 'state="$state"')));
+});
+
+for (const [reason, classification] of [
+  ['set ENGRAM_DASHBOARD_BENCH_DSN to the documented owned fixture', 'excluded-postgres'],
+  ['set ENGRAM_PAUSE_BENCH_DSN to the owned measurement fixture', 'excluded-postgres'],
+  ['requires Windows external commands', 'foreign-os'],
+  ['requires native Windows and Git Bash', 'foreign-os'],
+]) {
+  test('native summary classifies observed exclusion: ' + reason, () => {
+    const events = [...passed, event('output', 'TestExcluded', reason + '\n'), event('skip', 'TestExcluded')];
+    const result = summarize(events);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.skips[0].classification, classification);
+    assert.equal(report.skips[0].reason, reason + '\n');
+    assert.deepEqual(report.tests, { pass: 1, fail: 0, skip: 1 });
+    const failed = summarize([...events, event('fail', 'TestOriginalFailure'), event('fail')]);
+    assert.equal(failed.status, 1, failed.stdout);
+    assert.equal(JSON.parse(failed.stdout).tests.fail, 1);
+  });
+}
