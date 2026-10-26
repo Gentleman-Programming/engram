@@ -1,0 +1,118 @@
+# Native macOS baseline (#2121)
+
+## Candidate, not hosted qualification
+
+**Native macOS ARM64 Tests** adds one initially non-required job to CI on
+`macos-15`. The [official runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories)
+lists this standard label as ARM64 (3 M1 CPUs, 7 GB RAM); `macos-15-intel`
+is distinct. The label pins the OS family, not an immutable image revision.
+Record the actual image version, macOS version and architecture on every run.
+
+The job inherits CI's pull-request, merge-group and main-push events and
+concurrency. It has read-only contents permission, no persisted checkout
+credentials, no proof wait and no dependency on other jobs. Advisory means
+**non-required**, not ignored failures. Existing jobs, required contexts,
+merge queue, Windows pause and Linux Race cadence/budgets are unchanged.
+
+No hosted Darwin execution is established by this change's structural checks.
+Cross-built binaries, Linux/Windows results and source fixtures are not native
+execution, installed-host or distributed-artifact qualification.
+
+## Toolchain, prerequisites and isolated state
+
+Use repository Go **1.26.10**, `GOTOOLCHAIN=local`, Node **24**, the existing
+SHA-pinned setup actions, Bash, Git, jq, curl and ordinary shell utilities.
+The workflow records the checkout SHA, `uname -sm`, `sw_vers`, image identity,
+Go host/target architecture, CGO setting and tool versions. It requires
+Darwin/ARM64 for both Go and Node, not a cross-target build.
+
+Both PATH jq and **`/usr/bin/jq`** must be executable. The existing
+`plugin/claude_code_jq_compatibility_test.go` fixture defaults to that absolute
+path; PATH discovery alone is insufficient. Its supported `ENGRAM_TEST_JQ16`
+override requires actual jq 1.6, not an arbitrary installed jq. This job does
+not install a delegate, fabricate a system path or claim genuine jq 1.6 coverage.
+Absent `/usr/bin/jq` is an explicit preflight failure and incomplete coverage;
+runner-label documentation does not prove that fixture prerequisite exists.
+
+A private `/tmp/eg-mac.XXXXXX` root keeps Unix socket paths short. HOME,
+TMPDIR/TMP/TEMP and the fallback store live there; symlink creation is checked.
+Existing tests retain their own temporary homes, stores, listeners, processes
+and cleanup. The disposable runner VM owns the outer root; no real user store
+is opened and no unrelated process is killed. Go caches use their explicitly
+recorded setup locations, not the isolated HOME. Before the suite, inherited
+ENGRAM/GENTLE settings, PostgreSQL DSN, NODE_OPTIONS and GOFLAGS are removed;
+only the private fallback data directory is reintroduced.
+
+## Exact command and budgets
+
+After setup, preflight and isolation, the workflow runs:
+
+```bash
+set -euo pipefail
+/usr/bin/time -p go test -json -count=1 -timeout=10m ./... | tee "$RUNNER_TEMP/macos-native-tests.json"
+```
+
+There is no package filter, `-short`, blanket skip or native Race addition.
+The **20-minute outer** ceiling includes checkout, cold setup/downloads,
+compilation and reporting. The explicit **10-minute inner** timeout applies
+to each test binary and matches Go's uninstrumented default, not the whole
+suite. These are initial operational ceilings, **not native timing/SLO
+guarantees**. Exhaustion remains failure; do not automatically increase budgets,
+weaken assertions or drop expensive packages. Overlapping package times are
+not additive wall time.
+
+Pipefail preserves a failing test/tee exit. JSON is also retained in the run
+log, with time's real/user/sys on stderr. A separate non-cancellation summary
+step runs after ordinary failures without changing the test step's outcome.
+It reports package and test/subtest event counts, exact skipped-test output
+and classifications to the log and job summary. Missing, malformed or empty
+execution evidence, test/package failures, mandatory prerequisite skips and
+unclassified skips report **incomplete** and fail reporting too. Cancellation
+or the outer job timeout may prevent reporting: absence is not success.
+
+## Native scope and exclusions
+
+| Existing owner | Native scope / honest omission |
+| --- | --- |
+| `internal/store/filesystem_policy_darwin_test.go` | Darwin adapter and filesystem-type classification; not real NFS/SMB mounts. |
+| `internal/project/detect_test.go` | Canonical temporary paths, including /var versus /private/var comparisons. |
+| `cmd/engram/migrate_copy_test.go`, store/MCP/Obsidian casing tests | Actual case-alias or case-distinct capability; list each unsupported-capability skip, never claim both executed. |
+| CLI init / Obsidian symlink tests | Rejection/escape behavior; missing symlinks mean incomplete coverage. |
+| `cmd/engram/serve_owned_test.go`, `serve_socket_test.go`, Unix server tests | Owned-process lifecycle and real socket cleanup; injected SIGTERM is not real OS signal delivery. |
+| `internal/setup`, `internal/store/project_alias_test.go` | Config preservation/idempotence and temporary SQLite write/reopen/read persistence. |
+| Windows-only files/runtime cases; Linux-only Claude socket subtest | Foreign-OS exclusions; build-tag-excluded files do not emit skip events. |
+| DSN-gated cloud/CLI PostgreSQL integration | Explicitly excluded; no service-container PostgreSQL copy. |
+| Pi real-schema capture needing locked TypeBox | Optional capture only; native Pi/OpenCode placement remains #2150. Missing Node for portable Core lifecycle is **not** optional. |
+| Node <24 rejection case; child-only helper entrypoints; TUI entry without serialization | Explicit foreign-runtime/helper/not-applicable skips, not evidence of those alternate executions. |
+
+Native tagged E2E, Race, PostgreSQL, standalone plugin suites, benchmarks and
+Darwin amd64 execution are outside this foundation. Existing tests that run
+subprocesses remain included. #1903/#2055 retain fixture/installed-host contracts;
+#2122 retains distributed-byte smoke. No all-released-architectures guarantee.
+
+## Verification and finite disposition
+
+Local Node 24 structural/regression checks (not Darwin execution):
+
+```bash
+node --test .github/scripts/ci-technical-contracts.test.mjs .github/scripts/ci-unit-node.test.mjs
+node --test .github/scripts/issue-*.test.mjs
+```
+
+The technical suite owns native job invariants and executes the workflow's JSON
+summarizer against isolated fixtures. Keep the LF-normalized full CI hash in
+`issue-refresh-router-workflow.test.mjs` aligned deliberately; never remove its
+integrity assertion.
+
+After separately authorized delivery, follow the
+[accepted finite contract](https://github.com/Gentleman-Programming/engram/issues/2020#issuecomment-6423158281):
+observe **one normally occurring PR, merge-group and main execution**. Do not
+dispatch/rerun jobs to manufacture the sample. Record each run/attempt/event,
+actual tested SHA (PR head and synthetic merge SHA are distinct), runner image,
+tool versions, exit, wall time, executed/skipped scope and timeout/cleanup limits.
+
+Classify original failures as product defect, fixture assumption, missing
+prerequisite or resource limitation; establish comparable revision/environment
+evidence before calling anything a regression. Then make an explicit
+**promotion, focused-fix or defer disposition**. No indefinite informational
+qualification loop, automatic required-context promotion or settings change.

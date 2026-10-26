@@ -52,6 +52,143 @@ jobs:
       - name: Run full race suite with elapsed time
         run: /usr/bin/time -p go test -race -timeout=20m ./...
 
+  macos-native-tests:
+    name: Native macOS ARM64 Tests
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Verify native prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          uname -sm
+          sw_vers
+          printf 'ImageOS=%s ImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+          go version
+          go env GOOS GOARCH GOHOSTOS GOHOSTARCH CGO_ENABLED
+          node --version
+          test "$(uname -sm)" = "Darwin arm64"
+          test "$(go env GOVERSION)" = go1.26.10
+          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = darwin/arm64
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+          test "$(node -p 'process.platform + "/" + process.arch')" = darwin/arm64
+          test "$(node -p 'process.versions.node.split(".")[0]')" = 24
+          for tool in bash git jq curl cat date dirname touch mktemp sh make; do command -v "$tool"; done
+          /bin/bash --version
+          git --version
+          jq --version
+          curl --version
+          # The existing compatibility fixture consumes this absolute path, not PATH jq.
+          test -x /usr/bin/jq || { echo "::error::Incomplete native coverage: /usr/bin/jq fixture prerequisite absent"; exit 1; }
+          /usr/bin/jq --version
+
+      - name: Isolate test state
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Short, private socket paths; never a user home or store. The VM owns this root.
+          state=$(mktemp -d /tmp/eg-mac.XXXXXX)
+          mkdir -p "$state/home" "$state/tmp" "$state/store"
+          ln -s "$state/home" "$state/link"
+          test -d "$state/link"
+          rm "$state/link"
+          {
+            echo "HOME=$state/home"
+            echo "TMPDIR=$state/tmp"
+            echo "TMP=$state/tmp"
+            echo "TEMP=$state/tmp"
+            echo "ENGRAM_DATA_DIR=$state/store"
+            echo "GOMODCACHE=$(go env GOMODCACHE)"
+            echo "GOCACHE=$(go env GOCACHE)"
+          } >> "$GITHUB_ENV"
+
+      - name: Run native Go suite
+        id: native-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tests may supply their own overrides; do not inherit live host configuration.
+          while IFS='=' read -r key _; do
+            case "$key" in ENGRAM_*|GENTLE_*|CLOUDSTORE_TEST_DSN|NODE_OPTIONS|GOFLAGS) unset "$key" ;; esac
+          done < <(env)
+          export ENGRAM_DATA_DIR="$HOME/../store"
+          /usr/bin/time -p go test -json -count=1 -timeout=10m ./... | tee "$RUNNER_TEMP/macos-native-tests.json"
+
+      - name: Summarize native scope
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const report = { scope: 'Darwin ARM64 default-tag source suite', tests: { pass: 0, fail: 0, skip: 0 },
+            packages: { pass: 0, fail: 0, skip: 0 }, skips: [], buildFailures: [], unfinished: [], coverage: 'incomplete' };
+          try {
+            const outputs = new Map(), active = new Set();
+            const foreign = ['Windows-only path case normalization', 'requires native Windows paths',
+              'Windows handle inheritance regression', 'Windows in-process startup isolation', 'Windows process bootstrap',
+              'Windows process routing', 'Windows startup failures', 'native Windows SQLite temporary routing',
+              'PowerShell wrapper test is Windows-only', 'Git for Windows discovery',
+              'requires native Windows cmd.exe and PowerShell', 'requires Windows PowerShell', 'requires PowerShell',
+              'Unix socket hook transport requires a Linux test process'];
+            const capability = ['fixture filesystem does not expose a case alias', 'case spelling identifies a distinct directory',
+              'temp filesystem is case-sensitive; case-only aliases are distinct',
+              'filesystem cannot represent case-distinct candidate paths',
+              'filesystem exposes a case alias instead of distinct case directories'];
+            for (const line of fs.readFileSync(process.env.RUNNER_TEMP + '/macos-native-tests.json', 'utf8').split('\n').filter(Boolean)) {
+              const e = JSON.parse(line), key = e.Package + '/' + e.Test;
+              if (e.Action === 'start') active.add(e.Package);
+              if (e.Action === 'build-fail') report.buildFailures.push(e.ImportPath);
+              if (e.Action === 'output') outputs.set(key, (outputs.get(key) ?? '') + e.Output);
+              if (!['pass', 'fail', 'skip'].includes(e.Action)) continue;
+              if (!e.Test) active.delete(e.Package);
+              report[e.Test ? 'tests' : 'packages'][e.Action]++;
+              if (e.Action !== 'skip') continue;
+              const reason = outputs.get(key) ?? '';
+              let classification = 'incomplete';
+              if (!e.Test && reason.includes('[no test files]')) classification = 'no-test-files';
+              else if (foreign.some(x => reason.includes(x))) classification = 'foreign-os';
+              else if (capability.some(x => reason.includes(x))) classification = 'filesystem-capability';
+              else if (['CLOUDSTORE_TEST_DSN not set', 'requires URL-style CLOUDSTORE_TEST_DSN and disposable PostgreSQL',
+                'requires disposable PostgreSQL via CLOUDSTORE_TEST_DSN'].some(x => reason.includes(x))) classification = 'excluded-postgres';
+              else if (reason.includes('unsupported-runtime regression requires Node.js <24')) classification = 'foreign-runtime';
+              else if (reason.includes('TUI has no entry serialization')) classification = 'no-serialization';
+              else if (/runs only as a child of Test(StoreContentionAcrossProcesses|ConcurrentColdStartProcesses)/.test(reason)) classification = 'child-helper';
+              else if ((e.Package.endsWith('/internal/mcp') && e.Test === 'TestPiInputRealCapture' && reason.includes('Pi schema prerequisites absent: TypeBox'))
+                || (e.Package.endsWith('/tools/release-candidate') && reason.includes('real capture requires fixed local TypeBox1.3.34 and Node24;'))) classification = 'optional-pi-capture';
+              report.skips.push({ package: e.Package, test: e.Test ?? null, classification, reason });
+            }
+            report.unfinished = [...active];
+            if (report.tests.pass > 0 && report.packages.pass > 0 && !report.tests.fail && !report.packages.fail
+              && !report.buildFailures.length && !report.unfinished.length
+              && report.skips.every(s => s.classification !== 'incomplete')) report.coverage = 'complete-with-listed-exclusions';
+          } catch (error) { report.error = error.message; }
+          const json = JSON.stringify(report);
+          console.log(json);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Native macOS scope\n\n```json\n' + json.replaceAll('`', '\\u0060') + '\n```\n');
+          if (report.coverage === 'incomplete') process.exitCode = 1;
+          NODE
+
   govulncheck:
     name: Go Vulnerability Check
     runs-on: ubuntu-latest

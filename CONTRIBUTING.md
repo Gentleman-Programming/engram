@@ -311,6 +311,19 @@ events and test discovery. Proof-specific admission remains covered by
 `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
 Hosted experiments require separate authorization.
 
+### Native macOS baseline (initially non-required)
+
+The candidate **Native macOS ARM64 Tests** job runs the existing default-tag
+Go suite on `macos-15` ARM64 with Go 1.26.10 and Node 24. It checks native
+architecture and mandatory prerequisites (including the fixture's actual
+`/usr/bin/jq` path), uses isolated test state, preserves failure exits and
+reports JSON pass/fail/skip scope. The 20-minute job and 10-minute per-binary
+ceilings are provisional, not measured Darwin guarantees.
+See [native scope, prerequisites and finite rollout](docs/ci-macos.md).
+No hosted Darwin result, installed-host/artifact qualification or new required
+context is claimed. Observe one normal PR, merge-group and main execution,
+then explicitly decide promotion, focused fix or defer.
+
 ### Go race detection (initially non-required)
 
 The candidate **Go Race Tests** job runs the full default-tag Go suite with
