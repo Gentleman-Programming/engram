@@ -87,6 +87,24 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgme
 				fixture = strings.Replace(fixture, "  host.registerTool(", extra+"\n  host.registerTool(", 1)
 			}
 			body = []byte(strings.ReplaceAll(fixture, `"$TOPIC_MARKER$"`, string(encode(topicMarker))))
+			body = append(body, []byte(`
+if (/engram-core-15[5678]-/.test(process.cwd())) {
+  const fs = await import('node:fs');
+  const countFile = `+string(encode(filepath.Join(repo, "peer-presence-count")))+`;
+  const peer = `+string(encode(filepath.Join(repo, "plugin", "pi", "node_modules", "typebox")))+`;
+  const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, 'utf8')) + 1 : 1;
+  fs.writeFileSync(countFile, String(count));
+  const phase = process.cwd().includes('-156-') ? 2 : process.cwd().includes('-157-') ? 6 : 1;
+  if (count === phase) {
+    if (process.cwd().includes('-158-')) fs.rmSync(peer, { recursive: true });
+    else {
+      fs.mkdirSync(peer, { recursive: true });
+      fs.writeFileSync(peer + '/package.json', JSON.stringify({ name: 'typebox', version: '1.3.34', type: 'module', exports: './index.js' }));
+      fs.writeFileSync(peer + '/index.js', 'export const syntheticPeer = true;\n');
+    }
+  }
+}
+`)...)
 		}
 		if name == "package.json" {
 			body = encode(map[string]any{"name": "gentle-engram", "version": "4.5.6", "files": packageRuntimeFiles})
@@ -203,15 +221,19 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgme
 		}
 	}
 	if finalization {
-		cases = []struct{ name, state string }{{"finalization original receipt", "passed"}, {"finalization rejects changed receipt", "passed"}}
-		runtimeModes[cases[0].name], runtimeModes[cases[1].name] = "153", "154"
+		cases = []struct{ name, state string }{{"finalization original receipt", "passed"}, {"finalization rejects changed receipt", "passed"}, {"peer appears after bootstrap", "unavailable"}, {"peer appears between workflows", "unavailable"}, {"peer appears after final workflow", "unavailable"}, {"peer disappears", "unavailable"}}
+		for i, tc := range cases {
+			runtimeModes[tc.name] = strconv.Itoa(153 + i)
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			helperMutation := topics && strings.Contains(tc.name, " helper ")
+			presenceChange := finalization && strings.HasPrefix(tc.name, "peer ")
+			peerPath := filepath.Join(repo, "plugin", "pi", "node_modules", "typebox")
 			var peerOrigin string
 			var peerOriginal []byte
-			if strings.HasPrefix(tc.name, "pi bootstrap peer") {
+			if strings.HasPrefix(tc.name, "pi bootstrap peer") || tc.name == "peer disappears" {
 				version := "1.3.34"
 				if tc.name == "pi bootstrap peer version" {
 					version = "2.0.0"
@@ -230,6 +252,20 @@ export const syntheticPeer = true;
 					if err != nil {
 						t.Fatal(err)
 					}
+				}
+			}
+			originalPeer := map[string][]byte{}
+			if presenceChange {
+				if tc.name == "peer disappears" {
+					for _, name := range []string{"package.json", "index.js"} {
+						data, err := os.ReadFile(filepath.Join(peerPath, name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						originalPeer[name] = data
+					}
+				} else if _, err := os.Lstat(filepath.Dir(peerPath)); !os.IsNotExist(err) {
+					t.Fatalf("late-peer fixture must start without node_modules: %v", err)
 				}
 			}
 			var ancestorMarker string
@@ -282,6 +318,80 @@ export const syntheticPeer = true;
 			var result map[string]any
 			if err := json.Unmarshal([]byte(out), &result); err != nil || strings.Count(out, "\n") != 1 {
 				t.Fatalf("not one JSON line: %q", out)
+			}
+			if presenceChange {
+				children := []map[string]any{result["coreRuntime"].(map[string]any), result["piBootstrap"].(map[string]any)}
+				inventory, _ := result["workflows"].(map[string]any)["cases"].([]any)
+				for _, value := range inventory {
+					for _, key := range []string{"coreRuntime", "piRuntime"} {
+						if child, ok := value.(map[string]any)[key].(map[string]any); ok {
+							children = append(children, child)
+						}
+					}
+				}
+				executed := 0
+				for _, child := range children {
+					if child["joined"] != true {
+						t.Fatalf("unknown joins; retain peer fixture: %s", out)
+					}
+					if child["exitCode"] != nil {
+						if child["exitCode"] != float64(0) || child["cleanup"] != "passed" {
+							t.Fatalf("peer fixture failed before integrity assertion: %s", out)
+						}
+						executed++
+					} else if child["state"] != "unavailable" || child["cleanup"] != "not-started" {
+						t.Fatalf("incorrect unstarted child evidence: %s", out)
+					}
+				}
+				countFile := filepath.Join(repo, "peer-presence-count")
+				count, err := os.ReadFile(countFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.name == "peer disappears" {
+					if _, err := os.Lstat(peerPath); !os.IsNotExist(err) {
+						t.Fatalf("peer disappearance did not execute: %v", err)
+					}
+					for name, data := range originalPeer {
+						write(filepath.Join(peerPath, name), data)
+					}
+				} else {
+					data, err := os.ReadFile(filepath.Join(peerPath, "index.js"))
+					if err != nil || string(data) != "export const syntheticPeer = true;\n" {
+						t.Fatalf("peer appearance did not execute: %q %v", data, err)
+					}
+					if err := os.RemoveAll(filepath.Dir(peerPath)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// Restore only known fixture inputs after every executed child joined.
+				if err := os.Remove(countFile); err != nil {
+					t.Fatal(err)
+				}
+				after, err := sourceTreeDigest(repo)
+				if err != nil || after != before {
+					t.Fatalf("peer fixture inputs not restored: %v", err)
+				}
+				if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != "unavailable" || result["piPackage"].(map[string]any)["state"] != "unavailable" || result["piBootstrap"].(map[string]any)["state"] != "unavailable" || result["workflows"].(map[string]any)["state"] != "unavailable" {
+					t.Fatalf("changed peer presence left evidence passing (imports=%s): %s", count, out)
+				}
+				wantCount := "1"
+				switch tc.name {
+				case "peer appears between workflows":
+					wantCount = "2"
+				case "peer appears after final workflow":
+					wantCount = "6"
+				}
+				if string(count) != wantCount || executed != 2*int(wantCount[0]-'0') {
+					t.Fatalf("execution continued after changed peer presence: imports=%s children=%d", count, executed)
+				}
+				for _, value := range inventory {
+					c := value.(map[string]any)
+					if c["state"] != "unavailable" {
+						t.Fatalf("changed peer left workflow evidence passing: %s", out)
+					}
+				}
+				return
 			}
 			if peerOrigin != "" {
 				if result["coreRuntime"].(map[string]any)["joined"] != true || result["piBootstrap"].(map[string]any)["joined"] != true {

@@ -147,28 +147,38 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 		before, beforeErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
 		peerSource := filepath.Join(root, "plugin", "pi", "node_modules", "typebox")
 		var peerBefore [32]byte
-		peerMeasured := false
-		materialize := func(destination string) bool {
-			if pkg.verifyInto(ctx, r.Pi.VersionIntent, destination).State != "passed" {
+		peerObserved, peerPresent, peerMeasured := false, false, false
+		peerUnchanged := func() bool {
+			_, err := os.Lstat(peerSource)
+			if err != nil && !os.IsNotExist(err) {
 				return false
 			}
-			if _, err := os.Lstat(peerSource); os.IsNotExist(err) {
-				return !peerMeasured // Only an originally absent peer keeps the dependency-free path.
-			} else if err != nil {
+			present := err == nil
+			if !peerObserved {
+				peerObserved, peerPresent = true, present
+			} else if present != peerPresent {
 				return false
+			}
+			if !present {
+				return true
 			}
 			current, err := sourceTreeDigest(peerSource)
-			if err != nil || (peerMeasured && current != peerBefore) || copyPinnedTypeBox(root, filepath.Dir(destination)) != nil {
+			if err != nil || (peerMeasured && current != peerBefore) {
 				return false
 			}
-			peerBefore, peerMeasured = current, true
+			if !peerMeasured {
+				peerBefore, peerMeasured = current, true
+			}
 			return true
 		}
-		r.CoreRuntime = runArtifactCoreWithPi(ctx, measured.Core, measured.CoreSHA256, want.RunID, materialize, r.PiBootstrap)
-		if peerMeasured {
-			after, err := sourceTreeDigest(peerSource)
-			r.PiBootstrap.mutated = r.PiBootstrap.mutated || err != nil || after != peerBefore
+		materialize := func(destination string) bool {
+			if pkg.verifyInto(ctx, r.Pi.VersionIntent, destination).State != "passed" || !peerUnchanged() {
+				return false
+			}
+			return !peerPresent || copyPinnedTypeBox(root, filepath.Dir(destination)) == nil
 		}
+		r.CoreRuntime = runArtifactCoreWithPi(ctx, measured.Core, measured.CoreSHA256, want.RunID, materialize, r.PiBootstrap)
+		r.PiBootstrap.mutated = r.PiBootstrap.mutated || !peerUnchanged()
 		if r.PiBootstrap.mutated {
 			r.Check.State, r.PiPackage.State = "unavailable", "unavailable"
 			r.PiBootstrap.State = "unavailable"
@@ -179,10 +189,7 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 			for _, c := range r.Workflows.Cases {
 				mutated = mutated || (c.PiRuntime != nil && c.PiRuntime.mutated)
 			}
-			if peerMeasured {
-				after, err := sourceTreeDigest(peerSource)
-				mutated = mutated || err != nil || after != peerBefore
-			}
+			mutated = mutated || !peerUnchanged()
 			if mutated {
 				r.Check.State, r.PiPackage.State, r.PiBootstrap.State = "unavailable", "unavailable", "unavailable"
 				r.invalidateWorkflowCases()
