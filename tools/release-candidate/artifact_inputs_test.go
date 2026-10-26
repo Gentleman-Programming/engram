@@ -88,13 +88,13 @@ func testArtifactInputCLI(t *testing.T, bootstrap, topics, consolidation, judgme
 			}
 			body = []byte(strings.ReplaceAll(fixture, `"$TOPIC_MARKER$"`, string(encode(topicMarker))))
 			body = append(body, []byte(`
-if (/engram-core-15[5678]-/.test(process.cwd())) {
+if (/engram-core-15[56789]-/.test(process.cwd())) {
   const fs = await import('node:fs');
   const countFile = `+string(encode(filepath.Join(repo, "peer-presence-count")))+`;
   const peer = `+string(encode(filepath.Join(repo, "plugin", "pi", "node_modules", "typebox")))+`;
   const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, 'utf8')) + 1 : 1;
   fs.writeFileSync(countFile, String(count));
-  const phase = process.cwd().includes('-156-') ? 2 : process.cwd().includes('-157-') ? 6 : 1;
+  const phase = process.cwd().includes('-159-') ? 0 : process.cwd().includes('-156-') ? 2 : process.cwd().includes('-157-') ? 6 : 1;
   if (count === phase) {
     if (process.cwd().includes('-158-')) fs.rmSync(peer, { recursive: true });
     else {
@@ -166,7 +166,38 @@ if (/engram-core-15[5678]-/.test(process.cwd())) {
 	input := t.TempDir()
 	bundle, contextFile, bin := filepath.Join(input, "bundle.zip"), filepath.Join(input, "context.json"), filepath.Join(input, "candidate.exe")
 	write(bundle, archive.Bytes())
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	buildArgs := []string{"build", "-o", bin}
+	if finalization {
+		// Instrument only this synthetic CLI build, never production sources.
+		sourceName, err := filepath.Abs("artifact_inputs.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := os.ReadFile(sourceName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const boundary = "\t\tafter, afterErr := sourceTreeDigest(filepath.Join(workspace, \"materialized-pi\"))"
+		if strings.Count(string(source), boundary) != 1 {
+			t.Fatal("final integrity boundary must be unique")
+		}
+		hook := `
+        if want.RunID == "159" {
+          count, err := os.ReadFile(filepath.Join(root, "peer-presence-count"))
+          if err != nil || string(count) != "6" { panic("final peer fixture requires six imports") }
+          if err := os.MkdirAll(peerSource, 0700); err != nil { panic(err) }
+          if err := os.WriteFile(filepath.Join(peerSource, "package.json"), []byte("{\"name\":\"typebox\",\"version\":\"1.3.34\",\"type\":\"module\",\"exports\":\"./index.js\"}"), 0600); err != nil { panic(err) }
+          if err := os.WriteFile(filepath.Join(peerSource, "index.js"), []byte("export const syntheticPeer = true;\n"), 0600); err != nil { panic(err) }
+          if err := os.WriteFile(filepath.Join(root, "peer-final-verification"), count, 0600); err != nil { panic(err) }
+        }
+`
+		instrumented := filepath.Join(input, "artifact-inputs-overlay.go")
+		write(instrumented, []byte(strings.Replace(string(source), boundary, boundary+hook, 1)))
+		overlay := filepath.Join(input, "overlay.json")
+		write(overlay, encode(map[string]any{"Replace": map[string]string{sourceName: instrumented}}))
+		buildArgs = append(buildArgs, "-overlay", overlay)
+	}
+	if out, err := exec.Command("go", append(buildArgs, ".")...).CombinedOutput(); err != nil {
 		t.Fatalf("build: %v: %s", err, out)
 	}
 	invoke := func(args []string) (string, string, int) {
@@ -221,10 +252,12 @@ if (/engram-core-15[5678]-/.test(process.cwd())) {
 		}
 	}
 	if finalization {
-		cases = []struct{ name, state string }{{"finalization original receipt", "passed"}, {"finalization rejects changed receipt", "passed"}, {"peer appears after bootstrap", "unavailable"}, {"peer appears between workflows", "unavailable"}, {"peer appears after final workflow", "unavailable"}, {"peer disappears", "unavailable"}}
+		cases = []struct{ name, state string }{{"finalization original receipt", "passed"}, {"finalization rejects changed receipt", "passed"}, {"peer appears after bootstrap", "unavailable"}, {"peer appears between workflows", "unavailable"}, {"peer appears after final workflow", "unavailable"}, {"peer appears during final verification", "unavailable"}, {"peer disappears", "unavailable"}}
 		for i, tc := range cases {
 			runtimeModes[tc.name] = strconv.Itoa(153 + i)
 		}
+		runtimeModes["peer appears during final verification"] = "159"
+		runtimeModes["peer disappears"] = "158"
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -348,6 +381,15 @@ export const syntheticPeer = true;
 				if err != nil {
 					t.Fatal(err)
 				}
+				if tc.name == "peer appears during final verification" {
+					phase, err := os.ReadFile(filepath.Join(repo, "peer-final-verification"))
+					if err != nil || string(phase) != "6" {
+						t.Fatalf("final verification mutation did not execute: %q %v", phase, err)
+					}
+					if err := os.Remove(filepath.Join(repo, "peer-final-verification")); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if tc.name == "peer disappears" {
 					if _, err := os.Lstat(peerPath); !os.IsNotExist(err) {
 						t.Fatalf("peer disappearance did not execute: %v", err)
@@ -372,18 +414,21 @@ export const syntheticPeer = true;
 				if err != nil || after != before {
 					t.Fatalf("peer fixture inputs not restored: %v", err)
 				}
-				if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != "unavailable" || result["piPackage"].(map[string]any)["state"] != "unavailable" || result["piBootstrap"].(map[string]any)["state"] != "unavailable" || result["workflows"].(map[string]any)["state"] != "unavailable" {
-					t.Fatalf("changed peer presence left evidence passing (imports=%s): %s", count, out)
-				}
 				wantCount := "1"
 				switch tc.name {
 				case "peer appears between workflows":
 					wantCount = "2"
-				case "peer appears after final workflow":
+				case "peer appears after final workflow", "peer appears during final verification":
 					wantCount = "6"
 				}
 				if string(count) != wantCount || executed != 2*int(wantCount[0]-'0') {
 					t.Fatalf("execution continued after changed peer presence: imports=%s children=%d", count, executed)
+				}
+				if tc.name == "peer appears during final verification" && result["coreRuntime"].(map[string]any)["state"] != "unavailable" {
+					t.Fatalf("final gate left Core evidence passing after the observed late peer mutation: %s", out)
+				}
+				if result["outcome"] != "blocked" || result["schemaVersion"] != float64(1) || result["check"].(map[string]any)["state"] != "unavailable" || result["piPackage"].(map[string]any)["state"] != "unavailable" || result["piBootstrap"].(map[string]any)["state"] != "unavailable" || result["workflows"].(map[string]any)["state"] != "unavailable" {
+					t.Fatalf("changed peer presence left evidence passing (imports=%s): %s", count, out)
 				}
 				for _, value := range inventory {
 					c := value.(map[string]any)
@@ -635,6 +680,9 @@ export const syntheticPeer = true;
 				if tc.name == "core healthy" || bootstrap {
 					state = "passed"
 				}
+				if peerOrigin != "" {
+					state = "unavailable"
+				}
 				if tc.name == "pi bootstrap peer version" {
 					state, cleanup = "unavailable", "not-started"
 				}
@@ -644,7 +692,7 @@ export const syntheticPeer = true;
 				if observed["state"] != state || observed["cleanup"] != cleanup || observed["joined"] != true {
 					t.Fatalf("wrong runtime: %s", out)
 				}
-				if state == "passed" && (observed["reportedVersion"] != "fixture-observed" || observed["instanceId"] != "synthetic-owned-instance") {
+				if (state == "passed" || peerOrigin != "") && (observed["reportedVersion"] != "fixture-observed" || observed["instanceId"] != "synthetic-owned-instance") {
 					t.Fatalf("invented runtime identity/version: %s", out)
 				}
 				if _, leaked := observed["token"]; leaked || strings.Contains(out, "inherited-not-private") {

@@ -57,11 +57,11 @@ func main() {
   if r.Header.Get("Authorization")!="Bearer "+token && !strings.Contains(cwd,"-128-") { w.WriteHeader(401); _=json.NewEncoder(w).Encode(map[string]any{"error":"unauthorized"}); return }
   mutex.Lock(); defer mutex.Unlock()
   finalizationFixture:=false
-  for _,run:=range []string{"153","154","155","156","157","158"} { finalizationFixture=finalizationFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  for _,run:=range []string{"153","154","155","156","157","158","159"} { finalizationFixture=finalizationFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
   judgmentFixture:=finalizationFixture || strings.Contains(cwd,"engram-core-150-") || strings.Contains(cwd,"engram-core-151-") || strings.Contains(cwd,"engram-core-152-")
   consolidationFixture:=judgmentFixture || strings.Contains(cwd,"engram-core-148-") || strings.Contains(cwd,"engram-core-149-")
   topicFixture:=false
-  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149","150","151","152","153","154","155","156","157","158"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
+  for _,run:=range []string{"140","141","142","143","144","145","146","147","148","149","150","151","152","153","154","155","156","157","158","159"} { topicFixture=topicFixture || strings.Contains(cwd,"engram-core-"+run+"-") }
   if judgmentFixture && strings.HasPrefix(r.URL.Path,"/conflicts") {
    switch r.URL.Path {
    case "/conflicts/scan":

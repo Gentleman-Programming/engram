@@ -197,7 +197,7 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 		}
 		verified = pkg.verify(ctx, r.Pi.VersionIntent)
 		after, afterErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
-		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" {
+		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" || !peerUnchanged() {
 			r.Check.State, r.PiPackage.State, r.CoreRuntime.State = "unavailable", "unavailable", "unavailable"
 			r.PiBootstrap.State = "unavailable"
 			r.invalidateWorkflowCases()
