@@ -661,6 +661,12 @@ relative to the repository root.
 | Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy helper suites; not live approval-refresh behavior. |
 
 The **Unit Tests** job provides Node.js 24 for the Go-owned Core lifecycle tests.
+The `tools/release-candidate` Core lifecycle tests require Node.js >=24 in PATH;
+when Node is missing, cannot run, or is older, only the execution-dependent cases
+skip with a prerequisite message. Non-runtime admission cases still run. With
+Node.js <24, a separate regression verifies that Core is not started. To exercise
+all supported lifecycle paths locally, run `go test ./tools/release-candidate`
+with Node.js 24 in PATH.
 
 The [CI workflow](.github/workflows/ci.yml) is authoritative for hosted commands,
 setup steps and platform coverage; the [Makefile](Makefile) defines the existing

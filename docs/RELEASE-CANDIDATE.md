@@ -287,6 +287,13 @@ node --test plugin/pi/test/local-package.test.mjs
 go test ./tools/release-candidate
 ```
 
+The Go Core lifecycle tests require Node.js >=24 in PATH. If Node is missing,
+cannot run, or is older, the child-lifecycle test and only the runtime subtests of
+`TestArtifactInputCLI` skip with a clear prerequisite message; non-runtime
+admission checks still run. A separate regression runs with Node.js <24 to verify
+that the production helper rejects it before starting Core. Use Node.js 24 for
+full supported-runtime coverage; passing with skips is not lifecycle evidence.
+
 A passing checker test suite would demonstrate the rejection-only behavior and
 unchanged legacy Pi guard. It would not make current Go/Pi sources release-ready.
 Implementation validation and independent review must be observed separately;

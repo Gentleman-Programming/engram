@@ -143,6 +143,9 @@ func TestArtifactInputCLI(t *testing.T) {
 		{"core startup", "passed"}, {"core auth", "passed"}, {"core PID", "passed"}, {"core nonloopback", "passed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if _, active := runtimeModes[tc.name]; active {
+				requireArtifactNode(t)
+			}
 			expected, pi := want, piRevision
 			payload, mode := archive.Bytes(), "-observe-artifact-inputs"
 			if run, active := runtimeModes[tc.name]; active {

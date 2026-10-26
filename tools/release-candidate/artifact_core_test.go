@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +107,51 @@ func runtimeFixtureZIP(t *testing.T, original []byte, run string) []byte {
 	return output.Bytes()
 }
 
+func artifactNodeMajor(t *testing.T) int {
+	t.Helper()
+	out, err := exec.Command("node", "--version").Output()
+	if err != nil {
+		t.Skipf("Core lifecycle tests require Node.js >=24 in PATH: %v", err)
+	}
+	version := strings.TrimSpace(string(out))
+	major, err := strconv.Atoi(strings.Split(strings.TrimPrefix(version, "v"), ".")[0])
+	if err != nil {
+		t.Fatalf("cannot parse Node.js version %q: %v", version, err)
+	}
+	return major
+}
+
+func requireArtifactNode(t *testing.T) {
+	t.Helper()
+	if major := artifactNodeMajor(t); major < 24 {
+		t.Skipf("Core lifecycle tests require Node.js >=24 in PATH; found Node.js %d", major)
+	}
+}
+
+func TestArtifactCoreUnsupportedNode(t *testing.T) {
+	if major := artifactNodeMajor(t); major >= 24 {
+		t.Skip("unsupported-runtime regression requires Node.js <24 in PATH")
+	}
+	marker := filepath.Join(t.TempDir(), "core-started")
+	encoded, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := strings.Replace(artifactCoreFixture, "func main() {", "func main() {\n if os.WriteFile("+string(encoded)+", []byte(\"started\"), 0600) != nil { os.Exit(25) }", 1)
+	core, _, _ := stagedProgramFixture(t, program)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result := runArtifactCore(ctx, core, stagedDigest(core), "123")
+	if result.State != "unavailable" || result.Cleanup != "not-started" || !result.Joined || result.Retained || !strings.HasPrefix(result.NodeVersion, strconv.Itoa(artifactNodeMajor(t))+".") {
+		t.Fatalf("unsupported Node.js did not fail closed before spawn: %+v", result)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("unsupported Node.js started Core or marker check failed: %v", err)
+	}
+}
+
 func TestArtifactCoreFailedKill(t *testing.T) {
+	requireArtifactNode(t)
 	core, _, _ := stagedProgramFixture(t, artifactCoreFixture)
 	marker := filepath.Join(t.TempDir(), "owned-child-exited.json")
 	encoded, err := json.Marshal(marker)
