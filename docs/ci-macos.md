@@ -164,3 +164,26 @@ observed request counts and bounded child output; they do not repair or bypass
 a failing hook. A passing local Windows test is not Bash 3.2/macOS proof.
 The no-jq runtime cause and a green native baseline remain unproven; product
 hook changes require a separate scope decision.
+
+The subsequently authorized product fix normalizes quoted character conversions
+to unsigned bytes before the Bash hook classifies JSON bytes or encodes
+JSON and URLs. The Windows-safe session-key helper stays unchanged. Apple Bash 3.2's
+[`printf` source](https://github.com/apple-oss-distributions/bash/blob/main/bash-3.2/builtins/printf.def)
+returns the quoted `char` without an unsigned cast; sign-extension can reject
+non-ASCII decision metadata or corrupt byte encodings. A source-derived
+signed-conversion fixture reproduced those failures through the public hook
+before the fix. That compatibility fixture is **not native Bash 3.2 execution**.
+
+The regression keeps exact Unicode prompt/project/cwd values, capture-decision
+and prompt-write counts, bootstrap/reminder output, empty stderr and rejected
+raw-control metadata with no prompt writes or local store creation. Existing
+malformed/nested/wrong-type/unknown-source decision guards remain unchanged.
+No interpreter upgrade, external JSON dependency or longer deadline is added.
+The required matching Claude plugin patch versions advance to 0.1.19; this is
+metadata consistency, not a release or publication.
+
+Actual macOS execution of this product fix is still pending. Separately, the
+completed run 40403756179 also failed Linux Race at
+`TestServeOwnedStartupFailure` (expected startup failure); its inspected log
+showed no data-race warning or timeout. That failure is not attributed to this
+unpublished fix, and Race cadence/budgets remain untouched.
