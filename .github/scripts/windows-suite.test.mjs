@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const source = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
@@ -28,7 +29,7 @@ function contract(text) {
   for (const token of ['git rev-parse HEAD', "(go env GOOS) -ne 'windows'",
     "(go env GOARCH) -ne 'amd64'", "(go env GOVERSION) -ne 'go1.26.10'",
     "(node --version) -notmatch '^v24\\.'", "Get-Command powershell.exe",
-    "Get-Command git.exe", "'/(cmd|mingw64/bin|usr/bin)$'", "'usr\\bin\\bash.exe'",
+    "Get-Command git.exe", "'/(cmd|bin|mingw64/bin|usr/bin)$'", "'usr\\bin\\bash.exe'",
     "$bash -notlike '*\\usr\\bin\\bash.exe'", "Get-Command jq.exe -CommandType Application",
     "$trustedJQ = (Resolve-Path $jq.Source).Path", "[IO.Path]::IsPathFullyQualified($trustedJQ)",
     "[IO.Path]::GetExtension($trustedJQ) -ne '.exe'", 'Test-Path $trustedJQ -PathType Leaf',
@@ -50,11 +51,40 @@ function contract(text) {
   assert.equal((body.match(/\n\s+if:/g) ?? []).length, 1, 'only failure artifact guard');
   assert.equal(body.split('Add-Content $env:GITHUB_ENV "$key=$value"').length - 1, 2,
     'export both preserved caches and isolated test state');
+  assert.ok(body.includes('run: node --test .github/scripts/windows-suite.test.mjs\n'));
+  assert.ok(body.indexOf('run: node --test') < body.indexOf('npm ci'));
   assert.ok(body.indexOf('npm ci') < body.indexOf('& go test'));
   assert.ok(body.indexOf('Add-Content $env:GITHUB_ENV') < body.indexOf('npm ci'));
 }
 
 test('native observational full-module Windows contract', () => contract(source));
+
+test('installed Git entrypoints resolve to actual usr/bin Bash', {
+  skip: process.platform !== 'win32' && 'requires native Windows PowerShell path semantics',
+}, t => {
+  const body = job(source);
+  const root = body.match(/^\s+(\$gitRoot = .+)$/m)?.[1];
+  const bash = body.match(/^\s+(\$bash = Join-Path .+)$/m)?.[1];
+  assert.ok(root, 'extract current workflow root calculation');
+  assert.ok(bash, 'extract current workflow Bash calculation');
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', `
+    $ErrorActionPreference = 'Stop'
+    @('bin', 'cmd', 'mingw64/bin', 'usr/bin') | ForEach-Object {
+      $gitDir = 'C:\\Program Files\\Git\\' + $_.Replace('/', '\\')
+      ${root}
+      ${bash}
+      [pscustomobject]@{ entrypoint = $_; root = $gitRoot; bash = $bash }
+    } | ConvertTo-Json -Compress
+  `], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  const cases = JSON.parse(result.stdout);
+  t.diagnostic(JSON.stringify(cases));
+  assert.deepEqual(cases, ['bin', 'cmd', 'mingw64/bin', 'usr/bin'].map(entrypoint => ({
+    entrypoint, root: 'C:/Program Files/Git', bash: 'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+  })));
+});
 
 const mutations = [
   ['go test -json ./...', 'go test -json ./internal/setup/...'],

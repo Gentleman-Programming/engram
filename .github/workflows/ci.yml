@@ -455,6 +455,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Verify Windows suite contracts
+        run: node --test .github/scripts/windows-suite.test.mjs
+
       - name: Verify native prerequisites and isolate test state
         run: |
           $ErrorActionPreference = 'Stop'
@@ -469,7 +472,7 @@ jobs:
           Get-Command powershell.exe
           powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
           $gitDir = Split-Path (Get-Command git.exe).Source
-          $gitRoot = $gitDir.Replace('\', '/') -replace '/(cmd|mingw64/bin|usr/bin)$', ''
+          $gitRoot = $gitDir.Replace('\', '/') -replace '/(cmd|bin|mingw64/bin|usr/bin)$', ''
           $bash = Join-Path $gitRoot 'usr\bin\bash.exe'
           if (!(Test-Path $bash -PathType Leaf)) { throw 'Actual Git usr/bin/bash.exe required' }
           $bash = (Resolve-Path $bash).Path
