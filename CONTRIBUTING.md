@@ -252,9 +252,13 @@ Non-required PR checks include the Claude plugin version guard, lint, Windows se
 
 ### Windows full-suite baseline (#1891)
 
-The candidate `Windows Unit Tests (observational)` job runs `go test -json ./...` on
+The candidate `Windows Unit Tests (observational)` job runs `go test -json -p 1 ./...` on
 `windows-latest` for PRs and pushes to `main`, using the same pinned Go version
-as Linux. It does not run on merge groups during baseline collection. Existing
+as Linux. Packages run serially; this does not disable `t.Parallel` within a package.
+The default ten-minute package timeout and thirty-minute job budget are unchanged;
+a job-budget failure remains a failure, not permission to increase either limit.
+Package contention is an unproven hypothesis; hosted evidence is still needed.
+It does not run on merge groups during baseline collection. Existing
 Linux and selected Windows checks remain intact. This is not a required context;
 failing tests still fail the job, rather than being converted to success.
 

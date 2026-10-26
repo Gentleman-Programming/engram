@@ -511,7 +511,7 @@ jobs:
 
       - name: Run complete Go suite
         id: suite
-        run: go test -json ./...
+        run: go test -json -p 1 ./...
 
       - name: Record baseline result
         if: always()
@@ -520,7 +520,7 @@ jobs:
           SUITE_OUTCOME: ${{ steps.suite.outcome }}
         run: |
           @(
-            'Command: `go test -json ./...`'
+            'Command: `go test -json -p 1 ./...`'
             "Test step outcome: $env:SUITE_OUTCOME"
             "Run and diagnostics: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             'The test step log retains stdout, stderr, and the process exit code.'
