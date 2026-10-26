@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -3667,12 +3668,29 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 	prompts := make(chan capturedPrompt, 8)
 	const cwd = "/workspace with space/mañana"
 	const project = "hook test?mañana"
+	var decisionRequests, promptRequests atomic.Int32
+	var invocationOutput [][2]string
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		t.Logf("no-jq fixture: OS=%s bash=%q controlled PATH=%q invocations=%d capture-decision requests=%d prompt POST requests=%d", runtime.GOOS, bashPath, pathDirs, len(invocationOutput), decisionRequests.Load(), promptRequests.Load())
+		for i, output := range invocationOutput {
+			for stream, text := range output {
+				if len(text) > 4096 {
+					text = text[:4096] + "…"
+				}
+				t.Logf("hook invocation %d %s: %q", i+1, []string{"stdout", "stderr"}[stream], text)
+			}
+		}
+	}()
 	const expectedPrompt = "quote \" slash \\ newline\nbmp Ω pair 😃 esc \x1b"
 	input := `{"cwd":"/workspace with space/mañana","session_id":"session-677","prompt":"quote \" slash \\ newline\nbmp \u03a9 pair \uD83D\uDE03 esc \u001b"}`
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/prompts/capture-decision":
+			decisionRequests.Add(1)
 			var request struct{ Source, Cwd, Content string }
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode capture decision: %v", err)
@@ -3691,6 +3709,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			observationProjects <- r.URL.Query().Get("project")
 			_, _ = w.Write([]byte(`[{"created_at":"2000-01-01T00:00:00Z"}]`))
 		case "/prompts":
+			promptRequests.Add(1)
 			body, err := io.ReadAll(r.Body)
 			var payload promptPayload
 			if err == nil {
@@ -3732,7 +3751,9 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		runErr := cmd.Run()
+		invocationOutput = append(invocationOutput, [2]string{stdout.String(), stderr.String()})
+		if runErr != nil {
 			stderrText := stderr.String()
 			if len(stderrText) > 4096 {
 				stderrText = stderrText[:4096] + "…"
@@ -3740,7 +3761,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			if ctx.Err() != nil {
 				t.Fatalf("user prompt hook timed out: %v\nstderr: %s", ctx.Err(), stderrText)
 			}
-			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", err, stderrText)
+			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", runErr, stderrText)
 		}
 		if strings.Contains(stderr.String(), "jq:") {
 			t.Fatalf("user prompt hook invoked jq without jq on PATH: %s", stderr.String())

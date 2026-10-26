@@ -147,3 +147,20 @@ hosted execution on the new candidate. No rerun, assertion weakening, product
 change or larger budget is implied. Hook/Core and version-owner fixes remain
 separate scope decisions. Merge-group/main samples and a green, stable native
 baseline are still missing; do not promote the job from this failed sample.
+
+The normal follow-up [run 40396146998](https://github.com/Gentleman-Programming/engram/actions/runs/40396146998)
+used head `29838bcbd35c2e340cc3973077f95408ff02f046`, synthetic checkout
+`817bf6c95edb66c201b683a3dcba891a2b33bdf3` and the same reported runner image.
+The physical root was `/private/tmp`; previous path/history/backup and Core
+comparison cases passed. The native suite still failed: 8,432 pass / 2 fail /
+127 skip test/subtest events, with no unclassified skips, in 221.84s.
+Its remaining failures were the version-instruction test and the no-jq prompt hook.
+
+The test-owner follow-up asserts the existing exact update instructions for
+Darwin, Linux and other hosts instead of imposing the other-host Releases URL
+on Darwin. The no-jq fixture keeps its Unicode payload, three request checks,
+state/nudge assertions and original deadlines. Failure-only diagnostics record
+observed request counts and bounded child output; they do not repair or bypass
+a failing hook. A passing local Windows test is not Bash 3.2/macOS proof.
+The no-jq runtime cause and a green native baseline remain unproven; product
+hook changes require a separate scope decision.
