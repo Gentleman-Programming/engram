@@ -14,6 +14,10 @@ import (
 // history can be explicit or imported; it does not establish project ownership.
 // This query is needed only before first binding creation, not on each read.
 func (s *Store) ProjectHistory(directory string) ([]string, error) {
+	aliases, err := project.DirectoryHistoryAliases(directory)
+	if err != nil {
+		return nil, fmt.Errorf("project directory history: %w", err)
+	}
 	rows, err := s.queryItHook(s.db, `SELECT DISTINCT project, directory FROM sessions WHERE project IS NOT NULL AND project != '' AND directory != ''`)
 	if err != nil {
 		return nil, fmt.Errorf("project directory history: %w", err)
@@ -29,7 +33,7 @@ func (s *Store) ProjectHistory(directory string) ([]string, error) {
 		// Only a valid canonical name can be weak project evidence.
 		resolved, err := project.Resolve(project.ResolutionOptions{Mode: project.ResolutionExplicit, Explicit: name})
 		historicalDir := historicalDirectoryIdentity(storedDir)
-		if err == nil && historicalDir != "" && historicalDir == directory {
+		if err == nil && historicalDir != "" && project.DirectoryHistoryMatches(aliases, historicalDir) {
 			projects = append(projects, resolved.Project)
 		}
 	}

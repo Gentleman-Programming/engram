@@ -152,8 +152,16 @@ func TestSQLiteTempHTTPDeletedInheritedDirectory(t *testing.T) {
 	}
 	save := func(index int, kind, content string) float64 {
 		t.Helper()
+		requestStarted := time.Now()
+		requestCompleted := false
+		defer func() {
+			if !requestCompleted {
+				t.Logf("observation request failed: index=%d elapsed=%s", index, time.Since(requestStarted))
+			}
+		}()
 		result := call("POST", "/observations", map[string]any{"session_id": session, "project": project, "type": kind,
 			"title": fmt.Sprintf("Synthetic SQLite temporary row %04d", index), "content": content, "capture_prompt": false}, 201)
+		requestCompleted = true
 		want := float64(index + 1)
 		if result["id"] != want {
 			t.Fatalf("save %d identity=%v want=%v", index, result["id"], want)

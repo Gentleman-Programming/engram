@@ -196,6 +196,9 @@ jobs:
       - name: Run issue policy helper tests
         run: node --test .github/scripts/issue-*.test.mjs
 
+      - name: Verify Windows suite workflow contract
+        run: node --test .github/scripts/windows-suite.test.mjs
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -414,6 +417,115 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  # Not a required context during baseline collection. Failures stay visible:
+  # Only the separate trace probe may continue on error; the full suite may not.
+  windows-unit-tests:
+    name: Windows Unit Tests (observational)
+    runs-on: windows-latest
+    if: github.event_name != 'merge_group'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Set up Node.js for subprocess fixtures
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Select trusted Windows fixture tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = 'C:/Program Files/Git/usr/bin/bash.exe'
+          $jq = 'C:/ProgramData/chocolatey/lib/jq/tools/jq.exe'
+          $curl = 'C:/Windows/System32/curl.exe'
+          $required = @(
+            $bash, $jq, $curl,
+            'C:/Program Files/Git/usr/bin/cygpath.exe',
+            'C:/Program Files/Git/usr/bin/cat.exe',
+            'C:/Program Files/Git/usr/bin/dirname.exe',
+            'C:/Program Files/Git/usr/bin/chmod.exe'
+          )
+          foreach ($path in $required) {
+            Write-Output "Checking Windows fixture prerequisite: $path"
+            if ([System.IO.Path]::GetExtension($path) -ne '.exe' -or
+                -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing Windows fixture prerequisite: $path"
+            }
+          }
+          $bashVersion = & $bash --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed: $bash (exit $LASTEXITCODE)" }
+          $jqVersion = & $jq --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed: $jq (exit $LASTEXITCODE)" }
+          $curlVersion = & $curl --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed: $curl (exit $LASTEXITCODE)" }
+          $evidence = @("Trusted Bash: $bash", $bashVersion, "Trusted jq: $jq", $jqVersion, "Trusted curl: $curl", $curlVersion)
+          $evidence | Write-Output
+          @('## Windows fixture prerequisites', '```text') + $evidence + @('```') |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          @("CODEX_TEST_TRUSTED_BASH=$bash", "CODEX_TEST_TRUSTED_JQ=$jq", "CODEX_TEST_TRUSTED_CURL=$curl") |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Diagnose Git Bash temporary directory
+        shell: pwsh
+        run: ./.github/scripts/windows-bash-tmp-diagnostic.ps1
+
+      - name: Diagnose PerfRatchet temporary visibility
+        shell: pwsh
+        run: ./.github/scripts/windows-perf-temp-diagnostic.ps1
+
+      - name: Trace Codex isolation preflight
+        continue-on-error: true
+        env:
+          CODEX_TEST_TMP_TRACE: "1"
+        run: go test -mod=readonly ./plugin -run '^TestCodexShellIsolationPreflight$' -count=1 -timeout=90s -v
+
+      - name: Record Windows baseline environment
+        shell: pwsh
+        run: |
+          $evidence = @(
+            "Checked-out commit: $(git rev-parse HEAD)"
+            "Runner image: $env:ImageOS $env:ImageVersion"
+            "OS: $([System.Environment]::OSVersion.VersionString)"
+            (go version)
+            (go env GOOS GOARCH GOPROXY GOSUMDB CGO_ENABLED)
+            (git --version)
+            (bash --version)
+            (node --version)
+            ($PSVersionTable | Out-String)
+            (Get-Command bash, sh, node, pwsh, git, go | Format-Table Name, Source | Out-String)
+          )
+          $evidence | Write-Output
+          @('## Windows full-suite baseline', '```text') + $evidence + @('```') |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Run complete Go suite
+        id: suite
+        run: go test -json -p 1 ./...
+
+      - name: Record baseline result
+        if: always()
+        shell: pwsh
+        env:
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          @(
+            'Command: `go test -json -p 1 ./...`'
+            "Test step outcome: $env:SUITE_OUTCOME"
+            "Run and diagnostics: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            'The test step log retains stdout, stderr, and the process exit code.'
+            'Observational only; failures require classification under issue #1891.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
   windows-setup-test:
     name: Windows Setup Test

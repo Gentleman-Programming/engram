@@ -6418,6 +6418,19 @@ func TestAmbiguousRecoveryPreservesExistingSessionState(t *testing.T) {
 	}
 }
 
+func expectedAmbiguousFixturePath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return absolute
+}
+
 func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"same-a", "same-b"} {
@@ -6447,7 +6460,9 @@ func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
 		}
 	}
 	sess, err := s.GetSession("root")
-	if err != nil || sess.Project != "same-a" || sess.OwnershipMode != store.SessionOwnershipProjectOwned || sess.Directory != filepath.Join(parent, "same-a") {
+	expectedPath := expectedAmbiguousFixturePath(t, filepath.Join(parent, "same-a"))
+	if err != nil || sess.Project != "same-a" || sess.OwnershipMode != store.SessionOwnershipProjectOwned || sess.Directory != expectedPath {
+		t.Logf("expected_directory=%q actual_session=%#v", expectedPath, sess)
 		t.Fatalf("incorrect converged association: %#v %v", sess, err)
 	}
 }
@@ -6565,7 +6580,9 @@ func TestMemSave_AmbiguousUnknownSessionRecovery(t *testing.T) {
 		t.Fatalf("recovery failed: %s", callResultText(t, r))
 	}
 	sess, err := s.GetSession("runtime-root")
-	if err != nil || sess.Project != "recovery-b" || sess.Directory != filepath.Join(parent, "recovery-b") {
+	expectedPath := expectedAmbiguousFixturePath(t, filepath.Join(parent, "recovery-b"))
+	if err != nil || sess.Project != "recovery-b" || sess.Directory != expectedPath {
+		t.Logf("expected_directory=%q actual_session=%#v", expectedPath, sess)
 		t.Fatalf("wrong recovered association: %#v %v", sess, err)
 	}
 }
@@ -6608,7 +6625,9 @@ func TestMemSave_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 	if body["project"] != "repo-choice-b" || body["project_source"] != project.SourceUserSelectedAfterAmbiguousProject {
 		t.Fatalf("expected explicit user choice envelope, got %v", body)
 	}
-	if body["project_path"] != filepath.Join(parent, "repo-choice-b") {
+	expectedPath := expectedAmbiguousFixturePath(t, filepath.Join(parent, "repo-choice-b"))
+	if body["project_path"] != expectedPath {
+		t.Logf("expected_project_path=%q actual_project_path=%#v", expectedPath, body["project_path"])
 		t.Fatalf("expected project_path to point at selected repo root, got %v", body)
 	}
 	obs, err := s.Search("chosen project memory", store.SearchOptions{Project: "repo-choice-b", Limit: 5})
@@ -6869,7 +6888,9 @@ func TestMemSave_AmbiguousChoiceRequiresExactAvailableProject(t *testing.T) {
 	if body["project"] != "baz_qux" || body["project_source"] != project.SourceUserSelectedAfterAmbiguousProject {
 		t.Fatalf("expected exact ambiguous recovery project, got %v", body)
 	}
-	if body["project_path"] != filepath.Join(parent, "baz__qux") {
+	expectedPath := expectedAmbiguousFixturePath(t, filepath.Join(parent, "baz__qux"))
+	if body["project_path"] != expectedPath {
+		t.Logf("expected_project_path=%q actual_project_path=%#v", expectedPath, body["project_path"])
 		t.Fatalf("expected project_path to selected exact repo root, got %v", body)
 	}
 }
@@ -7353,7 +7374,9 @@ func TestMemSavePrompt_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 	if body["project"] != "repo-prompt-a" || body["project_source"] != project.SourceUserSelectedAfterAmbiguousProject {
 		t.Fatalf("expected explicit user choice envelope, got %v", body)
 	}
-	if body["project_path"] != filepath.Join(parent, "repo-prompt-a") {
+	expectedPath := expectedAmbiguousFixturePath(t, filepath.Join(parent, "repo-prompt-a"))
+	if body["project_path"] != expectedPath {
+		t.Logf("expected_project_path=%q actual_project_path=%#v", expectedPath, body["project_path"])
 		t.Fatalf("expected project_path to point at selected prompt repo root, got %v", body)
 	}
 	prompts, err := s.RecentPrompts("repo-prompt-a", 5)

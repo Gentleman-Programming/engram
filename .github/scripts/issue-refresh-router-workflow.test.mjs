@@ -50,24 +50,33 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // native adds only the original-event steps. CI includes the independently/native-approved
   // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b,
   // plus the approved #1994 TypeBox test bootstrap in f65380cc79ffa6fe63d4594b1e5341733d51f288.
+  // Approved #1891 adds observational Windows full-suite coverage and its contract check;
+  // prerequisite corrections declare reviewed Bash/jq/native Windows CURL selectors with fail-closed validation only.
   // #2030 adds dormant boundaries/source pins to native/legacy workflows only.
+  // Approved #1891 temp diagnostics observe existing paths without changing tools or tests.
+  // #1891 PerfRatchet observations add only owned-file controls; suite/assertions stay unchanged.
+  // #1891 adds a step-scoped observational Codex trace; the unfiltered suite still fails normally.
   // CI retains main's selected-proof bootstrap plus #2043's mandatory selected-Pi source test.
   // #1810 adds the dormant authenticated fork configuration path; other guards stay exact.
   // #2068 adds only the existing non-mutating tidy check to required Unit Tests after Go setup.
   // #2071 adds an isolated, read-only jq 1.6 compatibility job; existing CI jobs stay exact.
+  // #1891's pinned-main integration retains that job, tidy check and fork-proof bootstrap
+  // together with the feature parent's observational Windows job and contract step.
   // #2019 adds independent read-only scanner jobs and their policy-test step only.
   // #2096 adds only guarded workflow-level concurrency; existing CI jobs stay exact.
   // #2107 updates the nine explicit CI toolchain pins to Go 1.26.10; job guards stay exact.
+  // Incoming main's Go 1.26.10 toolchain also applies to the observational Windows job.
   // #2017 adds only the isolated PostgreSQL job and its policy-test step; existing guards stay exact.
   // #2018 adds the independent Linux race job with its measured 20m per-binary budget;
   // existing jobs stay exact.
   // #2100/#2055 add approved Node24 unit bootstrap and policy regression registration only.
+  // #1891 serializes only Windows full-suite packages with -p 1; selection and budgets stay exact.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'de119dc96ed1398371027d55516f66380cbadbad667200a38a4906116e8db6be',
+    '.github/workflows/ci.yml': '0b8cd476591151e176c2119f69f1f76720c302bcfbf1a21ab145533ccbfdb9af',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
