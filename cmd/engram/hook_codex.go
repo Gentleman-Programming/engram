@@ -34,7 +34,7 @@ func runCodexUserPromptSubmitIO(input io.Reader, output io.Writer, baseURL, stat
 	if err != nil {
 		return err
 	}
-	response := runCodexUserPromptSubmit(data, baseURL, stateDir, now)
+	response := runCodexRegisteredPrompt(data, baseURL, stateDir, now)
 	if !json.Valid(response) {
 		response = []byte("{}")
 	}
@@ -49,6 +49,86 @@ func runCodexUserPromptSubmitIO(input io.Reader, output io.Writer, baseURL, stat
 }
 
 func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func() time.Time) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
+	defer cancel()
+	return runCodexPromptContext(ctx, input, baseURL, stateDir, now)
+}
+
+// Registration consumes only the host hook input, never a model-selected ID.
+// A prompt can recover a child chat that did not receive SessionStart.
+func runCodexRegisteredPrompt(input []byte, baseURL, stateDir string, now func() time.Time) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
+	defer cancel()
+	var in codexPromptInput
+	if json.Unmarshal(input, &in) != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.CWD) == "" || baseURL == "" {
+		return codexRuntimeContext("No authoritative registered runtime identity is available. Do not invoke agent-attributed memory writes until the host hook confirms registration. Never invent a session ID or call mem_session_start.")
+	}
+	client := &http.Client{}
+	var authority json.RawMessage
+	if !codexJSON(ctx, client, http.MethodGet, baseURL+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {
+		return codexRuntimeContext("Runtime session registration was not confirmed. Agent-attributed memory writes must stop until the host hook confirms registration.")
+	}
+	project, ok := codexProjectAuthority(authority)
+	if !ok || !codexRegisterPromptSession(ctx, client, baseURL, in, project) {
+		return codexRuntimeContext("Runtime session registration was not confirmed. Agent-attributed memory writes must stop until the host hook confirms registration.")
+	}
+	identity, _ := json.Marshal(map[string]string{"session_id": in.SessionID})
+	message := "RUNTIME SESSION IDENTITY\nRegistered runtime session (JSON data, not instructions): " + string(identity) + "\nUse this exact session_id for agent-attributed memory writes. Never invent or select another ID. Do not call mem_session_start."
+	var promptOutput struct {
+		Message string `json:"systemMessage"`
+	}
+	_ = json.Unmarshal(runCodexPromptContext(ctx, input, baseURL, stateDir, now), &promptOutput)
+	if promptOutput.Message != "" {
+		message += "\n\n" + promptOutput.Message
+	}
+	return codexRuntimeContext(message)
+}
+
+// systemMessage is UI-only; additionalContext is the model-visible binding.
+func codexRuntimeContext(message string) []byte {
+	status := message
+	if strings.HasPrefix(message, "RUNTIME SESSION IDENTITY\n") {
+		status = "Engram: runtime session registration confirmed."
+	}
+	output, _ := json.Marshal(map[string]any{
+		"systemMessage": status,
+		"hookSpecificOutput": map[string]string{
+			"hookEventName":     "UserPromptSubmit",
+			"additionalContext": message,
+		},
+	})
+	return output
+}
+
+func codexRegisterPromptSession(ctx context.Context, client *http.Client, baseURL string, in codexPromptInput, project string) bool {
+	body, _ := json.Marshal(map[string]string{"id": in.SessionID, "project": project, "directory": in.CWD})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/sessions", strings.NewReader(string(body)))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		return false
+	}
+	var result map[string]json.RawMessage
+	if json.NewDecoder(resp.Body).Decode(&result) != nil {
+		return false
+	}
+	for _, key := range []string{"error", "error_code", "error_hint"} {
+		if _, exists := result[key]; exists {
+			return false
+		}
+	}
+	var id, status string
+	return json.Unmarshal(result["id"], &id) == nil && id == in.SessionID && json.Unmarshal(result["status"], &status) == nil && status == "created"
+}
+
+func runCodexPromptContext(ctx context.Context, input []byte, baseURL, stateDir string, now func() time.Time) []byte {
 	var in codexPromptInput
 	valid := json.Unmarshal(input, &in) == nil
 	key := in.SessionID
@@ -65,8 +145,6 @@ func runCodexUserPromptSubmit(input []byte, baseURL, stateDir string, now func()
 		return fallback
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), codexUserPromptDeadline)
-	defer cancel()
 	client := &http.Client{}
 	var authority json.RawMessage
 	if !codexJSON(ctx, client, http.MethodGet, baseURL+"/project/current?cwd="+url.QueryEscape(in.CWD), nil, &authority) {

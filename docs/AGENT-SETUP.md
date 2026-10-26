@@ -438,6 +438,8 @@ gemini mcp add engram engram mcp
 
 ## Codex
 
+The native Windows `UserPromptSubmit` hook also registers the exact host-provided session ID. This recovers child chats that did not receive `SessionStart`. It injects the ID through `hookSpecificOutput.additionalContext` only after an HTTP 201 response confirms the same ID and `created` status, without an error field. `systemMessage` provides a short UI status; it does not deliver the ID to the model. Failed confirmation blocks prompt persistence and emits a memory-write warning in both channels. Registration, prompt capture, and reminders share a 1.5-second deadline.
+
 Recommended: one command to set up MCP + compaction recovery instructions:
 
 ```bash

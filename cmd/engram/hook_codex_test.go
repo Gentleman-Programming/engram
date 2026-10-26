@@ -23,6 +23,90 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
+func TestCodexNativePromptConfirmsHostIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, response string
+		status             int
+		confirmed          bool
+	}{
+		{"child", "child-host", `{"id":"child-host","status":"created"}`, 201, true},
+		{"wrong host", "child-host", `{"id":"parent-host","status":"created"}`, 201, false},
+		{"wrong status", "child-host", `{"id":"child-host","status":"created"}`, 200, false},
+		{"error", "child-host", `{"id":"child-host","status":"created","error":"rejected"}`, 201, false},
+		{"malformed response", "child-host", `{`, 201, false},
+		{"server unavailable", "child-host", `{}`, 503, false},
+		{"missing id", "", `{}`, 201, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var registrations, prompts int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"git_root"}`)
+				case "/sessions":
+					registrations++
+					var body map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if body["id"] != tc.id || body["project"] != "engram" || body["directory"] != "C:/work" {
+						t.Errorf("registration does not match host input: %v", body)
+					}
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.response)
+				case "/prompts":
+					prompts++
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			input, _ := json.Marshal(codexPromptInput{CWD: "C:/work", SessionID: tc.id, Prompt: "test"})
+			var out bytes.Buffer
+			stateDir := t.TempDir()
+			if err := runCodexUserPromptSubmitIO(bytes.NewReader(input), &out, server.URL, stateDir, time.Now); err != nil {
+				t.Fatal(err)
+			}
+			var response struct {
+				SystemMessage string `json:"systemMessage"`
+				Output        struct {
+					Event   string `json:"hookEventName"`
+					Context string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Output.Event != "UserPromptSubmit" || response.Output.Context == "" {
+				t.Fatalf("hook did not deliver model-visible context: %s", out.String())
+			}
+			if strings.Contains(response.Output.Context, `{"session_id":"child-host"}`) != tc.confirmed {
+				t.Fatalf("identity confirmation = %q, want confirmed %v", out.String(), tc.confirmed)
+			}
+			if tc.id == "" && registrations != 0 {
+				t.Fatal("registered an invented ID")
+			}
+			if !tc.confirmed && prompts != 0 {
+				t.Fatal("persisted prompt without confirmation")
+			}
+			if tc.confirmed && (prompts != 1 || registrations != 1) {
+				t.Fatalf("registrations=%d prompts=%d", registrations, prompts)
+			}
+			if tc.confirmed {
+				out.Reset()
+				if err := runCodexUserPromptSubmitIO(bytes.NewReader(input), &out, server.URL, stateDir, time.Now); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(response.Output.Context, `{"session_id":"child-host"}`) || registrations != 2 || prompts != 2 {
+					t.Fatalf("next prompt did not confirm the same host: %s", out.String())
+				}
+			}
+		})
+	}
+}
+
 func TestCodexAdapterPersistsWritesForDistinctSameWorktreeHosts(t *testing.T) {
 	root := t.TempDir()
 	db, err := store.New(store.FallbackConfig(filepath.Join(root, "store")))
@@ -203,8 +287,8 @@ func TestCodexSessionStartInterleavedHostWritesAndUnconfirmedRegistration(t *tes
 		cmdHook([]string{"codex-pre-tool-use"})
 		var hook struct {
 			HookSpecificOutput struct {
-				PermissionDecision string `json:"permissionDecision"`
-				UpdatedInput map[string]any `json:"updatedInput"`
+				PermissionDecision string         `json:"permissionDecision"`
+				UpdatedInput       map[string]any `json:"updatedInput"`
 			} `json:"hookSpecificOutput"`
 		}
 		if err := json.Unmarshal(output, &hook); err != nil {
