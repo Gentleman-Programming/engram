@@ -193,6 +193,9 @@ jobs:
       - name: Run scanner policy tests
         run: node --test .github/scripts/ci-scanners.test.mjs
 
+      - name: Run technical CI contract tests
+        run: node --test .github/scripts/ci-technical-contracts.test.mjs
+
       - name: Run issue policy helper tests
         run: node --test .github/scripts/issue-*.test.mjs
 

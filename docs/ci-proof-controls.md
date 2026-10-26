@@ -34,8 +34,17 @@ inside a job. Controllers remain unchanged and OFF; there is no measured savings
 claim or hosted gate/queue proof. Controller activation, reruns and other hosted
 experiments require separate authorization.
 
-Run `node --test .github/scripts/issue-ci-concurrency.test.mjs` for local routing
-regressions; retain the producer and proof-control suites below.
+Run `node --test .github/scripts/ci-technical-contracts.test.mjs` for independently
+owned technical workflow contracts: ordinary PR/main/merge-group isolation,
+race/toolchain/failure behavior, verification commands/order, permissions, events
+and discovery. It needs no proof helpers or qualification data and also validates
+a fixture without the hold step. These source checks are not hosted execution
+or cancellation evidence.
+
+Run `node --test .github/scripts/issue-ci-concurrency.test.mjs` for the exact
+proof admission predicate, reserved prefixes and nonempty raw selectors. Retain
+the producer, bootstrap/security/integrity and proof-control suites below; local
+technical coverage does not replace live hosted cancellation proof.
 
 ## Public API
 

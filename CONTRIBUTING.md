@@ -248,7 +248,7 @@ retain their trusted `pull_request_target` checkout boundaries; neither executes
 PR-head code. Local event-matrix tests do not prove hosted event delivery or
 measured savings; verify actual runs after integration on the trusted branch.
 
-Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
+Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus explicit `.github/scripts/ci-technical-contracts.test.mjs` execution and a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
 ### CI concurrency
 
@@ -267,7 +267,12 @@ This is workflow admission, not the job's parsed controller selection. Controlle
 and their bootstrap remain unchanged and OFF. Fork/rerun variable visibility,
 control transitions and scheduling by commit recency are not hosted-qualified;
 no savings have been measured. See [proof boundaries](docs/ci-proof-controls.md#workflow-admission-concurrency-2096).
-Local routing checks: `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
+Local technical checks (no proof helpers or qualification data):
+`node --test .github/scripts/ci-technical-contracts.test.mjs`.
+This suite owns ordinary PR/main/merge-group routing, race/toolchain/failure
+contracts, existing verification commands and their ordering, permissions,
+events and test discovery. Proof-specific admission remains covered by
+`node --test .github/scripts/issue-ci-concurrency.test.mjs`.
 Hosted experiments require separate authorization.
 
 ### Go race detection (initially non-required)
@@ -280,7 +285,8 @@ budget follows a corrected local store race run of 14m04s. The successful
 at head `b64205b3` took 19m04s; the separate 30-minute job budget stays provisional.
 No required-check settings change. See [scope, local reproduction and failure
 classification](docs/ci-go-race.md).
-Local structural checks: `node --test .github/scripts/issue-go-race-ci.test.mjs`.
+Local structural checks: `node --test .github/scripts/ci-technical-contracts.test.mjs`.
+These inspect workflow contracts; they do not execute the Go race suite.
 
 ### CI scanners (initially non-required)
 
@@ -658,7 +664,8 @@ relative to the repository root.
 | Pi plugin | `plugin/pi` | Node.js 24, npm, and Go from [go.mod](go.mod) for Go-backed fixtures; run `npm ci --ignore-scripts --legacy-peer-deps` for the locked real-TypeBox test dependency (no Pi SDK peers) | `npm test` | Pi plugin suite from a Go checkout, including fixture-based workflows; not the full installed-host lifecycle. See [scripts](plugin/pi/package.json) and [real HTTP test prerequisites](plugin/pi/README.md#testing-the-real-http-workflows). |
 | Obsidian plugin | `plugin/obsidian` | Node.js 24, npm, and dependencies installed with `npm ci` under the existing [dependency policy](#npm-dependency-hygiene) | `npm test`, `npm run typecheck`, `npm run build` | Plugin tests, TypeScript checking, and bundle generation; not an interactive Obsidian smoke test. See [scripts](plugin/obsidian/package.json). |
 | PR policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs` | Merge-queue, label, artifact and PR-size helper logic; not live GitHub permissions or event delivery. |
-| Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy helper suites; not live approval-refresh behavior. |
+| Technical CI contracts | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/ci-technical-contracts.test.mjs` | Proof-independent workflow commands, ordering, race, permissions, events, discovery and ordinary concurrency; not hosted execution/cancellation proof. |
+| Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy and proof-specific helper suites; not live approval-refresh behavior. |
 
 The **Unit Tests** job provides Node.js 24 for the Go-owned Core lifecycle tests.
 The `tools/release-candidate` Core lifecycle tests require Node.js >=24 in PATH;
