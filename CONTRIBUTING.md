@@ -209,7 +209,10 @@ observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
 do not raise it to hide failures.
 
 The job checks Go 1.26.10, Node 24, PowerShell and Git for Windows Bash with
-jq/curl, then installs locked Pi schema dependencies with
+jq/curl. It selects actual Git `usr/bin/bash.exe` (not the `bin` launcher),
+validates the absolute `jq.exe` selected from PATH, and exports the existing
+`CODEX_TEST_TRUSTED_BASH` / `CODEX_TEST_TRUSTED_JQ` fixture selectors before tests.
+It then installs locked Pi schema dependencies with
 `npm ci --ignore-scripts --legacy-peer-deps`. `ENGRAM_PI_SCHEMA_REQUIRE_REAL=1`
 makes that schema prerequisite mandatory rather than silently skipped.
 Missing mandatory tools fail preparation; no substitute tools are installed.

@@ -469,11 +469,16 @@ jobs:
           Get-Command powershell.exe
           powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
           $gitDir = Split-Path (Get-Command git.exe).Source
-          $bash = @('bash.exe', '..\bin\bash.exe', '..\..\bin\bash.exe') |
-            ForEach-Object { Join-Path $gitDir $_ } |
-            Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
-          if (!$bash) { throw 'Git for Windows Bash required' }
+          $gitRoot = $gitDir.Replace('\', '/') -replace '/(cmd|mingw64/bin|usr/bin)$', ''
+          $bash = Join-Path $gitRoot 'usr\bin\bash.exe'
+          if (!(Test-Path $bash -PathType Leaf)) { throw 'Actual Git usr/bin/bash.exe required' }
           $bash = (Resolve-Path $bash).Path
+          if ($bash -notlike '*\usr\bin\bash.exe') { throw 'Git bin launcher is not supported' }
+          $jq = Get-Command jq.exe -CommandType Application
+          $trustedJQ = (Resolve-Path $jq.Source).Path
+          if (![IO.Path]::IsPathFullyQualified($trustedJQ) -or [IO.Path]::GetExtension($trustedJQ) -ne '.exe' -or !(Test-Path $trustedJQ -PathType Leaf)) { throw 'Absolute real jq.exe required' }
+          & $trustedJQ --version
+          if ($LASTEXITCODE -ne 0) { throw 'Trusted jq verification failed' }
           Write-Output "Selected Git Bash: $bash"
           # Make PATH discovery agree with the Git-relative fixture discovery.
           $bashDir = Split-Path $bash
@@ -481,6 +486,9 @@ jobs:
           Add-Content $env:GITHUB_PATH $bashDir
           & $bash -lc 'set -euo pipefail; command -v bash jq curl; bash --version; jq --version; curl --version'
           Get-Command bash, jq, curl
+          # Existing Codex fixtures require explicit reviewed real executables.
+          Add-Content $env:GITHUB_ENV "CODEX_TEST_TRUSTED_BASH=$bash"
+          Add-Content $env:GITHUB_ENV "CODEX_TEST_TRUSTED_JQ=$trustedJQ"
           # Resolve Go defaults before changing home; retain setup-go's caches.
           foreach ($key in @('GOPATH', 'GOCACHE', 'GOMODCACHE')) {
             $value = go env $key
