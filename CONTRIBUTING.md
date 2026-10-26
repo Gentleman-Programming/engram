@@ -250,6 +250,42 @@ measured savings; verify actual runs after integration on the trusted branch.
 
 Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus explicit `.github/scripts/ci-technical-contracts.test.mjs` execution and a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
 
+### CI job execution ceilings
+
+The [accepted #2020 execution contract](https://github.com/Gentleman-Programming/engram/issues/2020#issuecomment-6423158281)
+sets these initial job-level `timeout-minutes` ceilings in
+[CI](.github/workflows/ci.yml):
+
+| Job ID | Outer timeout (minutes) |
+|---|---:|
+| `lint` | 15 |
+| `policy-helper-tests` | 10 |
+| `unit-tests` | 20 |
+| `e2e-tests` | 15 |
+| `windows-setup-test` | 20 |
+| `wrapper-tests-windows` | 15 |
+| `obsidian-build` | 10 |
+| `perf-ratchet` | 20 |
+
+Each ceiling includes the entire job, including checkout, tool/dependency setup
+and every existing check. Unit Tests' 20 minutes includes administrative helper
+preparation and the selected proof wait (up to five minutes), setup, tidy,
+generated-output and deadcode checks, the Go suite, build and quick self-test.
+The proof-branch bootstrap's 15-second limit is not a universal administrative
+fetch bound. Go's default 10-minute test timeout applies per test binary, not to
+the whole suite.
+
+These are initial operational ceilings, not validated cold/failure-path SLOs.
+Exhaustion remains a failure; retain original diagnostics without masking errors,
+automatically increasing budgets or weakening coverage. Hosted timeout and
+cleanup behavior is not established by structural tests. Existing bounded jobs,
+inner deadlines, commands, conditions, required contexts and queue stay unchanged,
+including Race's 30-minute outer and 20-minute per-binary limits.
+
+Run `node --test .github/scripts/issue-ci-timeouts.test.mjs` for the ceiling map,
+missing/wrong/step-only negative cases, preserved budgets and documentation checks.
+Existing issue-helper discovery includes this suite; no new required check is added.
+
 ### CI concurrency
 
 CI uses a workflow-namespaced PR-number concurrency group with cancellation

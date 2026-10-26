@@ -148,6 +148,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name != 'merge_group'
     permissions:
       contents: read
@@ -173,6 +174,7 @@ jobs:
   policy-helper-tests:
     name: Policy Helper Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -205,6 +207,7 @@ jobs:
     permissions:
       contents: read
       issues: read
+    timeout-minutes: 20
     steps:
       - name: Await selected CI proof
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -404,6 +407,7 @@ jobs:
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -421,6 +425,7 @@ jobs:
   windows-setup-test:
     name: Windows Setup Test
     runs-on: windows-latest
+    timeout-minutes: 20
     if: github.event_name != 'merge_group'
     steps:
       - name: Checkout
@@ -442,6 +447,7 @@ jobs:
   wrapper-tests-windows:
     name: Cloud Sync Wrapper Tests (Windows)
     runs-on: windows-latest
+    timeout-minutes: 15
     if: github.event_name != 'merge_group'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -453,6 +459,7 @@ jobs:
   obsidian-build:
     name: Obsidian Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -527,6 +534,7 @@ jobs:
     name: Performance Ratchet
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
