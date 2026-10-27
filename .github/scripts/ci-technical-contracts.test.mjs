@@ -327,13 +327,14 @@ function adapterSummary(pi = tap(piRequired, [[host, hostReason]]), oc = tap(ocR
     return { ...result, report };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-test('adapter evidence preserves exact counts and installed-host exclusion', () => {
-  const result = adapterSummary();
+test('adapter evidence preserves counts, repeated parameterized names and installed-host exclusion', () => {
+  const repeated = 'V2 degraded warning preserves completed content and pending unknown results';
+  const result = adapterSummary(undefined, tap([...ocRequired, repeated, repeated]));
   assert.equal(result.status, 0);
   assert.equal(result.report.coverage, 'complete-with-listed-exclusions');
   assert.deepEqual(result.report.suites.pi.skips, [{ name: host, reason: hostReason }]);
   assert.deepEqual(result.report.suites.pi.counts, { tests: 4, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 1, todo: 0 });
-  assert.equal(result.report.suites.opencode.counts.pass, 1);
+  assert.deepEqual(result.report.suites.opencode.counts, { tests: 3, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 0, todo: 0 });
 });
 test('adapter evidence consumes actual Node24 TAP including nested tests', () => {
   const dir = mkdtempSync(join(tmpdir(), 'adapter-tap-'));

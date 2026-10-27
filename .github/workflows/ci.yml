@@ -317,7 +317,7 @@ jobs:
                 }
                 const entry = line.match(/^(ok|not ok) (\d+) - (.*?)(?: # SKIP (.*))?$/);
                 if (entry) {
-                  if (!header || entry[1] !== 'ok' || Number(entry[2]) !== ++number || seen.has(entry[3])) throw Error('invalid top-level result');
+                  if (!header || entry[1] !== 'ok' || Number(entry[2]) !== ++number) throw Error('invalid top-level result');
                   seen.add(entry[3]);
                   if (entry[4] !== undefined) result.skips.push({ name: entry[3], reason: entry[4] });
                 }

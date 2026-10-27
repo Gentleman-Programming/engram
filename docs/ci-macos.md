@@ -57,7 +57,10 @@ First normal PR [run 40456433724](https://github.com/Gentleman-Programming/engra
 head `493992f9`, checkout `9b59e22c`, executed Pi on Darwin ARM64: 615 pass /
 23 fail / 1 skip in 106.57s; OpenCode was skipped. Inherited NODE_OPTIONS
 reporter flags collided with child fixtures\u0027 explicit TAP flags. CLI-only selection
-corrects that wiring; native execution of the correction remains unverified.
+fixed that wiring. Follow-up run 40459952974 (head `6bf00647`) executed Pi
+638 pass / 1 opt-in skip and OpenCode 273 pass / 0 skip; only the summary failed
+by rejecting a legitimate repeated parameterized name. That guard is corrected;
+new native job execution remains pending, not established by replaying its TAP.
 No adapter execution on Darwin is established by local Node structural checks.
 Foundation PR run 40443462722 (head d9f0ab3baab017d8245f46b4381c8deccd48267f),
 merge-group 40445951871 and main 40446353609 (both at
