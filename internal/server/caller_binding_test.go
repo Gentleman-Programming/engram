@@ -50,15 +50,15 @@ func TestCallerBindingAssessment(t *testing.T) {
 		{name: "ordinal one", root: "root", effective: "root:resume:1", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active", next: inspect},
 		{name: "foreign identity", root: "root", effective: "foreign", project: "fixture", reason: "effective_mapping_invalid", status: "blocked", rootState: "active", effectiveState: "active", next: inspect},
 		{name: "host absent", root: "root", effective: "root", project: "fixture", reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active", next: collect},
-		{name: "live root", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{&no, &no}, reason: "binding_observed", status: "ok", rootState: "active", effectiveState: "active", next: observe},
-		{name: "ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, endEffective: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "resume_required", status: "warning", rootState: "ended", effectiveState: "ended", next: resume},
-		{name: "ended root with live continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "binding_observed", status: "ok", rootState: "ended", effectiveState: "active", next: observe},
-		{name: "branch unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&yes, &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended", next: resume},
+		{name: "live root", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{AppendEntryAvailable: &no, BranchAvailable: &no}, reason: "binding_observed", status: "ok", rootState: "active", effectiveState: "active", next: observe},
+		{name: "ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, endEffective: true, host: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes, BranchAvailable: &yes}, reason: "resume_required", status: "warning", rootState: "ended", effectiveState: "ended", next: resume},
+		{name: "ended root with live continuation", root: "root", effective: "root:resume:2", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes, BranchAvailable: &yes}, reason: "binding_observed", status: "ok", rootState: "ended", effectiveState: "active", next: observe},
+		{name: "branch unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes, BranchAvailable: &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended", next: resume},
 		{name: "lookup unavailable", root: "root", effective: "root", project: "fixture", lookupErr: errors.New("private database path"), reason: "caller_binding_unavailable", status: "unknown", rootState: "unknown", effectiveState: "unknown", next: verify},
-		{name: "both persistence APIs unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{&no, &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended", next: resume},
+		{name: "both persistence APIs unavailable", root: "root", effective: "root", project: "fixture", endRoot: true, host: &diagnostic.CallerHostContext{AppendEntryAvailable: &no, BranchAvailable: &no}, reason: "ended_session_without_persistence", status: "blocked", rootState: "ended", effectiveState: "ended", next: resume},
 		{name: "append evidence missing", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{BranchAvailable: &yes}, reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active", next: collect},
 		{name: "branch evidence missing", root: "root", effective: "root", project: "fixture", host: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes}, reason: "host_context_missing", status: "unknown", rootState: "active", effectiveState: "active", next: collect},
-		{name: "active root with ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endEffective: true, host: &diagnostic.CallerHostContext{&yes, &yes}, reason: "resume_required", status: "warning", rootState: "active", effectiveState: "ended", next: resume},
+		{name: "active root with ended continuation", root: "root", effective: "root:resume:2", project: "fixture", endEffective: true, host: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes, BranchAvailable: &yes}, reason: "resume_required", status: "warning", rootState: "active", effectiveState: "ended", next: resume},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := map[string]*store.Session{"root": {Project: "fixture"}}
@@ -127,7 +127,7 @@ func TestCallerBindingProjectValidation(t *testing.T) {
 			}
 			got := diagnostic.AssessCallerBinding(callerReader{rows: rows}, diagnostic.CallerBindingInput{
 				Project: tc.caller, RuntimeSessionID: "root", EffectiveSessionID: effective,
-				HostContext: &diagnostic.CallerHostContext{&yes, &yes},
+				HostContext: &diagnostic.CallerHostContext{AppendEntryAvailable: &yes, BranchAvailable: &yes},
 			})
 			state, next := "active", "Inspect the runtime binding; diagnosis does not repair it."
 			switch tc.status {
