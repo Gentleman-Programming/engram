@@ -64,6 +64,12 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #2100/#2055 add approved Node24 unit bootstrap and policy regression registration only.
   // #2144 adds only explicit technical-contract discovery alongside the unchanged issue wildcard.
   // #2149 adds only the eight outer job ceilings accepted in #2020 comment 6423158281.
+  // #2121 adds only the independent advisory native macOS ARM64 baseline; existing jobs stay exact.
+  // Its bounded follow-up resolves the physical fixture root and lists observed PG/Windows skip reasons only.
+  // The summary-only follow-up requires the actual native-test outcome to be success for completeness.
+  // #2150 adds only the independent advisory macOS adapter lane and its inline evidence report.
+  // #2160 scopes its TAP reporter flags to the CLI, preserving child fixture environments.
+  // #2160 permits repeated parameterized names while retaining numeric TAP identity checks.
   // #1891 adds only the observational Windows suite/discovery, including trusted Bash/jq prerequisites,
   // Git/bin root resolution and its native Windows path contract step.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
@@ -71,7 +77,7 @@ test('workflow baselines retain readiness guards and pin original-event identity
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'a6b8a4323f32eccb172521ec7d6c143bf270c3eb2b98d89899179971b4c2b2b1',
+    '.github/workflows/ci.yml': 'aeb32473db4636bb74e2a7a100361101e569f64ea0be5e6351ef22737eac1df6',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);
