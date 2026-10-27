@@ -10,7 +10,7 @@ function contract(text) {
   const body = job(text);
   assert.ok(body, 'independent Windows job');
   assert.match(text, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main\n/);
-  assert.match(text, /run: node --test \.github\/scripts\/windows-suite\.test\.mjs\n/);
+  assert.match(text, /run: node --test \.github\/scripts\/windows-suite\.test\.mjs \.github\/scripts\/windows-bash-temp-diagnostics\.test\.mjs\n/);
   for (const line of ['name: Windows Full Suite (Observational)', 'runs-on: windows-2025',
     'timeout-minutes: 30', 'contents: read', 'GOTOOLCHAIN: local',
     'ENGRAM_PI_SCHEMA_REQUIRE_REAL: "1"', 'shell: pwsh',
@@ -48,16 +48,36 @@ function contract(text) {
     assert.match(body, new RegExp(`(?:^|[ ;])${key} = '(?:home|appdata|localappdata|data|tmp)'`, 'm'), `isolated ${key}`);
   }
   assert.doesNotMatch(body, /continue-on-error|needs:|: write|secrets\.|\|\| true| -p | -parallel| -run | -short| -skip| -tags| -timeout|GOFLAGS|GOOS:|GOARCH:/);
-  assert.equal((body.match(/\n\s+if:/g) ?? []).length, 1, 'only failure artifact guard');
+  assert.equal((body.match(/\n\s+if:/g) ?? []).length, 3, 'failure evidence plus diagnostic collection/artifact guards');
   assert.equal(body.split('Add-Content $env:GITHUB_ENV "$key=$value"').length - 1, 2,
     'export both preserved caches and isolated test state');
-  assert.ok(body.includes('run: node --test .github/scripts/windows-suite.test.mjs\n'));
+  assert.ok(body.includes('run: node --test .github/scripts/windows-suite.test.mjs .github/scripts/windows-bash-temp-diagnostics.test.mjs\n'));
   assert.ok(body.indexOf('run: node --test') < body.indexOf('npm ci'));
   assert.ok(body.indexOf('npm ci') < body.indexOf('& go test'));
   assert.ok(body.indexOf('Add-Content $env:GITHUB_ENV') < body.indexOf('npm ci'));
 }
 
 test('native observational full-module Windows contract', () => contract(source));
+
+function diagnostics(text) {
+  const body = job(text);
+  const snapshot = body.indexOf('windows-bash-temp-diagnostics.mjs snapshot');
+  assert.ok(snapshot > 0 && snapshot < body.indexOf('$paths = @{'), 'snapshot before private exports');
+  assert.match(body, /curl --version; printf "BASH_TEMP/);
+  const suite = body.indexOf('exit $suiteExit');
+  const collection = body.indexOf('windows-bash-temp-diagnostics.mjs collect');
+  assert.ok(collection > suite, 'collect after original suite');
+  assert.match(body, /name: Collect representative Bash temp diagnostics\n\s+if: \$\{\{ !cancelled\(\) \}\}/);
+  assert.match(body, /name: Preserve Bash temp diagnostics\n\s+if: always\(\)/);
+  assert.ok(body.includes('path: ${{ runner.temp }}/windows-suite/diagnostics'));
+}
+test('bounded post-suite temp diagnostics preserve prerequisite ordering', () => diagnostics(source));
+test('reject missing diagnostic snapshot, streams and artifact wiring', () => {
+  for (const token of ['windows-bash-temp-diagnostics.mjs snapshot', 'windows-bash-temp-diagnostics.mjs collect', 'curl --version; printf "BASH_TEMP', 'path: ${{ runner.temp }}/windows-suite/diagnostics']) {
+    assert.ok(job(source).includes(token));
+    assert.throws(() => diagnostics(source.replace(token, 'lost-diagnostic')));
+  }
+});
 
 test('installed Git entrypoints resolve to actual usr/bin Bash', {
   skip: process.platform !== 'win32' && 'requires native Windows PowerShell path semantics',

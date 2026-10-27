@@ -221,7 +221,18 @@ Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
 provide process isolation, not measured proof of cleanup.
 
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
-failure artifacts when available. Cancellation/outer timeout can leave partial
+failure artifacts when available. The existing prerequisite Bash invocation also
+records safe temp aliases and `/tmp` mapping/existence. After the unchanged suite,
+a cancellation-aware, two-minute diagnostic step records three representative
+Bash environments (original profile aliases, suite aliases, minimal fixture-like).
+`windows-bash-temp-<run>-<attempt>` artifacts retain the original safe-alias
+snapshot and exact child exit/stdout/stderr, including errors; private diagnostic
+scratch is removed. These are not the actual Go fixture children or Go
+`os.TempDir()`, and do not establish root cause or comparable baseline/candidate
+behavior. No startup files or fixture gate run in the representative matrix.
+For local collection, run `node .github/scripts/windows-bash-temp-diagnostics.mjs --help` for snapshot/collect arguments; `CODEX_TEST_TRUSTED_BASH` must identify the
+reviewed absolute Bash executable. Diagnostic errors never replace the recorded
+suite exit or repair a missing temp directory. Cancellation/outer timeout can leave partial
 output without a completed exit/timing record. Wiring and structural tests do
 **not** complete #1891: hosted checked-out SHA, actual toolchain, exit, elapsed
 time and skip review are still missing. Optional-service and foreign-OS skips
