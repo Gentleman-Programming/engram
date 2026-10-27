@@ -70,12 +70,13 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // #2150 adds only the independent advisory macOS adapter lane and its inline evidence report.
   // #2160 scopes its TAP reporter flags to the CLI, preserving child fixture environments.
   // #2160 permits repeated parameterized names while retaining numeric TAP identity checks.
+  // #2150 adds the independent Windows adapter lane and extracts the unchanged Mac TAP checker.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'bfa03d6a0695ccf506762e53aeb7312f7e3b0a448c88860124883f9ce28e6d48',
+    '.github/workflows/ci.yml': 'b88646af98b647858f5e9c49b5ec850a72b3de6e9296657baa840c8850bfa190',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

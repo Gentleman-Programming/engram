@@ -198,9 +198,10 @@ test('native macOS rejects scope, prerequisites, budget and failure regressions'
   assert.throws(() => macos(source.replace(original, original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
 });
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 function summarize(events, raw, outcome = 'success') {
@@ -267,9 +268,11 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
 });
 
 
-for (const suite of ['Pi', 'OpenCode']) {
-  test(`native ${suite} reporter stays out of child fixtures and preserves failures`, () => {
-    const script = job(source, 'macos-adapter-tests').match(new RegExp(
+for (const platform of ['macos', 'windows']) for (const suite of ['Pi', 'OpenCode']) {
+  test(`native ${platform} ${suite} reporter stays out of child fixtures and preserves failures`, {
+    skip: platform === 'windows' && process.platform !== 'win32' && 'requires native Windows PowerShell',
+  }, () => {
+    const script = job(source, `${platform}-adapter-tests`).match(new RegExp(
       `      - name: Run ${suite} adapters\\n[\\s\\S]*?        run: \\|\\n([\\s\\S]*?)(?=      - name:)`))[1].replace(/^          /gm, '');
     const dir = mkdtempSync(join(tmpdir(), 'adapter-reporter-'));
     try {
@@ -287,7 +290,8 @@ for (const suite of ['Pi', 'OpenCode']) {
       const env = { ...process.env, RUNNER_TEMP: dir.replaceAll('\\', '/'), HOME: dir, NODE_OPTIONS: '--max-old-space-size=128' };
       delete env.NODE_TEST_CONTEXT;
       for (const fail of [false, true]) {
-        const result = spawnSync('bash', ['-c', script], { cwd: dir, encoding: 'utf8',
+        const result = spawnSync(platform === 'windows' ? 'pwsh' : 'bash',
+          platform === 'windows' ? ['-NoProfile', '-NonInteractive', '-Command', script] : ['-c', script], { cwd: dir, encoding: 'utf8',
           env: { ...env, ...(fail ? { ADAPTER_PROBE_FAIL: '1' } : {}) } });
         assert.equal(result.status, fail ? 1 : 0, result.stdout + result.stderr);
         assert.equal(result.stderr, '');
@@ -301,6 +305,106 @@ for (const suite of ['Pi', 'OpenCode']) {
   });
 }
 
+
+function windowsAdapters(text) {
+  const body = job(text, 'windows-adapter-tests');
+  for (const value of ['name: Native Windows x64 Adapter Tests', 'runs-on: windows-2022',
+    'timeout-minutes: 20', 'shell: pwsh', 'GOTOOLCHAIN: local', 'go-version-file: go.mod',
+    'node-version: "24"', 'architecture: x64', 'ref: ${{ github.sha }}', 'persist-credentials: false',
+    "'windows/amd64'", "'go1.26.10'", "'X64'", 'process.platform !== "win32"', 'process.arch !== "x64"',
+    'process.versions.node.split(".")[0] !== "24"', 'node_modules/typebox/package.json',
+    'docs/contracts/agent-contract-v1.json', 'GOMODCACHE', 'GOCACHE', "USERPROFILE = 'home'",
+    "APPDATA = 'appdata'", "LOCALAPPDATA = 'localappdata'", "TEMP = 'tmp'", "TMP = 'tmp'",
+    'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download', 'pi-test-server.exe',
+    'go build -mod=readonly', '$env:ENGRAM_PI_TEST_SERVER_BINARY',
+    'node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs',
+    'node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs',
+    'node .github/scripts/adapter-ci-evidence.mjs windows', 'PI_OUTCOME: ${{ steps.pi.outcome }}',
+    'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}', 'if: ${{ !cancelled() }}',
+    '$LASTEXITCODE', 'Tee-Object', 'Remove-Item "Env:$($_.Name)"']) assert.ok(body.includes(value), value);
+  assert.match(body, /permissions:\n      contents: read\n/);
+  assert.match(body, /name: Build existing Pi fixture\n        timeout-minutes: 2/);
+  for (const name of ['Pi', 'OpenCode']) assert.match(body, new RegExp(`name: Run ${name} adapters\\n        id: \\w+\\n        timeout-minutes: 5`));
+  assert.doesNotMatch(body, /continue-on-error|needs:|services:|: write|secrets\.|bash| -skip| -short|NODE_OPTIONS=|npm install/);
+  for (const action of body.matchAll(/uses: (.+)/g)) assert.match(action[1], /@[a-f0-9]{40} # v\d+$/);
+}
+test('Windows adapter lane preserves native tools, profile isolation, selection and ceilings', () => windowsAdapters(source));
+test('Windows adapter lane rejects prerequisite, budget and failure masking regressions', () => {
+  const original = job(source, 'windows-adapter-tests');
+  for (const before of ['runs-on: windows-2022', 'timeout-minutes: 20', 'timeout-minutes: 2',
+    'timeout-minutes: 5', 'shell: pwsh', 'windows/amd64', 'go1.26.10', 'X64',
+    'go-version-file: go.mod', 'node-version: "24"', 'USERPROFILE', 'APPDATA', 'GOCACHE',
+    'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
+    'npm ci --ignore-scripts --legacy-peer-deps', '--test-concurrency=1', '$LASTEXITCODE',
+    'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
+    assert.ok(original.includes(before), before);
+    assert.throws(() => windowsAdapters(source.replace(original, original.replaceAll(before, '__REMOVED__'))), undefined, before);
+  }
+  assert.throws(() => windowsAdapters(source.replace(original, original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
+});
+test('Windows profile isolation preserves caches and creates only private directories', {
+  skip: process.platform !== 'win32' && 'requires native Windows PowerShell',
+}, () => {
+  const block = job(source, 'windows-adapter-tests').match(/name: Verify native prerequisites and isolate profile\n        run: \|\n([\s\S]*?)(?=      - name:)/)[1];
+  const normalized = block.replace(/^          /gm, '');
+  const script = normalized.slice(normalized.indexOf('$state ='));
+  const dir = mkdtempSync(join(tmpdir(), 'adapter profile café '));
+  try {
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; $go = @{ GOMODCACHE = 'original modules'; GOCACHE = 'original cache' };\n" + script],
+    { encoding: 'utf8', env: { ...process.env, RUNNER_TEMP: dir, GITHUB_ENV: join(dir, 'env') } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.match(result.stdout, /Private adapter root=/);
+    const entries = Object.fromEntries(readFileSync(join(dir, 'env'), 'utf8').trim().split(/\r?\n/).map(line => line.split(/=(.*)/, 2)));
+    assert.equal(entries.GOMODCACHE, 'original modules');
+    assert.equal(entries.GOCACHE, 'original cache');
+    const keys = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'ENGRAM_DATA_DIR'];
+    assert.equal(Object.keys(entries).length, keys.length + 2);
+    for (const key of keys) assert.ok(entries[key].startsWith(dir) && existsSync(entries[key]), key);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('Windows preflight rejects cross-target Go before creating profile state', {
+  skip: process.platform !== 'win32' && 'requires native Windows PowerShell',
+}, () => {
+  const block = job(source, 'windows-adapter-tests').match(/name: Verify native prerequisites and isolate profile\n        run: \|\n([\s\S]*?)(?=      - name:)/)[1].replace(/^          /gm, '');
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-preflight-'));
+  try {
+    for (const arch of ['amd64', 'arm64']) {
+      const metadata = JSON.stringify({ GOVERSION: 'go1.26.10', GOOS: 'windows', GOARCH: arch,
+        GOHOSTOS: 'windows', GOHOSTARCH: 'amd64', GOMODCACHE: 'original modules', GOCACHE: 'original cache' });
+      const fakeGo = `function go { '${metadata}'; $global:LASTEXITCODE = 0 };\n`;
+      const envFile = join(dir, arch);
+      const before = readdirSync(dir);
+      const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', fakeGo + block],
+        { encoding: 'utf8', env: { ...process.env, RUNNER_TEMP: dir, GITHUB_ENV: envFile } });
+      assert.equal(result.status, arch === 'amd64' ? 0 : 1, result.stderr);
+      assert.equal(existsSync(envFile), arch === 'amd64', 'rejected toolchain writes no profile environment');
+      if (arch === 'amd64') assert.equal(result.stderr, '');
+      else {
+        assert.match(result.stderr, /Native repository Go required/);
+        assert.deepEqual(readdirSync(dir), before, 'rejected toolchain leaves temporary state unchanged');
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('shared reporter rejects missing or unknown platform selectors before writing evidence', () => {
+  for (const arg of [[], ['linux'], ['constructor']]) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./adapter-ci-evidence.mjs', import.meta.url)), ...arg], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /Usage: node adapter-ci-evidence.mjs <macos\|windows>/);
+  }
+});
+test('shared reporter selects Windows labels without changing evidence or exclusions', () => {
+  const result = adapterSummary(undefined, undefined, 'success', 'windows');
+  assert.equal(result.status, 0);
+  assert.equal(result.report.scope, 'Windows x64 Pi/OpenCode source adapters');
+  assert.equal(result.report.coverage, 'complete-with-listed-exclusions');
+  assert.deepEqual(result.report.suites.pi.skips, [{ name: host, reason: hostReason }]);
+  assert.equal(adapterSummary(undefined, undefined, 'failure', 'windows').status, 1);
+});
+
 const piRequired = ['Pi native saves persist under separate host sessions and stop on failed registration',
   'existing CLI verifies real Pi registration without writing',
   'packaged real workflows run all eight tests with the prebuilt fixture binary'];
@@ -312,18 +416,17 @@ function tap(names, skipped = []) {
   return 'TAP version 13\n' + all.map(([name, reason], i) => `ok ${i + 1} - ${name}${reason ? ' # SKIP ' + reason : ''}\n`).join('')
     + `1..${all.length}\n# tests ${all.length}\n# suites 0\n# pass ${names.length}\n# fail 0\n# cancelled 0\n# skipped ${skipped.length}\n# todo 0\n# duration_ms 1\n`;
 }
-function adapterSummary(pi = tap(piRequired, [[host, hostReason]]), oc = tap(ocRequired), outcome = 'success') {
-  const match = job(source, 'macos-adapter-tests').match(/node <<'NODE'\n([\s\S]*?)\n          NODE/);
-  assert.ok(match, 'inline adapter summary');
+function adapterSummary(pi = tap(piRequired, [[host, hostReason]]), oc = tap(ocRequired), outcome = 'success', platform = 'macos') {
+  assert.ok(job(source, `${platform}-adapter-tests`).includes(`node .github/scripts/adapter-ci-evidence.mjs ${platform}`));
   const dir = mkdtempSync(join(tmpdir(), 'adapter-summary-'));
   try {
     if (pi !== null) writeFileSync(join(dir, 'pi.tap'), pi);
     writeFileSync(join(dir, 'opencode.tap'), oc);
-    const result = spawnSync(process.execPath, ['-'], { input: match[1].replace(/^          /gm, ''), encoding: 'utf8',
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('./adapter-ci-evidence.mjs', import.meta.url)), platform], { encoding: 'utf8',
       env: { ...process.env, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: join(dir, 'summary'), PI_OUTCOME: outcome, OPENCODE_OUTCOME: outcome } });
     const report = JSON.parse(result.stdout);
     assert.equal(result.stderr, '');
-    assert.equal(readFileSync(join(dir, 'summary'), 'utf8'), '## Native macOS adapters\n\n```json\n' + result.stdout.trim() + '\n```\n');
+    assert.equal(readFileSync(join(dir, 'summary'), 'utf8'), `## Native ${platform === 'macos' ? 'macOS' : 'Windows'} adapters\n\n\`\`\`json\n` + result.stdout.trim() + '\n```\n');
     return { ...result, report };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }

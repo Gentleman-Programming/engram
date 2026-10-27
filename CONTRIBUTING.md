@@ -332,6 +332,37 @@ is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture
 build and 5 minutes per adapter step. Source/fixture success is not installed-host,
 artifact, Windows or release qualification. See [commands and finite rollout](docs/ci-macos.md#native-adapter-lane-2150-macos-portion-only).
 
+### Native Windows adapter source suites (initially non-required)
+
+**Native Windows x64 Adapter Tests** adds one independent `windows-2022`
+PowerShell lane for #2150. It requires native Windows/x64 Node 24 and
+Windows/amd64 Go 1.26.10, a full checkout, contract JSON, and locked local
+TypeBox 1.3.34 (`npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi`).
+It builds the existing Pi server as `$env:RUNNER_TEMP\pi-test-server.exe`;
+the existing prebuilt-server selector enables packaged positive workflows.
+
+From `plugin/pi`, reuse the serial package script with CLI-only TAP:
+`node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs`.
+The root OpenCode command keeps the same three files as the Mac lane.
+PowerShell pipelines preserve native exit codes and stderr; private HOME,
+USERPROFILE, AppData, TEMP/TMP and stores retain the setup Go cache locations.
+No Bash/jq/curl, installed Pi SDK, Codex fixture change or full Go job is added.
+
+The shared [evidence checker](.github/scripts/adapter-ci-evidence.mjs) takes
+`macos` or `windows`; the existing Mac output/exit contract is unchanged.
+Mandatory missing resources, unexpected skips or incomplete evidence fail.
+Only the installed-host opt-in journey is excluded. Windows-shaped spawn mocks
+and forceful Windows SIGTERM are not real host/graceful-shutdown qualification.
+
+Initial ceilings are 20 minutes outer, 2 minutes fixture build and 5 minutes
+per adapter suite, not measured Windows guarantees. Existing fixture deadlines,
+six App15368 contexts, queue, Race, guards and budgets remain unchanged.
+Run the existing Node24 technical-contract command for structure, TAP negatives
+and isolated PowerShell probes; execution-only probes are foreign-OS skips on
+non-Windows hosts, never native evidence. Actual hosted Windows adapter proof
+and one normal PR/merge-group/main observation remain pending until delivery,
+followed by explicit disposition; no automatic promotion or closure of #2150.
+
 ### Go race detection (initially non-required)
 
 The candidate **Go Race Tests** job runs the full default-tag Go suite with
