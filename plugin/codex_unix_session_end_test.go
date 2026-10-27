@@ -20,46 +20,52 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 	requireCodexUnixTools(t, bashPath)
 	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "session-end.sh")
 
-	requests := make(chan string, 8)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	newServer := func(t *testing.T) (string, <-chan string) {
+		t.Helper()
+		requests := make(chan string, 8)
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions/") {
+				http.NotFound(w, r) // External unknown hosts require client inspection.
+				return
+			}
+			if r.URL.Path == "/project/current" {
+				_, _ = io.WriteString(w, `{"project":"end-project","project_source":"config"}`)
+				return
+			}
+			var payload struct{ ID, Project, Directory string }
+			if json.NewDecoder(r.Body).Decode(&payload) != nil || payload.Directory == "" || payload.Project != "end-project" {
+				t.Error("end lost canonical project or cwd")
+			}
+			requests <- r.Method + " " + r.URL.EscapedPath() + " " + payload.ID
+			if payload.ID == "slow" {
+				<-r.Context().Done()
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"id":%q,"status":"ended"}`, payload.ID)
+		})}
+		t.Cleanup(func() { _ = server.Close() })
+		go func() { _ = server.Serve(listener) }()
+		return strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:"), requests
 	}
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions/") {
-			http.NotFound(w, r) // External unknown hosts require client inspection.
-			return
-		}
-		if r.URL.Path == "/project/current" {
-			_, _ = io.WriteString(w, `{"project":"end-project","project_source":"config"}`)
-			return
-		}
-		var payload struct{ ID, Project, Directory string }
-		if json.NewDecoder(r.Body).Decode(&payload) != nil || payload.Directory == "" || payload.Project != "end-project" {
-			t.Error("end lost canonical project or cwd")
-		}
-		requests <- r.Method + " " + r.URL.EscapedPath() + " " + payload.ID
-		if payload.ID == "slow" {
-			<-r.Context().Done()
-			return
-		}
-		_, _ = fmt.Fprintf(w, `{"id":%q,"status":"ended"}`, payload.ID)
-	})}
-	defer server.Close()
-	go func() { _ = server.Serve(listener) }()
-	port := strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:")
 
 	t.Run("posts to a valid custom port", func(t *testing.T) {
+		port, requests := newServer(t)
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"custom-port"}`, &port, "")
 		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end custom-port")
 	})
 
 	t.Run("preserves reserved session ID in JSON rather than URL path", func(t *testing.T) {
+		port, requests := newServer(t)
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"session id/with?characters#%"}`, &port, "")
 		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end session id/with?characters#%")
 	})
 
 	t.Run("bounds an unresponsive HTTP request", func(t *testing.T) {
+		port, requests := newServer(t)
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"slow"}`, &port, "")
 		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end slow")
 	})
@@ -79,6 +85,7 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		{name: "object session ID", input: `{"session_id":{}}`},
 	} {
 		t.Run(tc.name+" makes no request", func(t *testing.T) {
+			port, requests := newServer(t)
 			assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, tc.input, &port, "")
 			assertNoCodexUnixRequest(t, requests)
 		})
