@@ -324,6 +324,14 @@ No hosted Darwin result, installed-host/artifact qualification or new required
 context is claimed. Observe one normal PR, merge-group and main execution,
 then explicitly decide promotion, focused fix or defer.
 
+The separate **Native macOS ARM64 Adapter Tests** lane (#2150, Mac portion)
+reuses serial Pi `npm test`, locked TypeBox dependencies and the existing
+three-file OpenCode command with fresh Go-backed fixtures. Mandatory prerequisites
+and unexpected skips fail completeness; only the installed-host opt-in exclusion
+is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture
+build and 5 minutes per adapter step. Source/fixture success is not installed-host,
+artifact, Windows or release qualification. See [commands and finite rollout](docs/ci-macos.md#native-adapter-lane-2150-macos-portion-only).
+
 ### Go race detection (initially non-required)
 
 The candidate **Go Race Tests** job runs the full default-tag Go suite with

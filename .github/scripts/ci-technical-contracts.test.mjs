@@ -218,6 +218,127 @@ function summarize(events, raw, outcome = 'success') {
     return { status: result.status, stdout: result.stdout, stderr: result.stderr, markdown };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
+
+function adapters(text) {
+  const body = job(text, 'macos-adapter-tests');
+  assert.ok(body, 'independent native adapter job');
+  for (const value of ['runs-on: macos-15', 'timeout-minutes: 15', 'GOTOOLCHAIN: local',
+    'go-version-file: go.mod', 'node-version: "24"', 'ref: ${{ github.sha }}', 'persist-credentials: false',
+    'test "$(uname -sm)" = "Darwin arm64"', 'test "$(go env GOVERSION)" = go1.26.10',
+    'test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64',
+    'test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = darwin/arm64',
+    'test "$(node -p \'process.platform + "/" + process.arch\')" = darwin/arm64',
+    'test "$(node -p \'process.versions.node.split(".")[0]\')" = 24',
+    'state=$(cd "$state" && pwd -P)', 'HOME=$state/home', 'TMPDIR=$state/tmp',
+    'GOMODCACHE=$(go env GOMODCACHE)', 'GOCACHE=$(go env GOCACHE)',
+    'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
+    'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server',
+    'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server', 'NODE_OPTIONS=--test-reporter=tap',
+    'npm test | tee "$RUNNER_TEMP/pi.tap"',
+    'node --test plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"',
+    'PI_OUTCOME: ${{ steps.pi.outcome }}', 'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}',
+    'if: ${{ !cancelled() }}']) assert.ok(body.includes(value), value);
+  assert.match(body, /permissions:\n      contents: read\n/);
+  assert.match(body, /name: Build existing Pi fixture\n        timeout-minutes: 2/);
+  assert.match(body, /name: Run Pi adapters\n        id: pi\n        timeout-minutes: 5\n        working-directory: plugin\/pi/);
+  assert.match(body, /name: Run OpenCode adapters\n        id: opencode\n        timeout-minutes: 5/);
+  assert.equal((body.match(/set -euo pipefail/g) ?? []).length, 5);
+  assert.doesNotMatch(body, /continue-on-error|needs:|services:|: write|secrets\.|sudo |\|\| true| -skip| -short|ENGRAM_PI_LIFECYCLE_CLI=/);
+  for (const action of body.matchAll(/uses: (.+)/g)) assert.match(action[1], /@[a-f0-9]{40} # v\d+$/);
+}
+
+test('native adapters retain source commands, native prerequisites, isolation and budgets', () => adapters(source));
+test('native adapter contract rejects weakened placement, prerequisites and exits', () => {
+  const original = job(source, 'macos-adapter-tests');
+  for (const before of ['runs-on: macos-15', 'timeout-minutes: 15', 'timeout-minutes: 2', 'timeout-minutes: 5',
+    'go-version-file: go.mod', 'node-version: "24"', 'persist-credentials: false', 'set -euo pipefail',
+    'Darwin arm64', 'go1.26.10', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
+    'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
+    'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'npm test | tee', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
+    assert.ok(original.includes(before), before);
+    assert.throws(() => adapters(source.replace(original, original.replace(before, '__REMOVED__'))), undefined, before);
+  }
+  for (const inserted of ['continue-on-error: true', 'needs: plugin-tests', 'permissions:\n      contents: write']) {
+    assert.throws(() => adapters(source.replace(original, original.replace('    steps:', '    ' + inserted + '\n    steps:'))));
+  }
+});
+
+const piRequired = ['Pi native saves persist under separate host sessions and stop on failed registration',
+  'existing CLI verifies real Pi registration without writing',
+  'packaged real workflows run all eight tests with the prebuilt fixture binary'];
+const ocRequired = ['V2 inbox prompts stay idempotent and deleted across real server restarts'];
+const host = 'actual Pi hosts retain attribution through compaction, resume and refusal';
+const hostReason = 'opt-in: set ENGRAM_PI_LIFECYCLE_CLI to the installed Pi CLI entry point';
+function tap(names, skipped = []) {
+  const all = [...names.map(name => [name, '']), ...skipped];
+  return 'TAP version 13\n' + all.map(([name, reason], i) => `ok ${i + 1} - ${name}${reason ? ' # SKIP ' + reason : ''}\n`).join('')
+    + `1..${all.length}\n# tests ${all.length}\n# suites 0\n# pass ${names.length}\n# fail 0\n# cancelled 0\n# skipped ${skipped.length}\n# todo 0\n# duration_ms 1\n`;
+}
+function adapterSummary(pi = tap(piRequired, [[host, hostReason]]), oc = tap(ocRequired), outcome = 'success') {
+  const match = job(source, 'macos-adapter-tests').match(/node <<'NODE'\n([\s\S]*?)\n          NODE/);
+  assert.ok(match, 'inline adapter summary');
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-summary-'));
+  try {
+    if (pi !== null) writeFileSync(join(dir, 'pi.tap'), pi);
+    writeFileSync(join(dir, 'opencode.tap'), oc);
+    const result = spawnSync(process.execPath, ['-'], { input: match[1].replace(/^          /gm, ''), encoding: 'utf8',
+      env: { ...process.env, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: join(dir, 'summary'), PI_OUTCOME: outcome, OPENCODE_OUTCOME: outcome } });
+    const report = JSON.parse(result.stdout);
+    assert.equal(result.stderr, '');
+    assert.equal(readFileSync(join(dir, 'summary'), 'utf8'), '## Native macOS adapters\n\n```json\n' + result.stdout.trim() + '\n```\n');
+    return { ...result, report };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+test('adapter evidence preserves exact counts and installed-host exclusion', () => {
+  const result = adapterSummary();
+  assert.equal(result.status, 0);
+  assert.equal(result.report.coverage, 'complete-with-listed-exclusions');
+  assert.deepEqual(result.report.suites.pi.skips, [{ name: host, reason: hostReason }]);
+  assert.deepEqual(result.report.suites.pi.counts, { tests: 4, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 1, todo: 0 });
+  assert.equal(result.report.suites.opencode.counts.pass, 1);
+});
+test('adapter evidence consumes actual Node24 TAP including nested tests', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-tap-'));
+  try {
+    const path = join(dir, 'probe.mjs');
+    writeFileSync(path, "import { test } from 'node:test';\n"
+      + piRequired.map(name => `test(${JSON.stringify(name)}, async t => { await t.test('nested', () => {}); });\n`).join('')
+      + `test(${JSON.stringify(host)}, { skip: ${JSON.stringify(hostReason)} }, () => {});\n`);
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const actual = spawnSync(process.execPath, ['--test', '--test-reporter=tap', path], { encoding: 'utf8', env });
+    assert.equal(actual.status, 0, actual.stderr);
+    assert.equal(actual.stderr, '');
+    const result = adapterSummary(actual.stdout);
+    const truncated = adapterSummary(actual.stdout.replace(/^    ok 1 - nested\r?\n/m, ''));
+    assert.equal(truncated.status, 1, 'missing nested result must fail completeness');
+    assert.equal(truncated.report.coverage, 'incomplete');
+    assert.equal(result.status, 0, result.stdout);
+    assert.deepEqual(result.report.suites.pi.counts, { tests: 7, suites: 0, pass: 6, fail: 0, cancelled: 0, skipped: 1, todo: 0 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('adapter evidence rejects failed outcomes, missing execution and unexpected prerequisite skips', () => {
+  for (const outcome of ['failure', 'cancelled', 'skipped', '', 'unknown']) {
+    const result = adapterSummary(undefined, undefined, outcome);
+    assert.equal(result.status, 1);
+    assert.equal(result.report.coverage, 'incomplete');
+    assert.equal(result.report.suites.pi.counts.pass, 3, 'original evidence retained');
+  }
+  for (const raw of [null, '', '{"broken":', '{"counts":{"pass":3}}', tap(piRequired).slice(0, -4),
+    tap(piRequired).replace('# fail 0', '# fail 1'), tap(piRequired).replace('# pass 3', '# pass 99'),
+    tap(piRequired).replace('# tests 3', '# tests 400').replace('# pass 3', '# pass 400'),
+    tap(piRequired).replace('1..3', '1..4'), tap(piRequired).replace('ok 2 -', 'ok 1 -'),
+    tap(piRequired).replace('ok 1 -', 'not ok 1 -'), tap(piRequired.slice(1)),
+    tap(piRequired, [['mandatory schema', 'Go toolchain unavailable']]),
+    tap(piRequired, [[host, 'unexpected reason']])]) {
+    const result = adapterSummary(raw);
+    assert.equal(result.status, 1, raw);
+    assert.equal(result.report.coverage, 'incomplete');
+  }
+});
+
 const event = (Action, Test, Output) => ({ Action, Package: 'example/store', ...(Test && { Test }), ...(Output && { Output }) });
 const passed = [event('pass', 'TestPortable'), event('pass')];
 
