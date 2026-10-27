@@ -230,6 +230,8 @@ snapshot and exact child exit/stdout/stderr, including errors; private diagnosti
 scratch is removed. These are not the actual Go fixture children or Go
 `os.TempDir()`, and do not establish root cause or comparable baseline/candidate
 behavior. No startup files or fixture gate run in the representative matrix.
+The quoted sibling `cygpath.exe` path uses forward slashes, including with spaces
+and an empty `PATH`, rather than depending on implicit Windows-path handling.
 For local collection, run `node .github/scripts/windows-bash-temp-diagnostics.mjs --help` for snapshot/collect arguments; `CODEX_TEST_TRUSTED_BASH` must identify the
 reviewed absolute Bash executable. Diagnostic errors never replace the recorded
 suite exit or repair a missing temp directory. Cancellation/outer timeout can leave partial

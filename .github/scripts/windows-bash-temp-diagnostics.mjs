@@ -42,7 +42,7 @@ export function collect(baseline, parent, env = process.env, execute = spawnSync
   const bash = env.CODEX_TEST_TRUSTED_BASH;
   if (!bash || !path.isAbsolute(bash)) throw new Error('Absolute CODEX_TEST_TRUSTED_BASH required');
   const base = { ...supplied(select(env, runtime)), BASH_ENV: '', ENV: '', LC_ALL: 'C',
-    DIAG_CYGPATH: path.join(path.dirname(bash), 'cygpath.exe') };
+    DIAG_CYGPATH: path.join(path.dirname(bash), 'cygpath.exe').replaceAll('\\', '/') };
   const original = { version: 1, aliases: select(baseline.aliases, aliases),
     context: select(baseline.context ?? {}, context), node: baseline.node ?? null };
   const result = { version: 1, representativeOnly: true, goTempDirMeasured: false,

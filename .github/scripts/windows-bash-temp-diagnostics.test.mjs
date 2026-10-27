@@ -70,6 +70,31 @@ test('representative matrix preserves every child exit and exact streams, enviro
   assert.deepEqual(readdirSync(root), []);
 });
 
+test('Bash receives a slash-delimited sibling executable with spaces even when PATH is empty', async t => {
+  const { collect, snapshot } = await import('./windows-bash-temp-diagnostics.mjs');
+  const root = fixture(t), calls = [];
+  const bash = path.join(root, 'Git With Spaces', 'usr', 'bin', 'bash.exe');
+  const expected = path.join(path.dirname(bash), 'cygpath.exe').replaceAll('\\', '/');
+  const result = collect(snapshot({}), root, { CODEX_TEST_TRUSTED_BASH: bash }, (exe, args, options) => {
+    calls.push({ exe, args, options });
+    return { status: 0, signal: null, stdout: 'mapping observation\r\n', stderr: '' };
+  });
+  assert.equal(calls.length, 3);
+  for (const [i, call] of calls.entries()) {
+    assert.equal(call.exe, bash);
+    assert.equal(call.options.env.DIAG_CYGPATH, expected);
+    assert.doesNotMatch(call.options.env.DIAG_CYGPATH, /\\\\/);
+    assert.ok(call.options.env.DIAG_CYGPATH.includes('/Git With Spaces/'));
+    assert.ok(call.args[3].includes('"$DIAG_CYGPATH" -w /tmp'));
+    assert.equal(result.cases[i].environment.DIAG_CYGPATH, expected);
+    assert.equal(result.cases[i].exit, 0);
+    assert.equal(result.cases[i].stdout, 'mapping observation\r\n');
+    assert.equal(result.cases[i].stderr, '');
+  }
+  assert.equal(calls[2].options.env.PATH, '');
+  assert.equal(result.scratchRemoved, true); assert.deepEqual(readdirSync(root), []);
+});
+
 test('timeout retains partial stdout/stderr and cleans private scratch', async t => {
   const { collect, snapshot } = await import('./windows-bash-temp-diagnostics.mjs');
   const root = fixture(t);
