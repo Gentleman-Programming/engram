@@ -198,7 +198,7 @@ test('native macOS rejects scope, prerequisites, budget and failure regressions'
   assert.throws(() => macos(source.replace(original, original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
 });
 
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -220,6 +220,7 @@ function summarize(events, raw, outcome = 'success') {
 }
 
 function adapters(text) {
+  const piScript = JSON.parse(readFileSync(new URL('../../plugin/pi/package.json', import.meta.url), 'utf8')).scripts.test;
   const body = job(text, 'macos-adapter-tests');
   assert.ok(body, 'independent native adapter job');
   for (const value of ['runs-on: macos-15', 'timeout-minutes: 15', 'GOTOOLCHAIN: local',
@@ -234,9 +235,9 @@ function adapters(text) {
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download',
     'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server',
-    'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server', 'NODE_OPTIONS=--test-reporter=tap',
-    'npm test | tee "$RUNNER_TEMP/pi.tap"',
-    'node --test plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"',
+    'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    piScript.replace('node --test ', 'node --test --test-reporter=tap ') + ' | tee "$RUNNER_TEMP/pi.tap"',
+    'node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"',
     'PI_OUTCOME: ${{ steps.pi.outcome }}', 'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}',
     'if: ${{ !cancelled() }}']) assert.ok(body.includes(value), value);
   assert.match(body, /permissions:\n      contents: read\n/);
@@ -244,7 +245,7 @@ function adapters(text) {
   assert.match(body, /name: Run Pi adapters\n        id: pi\n        timeout-minutes: 5\n        working-directory: plugin\/pi/);
   assert.match(body, /name: Run OpenCode adapters\n        id: opencode\n        timeout-minutes: 5/);
   assert.equal((body.match(/set -euo pipefail/g) ?? []).length, 5);
-  assert.doesNotMatch(body, /continue-on-error|needs:|services:|: write|secrets\.|sudo |\|\| true| -skip| -short|ENGRAM_PI_LIFECYCLE_CLI=/);
+  assert.doesNotMatch(body, /continue-on-error|needs:|services:|: write|secrets\.|sudo |\|\| true| -skip| -short|ENGRAM_PI_LIFECYCLE_CLI=|export.*NODE_OPTIONS=/);
   for (const action of body.matchAll(/uses: (.+)/g)) assert.match(action[1], /@[a-f0-9]{40} # v\d+$/);
 }
 
@@ -256,7 +257,7 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
     'Darwin arm64', 'go1.26.10', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
-    'npm test | tee', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
+    '--test-concurrency=1', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
     assert.ok(original.includes(before), before);
     assert.throws(() => adapters(source.replace(original, original.replace(before, '__REMOVED__'))), undefined, before);
   }
@@ -264,6 +265,41 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
     assert.throws(() => adapters(source.replace(original, original.replace('    steps:', '    ' + inserted + '\n    steps:'))));
   }
 });
+
+
+for (const suite of ['Pi', 'OpenCode']) {
+  test(`native ${suite} reporter stays out of child fixtures and preserves failures`, () => {
+    const script = job(source, 'macos-adapter-tests').match(new RegExp(
+      `      - name: Run ${suite} adapters\\n[\\s\\S]*?        run: \\|\\n([\\s\\S]*?)(?=      - name:)`))[1].replace(/^          /gm, '');
+    const dir = mkdtempSync(join(tmpdir(), 'adapter-reporter-'));
+    try {
+      writeFileSync(join(dir, 'package.json'), readFileSync(new URL('../../plugin/pi/package.json', import.meta.url)));
+      const files = suite === 'Pi' ? ['test/probe.test.mjs'] : [
+        'plugin/opencode/engram.test.mjs', 'plugin/opencode/engram.v2.test.mjs', 'plugin/opencode/engram.v2.real-server.test.mjs'];
+      writeFileSync(join(dir, 'child.mjs'), "import { test } from 'node:test'; test('leaf', () => { if (process.env.ADAPTER_PROBE_FAIL) throw Error('fixture sentinel'); });");
+      for (const file of files) {
+        mkdirSync(join(dir, file, '..'), { recursive: true });
+        writeFileSync(join(dir, file), `import assert from 'node:assert/strict'; import { test } from 'node:test'; import { spawnSync } from 'node:child_process';
+          test('child reporter', () => { const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+            const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'child.mjs'], { env, encoding: 'utf8' });
+            assert.equal(r.stderr, ''); assert.equal(r.status, 0, r.stdout); assert.equal(process.env.NODE_OPTIONS, undefined); });`);
+      }
+      const env = { ...process.env, RUNNER_TEMP: dir.replaceAll('\\', '/'), HOME: dir, NODE_OPTIONS: '--max-old-space-size=128' };
+      delete env.NODE_TEST_CONTEXT;
+      for (const fail of [false, true]) {
+        const result = spawnSync('bash', ['-c', script], { cwd: dir, encoding: 'utf8',
+          env: { ...env, ...(fail ? { ADAPTER_PROBE_FAIL: '1' } : {}) } });
+        assert.equal(result.status, fail ? 1 : 0, result.stdout + result.stderr);
+        assert.equal(result.stderr, '');
+        assert.match(result.stdout, /^TAP version 13/m);
+        assert.match(result.stdout, new RegExp(`^# ${fail ? 'fail' : 'pass'} ${files.length}$`, 'm'));
+        assert.doesNotMatch(result.stdout, /ERR_INVALID_ARG_VALUE/);
+        if (fail) assert.match(result.stdout, /fixture sentinel/);
+        assert.equal(readFileSync(join(dir, suite.toLowerCase() + '.tap'), 'utf8'), result.stdout);
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}
 
 const piRequired = ['Pi native saves persist under separate host sessions and stop on failed registration',
   'existing CLI verifies real Pi registration without writing',

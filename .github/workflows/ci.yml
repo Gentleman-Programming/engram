@@ -273,8 +273,7 @@ jobs:
             case "$key" in ENGRAM_*|GENTLE_*|CLOUDSTORE_TEST_DSN|NODE_OPTIONS|GOFLAGS) unset "$key" ;; esac
           done < <(env)
           export ENGRAM_DATA_DIR="$HOME/../store" ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server"
-          export NODE_OPTIONS=--test-reporter=tap
-          npm test | tee "$RUNNER_TEMP/pi.tap"
+          node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs | tee "$RUNNER_TEMP/pi.tap"
       - name: Run OpenCode adapters
         id: opencode
         timeout-minutes: 5
@@ -284,8 +283,8 @@ jobs:
           while IFS='=' read -r key _; do
             case "$key" in ENGRAM_*|GENTLE_*|CLOUDSTORE_TEST_DSN|NODE_OPTIONS|GOFLAGS) unset "$key" ;; esac
           done < <(env)
-          export ENGRAM_DATA_DIR="$HOME/../store" NODE_OPTIONS=--test-reporter=tap
-          node --test plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"
+          export ENGRAM_DATA_DIR="$HOME/../store"
+          node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"
       - name: Summarize adapter execution
         if: ${{ !cancelled() }}
         env:

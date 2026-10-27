@@ -68,12 +68,13 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // Its bounded follow-up resolves the physical fixture root and lists observed PG/Windows skip reasons only.
   // The summary-only follow-up requires the actual native-test outcome to be success for completeness.
   // #2150 adds only the independent advisory macOS adapter lane and its inline evidence report.
+  // #2160 scopes its TAP reporter flags to the CLI, preserving child fixture environments.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'c2f3abc1aada884d702ddfef2b3a192d6dd849dcf5ed7e7ab301e5b770b9bae6',
+    '.github/workflows/ci.yml': 'd7ddf146f26e4e31522d920ef7ab9fb46e53ebced0fc1cad4ca2f0a2546a86f6',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

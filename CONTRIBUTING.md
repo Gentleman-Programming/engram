@@ -325,7 +325,7 @@ context is claimed. Observe one normal PR, merge-group and main execution,
 then explicitly decide promotion, focused fix or defer.
 
 The separate **Native macOS ARM64 Adapter Tests** lane (#2150, Mac portion)
-reuses serial Pi `npm test`, locked TypeBox dependencies and the existing
+reuses the serial Pi `npm test` script with CLI-only TAP reporting, locked TypeBox dependencies and the existing
 three-file OpenCode command with fresh Go-backed fixtures. Mandatory prerequisites
 and unexpected skips fail completeness; only the installed-host opt-in exclusion
 is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture

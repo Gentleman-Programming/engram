@@ -19,14 +19,14 @@ go mod download
 go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server
 ```
 
-From `plugin/pi`, run `npm test` with
-`ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server"`; the existing
-script keeps `--test-concurrency=1`. This also executes the packaged positive
+From `plugin/pi`, run the existing `npm test` script with CLI-only TAP reporting:
+`ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server" node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs`.
+The contract test pins equivalence to the package script. This also executes the packaged positive
 workflow case. Other existing fixtures keep their own build/startup deadlines.
 From the repository root, reuse the current OpenCode CI selection unchanged:
 
 ```bash
-node --test plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs
+node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs
 ```
 
 The additional OpenCode `engram.test.mts` is not in that selected CI command.
@@ -41,7 +41,7 @@ Darwin timing guarantees. Existing fixture deadlines stay unchanged. Timeout,
 test/build/setup failure or cancellation is not successful coverage; no automatic
 budget increase, blanket skip or continue-on-error is permitted.
 
-TAP reporting is selected through NODE_OPTIONS without changing suite commands.
+TAP reporting is selected only through CLI flags, never inherited NODE_OPTIONS.
 The inline reporter retains pass/fail/skip counts and exact top-level skip
 identities/reasons, reconciles counters with all nested execution records,
 checks completed plans and required fixture cases,
@@ -53,6 +53,11 @@ Package-boundary tests deliberately assert child failures/skips; those are not
 new native positive workflows. The reporter emits JSON to the log/job summary;
 cancellation or outer timeout can prevent that report, never imply success.
 
+First normal PR [run 40456433724](https://github.com/Gentleman-Programming/engram/actions/runs/40456433724), attempt 1,
+head `493992f9`, checkout `9b59e22c`, executed Pi on Darwin ARM64: 615 pass /
+23 fail / 1 skip in 106.57s; OpenCode was skipped. Inherited NODE_OPTIONS
+reporter flags collided with child fixtures\u0027 explicit TAP flags. CLI-only selection
+corrects that wiring; native execution of the correction remains unverified.
 No adapter execution on Darwin is established by local Node structural checks.
 Foundation PR run 40443462722 (head d9f0ab3baab017d8245f46b4381c8deccd48267f),
 merge-group 40445951871 and main 40446353609 (both at
