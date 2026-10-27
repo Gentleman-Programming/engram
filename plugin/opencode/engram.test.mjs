@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { createInterface } from "node:readline"
 import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
@@ -145,6 +146,9 @@ async function createRuntime(t, {
 	projectCurrentOK = true,
 	manifestExists = false,
   identityLookupFails = false,
+  identityResult,
+  healthInstanceID = "00000000000000000000000000000000",
+  bakedBin,
   emitSpawnError = false,
   emitSpawnExit = false,
   spawnExit = [1, null],
@@ -203,6 +207,7 @@ async function createRuntime(t, {
   }
   childProcess.spawnSync = (command, args, options) => {
     syncSpawns.push({ args: [command, ...args], options })
+    if (args[0] === "instance-id" && identityResult) return identityResult
     return {
       status: args[0] === "instance-id" && !identityLookupFails ? 0 : 1,
       stdout: args[0] === "instance-id" && !identityLookupFails ? "00000000000000000000000000000000\n" : "",
@@ -240,7 +245,7 @@ async function createRuntime(t, {
     const path = new URL(url).pathname
 		if (path === "/health") {
       healthURLs.push(String(url))
-      return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+      return httpResponse({ status: "ok", instance_id: healthInstanceID }, typeof healthOK === "function" ? healthOK() : healthOK)
     }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
@@ -283,6 +288,13 @@ async function createRuntime(t, {
     syncBuiltinESMExports()
 	})
   runtimeImport += 1
+  if (bakedBin) {
+    const dir = mkdtempSync(join(tmpdir(), "engram-opencode-baked-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+    const file = join(dir, "engram.ts")
+    fs.writeFileSync(file, source.replace('?? "engram"', `?? ${JSON.stringify(bakedBin)}`))
+    adapterPath = pathToFileURL(file).href
+  }
   const moduleURL = new URL(`${adapterPath}?sdk-runtime=${runtimeImport}`, import.meta.url)
   const module = await import(moduleURL.href)
   let factory = module.Engram
@@ -667,6 +679,60 @@ test("adapter returns hooks when local identity lookup fails", async (t) => {
 
   assert.equal(typeof runtime.plugin.event, "function")
   assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+for (const scenario of [
+  { name: "stale baked path", bakedBin: "C:\\private\\old\\engram.exe", identityResult: { status: null, error: { code: "ENOENT" }, stdout: "" }, reason: /binary-not-found.*setup-default/, recovery: /engram setup opencode.*restart OpenCode/ },
+  { name: "invalid override", engramBin: "C:\\private\\override.exe", identityResult: { status: null, error: { code: "ENOENT" }, stdout: "" }, reason: /binary-not-found.*ENGRAM_BIN override/, recovery: /Correct or unset ENGRAM_BIN/ },
+  { name: "launch failure", identityResult: { status: null, error: { code: "EACCES" }, stdout: "private stdout" }, reason: /identity-command-failed/, recovery: /instance-id/ },
+  { name: "nonzero exit", identityResult: { status: 1, stdout: "private stdout" }, reason: /identity-command-failed/, recovery: /instance-id/ },
+  { name: "invalid output", identityResult: { status: 0, stdout: "private banner" }, reason: /identity-output-invalid/, recovery: /instance-id/ },
+  { name: "identity mismatch", healthInstanceID: "11111111111111111111111111111111", reason: /identity-mismatch/, recovery: /configured server/ },
+]) {
+  test(`readiness diagnostic: ${scenario.name} blocks attribution without leaking details`, async (t) => {
+    const runtime = await createRuntime(t, scenario)
+    const output = toolOutput()
+    await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, output), (error) => {
+      assert.match(error.message, /could not confirm Engram session registration/)
+      assert.match(error.message, scenario.reason)
+      assert.match(error.message, scenario.recovery)
+      assert.doesNotMatch(error.message, /private|11111111111111111111111111111111/)
+      return true
+    })
+    assert.equal(output.args.session_id, MODEL_SESSION_ID)
+    assert.deepEqual(runtime.requests, [])
+    if (scenario.identityResult) {
+      assert.deepEqual(runtime.healthURLs, [])
+      assert.deepEqual(runtime.spawns, [])
+      assert.ok(runtime.syncSpawns.every(({ args }) => args[0] === (scenario.engramBin ?? scenario.bakedBin ?? "engram")))
+    }
+    const warning = { output: "original" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, warning)
+    assert.match(warning.output, scenario.reason)
+    assert.match(warning.output, scenario.recovery)
+    assert.doesNotMatch(warning.output, /private|11111111111111111111111111111111/)
+    const next = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, next)
+    assert.equal(next.output, "next", "warning is delivered once")
+  })
+}
+
+test("readiness diagnostic: binary source stays frozen after environment changes", async (t) => {
+  const runtime = await createRuntime(t, { engramBin: "selected-engram", identityResult: { status: null, error: { code: "ENOENT" }, stdout: "" } })
+  delete process.env.ENGRAM_BIN
+  await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput()), /binary-not-found.*ENGRAM_BIN override/)
+  assert.ok(runtime.syncSpawns.every(({ args }) => args[0] === "selected-engram"))
+  assert.deepEqual(runtime.requests, [])
+})
+
+test("readiness diagnostic: valid override wins over stale baked path", async (t) => {
+  const runtime = await createRuntime(t, { bakedBin: "C:\\private\\old.exe", engramBin: "current-engram" })
+  const output = toolOutput()
+  await runtime.before({ sessionID: "runtime", tool: "mem_save" }, output)
+  assert.equal(output.args.session_id, "runtime")
+  assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  assert.ok(runtime.syncSpawns.every(({ args }) => args[0] === "current-engram"))
+  assert.deepEqual(runtime.spawns, [])
 })
 
 test("manifest import ignores an asynchronous child launch error", async (t) => {
