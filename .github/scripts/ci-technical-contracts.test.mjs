@@ -203,19 +203,44 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-function summarize(events, raw) {
+function summarize(events, raw, outcome = 'success') {
   const match = job(source, 'macos-native-tests').match(/node <<'NODE'\n([\s\S]*?)\n          NODE/);
   assert.ok(match, 'workflow summary script');
   const dir = mkdtempSync(join(tmpdir(), 'macos-summary-'));
   try {
     if (events !== null) writeFileSync(join(dir, 'macos-native-tests.json'), raw ?? events.map(e => JSON.stringify(e)).join('\n'));
+    const env = { ...process.env, NATIVE_TEST_OUTCOME: outcome, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: join(dir, 'summary') };
+    if (outcome === null) delete env.NATIVE_TEST_OUTCOME;
     const result = spawnSync(process.execPath, ['-'], { input: match[1].replace(/^          /gm, ''),
-      encoding: 'utf8', env: { ...process.env, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: join(dir, 'summary') } });
-    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+      encoding: 'utf8', env });
+    const markdown = readFileSync(join(dir, 'summary'), 'utf8');
+    if (events !== null) assert.equal(readFileSync(join(dir, 'macos-native-tests.json'), 'utf8'), raw ?? events.map(e => JSON.stringify(e)).join('\n'));
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr, markdown };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 const event = (Action, Test, Output) => ({ Action, Package: 'example/store', ...(Test && { Test }), ...(Output && { Output }) });
 const passed = [event('pass', 'TestPortable'), event('pass')];
+
+test('native summary requires actual successful step outcome after terminal packages', () => {
+  const body = job(source, 'macos-native-tests');
+  assert.match(body, /name: Run native Go suite\n        id: native-tests\n/);
+  const events = [...passed, event('output', 'TestForeign', 'requires Windows external commands\n'), event('skip', 'TestForeign')];
+  const success = summarize(events);
+  assert.equal(success.status, 0);
+  const expected = JSON.parse(success.stdout);
+  assert.equal(expected.coverage, 'complete-with-listed-exclusions');
+  assert.deepEqual(expected.tests, { pass: 1, fail: 0, skip: 1 });
+  assert.deepEqual(expected.packages, { pass: 1, fail: 0, skip: 0 });
+  for (const outcome of ['success', 'failure', 'cancelled', 'skipped', '', 'invalid', null]) {
+    const result = summarize(events, undefined, outcome);
+    const report = JSON.parse(result.stdout);
+    assert.equal(result.status, outcome === 'success' ? 0 : 1, outcome);
+    assert.deepEqual(report, { ...expected, coverage: outcome === 'success' ? expected.coverage : 'incomplete' });
+    assert.equal(result.stderr, '');
+    assert.equal(result.markdown, '## Native macOS scope\n\n```json\n' + result.stdout.trim() + '\n```\n');
+  }
+  assert.match(body, /name: Summarize native scope\n        if: \$\{\{ !cancelled\(\) \}\}\n        env:\n          NATIVE_TEST_OUTCOME: \$\{\{ steps\.native-tests\.outcome \}\}/);
+});
 
 test('native summary reports executed tests, packages, failures and exact skip reasons', () => {
   const result = summarize([...passed,

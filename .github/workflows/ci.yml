@@ -139,6 +139,8 @@ jobs:
 
       - name: Summarize native scope
         if: ${{ !cancelled() }}
+        env:
+          NATIVE_TEST_OUTCOME: ${{ steps.native-tests.outcome }}
         shell: bash
         run: |
           node <<'NODE'
@@ -184,7 +186,8 @@ jobs:
               report.skips.push({ package: e.Package, test: e.Test ?? null, classification, reason });
             }
             report.unfinished = [...active];
-            if (report.tests.pass > 0 && report.packages.pass > 0 && !report.tests.fail && !report.packages.fail
+            if (process.env.NATIVE_TEST_OUTCOME === 'success'
+              && report.tests.pass > 0 && report.packages.pass > 0 && !report.tests.fail && !report.packages.fail
               && !report.buildFailures.length && !report.unfinished.length
               && report.skips.every(s => s.classification !== 'incomplete')) report.coverage = 'complete-with-listed-exclusions';
           } catch (error) { report.error = error.message; }

@@ -69,7 +69,10 @@ step runs after ordinary failures without changing the test step's outcome.
 It reports package and test/subtest event counts, exact skipped-test output
 and classifications to the log and job summary. Missing, malformed or empty
 execution evidence, test/package failures, mandatory prerequisite skips and
-unclassified skips report **incomplete** and fail reporting too. Cancellation
+unclassified skips report **incomplete** and fail reporting too. Completeness also
+requires the actual native-test step outcome to be `success`; terminal package
+events alone cannot prove the suite finished. Every other outcome, including a
+missing outcome, remains incomplete without changing counts or exclusions. Cancellation
 or the outer job timeout may prevent reporting: absence is not success.
 
 ## Native scope and exclusions
