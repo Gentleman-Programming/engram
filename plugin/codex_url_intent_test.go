@@ -118,6 +118,11 @@ func codexIntentTool(t *testing.T, name, dir string) string {
 				value += ".exe"
 				if name == "curl" {
 					value = filepath.Join(dir, "..", "..", "mingw64", "bin", "curl.exe")
+					// Some Git distributions omit mingw64; use Windows curl only
+					// when that candidate is absent, without searching ambient PATH.
+					if _, err := os.Stat(value); os.IsNotExist(err) {
+						value = filepath.Join(os.Getenv("SystemRoot"), "System32", "curl.exe")
+					}
 				}
 			}
 		}
