@@ -2,8 +2,7 @@
 
 > **Status**: Beta — feedback welcome on the [GitHub issues](https://github.com/Gentleman-Programming/engram/issues) tagged `beta:obsidian`.
 > **Available since**: `v1.12.0-beta.1`
-> **Stability**: Behavior is locked but flag names may evolve before stable release.
-> **Side-by-side**: This beta installs as `engram-beta` so it doesn't replace your stable `engram`. Both binaries share the same `~/.engram/engram.db`, so memories captured by your stable agent show up in the beta exports automatically.
+> **Stability**: Included in the stable release.
 
 Visualize your AI agent's memory as an interactive knowledge graph in [Obsidian](https://obsidian.md/). Every observation becomes a Markdown note. Sessions, projects, and topic clusters become connected hubs. Open Obsidian's Graph View and **see how your agent's brain actually thinks**.
 
@@ -25,69 +24,6 @@ The result: your agent's knowledge becomes a **navigable cognitive map** instead
 
 ---
 
-## Install Side-by-Side (`engram-beta`)
-
-The beta ships as a separate binary named `engram-beta` so it never touches your stable `engram` install. Both binaries read and write the same `~/.engram/engram.db`, so anything captured by your stable agent is immediately visible to the beta.
-
-Pick the right archive for your platform from the [release page](https://github.com/Gentleman-Programming/engram/releases/tag/v1.12.0-beta.1), then extract and rename:
-
-### macOS (Apple Silicon)
-
-```bash
-curl -L https://github.com/Gentleman-Programming/engram/releases/download/v1.12.0-beta.1/engram_1.12.0-beta.1_darwin_arm64.tar.gz -o /tmp/engram-beta.tar.gz
-tar -xzf /tmp/engram-beta.tar.gz -C /tmp
-sudo mv /tmp/engram /usr/local/bin/engram-beta
-sudo chmod +x /usr/local/bin/engram-beta
-engram-beta version
-```
-
-### macOS (Intel)
-
-```bash
-curl -L https://github.com/Gentleman-Programming/engram/releases/download/v1.12.0-beta.1/engram_1.12.0-beta.1_darwin_amd64.tar.gz -o /tmp/engram-beta.tar.gz
-tar -xzf /tmp/engram-beta.tar.gz -C /tmp
-sudo mv /tmp/engram /usr/local/bin/engram-beta
-sudo chmod +x /usr/local/bin/engram-beta
-engram-beta version
-```
-
-### Linux
-
-```bash
-curl -L https://github.com/Gentleman-Programming/engram/releases/download/v1.12.0-beta.1/engram_1.12.0-beta.1_linux_amd64.tar.gz -o /tmp/engram-beta.tar.gz
-tar -xzf /tmp/engram-beta.tar.gz -C /tmp
-sudo mv /tmp/engram /usr/local/bin/engram-beta
-sudo chmod +x /usr/local/bin/engram-beta
-engram-beta version
-```
-
-### From source (`go install`)
-
-```bash
-go install github.com/Gentleman-Programming/engram/cmd/engram@v1.12.0-beta.1
-mv ~/go/bin/engram ~/go/bin/engram-beta
-engram-beta version
-```
-
-### Verify both binaries coexist
-
-```bash
-which engram        # /usr/local/bin/engram (stable, untouched)
-which engram-beta   # /usr/local/bin/engram-beta (the beta)
-engram version      # your stable version
-engram-beta version # v1.12.0-beta.1
-```
-
-### Uninstall
-
-```bash
-sudo rm /usr/local/bin/engram-beta
-```
-
-The stable `engram`, your `~/.engram/engram.db`, and your Obsidian vault are untouched.
-
----
-
 ## Quick Start (60 seconds)
 
 ```bash
@@ -95,7 +31,7 @@ The stable `engram`, your `~/.engram/engram.db`, and your Obsidian vault are unt
 mkdir -p ~/Obsidian/engram
 
 # 2. Export your full memory + bootstrap the engram-brain graph layout
-engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config force
+engram obsidian-export --vault ~/Obsidian/engram --graph-config force
 
 # 3. Open Obsidian, "Open folder as vault" → ~/Obsidian/engram
 # 4. Cmd+G (Mac) or Ctrl+G → Graph View
@@ -211,7 +147,7 @@ Slashes in topic keys become `--` in filenames for filesystem safety.
 ## CLI Reference
 
 ```bash
-engram-beta obsidian-export --vault <path> [flags]
+engram obsidian-export --vault <path> [flags]
 ```
 
 | Flag | Required | Default | Description |
@@ -239,28 +175,28 @@ a safe capped export is not implemented.
 
 ```bash
 # Single export of the current project
-engram-beta obsidian-export --vault ~/Obsidian/engram
+engram obsidian-export --vault ~/Obsidian/engram
 
 # Explicitly export every project
-engram-beta obsidian-export --vault ~/Obsidian/engram --all
+engram obsidian-export --vault ~/Obsidian/engram --all
 
 # Export only the engram project
-engram-beta obsidian-export --vault ~/Obsidian/engram --project engram
+engram obsidian-export --vault ~/Obsidian/engram --project engram
 
 # Force a complete re-export (useful after pruning observations)
-engram-beta obsidian-export --vault ~/Obsidian/engram --force
+engram obsidian-export --vault ~/Obsidian/engram --force
 
 # Auto-sync every 10 minutes (default), runs forever
-engram-beta obsidian-export --vault ~/Obsidian/engram --watch
+engram obsidian-export --vault ~/Obsidian/engram --watch
 
 # Auto-sync every 5 minutes, only the engram project
-engram-beta obsidian-export --vault ~/Obsidian/engram --watch --interval 5m --project engram
+engram obsidian-export --vault ~/Obsidian/engram --watch --interval 5m --project engram
 
 # Reset the graph layout to the engram-brain default
-engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config force
+engram obsidian-export --vault ~/Obsidian/engram --graph-config force
 
 # Never touch the graph config (you have your own custom layout)
-engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config skip
+engram obsidian-export --vault ~/Obsidian/engram --graph-config skip
 ```
 
 ---
@@ -298,23 +234,23 @@ To keep the daemon running across reboots, use `nohup`, `launchd` (macOS), `syst
 
 **macOS quick start with `nohup`**:
 ```bash
-nohup ~/go/bin/engram-beta obsidian-export \
+nohup ~/go/bin/engram obsidian-export \
   --vault ~/Obsidian/engram \
   --watch --interval 10m \
   > ~/.engram/obsidian-sync.log 2>&1 &
 ```
 
-**macOS launchd plist** (`~/Library/LaunchAgents/com.engram-beta.obsidian-sync.plist`):
+**macOS launchd plist** (`~/Library/LaunchAgents/com.engram.obsidian-sync.plist`):
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.engram-beta.obsidian-sync</string>
+    <string>com.engram.obsidian-sync</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/engram-beta</string>
+        <string>/usr/local/bin/engram</string>
         <string>obsidian-export</string>
         <string>--vault</string>
         <string>/Users/YOU/Obsidian/engram</string>
@@ -336,7 +272,7 @@ nohup ~/go/bin/engram-beta obsidian-export \
 
 Then load it:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.engram-beta.obsidian-sync.plist
+launchctl load ~/Library/LaunchAgents/com.engram.obsidian-sync.plist
 ```
 
 ---
@@ -444,7 +380,7 @@ In the Filter panel of Graph View:
 - Minimum interval is 1 minute. This is to prevent hammering your filesystem and SQLite. If you need faster updates, consider running the export in a tight loop with your own scheduler.
 
 ### "I customized the graph and now it looks weird"
-- Run `engram-beta obsidian-export --vault ~/Obsidian/engram --graph-config force` to reset to the engram-brain default.
+- Run `engram obsidian-export --vault ~/Obsidian/engram --graph-config force` to reset to the engram-brain default.
 
 ### "I want to keep my custom graph layout AND auto-sync"
 - This is the default! `--watch` only applies graph config on the first cycle, and the default mode is `preserve` which only writes when the file is missing.
