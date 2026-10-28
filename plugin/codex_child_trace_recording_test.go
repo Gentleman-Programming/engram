@@ -13,7 +13,7 @@ import (
 
 func TestCodexChildTraceRecordingFailureKeepsOracle(t *testing.T) {
 	if runtime.GOOS != "windows" {
-		t.Skip("Windows-only observer")
+		t.Skip("requires native Windows paths")
 	}
 	root := t.TempDir()
 	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

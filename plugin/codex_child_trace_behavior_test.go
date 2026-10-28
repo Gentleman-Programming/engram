@@ -58,7 +58,7 @@ func TestCodexChildTraceRollsBackPartialWrite(t *testing.T) {
 
 func TestCodexChildTraceRelativeDestinationLeavesOracleUntouched(t *testing.T) {
 	if runtime.GOOS != "windows" {
-		t.Skip("Windows-only observer")
+		t.Skip("requires native Windows paths")
 	}
 	t.Chdir(t.TempDir())
 	if err := os.Mkdir("relative", 0700); err != nil {
