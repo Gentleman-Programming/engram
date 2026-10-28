@@ -493,6 +493,9 @@ jobs:
       - name: Run scanner policy tests
         run: node --test .github/scripts/ci-scanners.test.mjs
 
+      - name: Run Windows suite contract tests
+        run: node --test .github/scripts/windows-suite.test.mjs
+
       - name: Run technical CI contract tests
         run: node --test .github/scripts/ci-technical-contracts.test.mjs
 
@@ -719,6 +722,117 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  windows-suite:
+    name: Windows Full Suite (Observational)
+    runs-on: windows-2025
+    # New observational ceiling, not an SLO or the selective #2020 budgets.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GOTOOLCHAIN: local
+      ENGRAM_PI_SCHEMA_REQUIRE_REAL: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Verify Windows suite contracts
+        run: node --test .github/scripts/windows-suite.test.mjs
+
+      - name: Verify native prerequisites and isolate test state
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $root = Join-Path $env:RUNNER_TEMP 'windows-suite'
+          $evidence = New-Item -ItemType Directory -Force "$root/evidence"
+          git rev-parse HEAD | Tee-Object "$evidence/revision.txt"
+          go version
+          node --version
+          if ((go env GOOS) -ne 'windows' -or (go env GOARCH) -ne 'amd64') { throw 'Native Windows x64 required' }
+          if ((go env GOVERSION) -ne 'go1.26.10' -or (node --version) -notmatch '^v24\.') { throw 'Unexpected toolchain' }
+          Get-Command powershell.exe
+          powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          $gitDir = Split-Path (Get-Command git.exe).Source
+          $gitRoot = $gitDir.Replace('\', '/') -replace '/(cmd|bin|mingw64/bin|usr/bin)$', ''
+          $bash = Join-Path $gitRoot 'usr\bin\bash.exe'
+          if (!(Test-Path $bash -PathType Leaf)) { throw 'Actual Git usr/bin/bash.exe required' }
+          $bash = (Resolve-Path $bash).Path
+          if ($bash -notlike '*\usr\bin\bash.exe') { throw 'Git bin launcher is not supported' }
+          $jq = Get-Command jq.exe -CommandType Application
+          $trustedJQ = (Resolve-Path $jq.Source).Path
+          if (![IO.Path]::IsPathFullyQualified($trustedJQ) -or [IO.Path]::GetExtension($trustedJQ) -ne '.exe' -or !(Test-Path $trustedJQ -PathType Leaf)) { throw 'Absolute real jq.exe required' }
+          & $trustedJQ --version
+          if ($LASTEXITCODE -ne 0) { throw 'Trusted jq verification failed' }
+          Write-Output "Selected Git Bash: $bash"
+          # Make PATH discovery agree with the Git-relative fixture discovery.
+          $bashDir = Split-Path $bash
+          $env:PATH = "$bashDir;$env:PATH"
+          Add-Content $env:GITHUB_PATH $bashDir
+          & $bash -lc 'set -euo pipefail; command -v bash jq curl; bash --version; jq --version; curl --version'
+          Get-Command bash, jq, curl
+          # Existing Codex fixtures require explicit reviewed real executables.
+          Add-Content $env:GITHUB_ENV "CODEX_TEST_TRUSTED_BASH=$bash"
+          Add-Content $env:GITHUB_ENV "CODEX_TEST_TRUSTED_JQ=$trustedJQ"
+          # Resolve Go defaults before changing home; retain setup-go's caches.
+          foreach ($key in @('GOPATH', 'GOCACHE', 'GOMODCACHE')) {
+            $value = go env $key
+            Add-Content $env:GITHUB_ENV "$key=$value"
+          }
+          $paths = @{
+            HOME = 'home'; USERPROFILE = 'home'
+            APPDATA = 'appdata'; LOCALAPPDATA = 'localappdata'
+            ENGRAM_DATA_DIR = 'data'
+            TEMP = 'tmp'; TMP = 'tmp'; TMPDIR = 'tmp'
+          }
+          foreach ($key in $paths.Keys) {
+            $value = Join-Path $root $paths[$key]
+            New-Item -ItemType Directory -Force $value | Out-Null
+            Add-Content $env:GITHUB_ENV "$key=$value"
+          }
+
+      - name: Install mandatory real Pi schema dependency
+        working-directory: plugin/pi
+        run: npm ci --ignore-scripts --legacy-peer-deps
+
+      - name: Run full default-tags module suite
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $evidence = Join-Path $env:RUNNER_TEMP 'windows-suite/evidence'
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          & go test -json ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"
+          $suiteExit = $LASTEXITCODE
+          $timer.Stop()
+          @("exit_code=$suiteExit", "elapsed_seconds=$($timer.Elapsed.TotalSeconds)") |
+            Tee-Object "$evidence/result.txt"
+          Get-Content "$evidence/suite.json"
+          Get-Content "$evidence/stderr.txt"
+          exit $suiteExit
+
+      - name: Preserve failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-suite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-suite/evidence
+          if-no-files-found: warn
 
   windows-setup-test:
     name: Windows Setup Test

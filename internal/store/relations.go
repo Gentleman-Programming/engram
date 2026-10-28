@@ -1545,9 +1545,12 @@ scan:
 			// In semantic mode, accumulate pairs for the worker pool.
 			// We need the full content for prompt building — fetch from DB.
 			var srcTitle, srcType, srcContent string
-			_ = s.db.QueryRow(
+			if err := s.db.QueryRow(
 				`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, obs.syncID,
-			).Scan(&srcTitle, &srcType, &srcContent)
+			).Scan(&srcTitle, &srcType, &srcContent); err != nil {
+				log.Printf("[store] ScanProject: source snippet obs=%s: %v", obs.syncID, err)
+				continue
+			}
 			srcSnippet := ObservationSnippet{
 				ID:      obs.id,
 				SyncID:  obs.syncID,
@@ -1569,9 +1572,12 @@ scan:
 					break scan
 				}
 				var candTitle, candType, candContent string
-				_ = s.db.QueryRow(
+				if err := s.db.QueryRow(
 					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
-				).Scan(&candTitle, &candType, &candContent)
+				).Scan(&candTitle, &candType, &candContent); err != nil {
+					log.Printf("[store] ScanProject: candidate snippet obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+					continue
+				}
 				semanticPairs = append(semanticPairs, candidatePair{
 					sourceSnippet: srcSnippet,
 					candidateSnippet: ObservationSnippet{

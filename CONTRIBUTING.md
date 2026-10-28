@@ -199,6 +199,39 @@ current repository; qualified-only links do not expand discovery or rerun routin
 
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
+#### Observational Windows full-module baseline (#1891)
+
+`Windows Full Suite (Observational)` independently runs `go test -json ./...`
+with default tags on native Windows x64 for PRs, merge groups and main pushes.
+It does not replace selective Windows jobs, change the six required contexts,
+App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
+observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
+do not raise it to hide failures.
+
+The job checks Go 1.26.10, Node 24, PowerShell and Git for Windows Bash with
+jq/curl. It selects actual Git `usr/bin/bash.exe` (not the `bin` launcher),
+validates the absolute `jq.exe` selected from PATH, and exports the existing
+`CODEX_TEST_TRUSTED_BASH` / `CODEX_TEST_TRUSTED_JQ` fixture selectors before tests.
+It then installs locked Pi schema dependencies with
+`npm ci --ignore-scripts --legacy-peer-deps`. `ENGRAM_PI_SCHEMA_REQUIRE_REAL=1`
+makes that schema prerequisite mandatory rather than silently skipped.
+Missing mandatory tools fail preparation; no substitute tools are installed.
+Test home/profile, app data, Engram data and temp directories are job-local;
+Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
+provide process isolation, not measured proof of cleanup.
+
+JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
+failure artifacts when available. Cancellation/outer timeout can leave partial
+output without a completed exit/timing record. Wiring and structural tests do
+**not** complete #1891: hosted checked-out SHA, actual toolchain, exit, elapsed
+time and skip review are still missing. Optional-service and foreign-OS skips
+are not mandatory-prerequisite evidence or proof of executed packages; this
+job does not provision PostgreSQL or establish installed-host/distributed
+Pi/OpenCode placement. A finite PR/merge-group/main observation window and
+explicit retain/promote/remove disposition remain pending before stable-baseline
+claims. Diagnose bounded dependencies separately; do not trim packages, mask
+failures or start an automatic patch-the-next-failure loop.
+
 ### Linked Issue Assignment
 
 The independent **Linked Issue Assignment** metadata workflow handles PR opening,
