@@ -178,6 +178,8 @@ func TestCodexSubagentStopConfirmedIdentity(t *testing.T) {
 			cmd.Stdin = bytes.NewReader(input)
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			finishTrace := startCodexChildTrace(t, tc.name, root, cmd, &stdout, &stderr)
+			defer finishTrace()
 			err = cmd.Run()
 			if err != nil || stdout.String() != "{}\n" || stderr.Len() != 0 {
 				t.Fatalf("hook exit=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())

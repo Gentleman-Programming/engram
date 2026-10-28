@@ -220,6 +220,13 @@ Test home/profile, app data, Engram data and temp directories are job-local;
 Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
 provide process isolation, not measured proof of cleanup.
 
+The Windows job also opts into `ENGRAM_CODEX_CHILD_TRACE` for only the Codex
+`empty confirmation` fixture case. Its test-only observer records allowlisted
+child temp metadata without replacing the launcher, command, guards or assertions.
+A separate best-effort artifact retains traces and observer status even when the
+original test passes. Missing/failed diagnostics are not a root-cause verdict;
+extra observation can perturb timing. This does not investigate session-end POSTs.
+
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
 failure artifacts when available. Cancellation/outer timeout can leave partial
 output without a completed exit/timing record. Wiring and structural tests do

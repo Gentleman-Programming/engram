@@ -7,10 +7,11 @@ const source = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'ut
 const job = text => text.match(/^  windows-suite:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0] ?? '';
 
 function contract(text) {
-  const body = job(text);
+  const fullBody = job(text);
+  const body = fullBody.replace(/      - name: Preserve Codex child trace\n[\s\S]*?(?=\n      - name:|$)/, '');
   assert.ok(body, 'independent Windows job');
   assert.match(text, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main\n/);
-  assert.match(text, /run: node --test \.github\/scripts\/windows-suite\.test\.mjs\n/);
+  assert.match(text, /run: node --test \.github\/scripts\/windows-suite\.test\.mjs \.github\/scripts\/codex-child-trace\.test\.mjs\n/);
   for (const line of ['name: Windows Full Suite (Observational)', 'runs-on: windows-2025',
     'timeout-minutes: 30', 'contents: read', 'GOTOOLCHAIN: local',
     'ENGRAM_PI_SCHEMA_REQUIRE_REAL: "1"', 'shell: pwsh',
@@ -51,7 +52,7 @@ function contract(text) {
   assert.equal((body.match(/\n\s+if:/g) ?? []).length, 1, 'only failure artifact guard');
   assert.equal(body.split('Add-Content $env:GITHUB_ENV "$key=$value"').length - 1, 2,
     'export both preserved caches and isolated test state');
-  assert.ok(body.includes('run: node --test .github/scripts/windows-suite.test.mjs\n'));
+  assert.ok(body.includes('run: node --test .github/scripts/windows-suite.test.mjs .github/scripts/codex-child-trace.test.mjs\n'));
   assert.ok(body.indexOf('run: node --test') < body.indexOf('npm ci'));
   assert.ok(body.indexOf('npm ci') < body.indexOf('& go test'));
   assert.ok(body.indexOf('Add-Content $env:GITHUB_ENV') < body.indexOf('npm ci'));
