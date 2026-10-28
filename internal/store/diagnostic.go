@@ -70,13 +70,21 @@ type ObservationSourceTitleRepairAction struct {
 	Title   string `json:"title"`
 }
 
+// ObservationSourceUnrepairable records source fields that remain unresolved
+// by the existing title repair, without exposing the observation's content.
+type ObservationSourceUnrepairable struct {
+	ObservationRequiredFieldsEvidence
+	Reason string `json:"reason"`
+}
+
 // ObservationSourceTitleRepairReport is the local recovery result for source
 // observation title repairs. A backup is created only when an apply changes rows.
 type ObservationSourceTitleRepairReport struct {
-	Project    string                               `json:"project,omitempty"`
-	Applied    bool                                 `json:"applied"`
-	Actions    []ObservationSourceTitleRepairAction `json:"actions"`
-	BackupPath string                               `json:"backup_path,omitempty"`
+	Project      string                               `json:"project,omitempty"`
+	Applied      bool                                 `json:"applied"`
+	Actions      []ObservationSourceTitleRepairAction `json:"actions"`
+	BackupPath   string                               `json:"backup_path,omitempty"`
+	Unrepairable []ObservationSourceUnrepairable      `json:"unrepairable"`
 }
 
 // SyncMutationTitleRepairAction records a title restored from its matching
@@ -660,6 +668,7 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 		return ObservationSourceTitleRepairReport{}, fmt.Errorf("list source observation repairs: %w", err)
 	}
 	actions := observationSourceTitleRepairActions(rows)
+	report.Unrepairable = observationSourceUnrepairable(rows, actions)
 	if !apply || len(actions) == 0 {
 		report.Actions = actions
 		return report, nil
@@ -674,6 +683,7 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 			return err
 		}
 		actions = observationSourceTitleRepairActions(currentRows)
+		report.Unrepairable = observationSourceUnrepairable(currentRows, actions)
 		for _, action := range actions {
 			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = datetime('now') WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, action.ID, action.SyncID)
 			if err != nil {
@@ -712,6 +722,33 @@ func observationSourceTitleRepairActions(rows []diagnosticObservationRow) []Obse
 		actions = append(actions, ObservationSourceTitleRepairAction{ID: row.ID, SyncID: row.SyncID, Project: row.Project, Title: title})
 	}
 	return actions
+}
+
+func observationSourceUnrepairable(rows []diagnosticObservationRow, actions []ObservationSourceTitleRepairAction) []ObservationSourceUnrepairable {
+	repairedTitles := make(map[int64]bool, len(actions))
+	for _, action := range actions {
+		repairedTitles[action.ID] = true
+	}
+	issues := make([]ObservationSourceUnrepairable, 0)
+	for _, row := range rows {
+		missing := make([]string, 0, len(row.MissingFields))
+		for _, field := range row.MissingFields {
+			if field != "title" || !repairedTitles[row.ID] {
+				missing = append(missing, field)
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		reason := "Repair cannot derive a valid title from existing content; manual investigation is required."
+		if containsString(missing, "type") || containsString(missing, "content") {
+			reason = "Repair cannot reconstruct missing type or content; manual investigation is required."
+		}
+		evidence := row.ObservationRequiredFieldsEvidence
+		evidence.MissingFields = missing
+		issues = append(issues, ObservationSourceUnrepairable{ObservationRequiredFieldsEvidence: evidence, Reason: reason})
+	}
+	return issues
 }
 
 func (s *Store) enqueueSourceObservationRepairMutationTx(tx *sql.Tx, observation *Observation) error {
@@ -1004,7 +1041,13 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 			return result
 		}
 		if op == SyncOpUpsert {
-			require("directory")
+			if rawStringField("ownership_mode") == SessionOwnershipProjectOwned {
+				if err := ValidateCloudSessionDirectory([]byte(trimmed)); err != nil {
+					missing = append(missing, "directory")
+				}
+			} else {
+				require("directory")
+			}
 		}
 	case SyncEntityObservation:
 		if field("sync_id") == "" && strings.TrimSpace(entityKey) == "" {
@@ -1050,8 +1093,9 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 	return result
 }
 
-// RepairObservationMutationTitles restores the single title field that can be
-// proved from a matching titleless local observation. It deliberately does not
+// RepairObservationMutationTitles restores a missing payload title from a
+// matching local observation's current title, or derives a blank source title
+// from its content. It deliberately does not
 // enqueue a replacement mutation: the existing journal row keeps its sequence
 // and all delivery state while only its frozen payload is corrected.
 func (s *Store) RepairObservationMutationTitles(project string, apply bool) (SyncMutationTitleRepairReport, error) {
@@ -1108,6 +1152,10 @@ func (s *Store) RepairObservationMutationTitles(project string, apply bool) (Syn
 		}
 		repairedObservations := make(map[int64]struct{})
 		for _, repair := range repairs {
+			// A valid current title is copied only into the frozen payload.
+			if strings.TrimSpace(repair.sourceTitle) != "" {
+				continue
+			}
 			if _, repaired := repairedObservations[repair.observationID]; repaired {
 				continue
 			}
@@ -1167,10 +1215,21 @@ func (s *Store) observationMutationTitleRepairTx(tx *sql.Tx, mutation SyncMutati
 	observationProject, _ := NormalizeProject(derefString(observation.Project))
 	mutationProject, _ := NormalizeProject(mutation.Project)
 	payloadProject, _ := NormalizeProject(payloadString("project"))
-	if strings.TrimSpace(observation.Title) != "" || (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
+	if (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
 		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
 	}
-	title := deriveObservationRepairTitle(observation.Content)
+	var title string
+	if strings.TrimSpace(observation.Title) != "" {
+		// Trust the current local projection, not historical payload content.
+		// Legacy blank project references are safe only within the existing query.
+		if mutation.Source != SyncSourceLocal || observationProject == "" ||
+			payloadString("session_id") != observation.SessionID || payloadString("scope") != observation.Scope {
+			return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+		}
+		title = observation.Title
+	} else {
+		title = deriveObservationRepairTitle(observation.Content)
+	}
 	if err := ValidateObservationTitle(title); err != nil {
 		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
 	}
@@ -1243,11 +1302,15 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	result.BackupPath = backupPath
 	err = s.withTx(func(tx *sql.Tx) error {
 		for _, action := range normalized {
+			// The owner test is canonical, so it cannot be one SQL CASE over
+			// `id = 'manual-save-' || project`.
+			mode := SessionOwnershipShared
+			if manualSaveOwnerProject(action.SessionID, action.ToProject) {
+				mode = SessionOwnershipProjectOwned
+			}
 			res, err := s.execHook(tx, `UPDATE sessions
-				SET project = ?, ownership_mode = CASE
-					WHEN id = 'manual-save-' || ? THEN 'project_owned'
-					ELSE 'shared' END
-				WHERE id = ? AND project = ?`, action.ToProject, action.ToProject, action.SessionID, action.FromProject)
+				SET project = ?, ownership_mode = ?
+				WHERE id = ? AND project = ?`, action.ToProject, mode, action.SessionID, action.FromProject)
 			if err != nil {
 				return fmt.Errorf("reclassify session %q: %w", action.SessionID, err)
 			}
@@ -1278,10 +1341,18 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 
 func (s *Store) sqliteRepairBackupPath() (string, error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)
 	}
 	path := filepath.Join(backupDir, "engram-repair-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".db")
+	// Reserve privately before SQLite opens the path, including in existing directories.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", fmt.Errorf("reserve sqlite backup: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close sqlite backup reservation: %w", err)
+	}
 	return path, nil
 }
 

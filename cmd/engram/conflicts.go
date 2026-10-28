@@ -30,6 +30,8 @@ func cmdConflicts(cfg store.Config) {
 		cmdConflictsScan(cfg)
 	case "deferred":
 		cmdConflictsDeferred(cfg)
+	case "prune":
+		cmdConflictsPrune(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown conflicts subcommand: %s\n", os.Args[2])
 		printConflictsUsage()
@@ -39,15 +41,19 @@ func cmdConflicts(cfg store.Config) {
 
 func printConflictsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram conflicts <subcommand> [options]")
-	fmt.Fprintln(os.Stderr, "subcommands: list, show, stats, scan, deferred")
+	fmt.Fprintln(os.Stderr, "subcommands: list, show, stats, scan, deferred, prune")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  list       [--project P|--all]  [--status S]  [--since RFC3339]  [--limit N]")
 	fmt.Fprintln(os.Stderr, "  show       <relation_id>")
 	fmt.Fprintln(os.Stderr, "  stats      [--project P|--all]")
+	fmt.Fprintln(os.Stderr, "             list/stats omit known cross-project pending pairs; show retains evidence.")
 	fmt.Fprintln(os.Stderr, "  scan       [--project P|--all]  [--since RFC3339]  [--limit N]  [--cursor ID]  [--dry-run]  [--apply]  [--max-insert N]")
 	fmt.Fprintln(os.Stderr, "             [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]")
 	fmt.Fprintln(os.Stderr, "             [--max-semantic N]  [--yes]")
 	fmt.Fprintln(os.Stderr, "  deferred   [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]")
+	fmt.Fprintln(os.Stderr, "  prune      [--max-age-days N]  [--max-per-scope N]  [--dry-run]  [--apply]")
+	fmt.Fprintln(os.Stderr, "             Unknown arguments are rejected; use space-separated option values.")
+	fmt.Fprintln(os.Stderr, "             Potentially recoverable retry-cap relations are preserved.")
 }
 
 func resolveConflictsProject(s *store.Store, explicit string, all bool) string {
@@ -128,6 +134,7 @@ func cmdConflictsList(cfg store.Config) {
 		SinceTime:          sinceTime,
 		Limit:              limit,
 		ExcludeNotConflict: true,
+		ActionableOnly:     true,
 	}
 
 	items, err := s.ListRelations(opts)
@@ -250,7 +257,7 @@ func cmdConflictsStats(cfg store.Config) {
 	defer s.Close()
 	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
-	stats, err := s.GetRelationStats(proj)
+	stats, err := s.GetActionableRelationStats(proj)
 	if err != nil {
 		fatal(err)
 		return
@@ -624,5 +631,121 @@ func cmdConflictsDeferred(cfg store.Config) {
 		fmt.Printf("  retry_count:  %d\n", row.RetryCount)
 		fmt.Printf("  first_seen_at: %s\n", row.FirstSeenAt)
 		fmt.Println()
+	}
+}
+
+// ─── prune ────────────────────────────────────────────────────────────────────
+
+// cmdConflictsPrune bounds dead sync_apply_deferred rows (issue #849). It is a
+// dry run unless --apply is given, and every flag is validated before the store
+// is opened so a rejected invocation never touches data.
+func cmdConflictsPrune(cfg store.Config) {
+	args := os.Args[3:]
+
+	maxAgeDays := store.DefaultDeadRowMaxAgeDays
+	maxPerScope := store.DefaultDeadRowMaxPerScope
+	dryRunFlag := false
+	apply := false
+	invalid := ""
+
+	positiveInt := func(i int) (int, bool) {
+		if i+1 >= len(args) {
+			return 0, false
+		}
+		n, err := strconv.Atoi(args[i+1])
+		return n, err == nil && n > 0
+	}
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--max-age-days":
+			n, ok := positiveInt(i)
+			if !ok && invalid == "" {
+				invalid = "--max-age-days"
+			}
+			maxAgeDays = n
+			i++
+		case "--max-per-scope":
+			n, ok := positiveInt(i)
+			if !ok && invalid == "" {
+				invalid = "--max-per-scope"
+			}
+			maxPerScope = n
+			i++
+		case "--dry-run":
+			dryRunFlag = true
+		case "--apply":
+			apply = true
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown prune argument: %s\n", args[i])
+			exitFunc(1)
+			return
+		}
+	}
+
+	if invalid != "" {
+		fmt.Fprintf(os.Stderr, "error: %s must be a positive integer\n", invalid)
+		exitFunc(1)
+		return
+	}
+	if dryRunFlag && apply {
+		fmt.Fprintln(os.Stderr, "error: --dry-run and --apply are mutually exclusive")
+		exitFunc(1)
+		return
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer func() { _ = s.Close() }()
+
+	result, err := s.PruneDeadRows(store.PruneDeadRowsOptions{
+		MaxAgeDays:  maxAgeDays,
+		MaxPerScope: maxPerScope,
+		Apply:       apply,
+	})
+	if err != nil {
+		fatal(err)
+		return
+	}
+
+	if apply {
+		fmt.Printf("Dead Row Prune (applied)\n")
+	} else {
+		fmt.Printf("Dead Row Prune (dry run)\n")
+	}
+	fmt.Printf("  max_age_days:  %d\n", maxAgeDays)
+	fmt.Printf("  max_per_scope: %d\n", maxPerScope)
+	if apply {
+		fmt.Printf("  evicted:       %d\n", result.Total)
+	} else {
+		fmt.Printf("  would_evict:   %d\n", result.Total)
+	}
+	if result.Total == 0 {
+		fmt.Println("  Nothing to prune.")
+		return
+	}
+
+	orNone := func(v string) string {
+		if v == "" {
+			return "(none)"
+		}
+		return v
+	}
+	fmt.Println()
+	fmt.Println("  By scope:")
+	for _, scope := range result.Scopes {
+		fmt.Printf("    target=%s project=%s by_age=%d by_cap=%d\n", orNone(scope.TargetKey), orNone(scope.Project), scope.ByAge, scope.ByCap)
+	}
+	fmt.Println()
+	fmt.Println("  By reason:")
+	for _, reason := range result.Reasons {
+		fmt.Printf("    entity=%s reason_code=%s age=%s count=%d\n", orNone(reason.Entity), orNone(reason.ReasonCode), reason.AgeBucket, reason.Count)
+	}
+	if !apply {
+		fmt.Println()
+		fmt.Println("Dry run: nothing was deleted. Re-run with --apply to delete these rows.")
 	}
 }

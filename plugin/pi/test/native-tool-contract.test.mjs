@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
+import { runtimeMetadataResponse } from "./support/runtime-contract-fixture.mjs";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createInterface } from "node:readline";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { importPluginFromSandbox, PLUGIN_ROOT, withPluginSandbox } from "./plugin-sandbox.mjs";
 
 // The runtime context these fixtures hand the plugin still points at the checkout, because the
 // plugin only ever reads `cwd`. The module it loads comes from the sandbox, so nothing under the
 // checkout is written to or removed.
 const ROOT = PLUGIN_ROOT;
+
+// This isolated test worker models a primary runtime by default, regardless of its launcher.
+// Child-role scenarios below explicitly set and restore their own marker.
+delete process.env.GENTLE_PI_AGENTS_CHILD;
 
 function deferred() {
   let resolve;
@@ -49,6 +57,27 @@ async function loadPluginHarness(sandbox, appendEntry) {
   return { registeredTools, eventHandlers };
 }
 
+test("warning fixture completes under an inherited delegated-child role", () => {
+  const env = { ...process.env, GENTLE_PI_AGENTS_CHILD: "1" };
+  // A nested runner must execute its selected test, not inherit Node's worker context.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, [
+    "--test", "--test-reporter=tap", "--test-concurrency=1", "--test-timeout=4000",
+    "--test-name-pattern=^background warning routing: tui-server$",
+    fileURLToPath(import.meta.url),
+  ], { env, encoding: "utf8", timeout: 10000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /ok 1 - background warning routing: tui-server/);
+  assert.match(result.stdout, /# tests 1\b/);
+  assert.match(result.stdout, /# pass 1\b/);
+  for (const counter of ["fail", "cancelled", "skipped"]) {
+    assert.match(result.stdout, new RegExp(`# ${counter} 0\\b`));
+  }
+});
+
 // Mode labels model documented hasUI capabilities; this is not a live RPC client test.
 for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwing-notifier", "missing-notifier", "incomplete-ui"]) {
   test(`background warning routing: ${scenario}`, async () => {
@@ -63,6 +92,7 @@ for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwin
     const started = deferred();
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       if (path === "/project/current") return new Response('{"project":"engram"}');
       if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }), { status: 201 });
       if (path === "/prompts") {
@@ -85,7 +115,7 @@ for (const scenario of ["tui-server", "rpc-transport", "print", "json", "throwin
         };
         if (["missing-notifier", "incomplete-ui"].includes(scenario)) delete ctx.ui.notify;
         const capture = eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "a sufficiently long captured prompt" }, ctx);
-        await started.promise;
+        await waitFor(started.promise, `background warning routing: ${scenario}: prompt capture did not start`);
         // Another session event must not steal the suspended capture's diagnostic UI.
         const unrelated = runtimeContext("unrelated-session");
         unrelated.hasUI = true;
@@ -127,6 +157,7 @@ for (const failure of ["shutdown", "archive", "recovery"]) {
     process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
     globalThis.fetch = async (url, init = {}) => {
       const request = new URL(url);
+      if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
       calls.push({ path: request.pathname, method: init.method ?? "GET", query: request.searchParams, body: init.body ? JSON.parse(init.body) : undefined });
       if (request.pathname === failedPath) return new Response(JSON.stringify({ error: `${failure} rejected` }), { status: 503 });
       if (request.pathname === "/project/current") return new Response('{"project":"engram"}');
@@ -158,10 +189,13 @@ for (const failure of ["shutdown", "archive", "recovery"]) {
           const recovery = calls.find(({ path }) => path === "/context/compaction");
           assert.equal(recovery.query.get("session_id"), sessionId);
           const next = await eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, owner);
-          assert.match(next.systemPrompt, failure === "archive" ? /FIRST ACTION REQUIRED/ : /already saved/);
-          assert.doesNotMatch(next.systemPrompt, /archive rejected|recovery rejected/);
+          assert.ok(next.message, "compaction guidance must be returned as a message");
+          assert.match(next.message.content, failure === "archive" ? /FIRST ACTION REQUIRED/ : /already saved/);
+          assert.doesNotMatch(next.message.content, /archive rejected|recovery rejected/);
           const consumed = await eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, owner);
           assert.doesNotMatch(consumed.systemPrompt, /FIRST ACTION REQUIRED|already saved/);
+          assert.equal(consumed.message, undefined);
+          assert.equal(next.systemPrompt, consumed.systemPrompt, "recovery must not change the stable prefix");
         }
         assert.equal(stderr.length, 0);
         assert.equal(notifications.length, 1);
@@ -185,6 +219,129 @@ function runtimeContext(sessionId) {
   };
 }
 
+for (const capture of [undefined, true, false]) {
+  test(`mem_save prompt capture forwarding: ${capture}`, async () => {
+    const originalFetch = globalThis.fetch;
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/health", body: { capabilities: { isolated_session_registration: true } } },
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+      { method: "POST", path: "/observations", status: 201, body: { id: 2, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-save-capture-", async ({ sandbox }) => {
+        const { eventHandlers, registeredTools } = await loadPluginHarness(sandbox);
+        const ctx = runtimeContext(`capture-${capture}`);
+        await eventHandlers.get("session_start")({}, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "A user prompt with <private>secret</private> safe content" }, ctx);
+        const save = async (params = {}, context = ctx) => {
+          const result = await registeredTools.get("mem_save").execute("capture", { title: "saved", content: "observation", ...params }, undefined, undefined, context);
+          assert.equal(result.isError, undefined, JSON.stringify(result));
+          return result;
+        };
+        const result = await save({ capture_prompt: capture });
+        assert.equal(result.isError, undefined, JSON.stringify(result));
+        const body = calls.filter(({ path }) => path === "/observations").at(-1).body;
+        assert.equal(body.capture_prompt, capture);
+        assert.equal(body.current_prompt, capture === false ? undefined : "A user prompt with [REDACTED] safe content");
+        assert.equal(calls.filter(({ path }) => path === "/prompts").length, 1, "per-save opt-out must not disable lifecycle capture");
+        assert.doesNotMatch(JSON.stringify(body), /secret/);
+        // An explicit satellite project never inherits the owner's prompt.
+        await save({ project: "other" });
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        // A different runtime never inherits this prompt.
+        await save({}, runtimeContext("another-capture-runtime"));
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        // Short and synthetic turns invalidate the previous prompt rather than reusing it.
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "short" }, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        await eventHandlers.get("input")({ source: "extension", text: "Synthetic extension prompt", images: [] }, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "Synthetic extension prompt" }, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "Another eligible human prompt" }, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, "Another eligible human prompt");
+        await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+        await eventHandlers.get("session_start")({}, ctx);
+        await save();
+        assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, undefined);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
+    }
+  });
+}
+
+for (const streamingBehavior of ["steer", "followUp"]) {
+  test(`mem_save prompt capture queued consumption: ${streamingBehavior}`, async () => {
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const originalFetch = globalThis.fetch;
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+      { method: "POST", path: "/observations", status: 201, body: { id: 2, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-queued-capture-", async ({ sandbox }) => {
+        const { eventHandlers, registeredTools } = await loadPluginHarness(sandbox);
+        const ctx = runtimeContext(`queued-${streamingBehavior}`);
+        const prompt = "Repeated user prompt with <private>queued-secret</private> safe content";
+        const redacted = "Repeated user prompt with [REDACTED] safe content";
+        const message = async (role) => eventHandlers.get("message_start")?.({ message: { role, content: [{ type: "text", text: prompt }] } }, ctx);
+        const save = async (expected) => {
+          const result = await registeredTools.get("mem_save").execute("queued", { title: "saved", content: "observation" }, undefined, undefined, ctx);
+          assert.equal(result.isError, undefined, JSON.stringify(result));
+          assert.equal(calls.filter(({ path }) => path === "/observations").at(-1).body.current_prompt, expected);
+        };
+        await eventHandlers.get("session_start")({}, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt }, ctx);
+        await message("assistant");
+        await message("user"); // Initial agent.prompt message must preserve the native capture.
+        await save(redacted);
+        const foreign = { ...ctx, sessionManager: { getSessionId: () => "foreign-queued-runtime" } };
+        await eventHandlers.get("input")({ source: "interactive", text: prompt, images: [], streamingBehavior }, foreign);
+        await eventHandlers.get("message_start")?.({ message: { role: "user" } }, foreign);
+        await save(redacted);
+        for (let queued = 0; queued < 2; queued++) {
+          await eventHandlers.get("input")({ source: "interactive", text: prompt, images: [], streamingBehavior }, ctx);
+          await save(queued === 0 ? redacted : undefined); // Enqueue alone cannot invalidate an active run.
+          await message("user"); // Identical text is still a distinct consumed queued turn.
+          await save(undefined);
+        }
+        assert.equal(calls.filter(({ path }) => path === "/prompts").length, 1, "queued content is never captured");
+        await eventHandlers.get("input")({ source: "interactive", text: "Next normal user prompt", images: [] }, ctx);
+        await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "Next normal user prompt" }, ctx);
+        await message("user");
+        await save("Next normal user prompt");
+        await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+        await eventHandlers.get("session_start")({}, ctx);
+        await message("user");
+        await save(undefined);
+        assert.doesNotMatch(JSON.stringify(calls), /queued-secret/);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
+    }
+  });
+}
+
 // Records every request the extension issues so a test can assert the wire contract the Engram
 // HTTP server actually receives, instead of asserting over the extension source text.
 function recordingFetch(routes) {
@@ -192,6 +349,7 @@ function recordingFetch(routes) {
   const fetchStub = async (url, init = {}) => {
     const method = init.method ?? "GET";
     const path = new URL(url).pathname + new URL(url).search;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
     const route = routes.find((candidate) => candidate.method === method && path.startsWith(candidate.path));
@@ -204,6 +362,80 @@ function recordingFetch(routes) {
     });
   };
   return { calls, fetchStub };
+}
+
+// Issue #1673: drive the registered input/start hooks and inspect HTTP requests.
+// The input hook is optional here because the buggy plugin does not subscribe to it.
+for (const scenario of [
+  { name: "interactive", source: "interactive", capture: true },
+  { name: "human RPC host", source: "rpc", capture: true },
+  { name: "unknown provenance", capture: true },
+  { name: "expanded interactive input", source: "interactive", inputText: "/explain", capture: true },
+  { name: "extension", source: "extension", capture: false },
+  { name: "extension wake", source: "extension", wake: true, capture: false },
+  { name: "delegated-child", source: "rpc", child: true, capture: false },
+  { name: "queued steer before interactive", source: "interactive", queuedBefore: "extension", capture: true },
+  { name: "queued follow-up after extension", source: "extension", queuedAfter: "interactive", capture: false },
+  { name: "handled extension before interactive", source: "interactive", staleInput: true, capture: true },
+  { name: "session start clears provenance", staleInput: true, restart: true, capture: true },
+  { name: "runtime switch isolates provenance", staleInput: true, switchSession: true, capture: true },
+  { name: "reload clears provenance", staleInput: true, reload: true, capture: true },
+]) {
+  test(`prompt provenance regression: ${scenario.name}`, async () => {
+    const keys = ["ENGRAM_URL", "ENGRAM_PROJECT", "GENTLE_PI_AGENTS_CHILD"];
+    const originalEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const originalFetch = globalThis.fetch;
+    process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+    delete process.env.ENGRAM_PROJECT;
+    if (scenario.child) process.env.GENTLE_PI_AGENTS_CHILD = "1";
+    else delete process.env.GENTLE_PI_AGENTS_CHILD;
+    const { calls, fetchStub } = recordingFetch([
+      { method: "GET", path: "/project/current", body: { project: "engram" } },
+      { method: "POST", path: "/sessions", body: {} },
+      { method: "POST", path: "/prompts", status: 201, body: { id: 1, status: "saved" } },
+    ]);
+    globalThis.fetch = fetchStub;
+    try {
+      await withPluginSandbox("engram-pi-provenance-", async ({ sandbox }) => {
+        const { eventHandlers } = await loadPluginHarness(sandbox);
+        let sessionId = `provenance-${scenario.name}`;
+        const ctx = runtimeContext(() => sessionId);
+        await eventHandlers.get("session_start")({}, ctx);
+        const input = async (source, text, streamingBehavior) => {
+          await eventHandlers.get("input")?.({ text, source, streamingBehavior, images: [] }, ctx);
+        };
+        if (scenario.staleInput) await input("extension", "An extension input that never starts an agent run.");
+        if (scenario.restart) await eventHandlers.get("session_start")({}, ctx);
+        if (scenario.reload) {
+          await eventHandlers.get("session_shutdown")({ reason: "reload" }, ctx);
+          await eventHandlers.get("session_start")({}, ctx);
+        }
+        if (scenario.switchSession) sessionId += "-switched";
+        const prompt = scenario.wake
+          ? "[System-generated Gentle Agents notification, not written by the user] Subagent output was delivered to this session above. Review it and continue. [gentle-agents wake: regression]"
+          : scenario.child
+            ? "Independent read-only verification of the uncommitted changes."
+            : scenario.source === "extension"
+              ? "Continue automatically after receiving an extension update."
+              : "Please explain the root cause of this reported bug.";
+        if (scenario.queuedBefore) await input(scenario.queuedBefore, "Queued automatic steering update.", "steer");
+        if (scenario.source) await input(scenario.source, scenario.inputText ?? prompt);
+        if (scenario.queuedAfter) await input(scenario.queuedAfter, "Queued human follow-up request.", "followUp");
+        await eventHandlers.get("before_agent_start")({ prompt, systemPrompt: "base" }, ctx);
+        const writes = calls.filter(({ method, path }) => method === "POST" && path === "/prompts");
+        assert.deepEqual(writes.map(({ body }) => body), scenario.capture ? [{
+          session_id: sessionId, content: prompt, project: "engram",
+          project_provenance: { source: "unknown", directory: ctx.cwd },
+        }] : [], "only human-authored prompts may be persisted, exactly once");
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of keys) {
+        if (originalEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = originalEnv[key];
+      }
+    }
+  });
 }
 
 test("Pi native saves persist under separate host sessions and stop on failed registration", async () => {
@@ -252,6 +484,29 @@ test("Pi native saves persist under separate host sessions and stop on failed re
       const append = (customType, data) => entries.push({ type: "custom", customType, data });
       const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox, append);
       const save = registeredTools.get("mem_save");
+      const suggest = registeredTools.get("mem_suggest_topic_key");
+      for (const params of [
+        { type: "architecture", title: "Auth model" },
+        { type: "bugfix", title: "Fix café / Unicode" },
+        { type: "decision", content: "Use SQLite for local state" },
+        { title: "X".repeat(120) },
+      ]) {
+        const direct = await fetch(`${url}/topic-keys/suggest`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params),
+        });
+        assert.equal(direct.status, 200);
+        const expected = await direct.json();
+        const result = await suggest.execute("real-suggest", params, undefined, undefined, runtimeContext("pi-host-alpha"));
+        assert.notEqual(result.isError, true, result.content?.[0]?.text);
+        assert.deepEqual(result.details.data, expected);
+        if (params.title === "Auth model") assert.equal(expected.topic_key, "architecture/auth-model");
+      }
+      const rejected = await suggest.execute("empty-suggest", {}, undefined, undefined, runtimeContext("pi-host-alpha"));
+      assert.equal(rejected.isError, true);
+      assert.equal(rejected.details.http_status, 400);
+      const beforeSaves = await fetch(`${url}/observations?all_projects=true&limit=20`);
+      assert.equal(beforeSaves.status, 200);
+      assert.deepEqual(await beforeSaves.json(), [], "suggestions and rejected input must not create observations");
       const ids = ["pi-host-alpha", "pi-host-beta"];
       for (const [index, host] of [ids[0], ids[1], ids[0], ids[1]].entries()) {
         const result = await save.execute(`real-${index}`, {
@@ -273,6 +528,41 @@ test("Pi native saves persist under separate host sessions and stop on failed re
         assert.equal(row.session_id, ids[index % 2]);
         assert.notEqual(row.session_id, "model-foreign-session");
       }
+      // Recover verbatim stored prompts through the registered tool and real Go route.
+      const promptContent = `prompt-retrieval-orbit\n${"original 世界 ".repeat(150).trim()}`;
+      const promptSaved = await registeredTools.get("mem_save_prompt").execute("real-prompt-save", {
+        content: promptContent,
+      }, undefined, undefined, runtimeContext(ids[0]));
+      assert.notEqual(promptSaved.isError, true, promptSaved.content?.[0]?.text);
+      const searchPrompts = registeredTools.get("mem_search_prompts");
+      for (const selectors of [{}, { project: "pi-persistence-test" }, { all_projects: true }]) {
+        const result = await searchPrompts.execute("real-prompt-search", {
+          query: "prompt-retrieval-orbit", limit: 5, ...selectors,
+        }, undefined, undefined, runtimeContext(ids[0]));
+        assert.notEqual(result.isError, true, result.content?.[0]?.text);
+        const query = new URLSearchParams({ q: "prompt-retrieval-orbit", limit: "5" });
+        if (selectors.all_projects) query.set("all_projects", "true");
+        else query.set("project", "pi-persistence-test");
+        const direct = await fetch(`${url}/prompts/search?${query}`);
+        assert.equal(direct.status, 200);
+        assert.deepEqual(result.details.data, await direct.json());
+        assert.equal(result.details.data.length, 1);
+        assert.equal(result.details.data[0].content, promptContent);
+        assert.equal(result.details.data[0].session_id, ids[0]);
+      }
+      const promptState = async () => Promise.all(["/prompts/recent?all_projects=true&limit=100", "/stats?all_projects=true"].map(async path => {
+        const response = await fetch(`${url}${path}`);
+        assert.equal(response.status, 200);
+        return response.json();
+      }));
+      const beforePromptRefusal = await promptState();
+      const promptRefusal = await searchPrompts.execute("real-prompt-conflict", {
+        query: "prompt-retrieval-orbit", project: "pi-persistence-test", all_projects: true,
+      }, undefined, undefined, runtimeContext(ids[0]));
+      assert.equal(promptRefusal.isError, true);
+      assert.equal(promptRefusal.details.http_status, 400);
+      assert.match(promptRefusal.content[0].text, /project and all_projects cannot be used together/);
+      assert.deepEqual(await promptState(), beforePromptRefusal, "rejected search leaves prompts and counters unchanged");
       // Exercise cross-project routing against the same real core, not a wire-only stub.
       const runtimeBefore = await (await fetch(`${url}/sessions/${ids[0]}`)).json();
       const foreign = await save.execute("real-foreign", {
@@ -550,9 +840,11 @@ test("fresh Pi state honors a structured session-project conflict without captur
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
+    if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: phase }));
     if (path === "/sessions") {
       if (phase === "generic-error") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 500 });
@@ -636,7 +928,8 @@ test("registered Pi-native mem_search reports native provider transport failure"
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (url) => {
+    if (new URL(url).pathname === "/runtime-contract") return runtimeMetadataResponse("/runtime-contract");
     throw new Error("connection refused");
   };
 
@@ -686,6 +979,7 @@ test("a malformed 200 Pi response is a tool error rather than a successful null 
     const path = new URL(url).pathname;
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/search") return new Response('{"observations":', { status: 200, headers: { "Content-Type": "application/json" } });
     throw new Error(`unexpected request: ${url}`);
   };
@@ -721,6 +1015,7 @@ test("a 204 Pi response is a successful null without JSON parsing", async () => 
     const path = new URL(url).pathname;
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/search") return new Response(null, { status: 204 });
     throw new Error(`unexpected request: ${url}`);
   };
@@ -755,6 +1050,7 @@ test("a successful empty Pi search presents no memories found", async () => {
     const path = new URL(url).pathname;
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/search") return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
     throw new Error(`unexpected request: ${url}`);
   };
@@ -789,6 +1085,7 @@ test("a timed-out Pi request cannot make a concurrent JSON-null request unavaila
   const nullRequestStarted = deferred();
   globalThis.fetch = async (url) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     if (request.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
     if (request.pathname === "/search" && request.searchParams.get("q") === "json-null") {
@@ -915,7 +1212,7 @@ test("registered Pi-native mem_context forwards optional bounds and compact mode
   }
 });
 
-test("Pi forwards its resolved project for review mutations while preserving global review and stats contracts", async () => {
+test("Pi doctor forwards its resolved project while preserving global review contracts", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -927,7 +1224,6 @@ test("Pi forwards its resolved project for review mutations while preserving glo
     { method: "GET", path: "/review", body: { observations: [] } },
     { method: "GET", path: "/review", body: { observations: [] } },
     { method: "POST", path: "/review/mark_reviewed", body: { state: "active" } },
-    { method: "GET", path: "/stats", body: { total_observations: 2 } },
   ]);
   globalThis.fetch = fetchStub;
 
@@ -937,17 +1233,18 @@ test("Pi forwards its resolved project for review mutations while preserving glo
       const ctx = runtimeContext("resolved-project-session");
 
       await registeredTools.get("mem_search").execute("search", { query: "override" }, undefined, undefined, ctx);
-      await registeredTools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+      const diagnostic = await registeredTools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+      assert.equal(diagnostic.details.data.status, "ok");
+      assert.equal(diagnostic.details.data.caller_binding.status, "unknown");
+      assert.equal(diagnostic.details.data.caller_binding.reason_code, "caller_binding_unavailable");
       await registeredTools.get("mem_review").execute("review", { action: "list" }, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("review-filtered", { action: "list", project: "override-project" }, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("mark-reviewed", { action: "mark_reviewed", observation_id: 42 }, undefined, undefined, ctx);
-      await registeredTools.get("mem_stats").execute("stats", {}, undefined, undefined, ctx);
 
       const search = calls.find((call) => call.path.startsWith("/search"));
       const doctor = calls.find((call) => call.path.startsWith("/doctor"));
       const reviews = calls.filter((call) => call.method === "GET" && call.path.startsWith("/review"));
       const markReviewed = calls.find((call) => call.method === "POST" && call.path.startsWith("/review/mark_reviewed"));
-      const stats = calls.find((call) => call.path.startsWith("/stats"));
       assert.match(search.path, /project=override-project/);
       assert.match(doctor.path, /project=override-project/);
       assert.equal(reviews.length, 2);
@@ -958,7 +1255,6 @@ test("Pi forwards its resolved project for review mutations while preserving glo
       assert.equal(filteredReviewQuery.get("project"), "override-project");
       assert.equal(filteredReviewQuery.has("all_projects"), false);
       assert.equal(new URL(`http://test${markReviewed.path}`).searchParams.get("project"), "override-project");
-      assert.equal(new URL(`http://test${stats.path}`).searchParams.get("all_projects"), "true");
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -1018,6 +1314,7 @@ test("session-attributed Pi writes bind to acknowledged runtime identity and ret
   const sessionBodies = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1086,6 +1383,7 @@ test("repeated Pi session-attributed writes renew the runtime lease and coalesce
   const observationBodies = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
     if (path === "/sessions") {
@@ -1139,6 +1437,7 @@ test("parallel first-use writes share one acknowledged registration and keep it 
   const writeRequests = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1194,6 +1493,7 @@ test("concurrent explicit projects cannot share an in-flight effective registrat
   const writes = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     if (path === "/sessions") {
@@ -1246,6 +1546,7 @@ test("shared registration failure rejects parallel writes and a later call retri
   const writeRequests = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1317,6 +1618,7 @@ test("an opaque runtime session ID stays byte-identical through registration, co
   const observationBodies = [];
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return { ok: true, async json() { return { status: "ok" }; } };
     if (path === "/project/current") {
       return { ok: true, async json() { return { project: "pi", project_source: "dir_basename", project_path: ROOT }; } };
@@ -1363,7 +1665,7 @@ test("an opaque runtime session ID stays byte-identical through registration, co
       assert.equal(compactionSummary.session_id, runtimeSessionId, "compaction must attribute the summary to the exact identity");
 
       await eventHandlers.get("session_shutdown")({}, ctx);
-      assert.deepEqual(sessionEndBodies, [{ summary: "" }], "shutdown must end the exact registered runtime session");
+      assert.deepEqual(sessionEndBodies, [{ summary: "", project_provenance: { source: "dir_basename", directory: ctx.cwd } }], "shutdown must end the exact registered runtime session");
       assert.deepEqual(sessionEndMethods, ["POST"], "shutdown must use the session-end POST contract");
       await eventHandlers.get("session_shutdown")({}, ctx);
       assert.equal(sessionEndBodies.length, 1, "repeated shutdown must not end an already discarded session twice");
@@ -1420,8 +1722,10 @@ test("separate plugin graphs converge on a server-selected continuation", async 
   let originals = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: true } }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "shared" }));
     if (path === "/sessions" && body.id === "dual") {
       if (++originals === 2) entered.resolve();
@@ -1429,6 +1733,7 @@ test("separate plugin graphs converge on a server-selected continuation", async 
       assert.equal(body.resume, true);
       return new Response(JSON.stringify({ id: "dual:resume:2", status: "created" }));
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   const entries = [];
@@ -1477,6 +1782,7 @@ test("simultaneous foreign projects honor core continuation ownership", async ()
   let originals = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     // Without a resolved owner, each explicit project may claim the runtime identity itself.
@@ -1488,6 +1794,7 @@ test("simultaneous foreign projects honor core continuation ownership", async ()
         ? new Response(JSON.stringify({ id: "foreign-dual:resume:2", status: "created" }))
         : new Response(JSON.stringify({ code: "session_project_conflict", session_id: body.id, owner_project: "alpha", requested_project: "beta" }), { status: 409 });
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   const entries = [];
@@ -1537,6 +1844,7 @@ test("shutdown bounds project lookup for an owned pending replacement in a fresh
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path !== "/project/current") throw new Error(`Unexpected shutdown request: ${path}`);
     if (!init.signal) return null; // RED: the old lookup repeats five times without a shutdown signal.
@@ -1582,6 +1890,7 @@ test("an ownerless pending replacement cannot be adopted or ended by a foreign p
   const entries = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     // Without a resolved owner, the explicit project may try to claim the runtime identity itself.
@@ -1634,6 +1943,7 @@ test("an ownerless pending replacement is not registered on first use", async ()
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push({ path, body: init.body ? JSON.parse(init.body) : undefined });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "project-a" }));
     return new Response(JSON.stringify({ status: "created" }));
@@ -1658,6 +1968,222 @@ test("an ownerless pending replacement is not registered on first use", async ()
   }
 });
 
+test("root resume compatibility negotiates support and fails closed", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const cases = [
+    { health: { version: "2.2.1" }, supported: false },
+    { health: { version: "3.0.0" }, supported: true },
+    { health: { version: "3.2.1" }, supported: true },
+    { health: { version: "v3.0.1" }, supported: true },
+    { health: { capabilities: { root_session_resume: true } }, supported: true },
+    { health: { version: "3.0.0", capabilities: { root_session_resume: false } }, supported: false },
+    { health: { version: "3.0.0", capabilities: { root_session_resume: "true" } }, supported: false },
+    { health: { version: "3.0.0", capabilities: [] }, supported: false },
+    { health: { version: "3.0.0-rc.1" }, supported: false },
+    { health: { version: "3.invalid" }, supported: false },
+    { health: {}, supported: false },
+    { health: null, supported: false },
+    { health: {}, healthStatus: 404, supported: false },
+    { health: "not an object", supported: false },
+    { health: { version: "3.0.0", capabilities: null }, supported: false },
+  ];
+  try {
+    for (const { health, healthStatus = 200, supported } of cases) {
+      for (const mode of ["root-ended", "mapped-ended", "fresh", "mapped-live"]) {
+        const mapped = mode.startsWith("mapped-");
+        const fresh = mode === "fresh";
+        const activeMapping = mode === "mapped-live";
+        const runtimeID = "compat-root";
+        const persistedID = `${runtimeID}:resume:2`;
+        const entries = mapped ? [{ type: "custom", customType: "engram-effective-session", data: {
+          runtimeID, effectiveID: persistedID, pending: true, project: "compat-project",
+        } }] : [];
+        const calls = [];
+        globalThis.fetch = async (url, init = {}) => {
+          const path = new URL(url).pathname;
+          if (path === "/runtime-contract") return runtimeMetadataResponse(path);
+          const body = init.body ? JSON.parse(init.body) : undefined;
+          calls.push({ path, body });
+          if (path === "/health") return new Response(JSON.stringify(health), { status: healthStatus });
+          if (path === "/project/current") return new Response(JSON.stringify({ project: "compat-project" }));
+          if (path === "/sessions") {
+            // Model an old core that ignores resume and rejects ended identities.
+            if (!fresh && !activeMapping && (body.id !== runtimeID || !supported || !body.resume)) {
+              return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+            }
+            return new Response(JSON.stringify({ id: activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`, status: "created" }));
+          }
+          if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
+          return new Response(JSON.stringify({ status: "ok" }));
+        };
+        const ctx = runtimeContext(runtimeID);
+        ctx.sessionManager.getBranch = () => entries;
+        await withPluginSandbox("engram-pi-root-compat-", async ({ sandbox }) => {
+          const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+          const result = await registeredTools.get("mem_save").execute("compat", { title: "compat", content: "compat" }, undefined, undefined, ctx);
+          assert.equal(!!result.isError, !supported && !fresh && !activeMapping, JSON.stringify({ health, mode, result }));
+          if (!supported && !fresh && !activeMapping) {
+            assert.match(JSON.stringify(result), /gentle-engram 0\.5\.1/);
+            assert.match(JSON.stringify(result), /core .*root_session_resume.*3\.0\.0.*[Uu]pgrade/);
+            assert.equal(calls.filter(({ path }) => path === "/observations").length, 0);
+            assert.ok(calls.filter(({ path }) => path === "/sessions").every(({ body }) => !body.resume));
+            assert.equal(entries.length, mapped ? 1 : 0);
+          } else {
+            assert.equal(calls.findLast(({ path }) => path === "/observations").body.session_id, activeMapping ? persistedID : fresh ? runtimeID : `${runtimeID}:resume:3`);
+            if (!supported) assert.equal(calls.findLast(({ path }) => path === "/sessions").body.resume, false);
+          }
+        });
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("retired sandbox self-heal cannot consume lost-ack capability evidence", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  let retiredClock;
+  try {
+    const refuse = async (url) => {
+      if (new URL(url).pathname === "/runtime-contract") return runtimeMetadataResponse("/runtime-contract");
+      if (new URL(url).pathname === "/project/current") return new Response('{"project":"retry-project"}');
+      throw new Error("connection refused");
+    };
+    globalThis.fetch = refuse;
+    await withPluginSandbox("engram-pi-retired-heal-", async ({ sandbox, clock }) => {
+      retiredClock = clock;
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const refused = await registeredTools.get("mem_search").execute("refused", { query: "outage", project: "retry-project" }, undefined, undefined, runtimeContext("retired"));
+      assert.equal(refused.isError, true);
+      assert.equal(clock.pending(), 1, JSON.stringify(refused));
+      let liveHealth = 0;
+      globalThis.fetch = async (url) => {
+        assert.equal(new URL(url).pathname, "/health", "live heal must only probe health");
+        liveHealth++;
+        return new Response('{}');
+      };
+      await clock.advance();
+      assert.equal(liveHealth, 1, "a live sandbox retains ordinary self-heal policy");
+      assert.equal(clock.pending(), 0);
+      globalThis.fetch = refuse;
+      const again = await registeredTools.get("mem_search").execute("refused-again", { query: "outage", project: "retry-project" }, undefined, undefined, runtimeContext("retired"));
+      assert.equal(again.isError, true);
+      assert.equal(clock.pending(), 1, "retirement must cancel a newly scheduled heal");
+    }, { controlledDelay: 5000 });
+
+    let healthChecks = 0;
+    const posts = [];
+    const writes = [];
+    const entries = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      if (path === "/health") return new Response(JSON.stringify({ capabilities: { root_session_resume: healthChecks++ !== 0 } }));
+      if (path === "/project/current") return new Response('{"project":"retry-project"}');
+      if (path === "/sessions") {
+        posts.push(body);
+        return new Response(posts.length === 1 ? "truncated acknowledgement" : JSON.stringify({ id: body.id, status: "created" }));
+      }
+      if (path === "/observations") {
+        writes.push(body);
+        return new Response('{"id":1,"status":"saved"}');
+      }
+      return new Response('{}');
+    };
+    await withPluginSandbox("engram-pi-after-heal-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+      await retiredClock.advance();
+      const ctx = runtimeContext("retry-compat");
+      ctx.sessionManager.getBranch = () => entries;
+      const result = await registeredTools.get("mem_save").execute("lost-ack", { title: "retry", content: "retry" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true, JSON.stringify({ healthChecks, result }));
+      assert.match(JSON.stringify(result), /resume support changed.*retry/i);
+      assert.deepEqual(posts.map(({ resume }) => resume), [false]);
+      assert.equal(writes.length, 0);
+      assert.equal(entries.length, 0, "lost acknowledgement must not adopt an identity");
+      assert.equal(healthChecks, 2, "retired heal must not consume the new stub's health evidence");
+    });
+  } finally {
+    retiredClock?.dispose();
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("root resume compatibility pins retry support after lost acknowledgement", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const [initial, next, mandatory] of [
+      [true, false, false], [false, true, false], [true, null, false],
+      [true, true, false], [false, false, false], [false, null, false],
+      [true, false, true], [true, true, true],
+    ]) {
+      const runtimeID = "retry-compat";
+      const mappedID = `${runtimeID}:resume:2`;
+      const entries = mandatory ? [{ type: "custom", customType: "engram-effective-session", data: {
+        runtimeID, effectiveID: mappedID, pending: true, project: "retry-project",
+      } }] : [];
+      const initialEntries = entries.length;
+      const posts = [];
+      const writes = [];
+      let healthChecks = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
+        const body = init.body ? JSON.parse(init.body) : undefined;
+        if (path === "/health") {
+          const support = healthChecks++ === 0 ? initial : next;
+          return new Response(support === null ? "unreadable" : JSON.stringify({ capabilities: { root_session_resume: support } }));
+        }
+        if (path === "/project/current") return new Response(JSON.stringify({ project: "retry-project" }));
+        if (path === "/sessions") {
+          if (body.id === mappedID) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
+          posts.push(body);
+          // The core applied the first registration, but its successful body was lost.
+          if (posts.length === 1) return new Response("truncated acknowledgement");
+          return new Response(JSON.stringify({ id: initial ? `${runtimeID}:resume:3` : runtimeID, status: "created" }));
+        }
+        if (path === "/observations") {
+          writes.push(body);
+          return new Response(JSON.stringify({ id: 1, status: "saved" }));
+        }
+        return new Response(JSON.stringify({ status: "ok" }));
+      };
+      const ctx = runtimeContext(runtimeID);
+      ctx.sessionManager.getBranch = () => entries;
+      await withPluginSandbox("engram-pi-retry-compat-", async ({ sandbox }) => {
+        const { registeredTools } = await loadPluginHarness(sandbox, (customType, data) => entries.push({ type: "custom", customType, data }));
+        const result = await registeredTools.get("mem_save").execute("retry-compat", { title: "retry", content: "retry" }, undefined, undefined, ctx);
+        const changed = initial !== (next === true);
+        assert.equal(!!result.isError, changed, JSON.stringify({ initial, next, mandatory, result }));
+        assert.ok(healthChecks >= 2, "each dispatch attempt must recheck health (other probes may also run)");
+        assert.deepEqual(posts.map(({ resume }) => resume), changed ? [initial] : [initial, initial]);
+        if (changed) {
+          assert.match(JSON.stringify(result), /resume support changed.*retry/i);
+          assert.equal(writes.length, 0);
+          assert.equal(entries.length, initialEntries, "lost acknowledgement must not adopt an identity");
+        } else {
+          assert.equal(writes.at(-1).session_id, initial ? `${runtimeID}:resume:3` : runtimeID);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("resumed quit adopts core numeric identities and reload retains the persisted ID", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -1666,14 +2192,17 @@ test("resumed quit adopts core numeric identities and reload retains the persist
   const ended = new Set();
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }), { status: 200 });
     if (path === "/sessions") {
       if (ended.has(body.id) && !body.resume) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
       const id = ended.has(body.id) ? (ended.has("resumed:resume:2") ? "resumed:resume:3" : "resumed:resume:2") : body.id;
       return new Response(JSON.stringify({ id, status: "created" }), { status: 201 });
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }), { status: 201 });
     if (path.startsWith("/sessions/") && path.endsWith("/end")) ended.add(decodeURIComponent(path.slice(10, -4)));
     return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
   };
@@ -1708,7 +2237,8 @@ test("resumed quit adopts core numeric identities and reload retains the persist
       assert.ok(archive, "resumed compaction must archive its summary");
       assert.equal(archive.body.session_id, effectiveID);
       const recovered = await second.eventHandlers.get("before_agent_start")({ systemPrompt: "base" }, ctx);
-      assert.match(recovered.systemPrompt, /already saved/);
+      assert.ok(recovered.message, "resumed compaction must return a recovery message");
+      assert.match(recovered.message.content, /already saved/);
       assert.ok(entries.length);
       const third = await loadPluginHarness(sandbox, appendEntry);
       await third.eventHandlers.get("session_start")({ reason: "reload" }, ctx);
@@ -1747,10 +2277,12 @@ test("Pi-native explicit end targets the registered resumed identity, not the ho
   ctx.sessionManager.getBranch = () => entries;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method: init.method ?? "GET", path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: "explicit-resume:resume:2", status: "created" }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ status: "ok" }));
   };
   try {
@@ -1795,6 +2327,7 @@ test("ambiguous resumed explicit end leaves its pending reservation intact; JSON
   let endAttempts = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: effectiveID, status: "created" }));
     if (path === "/observations") return new Response(JSON.stringify({ id: 1 }));
@@ -1843,6 +2376,7 @@ test("Pi-native explicit end in a new graph confirms prior pending ownership bef
   let conflict = false;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
     if (path === "/sessions") return conflict
@@ -1907,6 +2441,7 @@ test("ambiguous legacy mapping registration reuses its persisted identity and en
   const attempts = new Map();
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -1916,6 +2451,7 @@ test("ambiguous legacy mapping registration reuses its persisted identity and en
       attempts.set(body.id, count);
       if (count <= 4) throw new Error("response lost after server created session");
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   try {
@@ -1963,6 +2499,7 @@ test("a legacy pending mapping cannot be claimed by another project after pre-di
   let failedReplacementAttempts = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
@@ -1974,6 +2511,7 @@ test("a legacy pending mapping cannot be claimed by another project after pre-di
       failure.code = "ENETUNREACH";
       throw failure;
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   try {
@@ -2011,11 +2549,13 @@ test("two module graphs coalesce concurrent pending replacement shutdown", async
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: body.id === "parallel" ? "parallel:resume:2" : body.id, status: "created" }));
     if (path.endsWith("/end")) { entered.resolve(); await release.promise; }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ status: "ok" }));
   };
   const entries = [];
@@ -2066,10 +2606,12 @@ test("a peer graph cannot revive a closed replacement without explicit session_s
   let pausePeer = false;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
     if (pausePeer && path === "/sessions") { entered.resolve(); await release.promise; }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id === "closed-peer" ? "closed-peer:resume:2" : body?.id, status: "created" }));
   };
   const entries = [];
@@ -2126,6 +2668,7 @@ test("passive capture does not dispatch after a peer closes during body construc
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
@@ -2173,6 +2716,7 @@ test("concurrent uncertain replacement end stays pending and a fresh graph retri
   const effectiveID = `${runtimeID}:resume:reserved`;
   globalThis.fetch = async (url) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "owner" }));
     if (path === `/sessions/${encodeURIComponent(effectiveID)}/end`) {
@@ -2233,6 +2777,7 @@ test("foreign resolved graph cannot end an explicitly owned pending replacement"
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "foreign" }));
     return new Response(JSON.stringify({ status: "created" }));
@@ -2264,9 +2809,11 @@ test("confirmed replacement end clears pending state across repeated shutdown an
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id === "repeat-end" ? "repeat-end:resume:2" : body?.id, status: "created" }));
   };
   try {
@@ -2301,10 +2848,12 @@ test("an unconfirmed replacement end retains pending state for a later shutdown"
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path.endsWith("/end") && calls.filter(({ path: requested }) => requested.endsWith("/end")).length === 1) throw new Error("end response lost");
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id === "uncertain-end" ? "uncertain-end:resume:2" : body?.id, status: "created" }));
   };
   try {
@@ -2340,6 +2889,7 @@ test("a concurrent foreign-project caller cannot revoke the pending owner's shut
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/health") return new Response(JSON.stringify({ status: "ok", capabilities: { isolated_session_registration: true } }));
@@ -2349,6 +2899,7 @@ test("a concurrent foreign-project caller cannot revoke the pending owner's shut
       started.resolve();
       await gate.promise;
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: body?.id, status: "created" }));
   };
   try {
@@ -2392,6 +2943,7 @@ test("a later ownership conflict on an uncertain replacement revokes shutdown en
   let replacementAttempts = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2437,6 +2989,7 @@ test("a rejected replacement ownership never authorizes shutdown end", async () 
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2473,6 +3026,7 @@ test("a persisted uncertain replacement ends after extension reload without anot
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2513,6 +3067,7 @@ test("shutdown waits for resumed registration and rejects attributed writes", as
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
@@ -2521,6 +3076,7 @@ test("shutdown waits for resumed registration and rejects attributed writes", as
       await gate.promise;
       return new Response(JSON.stringify({ id: "overlap:resume:2", status: "created" }));
     }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ status: "ok" }));
   };
   const entries = [];
@@ -2569,12 +3125,15 @@ test("fallback from ended mapping to live root supersedes identity for writes an
       const calls = [];
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         const body = init.body ? JSON.parse(init.body) : undefined;
         calls.push({ path, body });
+        if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return body.id === legacyID
           ? new Response(JSON.stringify({ code: "session_already_ended", session_id: legacyID }), { status: 409 })
           : new Response(JSON.stringify({ id: runtimeID, status: "created" }));
+        if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
         return new Response(JSON.stringify({ id: 1, status: "ended" }));
       };
       await withPluginSandbox("engram-pi-fallback-root-", async ({ sandbox }) => {
@@ -2620,12 +3179,14 @@ test("read-only legacy shutdown suppresses confirmed delivery but retries uncert
       let ends = 0;
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
         if (path.endsWith("/end")) {
           ends++;
           if (uncertain && ends === 1) throw new Error("end acknowledgement lost");
         }
+        if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
         return new Response(JSON.stringify({ status: "ended", id: 1 }));
       };
       await withPluginSandbox("engram-pi-readonly-shutdown-", async ({ sandbox }) => {
@@ -2652,6 +3213,7 @@ test("hosts without mapping persistence never request core resume", async () => 
   let children = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") {
@@ -2663,7 +3225,7 @@ test("hosts without mapping persistence never request core resume", async () => 
       }
       return new Response(JSON.stringify({ id: body.id, status: "created" }));
     }
-    return new Response(JSON.stringify({ id: 1 }));
+    return new Response(JSON.stringify({ id: 1, status: "saved" }));
   };
   try {
     for (const missing of ["appendEntry", "getBranch"]) {
@@ -2687,6 +3249,213 @@ test("hosts without mapping persistence never request core resume", async () => 
   }
 });
 
+test("session registration trace is opt-in, metadata-only, and preserves resume behavior", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalTrace = process.env.ENGRAM_PI_SESSION_TRACE;
+  const originalWrite = process.stderr.write;
+  const originalDescriptorWrite = fs.writeSync;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const scenario of ["disabled", "appendEntry", "getBranch", "resume", "retry"]) {
+      const enabled = scenario !== "disabled";
+      if (enabled) process.env.ENGRAM_PI_SESSION_TRACE = "1";
+      else delete process.env.ENGRAM_PI_SESSION_TRACE;
+      const stderr = [];
+      const registrations = [];
+      const writes = [];
+      const entries = [];
+      const runtimeID = `private-runtime-${scenario}`;
+      const effectiveID = `${runtimeID}:resume:2`;
+      const canPersist = !["appendEntry", "getBranch"].includes(scenario);
+      process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
+      fs.writeSync = (fd, ...args) => {
+        if (fd !== 2) return originalDescriptorWrite(fd, ...args);
+        stderr.push(String(args[0])); return Buffer.byteLength(String(args[0]));
+      };
+      syncBuiltinESMExports();
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
+        const body = init.body ? JSON.parse(init.body) : undefined;
+        if (path === "/project/current") return new Response('{"project":"private-project"}');
+        if (path === "/health") return new Response('{"version":"3.0.0","capabilities":{"root_session_resume":true}}');
+        if (path === "/sessions") {
+          registrations.push(body);
+          if (scenario === "retry" && registrations.length === 1) throw new Error("private transport detail");
+          if (!body.resume) return new Response(JSON.stringify({ code: "session_already_ended", error: "session has already ended", session_id: runtimeID }), { status: 409 });
+          return new Response(JSON.stringify({ id: effectiveID, status: "created" }));
+        }
+        if (path === "/observations") writes.push(body);
+        return new Response('{"id":1}');
+      };
+      await withPluginSandbox("engram-pi-session-trace-", async ({ sandbox }) => {
+        const append = scenario === "appendEntry" ? undefined : (customType, data) => entries.push({ type: "custom", customType, data });
+        const { registeredTools } = await loadPluginHarness(sandbox, append);
+        const ctx = runtimeContext(runtimeID);
+        if (scenario !== "getBranch") ctx.sessionManager.getBranch = () => entries;
+        const result = await registeredTools.get("mem_save").execute("trace", { title: "private title", content: "private content" }, undefined, undefined, ctx);
+        assert.equal(result.isError, canPersist ? undefined : true);
+        if (!canPersist) assert.equal(result.details.data?.code, "session_already_ended");
+        assert.equal(registrations.length, scenario === "retry" ? 2 : 1);
+        assert.ok(registrations.every((body) => body.resume === canPersist));
+        assert.equal(writes.length, canPersist ? 1 : 0);
+        if (canPersist) assert.equal(writes[0].session_id, effectiveID);
+        assert.equal(entries.length, canPersist ? 1 : 0);
+        const lines = stderr.filter((line) => line.startsWith("[engram:session-trace] "));
+        if (!enabled) assert.deepEqual(lines, []);
+        else {
+          const events = lines.map((line) => JSON.parse(line.slice("[engram:session-trace] ".length)));
+          assert.deepEqual(events, [
+            { stage: "context", append_entry: scenario !== "appendEntry", get_branch: scenario !== "getBranch", persisted: "root" },
+            ...registrations.map(() => ({ stage: "dispatch", requested: "root", resume: canPersist })),
+            canPersist ? { stage: "acknowledgement", effective: "continuation" }
+              : { stage: "rejection", http_status: 409, reason: "session_already_ended" },
+            ...(canPersist ? [{ stage: "adoption", effective: "continuation" }] : []),
+          ]);
+          assert.doesNotMatch(lines.join(""), /private|\/|session_id|title|content/);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stderr.write = originalWrite;
+    fs.writeSync = originalDescriptorWrite;
+    syncBuiltinESMExports();
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (originalTrace === undefined) delete process.env.ENGRAM_PI_SESSION_TRACE; else process.env.ENGRAM_PI_SESSION_TRACE = originalTrace;
+  }
+});
+
+test("session lifecycle trace is private, opt-in, and preserves shutdown behavior", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalTrace = process.env.ENGRAM_PI_SESSION_TRACE;
+  const originalWrite = process.stderr.write;
+  const originalDescriptorWrite = fs.writeSync;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  try {
+    for (const mode of ["enabled", "disabled", "broken-stderr"]) {
+      process.env.ENGRAM_PI_SESSION_TRACE = mode === "disabled" ? "0" : "1";
+      const stderr = [];
+      const calls = [];
+      process.stderr.write = (chunk) => {
+        if (mode === "broken-stderr") throw new Error("private stderr failure");
+        stderr.push(String(chunk)); return true;
+      };
+      fs.writeSync = (fd, ...args) => {
+        if (fd !== 2) return originalDescriptorWrite(fd, ...args);
+        if (mode === "broken-stderr") throw new Error("private stderr failure");
+        stderr.push(String(args[0])); return Buffer.byteLength(String(args[0]));
+      };
+      syncBuiltinESMExports();
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
+        calls.push(path);
+        if (path === "/project/current") return new Response('{"project":"pi"}');
+        if (path === "/health") return new Response('{"version":"3.0.0"}');
+        if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
+        if (path === "/observations") return new Response('{"id":1,"status":"saved"}');
+        return new Response('{"id":1,"status":"ended"}');
+      };
+      await withPluginSandbox("engram-pi-lifecycle-trace-", async ({ sandbox }) => {
+        const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+        const start = eventHandlers.get("session_start");
+        const shutdown = eventHandlers.get("session_shutdown");
+        const alpha = runtimeContext("private-alpha");
+        const beta = runtimeContext("private-beta");
+        const save = async (ctx) => {
+          const result = await registeredTools.get("mem_save").execute("trace", { title: "private title", content: "private content" }, undefined, undefined, ctx);
+          assert.equal(result.isError, undefined);
+        };
+        await start({}, alpha); await save(alpha);
+        await shutdown({ reason: "reload" }, alpha);
+        assert.equal(calls.filter((path) => path.endsWith("/end")).length, 0);
+        await start({}, alpha); await save(alpha);
+        await shutdown({ reason: "private arbitrary reason" }, alpha);
+        assert.equal(calls.filter((path) => path.endsWith("/end")).length, 1);
+        await start({}, beta); await save(beta);
+        await shutdown({}, beta);
+        await shutdown({}, runtimeContext(""));
+        await shutdown({ reason: "reload" }, runtimeContext(() => { throw new Error("private identity failure"); }));
+        assert.equal(calls.filter((path) => path === "/observations").length, 3);
+        assert.equal(calls.filter((path) => path.endsWith("/end")).length, 2);
+        const events = stderr.filter((line) => line.startsWith("[engram:session-trace] "))
+          .map((line) => JSON.parse(line.slice("[engram:session-trace] ".length)));
+        assert.deepEqual(events.filter(({ stage }) => stage === "lifecycle"), mode === "enabled" ? [
+          { stage: "lifecycle", event: "session_start", identity: "first" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "reload", identity: "same" },
+          { stage: "lifecycle", event: "session_start", identity: "same" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "other", identity: "same" },
+          { stage: "lifecycle", event: "session_start", identity: "different" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "missing", identity: "same" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "missing", identity: "missing" },
+          { stage: "lifecycle", event: "session_shutdown", reason: "reload", identity: "missing" },
+        ] : []);
+        assert.doesNotMatch(stderr.join(""), /private|arbitrary|\/|title|content/);
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch; process.stderr.write = originalWrite;
+    fs.writeSync = originalDescriptorWrite;
+    syncBuiltinESMExports();
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (originalTrace === undefined) delete process.env.ENGRAM_PI_SESSION_TRACE; else process.env.ENGRAM_PI_SESSION_TRACE = originalTrace;
+  }
+});
+
+test("session trace survives a closed stderr pipe without changing host error handling", async () => {
+  for (const hostHandler of [false, true]) {
+    await withPluginSandbox("engram-pi-closed-trace-pipe-", async ({ sandbox }) => {
+      const script = `
+        import { importPluginFromSandbox } from ${JSON.stringify(new URL("./plugin-sandbox.mjs", import.meta.url).href)};
+        const handlers = new Map();
+        const register = await importPluginFromSandbox(${JSON.stringify(sandbox)});
+        register({ registerTool() {}, on(event, handler) { handlers.set(event, handler); } });
+        let hostErrors = 0;
+        if (${hostHandler}) process.stderr.on('error', () => { hostErrors++; });
+        const listeners = process.stderr.listenerCount('error');
+        let requests = 0;
+        globalThis.fetch = async () => { requests++; throw new Error('unexpected request'); };
+        process.stdout.write('ready\\n');
+        await new Promise(resolve => process.stdin.once('data', resolve));
+        await handlers.get('session_shutdown')({ reason: 'reload' }, {
+          sessionManager: { getSessionId: () => 'synthetic-session' },
+        });
+        process.stdin.pause();
+        await new Promise(resolve => setImmediate(resolve));
+        process.stdout.write(JSON.stringify({ listeners, remaining: process.stderr.listenerCount('error'), hostErrors, requests }) + '\\n');
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+        env: { ...process.env, ENGRAM_PI_SESSION_TRACE: "1" },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const ready = deferred();
+      const closed = deferred();
+      const exited = deferred();
+      const output = [];
+      const lines = createInterface({ input: child.stdout });
+      lines.on("line", (line) => { output.push(line); if (line === "ready") ready.resolve(); });
+      child.stderr.once("close", () => closed.resolve());
+      child.once("exit", (code, signal) => exited.resolve({ code, signal }));
+      child.once("error", (error) => exited.resolve({ error }));
+      try {
+        await waitFor(ready.promise, "child did not prepare the trace");
+        child.stderr.destroy();
+        await waitFor(closed.promise, "stderr reader did not close");
+        child.stdin.end("trace\n");
+        const result = await waitFor(exited.promise, "child did not exit after the trace");
+        assert.deepEqual(result, { code: 0, signal: null });
+        assert.deepEqual(output, ["ready", JSON.stringify({ listeners: hostHandler ? 1 : 0, remaining: hostHandler ? 1 : 0, hostErrors: 0, requests: 0 })]);
+      } finally {
+        child.kill();
+        lines.close();
+      }
+    });
+  }
+});
+
 test("persisted legacy continuation renews without appendEntry", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
@@ -2696,11 +3465,12 @@ test("persisted legacy continuation renews without appendEntry", async () => {
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: body.id, status: "created" }));
-    return new Response(JSON.stringify({ id: 1 }));
+    return new Response(JSON.stringify({ id: 1, status: "saved" }));
   };
   try {
     await withPluginSandbox("engram-pi-read-only-mapping-", async ({ sandbox }) => {
@@ -2731,6 +3501,7 @@ test("explicit end overlapping core resume awaits and ends the acknowledged cont
   const effectiveID = "explicit-overlap:resume:2";
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") { started.resolve(); await release.promise; return new Response(JSON.stringify({ id: effectiveID, status: "created" })); }
@@ -2772,10 +3543,13 @@ test("malformed persisted mapping never authorizes foreign writes or cleanup", a
   let foreignAck = true;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ path, body });
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: foreignAck ? "foreign" : body.id, status: "created" }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1, status: "saved" }));
     return new Response(JSON.stringify({ id: 1, status: "ok" }));
   };
   try {
@@ -2814,8 +3588,10 @@ test("legacy UUID mapping is registered as-is until ended, then resumes the runt
   let ended = false;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/sessions") {
       registrations.push(body);
       if (ended && body.id === legacyID) return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -2851,7 +3627,9 @@ test("resume registration refuses invalid acknowledgements before persisting or 
   let acknowledgement;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify(acknowledgement));
     throw new Error(`unexpected write: ${path}`);
@@ -2869,7 +3647,7 @@ test("resume registration refuses invalid acknowledgements before persisting or 
         assert.match(result.content[0].text, /invalid acknowledgement/);
       }
       assert.equal(entries.length, 0);
-      assert.equal(calls.filter((path) => path !== "/sessions" && path !== "/project/current").length, 0);
+      assert.equal(calls.filter((path) => path !== "/sessions" && path !== "/project/current" && path !== "/health").length, 0);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -2885,6 +3663,8 @@ test("lost core acknowledgement retries the root without guessing a continuation
   let writes = 0;
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
+    if (path === "/health") return new Response(JSON.stringify({ version: "3.0.0" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") {
       registrations.push(JSON.parse(init.body));
@@ -2915,13 +3695,14 @@ test("lost core acknowledgement retries the root without guessing a continuation
   }
 });
 
-test("old server ended-session refusal retains its specific cause without client guessing", async () => {
+test("old server ended-session refusal explains compatibility without client guessing", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "resume-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ code: "session_already_ended" }), { status: 409 });
@@ -2935,8 +3716,7 @@ test("old server ended-session refusal retains its specific cause without client
       ctx.sessionManager.getBranch = () => entries;
       const result = await registeredTools.get("mem_save").execute("no-entry", { title: "blocked", content: "blocked" }, undefined, undefined, ctx);
       assert.equal(result.isError, true);
-      assert.equal(result.details.http_status, 409);
-      assert.equal(result.details.data.code, "session_already_ended");
+      assert.match(result.details.error, /core unknown.*root_session_resume.*Upgrade/);
       assert.equal(entries.length, 0);
       assert.equal(calls.filter((path) => path === "/sessions").length, 1);
       assert.equal(calls.includes("/observations"), false);
@@ -2957,6 +3737,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
   const endGate = deferred();
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
     if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
@@ -2982,7 +3763,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
       endGate.resolve();
       const [, explicitEndResult] = await Promise.all([firstShutdown, explicitEnd, secondShutdown]);
       assert.equal(explicitEndResult.isError, undefined, "an explicit end must join shutdown delivery");
-      assert.deepEqual(endCalls, [{ method: "POST", body: { summary: "" } }], "concurrent shutdown and explicit end must send one POST");
+      assert.deepEqual(endCalls, [{ method: "POST", body: { summary: "", project_provenance: { source: "unknown", directory: ctx.cwd } } }], "concurrent shutdown and explicit end must send one POST");
 
       await eventHandlers.get("session_start")({}, runtimeContext(undefined));
       await eventHandlers.get("session_shutdown")({}, runtimeContext(undefined));
@@ -2994,6 +3775,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
     const raceEndCalls = [];
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
       if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
       if (path === "/sessions") {
@@ -3016,7 +3798,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
       const shutdown = eventHandlers.get("session_shutdown")({}, ctx);
       registrationGate.resolve();
       await Promise.all([write, shutdown]);
-      assert.deepEqual(raceEndCalls, [{ method: "POST", body: { summary: "" } }], "shutdown must end a registration that was already in flight");
+      assert.deepEqual(raceEndCalls, [{ method: "POST", body: { summary: "", project_provenance: { source: "unknown", directory: ctx.cwd } } }], "shutdown must end a registration that was already in flight");
     });
 
     const uncertainRegistration = deferred();
@@ -3024,6 +3806,7 @@ test("Pi session shutdown serializes end delivery and waits for registration", a
     const uncertainEndCalls = [];
     globalThis.fetch = async (url, init = {}) => {
       const path = new URL(url).pathname;
+      if (path === "/runtime-contract") return runtimeMetadataResponse(path);
       if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
       if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
       if (path === "/sessions") {
@@ -3075,6 +3858,7 @@ test("Pi-native explicit end awaits a pending effective registration conflict be
   } });
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
     if (path === "/sessions") {
@@ -3120,6 +3904,7 @@ test("explicit end reconciles only an owned pending effective ID with matching a
   let owner = "local-project";
   globalThis.fetch = async (url) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push(path);
     if (path === "/project/current") return new Response(JSON.stringify({ project: "local-project" }));
     if (path === "/sessions") return new Response(JSON.stringify({ code: "session_already_ended", session_id: responseID }), { status: 409 });
@@ -3162,6 +3947,7 @@ test("shutdown closes a paused hook until the same runtime session starts again"
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     calls.push({ method: init.method ?? "GET", path });
     if (path === "/project/current") {
       projectLookupStarted.resolve();
@@ -3202,6 +3988,7 @@ test("shutdown stops passive capture after registration", async () => {
       let shutdown;
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         calls.push({ method: init.method ?? "GET", path });
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
@@ -3240,6 +4027,7 @@ test("shutdown stops passive capture after registration", async () => {
       const calls = [];
       globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
+        if (path === "/runtime-contract") return runtimeMetadataResponse(path);
         calls.push({ method: init.method ?? "GET", path });
         if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
         if (path === "/sessions") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 503 });
@@ -3280,6 +4068,9 @@ test("shutdown stops passive capture after registration", async () => {
       const { eventHandlers } = await loadPluginHarness(sandbox);
       const runtimeSessionId = "  exact cached Pi identity  ";
       await eventHandlers.get("session_start")({}, runtimeContext(runtimeSessionId));
+      const initialTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(runtimeSessionId));
+      assert.match(initialTurn.systemPrompt, /^base prompt\n\n## Engram Persistent Memory — Protocol/);
+      assert.equal(initialTurn.message, undefined);
       await eventHandlers.get("session_compact")(
         { compactionEntry: { summary: "current shape" }, summary: "conflicting legacy shape" },
         { cwd: ROOT, sessionManager: { getSessionId: () => { throw new Error("stale context accessed"); } } },
@@ -3301,9 +4092,19 @@ test("shutdown stops passive capture after registration", async () => {
       assert.equal(new URL(`http://test${recovery.path}`).searchParams.get("session_id"), runtimeSessionId);
       assert.doesNotMatch(otherTurn.systemPrompt, /exact-session context/);
       assert.doesNotMatch(otherTurn.systemPrompt, /already saved/);
-      assert.match(nextTurn.systemPrompt, /already saved/);
-      assert.doesNotMatch(nextTurn.systemPrompt, /FIRST ACTION REQUIRED/);
-      assert.doesNotMatch(consumedTurn.systemPrompt, /already saved/);
+      assert.ok(nextTurn.message, "owner recovery must return a custom message, not a system-prompt notice");
+      assert.deepEqual(nextTurn.message, {
+        customType: "engram-compaction-recovery",
+        content: "exact-session context\n\nCompaction recovery summary was already saved to Engram (pi) by gentle-engram. No manual mem_session_summary call is needed for this compaction. Call mem_context if you need additional recent project memory.",
+        display: false,
+      });
+      for (const turn of [otherTurn, nextTurn, consumedTurn]) {
+        assert.equal(turn.systemPrompt, initialTurn.systemPrompt, "Memory Protocol prefix stays identical before, during and after recovery");
+      }
+      assert.equal(otherTurn.message, undefined, "foreign turn must not consume or receive the notice");
+      assert.equal(consumedTurn.message, undefined, "owner receives the notice only once");
+      assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions", "/observations"]);
+      assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 1);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -3351,17 +4152,35 @@ test("structured system prompt options receive memory instructions and the one-s
       assert.match(empty.appendSystemPrompt, /^## Engram Persistent Memory — Protocol/, "empty append text gets no leading separator");
 
       await eventHandlers.get("session_compact")({ compactionEntry: { summary: "compacted summary" } }, runtimeContext(sessionId));
+      const foreignOptions = { appendSystemPrompt: "" };
+      const foreign = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: foreignOptions }, runtimeContext("foreign-append"));
+      assert.equal(foreign, undefined, "foreign structured turn receives no notice");
+      assert.equal(foreignOptions.appendSystemPrompt, empty.appendSystemPrompt);
       const recoveryOptions = { appendSystemPrompt: "" };
       const recovered = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: recoveryOptions }, runtimeContext(sessionId));
-      assert.equal(recovered, undefined);
-      assert.match(recoveryOptions.appendSystemPrompt, /## Engram Persistent Memory — Protocol[\s\S]*\n\n[\s\S]*already saved/);
-      assert.equal(recoveryOptions.appendSystemPrompt.split("already saved").length, 2, "recovery notice lands once");
+      assert.ok(recovered?.message, "structured options must return the recovery message without forcing a systemPrompt");
+      assert.deepEqual(recovered, {
+        message: {
+          customType: "engram-compaction-recovery",
+          content: "exact-session context\n\nCompaction recovery summary was already saved to Engram (pi) by gentle-engram. No manual mem_session_summary call is needed for this compaction. Call mem_context if you need additional recent project memory.",
+          display: false,
+        },
+      });
+      assert.equal(recoveryOptions.appendSystemPrompt, empty.appendSystemPrompt, "recovery leaves the Memory Protocol prefix unchanged");
 
       const consumedOptions = { appendSystemPrompt: "" };
       const consumed = await beforeAgentStart({ systemPrompt: "base", systemPromptOptions: consumedOptions }, runtimeContext(sessionId));
       assert.equal(consumed, undefined);
       assert.doesNotMatch(consumedOptions.appendSystemPrompt, /already saved/, "recovery notice is consumed");
       assert.match(consumedOptions.appendSystemPrompt, /## Engram Persistent Memory — Protocol/);
+      assert.equal(consumedOptions.appendSystemPrompt, empty.appendSystemPrompt, "next turn retains the same stable prefix");
+      assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions", "/prompts", "/sessions", "/observations"]);
+      const archive = calls.find((call) => call.path === "/observations");
+      assert.equal(archive.body.session_id, sessionId);
+      assert.equal(archive.body.content, "compacted summary");
+      const recoveryCalls = calls.filter((call) => call.path.startsWith("/context/compaction"));
+      assert.equal(recoveryCalls.length, 1);
+      assert.equal(new URL(`http://test${recoveryCalls[0].path}`).searchParams.get("session_id"), sessionId);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -3413,6 +4232,7 @@ test("compaction timeout does not repeat its archive and queues verification gui
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     calls.push({ method: init.method ?? "GET", path: request.pathname + request.search });
     if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (request.pathname === "/sessions") return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }));
@@ -3434,9 +4254,10 @@ test("compaction timeout does not repeat its archive and queues verification gui
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, ctx);
 
       assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/observations").length, 1);
-      assert.match(nextTurn.systemPrompt, /could not confirm/);
-      assert.match(nextTurn.systemPrompt, /verify/i);
-      assert.match(nextTurn.systemPrompt, /Do NOT retry/);
+      assert.ok(nextTurn.message, "unknown archive outcome must return a recovery message");
+      assert.match(nextTurn.message.content, /could not confirm/);
+      assert.match(nextTurn.message.content, /verify/i);
+      assert.match(nextTurn.message.content, /Do NOT retry/);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -3453,6 +4274,7 @@ test("ambiguous runtime identity history permanently blocks compaction writes", 
   const registrationGate = deferred();
   globalThis.fetch = async (url, init = {}) => {
     const request = new URL(url);
+    if (request.pathname === "/runtime-contract") return runtimeMetadataResponse(request.pathname);
     calls.push({ method: init.method ?? "GET", path: request.pathname + request.search });
     if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
     if (request.pathname === "/sessions") {
@@ -3480,7 +4302,8 @@ test("ambiguous runtime identity history permanently blocks compaction writes", 
       await eventHandlers.get("session_start")({}, a);
       await eventHandlers.get("session_compact")({ summary: "repeated" });
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, a);
-      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.ok(nextTurn.message, "unsafe identity must return verification guidance");
+      assert.match(nextTurn.message.content, /did not archive/);
       assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/sessions").length, 1);
       assert.equal(calls.filter((call) => call.path.startsWith("/observations")).length, 0);
       assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 0);
@@ -3492,7 +4315,8 @@ test("ambiguous runtime identity history permanently blocks compaction writes", 
       await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(invalidIdentity));
       await eventHandlers.get("session_compact")({ summary: "unavailable identity" });
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, a);
-      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.ok(nextTurn.message, "missing identity must return verification guidance");
+      assert.match(nextTurn.message.content, /did not archive/);
       assert.equal(calls.filter((call) => call.path.startsWith("/observations")).length, 0);
       assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 0);
     });
@@ -3519,8 +4343,9 @@ test("pending compaction recovery is injected even when startup remains unavaila
       await eventHandlers.get("session_compact")({ compactionEntry: { summary: "summary" } }, ctx);
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, ctx);
 
-      assert.match(nextTurn.systemPrompt, /did not archive/);
-      assert.match(nextTurn.systemPrompt, /verify/i);
+      assert.ok(nextTurn.message, "unavailable startup must still return recovery guidance");
+      assert.match(nextTurn.message.content, /did not archive/);
+      assert.match(nextTurn.message.content, /verify/i);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -3598,6 +4423,7 @@ test("automatic prompt capture redacts a private block that straddles the trunca
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
   globalThis.fetch = async (url, init = {}) => {
     const path = new URL(url).pathname;
+    if (path === "/runtime-contract") return runtimeMetadataResponse(path);
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method: init.method ?? "GET", path, body });
     if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));

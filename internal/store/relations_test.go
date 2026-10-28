@@ -1854,79 +1854,63 @@ func TestFindCandidates_SkipInsert_True(t *testing.T) {
 	_ = candidates // presence check only; count depends on FTS scoring
 }
 
-func TestFindCandidates_ExecErrorSkipsCandidate(t *testing.T) {
-	s := setupRelationsStore(t)
-	_, _ = addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
-	savedID, _ := addTestObs(t, s, "Session-based auth token handling", "decision", "testproject", "project")
-
-	originalExecHook := s.hooks.exec
-	t.Cleanup(func() { s.hooks.exec = originalExecHook })
-	hookCalled := false
-	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-		hookCalled = true
-		return nil, errors.New("conditional insert failed")
-	}
-
-	candidates, err := s.FindCandidates(savedID, CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(-10.0),
-	})
-	if err != nil {
-		t.Fatalf("FindCandidates: %v", err)
-	}
-	if !hookCalled {
-		t.Fatal("expected conditional insert to use exec hook")
-	}
-	if len(candidates) != 0 {
-		t.Fatalf("candidates = %v, want none after exec error", candidates)
-	}
-
-	var relationCount int
-	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationCount); err != nil {
-		t.Fatalf("count relations: %v", err)
-	}
-	if relationCount != 0 {
-		t.Fatalf("pending relations = %d, want 0", relationCount)
-	}
-}
-
-func TestFindCandidates_RowsAffectedErrorSkipsCandidate(t *testing.T) {
-	s := setupRelationsStore(t)
-	_, _ = addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
-	savedID, _ := addTestObs(t, s, "Session-based auth token handling", "decision", "testproject", "project")
-
-	originalExecHook := s.hooks.exec
-	t.Cleanup(func() { s.hooks.exec = originalExecHook })
-	hookCalled := false
-	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
-		hookCalled = true
-		return rowsAffectedErrorResult{err: errors.New("rows affected failed")}, nil
-	}
-
-	candidates, err := s.FindCandidates(savedID, CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(-10.0),
-	})
-	if err != nil {
-		t.Fatalf("FindCandidates: %v", err)
-	}
-	if !hookCalled {
-		t.Fatal("expected conditional insert to use exec hook")
-	}
-	if len(candidates) != 0 {
-		t.Fatalf("candidates = %v, want none after RowsAffected error", candidates)
-	}
-
-	var relationCount int
-	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationCount); err != nil {
-		t.Fatalf("count relations: %v", err)
-	}
-	if relationCount != 0 {
-		t.Fatalf("pending relations = %d, want 0", relationCount)
+func TestFindCandidates_PersistenceFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		failAt                        int
+		rowsError                     bool
+		wantCandidates, wantRelations int
+	}{
+		{"all inserts", 0, false, 0, 0},
+		{"insert", 1, false, 1, 1},
+		{"rows affected after insert", 1, true, 1, 2},
+		{"partial insert", 2, false, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupRelationsStore(t)
+			addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
+			addTestObs(t, s, "JWT auth token session policy", "decision", "testproject", "project")
+			savedID, savedSyncID := addTestObs(t, s, "JWT auth token session handling", "decision", "testproject", "project")
+			opts := CandidateOptions{Project: "testproject", Scope: "project", Limit: 3, SkipInsert: true}
+			before, err := s.FindCandidates(savedID, opts)
+			if err != nil || len(before) != 2 {
+				t.Fatalf("fixture candidates = %v, err = %v", before, err)
+			}
+			injected := errors.New("injected pending relation failure")
+			calls := 0
+			s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+				calls++
+				if (tc.failAt == 0 || calls == tc.failAt) && !tc.rowsError {
+					return nil, injected
+				}
+				result, err := db.Exec(query, args...)
+				if err == nil && calls == tc.failAt && tc.rowsError {
+					return rowsAffectedErrorResult{err: injected}, nil
+				}
+				return result, err
+			}
+			opts.SkipInsert = false
+			candidates, err := s.FindCandidates(savedID, opts)
+			if !errors.Is(err, injected) {
+				t.Errorf("error = %v, want wrapped injected error", err)
+			}
+			if len(candidates) != tc.wantCandidates || calls != 2 {
+				t.Errorf("confirmed candidates = %d, insert attempts = %d", len(candidates), calls)
+			}
+			for _, c := range candidates {
+				if c.JudgmentID == "" {
+					t.Error("confirmed candidate missing judgment ID")
+				}
+			}
+			obs, err := s.GetObservation(savedID)
+			if err != nil || obs.SyncID != savedSyncID {
+				t.Fatalf("saved observation lost: %v, %v", obs, err)
+			}
+			count, err := s.CountRelations(ListRelationsOptions{Status: JudgmentStatusPending})
+			if err != nil || count != tc.wantRelations {
+				t.Fatalf("pending relations = %d, err = %v, want %d", count, err, tc.wantRelations)
+			}
+		})
 	}
 }
 

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -441,7 +445,9 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 			}
 
 			_, stderr, recovered := captureOutputAndRecover(t, func() {
-				cmdServe(cfg)
+				if err := cmdServe(cfg); err != nil {
+					fatal(err)
+				}
 			})
 
 			if seenPort != tc.wantPort {
@@ -605,6 +611,310 @@ func TestCmdServeStartsWithoutAutosync(t *testing.T) {
 // BR2-3: Stubs newAutosyncManager with a fully deterministic fake that has no
 // goroutines, no WaitGroup, and no real network calls — eliminating the racy
 // wg.Add/wg.Wait interleave that occurred when using the real *autosync.Manager.
+func TestCmdServeGenerationChangeStopsAutosyncAndReturnsTerminalError(t *testing.T) {
+	run, ok := any(cmdServe).(func(store.Config) error)
+	if !ok {
+		t.Fatal("cmdServe cannot return a terminal cause after cleanup")
+	}
+	stubRuntimeHooks(t)
+	withArgs(t, "engram", "serve")
+	t.Setenv("ENGRAM_SOCKET", "")
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+	oldManager := newAutosyncManager
+	t.Cleanup(func() { newAutosyncManager = oldManager })
+	var stopped atomic.Int32
+	ctxSeen := make(chan context.Context, 1)
+	newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+		return &fakeStartableManager{runFn: func(ctx context.Context) { ctxSeen <- ctx }, stopFn: func() { stopped.Add(1) }}
+	}
+	oldNotify := serveGenerationInvalidated
+	t.Cleanup(func() { serveGenerationInvalidated = oldNotify })
+	notification := make(chan struct{}, 1)
+	serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+	startHTTP = func(*engramsrv.Server) error { notification <- struct{}{}; return nil }
+	var diagnostic bytes.Buffer
+	oldLog := log.Writer()
+	log.SetOutput(&diagnostic)
+	t.Cleanup(func() { log.SetOutput(oldLog) })
+	cfg := testConfig(t)
+	var opened *store.Store
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		var err error
+		opened, err = store.New(cfg)
+		return opened, err
+	}
+	err := run(cfg)
+	if _, err := opened.Stats(); err == nil {
+		t.Fatal("store not closed before return")
+	}
+	const message = "[engram] database generation changed; stopping server; restart Engram"
+	if strings.Count(diagnostic.String(), message) != 1 || strings.Contains(diagnostic.String(), cfg.DataDir) {
+		t.Fatalf("unsafe or duplicate diagnostic: %q", diagnostic.String())
+	}
+	if !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+		t.Fatalf("terminal cause = %v", err)
+	}
+	if stopped.Load() != 1 {
+		t.Fatalf("stop calls = %d", stopped.Load())
+	}
+	select {
+	case <-(<-ctxSeen).Done():
+	default:
+		t.Fatal("autosync context not canceled before return")
+	}
+}
+
+// This accessor seam proves owner consultation before store close, not a blocked
+// handler integration or real store invalidation. The notification stays empty.
+func TestCmdServeStickyGenerationWithoutNotification(t *testing.T) {
+	for _, trigger := range []string{"signal", "serve_error", "serve_nil"} {
+		for _, state := range []string{"sticky", "nil", "transient"} {
+			t.Run(trigger+"/"+state, func(t *testing.T) {
+				stubRuntimeHooks(t)
+				withArgs(t, "engram", "serve")
+				t.Setenv("ENGRAM_SOCKET", "")
+				t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+				t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+				t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+				oldManager, oldGeneration := newAutosyncManager, serveGenerationInvalidated
+				oldAccessor, oldNotify, oldStop := serveGenerationError, notifySignals, stopSignals
+				t.Cleanup(func() {
+					newAutosyncManager, serveGenerationInvalidated = oldManager, oldGeneration
+					serveGenerationError, notifySignals, stopSignals = oldAccessor, oldNotify, oldStop
+				})
+				notification := make(chan struct{})
+				serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+				notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) {
+					if trigger == "signal" {
+						ch <- syscall.SIGTERM
+					}
+				}
+				stopSignals = func(chan<- os.Signal) {}
+				var original error
+				if trigger == "serve_error" {
+					original = errors.New("serving loop failed")
+				}
+				release, serverDone := make(chan struct{}), make(chan struct{})
+				startHTTP = func(*engramsrv.Server) error {
+					defer close(serverDone)
+					if trigger == "signal" {
+						<-release
+					}
+					return original
+				}
+				var stopped, reads int
+				var observed error
+				newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+					return &fakeStartableManager{stopFn: func() {
+						stopped++
+						switch state {
+						case "sticky":
+							observed = fmt.Errorf("private fixture detail: %w", store.ErrDatabaseGenerationChanged)
+						case "transient":
+							observed = errors.New("private transient fixture detail")
+						}
+						close(release)
+					}}
+				}
+				serveGenerationError = func(s *store.Store) error {
+					reads++
+					if stopped != 1 {
+						t.Fatal("sticky accessor consulted before background cleanup")
+					}
+					if _, err := s.Stats(); err != nil {
+						t.Fatalf("store closed before sticky accessor: %v", err)
+					}
+					return observed
+				}
+				var diagnostic bytes.Buffer
+				oldLog := log.Writer()
+				log.SetOutput(&diagnostic)
+				t.Cleanup(func() { log.SetOutput(oldLog) })
+				var opened *store.Store
+				storeNew = func(cfg store.Config) (*store.Store, error) {
+					var err error
+					opened, err = store.New(cfg)
+					return opened, err
+				}
+				err := cmdServe(testConfig(t))
+				<-serverDone
+				if _, err := opened.Stats(); err == nil {
+					t.Fatal("store not closed before return")
+				}
+				want, count := original, 0
+				if state == "sticky" {
+					want, count = store.ErrDatabaseGenerationChanged, 1
+				}
+				if err != want {
+					t.Fatalf("terminal cause = %v, want %v", err, want)
+				}
+				if reads != 1 || stopped != 1 {
+					t.Fatalf("accessor reads = %d, Stop calls = %d, want 1 each", reads, stopped)
+				}
+				const message = "[engram] database generation changed; stopping server; restart Engram"
+				if strings.Count(diagnostic.String(), message) != count || strings.Contains(diagnostic.String(), "private") {
+					t.Fatalf("diagnostic = %q, want %d privacy-safe generation messages", diagnostic.String(), count)
+				}
+			})
+		}
+	}
+}
+
+func TestCmdServeResultShutdownGenerationPrecedence(t *testing.T) {
+	for _, generation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late_generation=%t", generation), func(t *testing.T) {
+			stubRuntimeHooks(t)
+			withArgs(t, "engram", "serve")
+			t.Setenv("ENGRAM_SOCKET", "")
+			t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+			t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+			t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+			oldManager, oldGeneration := newAutosyncManager, serveGenerationInvalidated
+			oldNotify, oldStop := notifySignals, stopSignals
+			t.Cleanup(func() {
+				newAutosyncManager, serveGenerationInvalidated = oldManager, oldGeneration
+				notifySignals, stopSignals = oldNotify, oldStop
+			})
+			notification := make(chan struct{}, 1)
+			serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+			notifySignals = func(chan<- os.Signal, ...os.Signal) {}
+			stopSignals = func(chan<- os.Signal) {}
+			serveErr := errors.New("serving loop failed")
+			startHTTP = func(*engramsrv.Server) error { return serveErr }
+			ctxSeen := make(chan context.Context, 1)
+			var stopped int
+			newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+				return &fakeStartableManager{
+					runFn: func(ctx context.Context) { ctxSeen <- ctx },
+					stopFn: func() {
+						stopped++
+						// Only serveResult is ready; invalidation arrives during cleanup.
+						if generation {
+							notification <- struct{}{}
+						}
+					},
+				}
+			}
+			cfg := testConfig(t)
+			var opened *store.Store
+			storeNew = func(cfg store.Config) (*store.Store, error) {
+				var err error
+				opened, err = store.New(cfg)
+				return opened, err
+			}
+			var diagnostic bytes.Buffer
+			oldLog := log.Writer()
+			log.SetOutput(&diagnostic)
+			t.Cleanup(func() { log.SetOutput(oldLog) })
+			err := cmdServe(cfg)
+			if stopped != 1 {
+				t.Fatalf("Stop calls = %d, want 1", stopped)
+			}
+			select {
+			case <-(<-ctxSeen).Done():
+			default:
+				t.Fatal("background context not canceled before return")
+			}
+			if _, err := opened.Stats(); err == nil {
+				t.Fatal("store not closed before return")
+			}
+			wantErr := serveErr
+			wantDiagnostics := 0
+			if generation {
+				wantErr = store.ErrDatabaseGenerationChanged
+				wantDiagnostics = 1
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("terminal cause = %v, want %v", err, wantErr)
+			}
+			const message = "[engram] database generation changed; stopping server; restart Engram"
+			if strings.Count(diagnostic.String(), message) != wantDiagnostics {
+				t.Fatalf("diagnostic = %q, want count %d", diagnostic.String(), wantDiagnostics)
+			}
+		})
+	}
+}
+
+func TestCmdServeSignalShutdownGenerationPrecedence(t *testing.T) {
+	for _, generation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late_generation=%t", generation), func(t *testing.T) {
+			stubRuntimeHooks(t)
+			withArgs(t, "engram", "serve")
+			t.Setenv("ENGRAM_SOCKET", "")
+			t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+			t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+			t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
+			oldManager, oldGeneration := newAutosyncManager, serveGenerationInvalidated
+			oldNotify, oldStop := notifySignals, stopSignals
+			t.Cleanup(func() {
+				newAutosyncManager, serveGenerationInvalidated = oldManager, oldGeneration
+				notifySignals, stopSignals = oldNotify, oldStop
+			})
+			notification := make(chan struct{}, 1)
+			serveGenerationInvalidated = func(*engramsrv.Server) <-chan struct{} { return notification }
+			notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) { ch <- syscall.SIGTERM }
+			stopSignals = func(chan<- os.Signal) {}
+			release, serverDone := make(chan struct{}), make(chan struct{})
+			startHTTP = func(*engramsrv.Server) error { defer close(serverDone); <-release; return nil }
+			ctxSeen := make(chan context.Context, 1)
+			var stopped atomic.Int32
+			newAutosyncManager = func(*store.Store, autosync.CloudTransport, autosync.Config) startableAutosyncManager {
+				return &fakeStartableManager{
+					runFn: func(ctx context.Context) { ctxSeen <- ctx },
+					stopFn: func() {
+						stopped.Add(1)
+						// Only signal selection can reach Stop: both other select cases remain blocked.
+						if generation {
+							notification <- struct{}{}
+						}
+						close(release)
+					},
+				}
+			}
+			cfg := testConfig(t)
+			var opened *store.Store
+			storeNew = func(cfg store.Config) (*store.Store, error) {
+				var err error
+				opened, err = store.New(cfg)
+				return opened, err
+			}
+			var diagnostic bytes.Buffer
+			oldLog := log.Writer()
+			log.SetOutput(&diagnostic)
+			t.Cleanup(func() { log.SetOutput(oldLog) })
+			err := cmdServe(cfg)
+			<-serverDone
+			if stopped.Load() != 1 {
+				t.Fatalf("Stop calls = %d, want 1", stopped.Load())
+			}
+			select {
+			case <-(<-ctxSeen).Done():
+			default:
+				t.Fatal("background context not canceled")
+			}
+			if _, err := opened.Stats(); err == nil {
+				t.Fatal("store not closed before return")
+			}
+			if generation && !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+				t.Fatalf("late generation terminal cause = %v, want ErrDatabaseGenerationChanged", err)
+			}
+			if !generation && err != nil {
+				t.Fatalf("signal-only terminal cause = %v, want nil", err)
+			}
+			wantDiagnostics := 0
+			if generation {
+				wantDiagnostics = 1
+			}
+			const message = "[engram] database generation changed; stopping server; restart Engram"
+			if strings.Count(diagnostic.String(), message) != wantDiagnostics || strings.Contains(diagnostic.String(), cfg.DataDir) {
+				t.Fatalf("unsafe or duplicate diagnostic: %q", diagnostic.String())
+			}
+		})
+	}
+}
+
 func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
@@ -1182,6 +1492,75 @@ func TestCmdCloudUpgradeDoctorRequiresProjectAndIsDeterministic(t *testing.T) {
 			t.Fatalf("bootstrap must capture enrollment before legacy diagnosis: state=%+v err=%v", state, err)
 		}
 	})
+}
+
+func TestCmdCloudUpgradeDoctorScopesPolicyToProject(t *testing.T) {
+	for _, denied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("selected project denied=%t", denied), func(t *testing.T) {
+			stubExitWithPanic(t)
+			stubRuntimeHooks(t)
+			cfg := testConfig(t)
+			if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+				t.Fatal(err)
+			}
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			})
+			for _, project := range []string{"project-a", "project-b"} {
+				if err := s.EnrollProject(project); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.MarkSyncHealthy("cloud:project-a"); err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range []string{"cloud:project-b", constants.TargetKeyCloud} {
+				if err := s.MarkSyncBlocked(target, constants.ReasonPolicyForbidden, "project-b denied"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if denied {
+				if err := s.MarkSyncBlocked("cloud:project-a", constants.ReasonPolicyForbidden, "project-a denied"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{Project: "project-a", Stage: store.UpgradeStageBootstrapVerified}); err != nil {
+				t.Fatal(err)
+			}
+
+			withArgs(t, "engram", "cloud", "upgrade", "doctor", "--project", "project-a")
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("doctor must succeed: recovered=%v stderr=%q", recovered, stderr)
+			}
+			want := "project: project-a\nstatus: ready\nclass: ready\nreason_code: upgrade_ready\nmessage: project \"project-a\" is ready for cloud bootstrap\n"
+			wantStage, wantClass, wantCode := store.UpgradeStageDoctorReady, "ready", "upgrade_ready"
+			if denied {
+				want = "project: project-a\nstatus: blocked\nclass: policy\nreason_code: policy_forbidden\nmessage: project \"project-a\" is blocked by organization policy\n"
+				wantStage, wantClass, wantCode = store.UpgradeStageDoctorBlocked, "policy", constants.ReasonPolicyForbidden
+			}
+			if stdout != want {
+				t.Fatalf("doctor output: got %q, want %q", stdout, want)
+			}
+			// Read persisted results through the public CLI, not the underlying tables.
+			withArgs(t, "engram", "cloud", "upgrade", "status", "--project", "project-a")
+			stdout, stderr, recovered = captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("status must succeed: recovered=%v stderr=%q", recovered, stderr)
+			}
+			for _, field := range []string{"stage: " + wantStage, "class: " + wantClass, "reason_code: " + wantCode} {
+				if !strings.Contains(stdout, field+"\n") {
+					t.Fatalf("status missing %q: %q", field, stdout)
+				}
+			}
+		})
+	}
 }
 
 func TestCmdSyncCloudPreflightsLegacyMutationPayloads(t *testing.T) {
@@ -2944,7 +3323,11 @@ func TestStoreInitFailurePaths(t *testing.T) {
 	}
 
 	cmds := []func(store.Config){
-		cmdServe,
+		func(cfg store.Config) {
+			if err := cmdServe(cfg); err != nil {
+				fatal(err)
+			}
+		},
 		cmdMCP,
 		cmdTUI,
 		cmdSearch,

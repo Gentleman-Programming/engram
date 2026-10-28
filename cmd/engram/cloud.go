@@ -116,6 +116,7 @@ func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+		cloudserver.WithVersion(version),
 	}
 	if authenticator != nil {
 		options = append(options, cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: grantStore}))
@@ -428,23 +429,14 @@ func cmdCloudUpgradeDoctor(cfg store.Config) {
 }
 
 func cloudUpgradePolicyDenied(s *store.Store, project string) (bool, error) {
-	targets := []string{cloudTargetKeyForProject(project)}
-	if cloudTargetKeyForProject(project) != constants.TargetKeyCloud {
-		targets = append(targets, constants.TargetKeyCloud)
+	state, err := s.GetSyncState(cloudTargetKeyForProject(project))
+	if err != nil {
+		return false, err
 	}
-	for _, targetKey := range targets {
-		state, err := s.GetSyncState(targetKey)
-		if err != nil {
-			return false, err
-		}
-		if state == nil {
-			continue
-		}
-		if strings.TrimSpace(derefString(state.ReasonCode)) == constants.ReasonPolicyForbidden {
-			return true, nil
-		}
+	if state == nil {
+		return false, nil
 	}
-	return false, nil
+	return strings.TrimSpace(derefString(state.ReasonCode)) == constants.ReasonPolicyForbidden, nil
 }
 
 func parseCloudUpgradeProjectArg(args []string) string {

@@ -1246,6 +1246,9 @@ func TestCmdDoctorRepairDefaultsSourceObservationRepairToDryRun(t *testing.T) {
 	if dry["applied"] != false {
 		t.Fatalf("dry-run applied=%v, want false", dry["applied"])
 	}
+	if unresolved, ok := dry["source_unrepairable"].([]any); !ok || len(unresolved) != 0 {
+		t.Fatalf("recoverable source reported as unrepairable: %v", dry)
+	}
 	sourceRepairs := dry["source_repairs"].([]any)
 	if len(sourceRepairs) != 1 || sourceRepairs[0].(map[string]any)["id"] != float64(id) || sourceRepairs[0].(map[string]any)["title"] != "Recovered source title." {
 		t.Fatalf("dry-run=%v", dry)
@@ -1287,6 +1290,9 @@ func TestCmdDoctorRepairDefaultsSourceObservationRepairToDryRun(t *testing.T) {
 	}
 	if observation.Title != "Recovered source title." {
 		t.Fatalf("title after apply=%q", observation.Title)
+	}
+	if unresolved, ok := applied["source_unrepairable"].([]any); !ok || len(unresolved) != 0 {
+		t.Fatalf("repaired source reported as unrepairable: %v", applied)
 	}
 }
 

@@ -165,6 +165,45 @@ func TestClaudePreToolUseManifestUsesPortableCoreHook(t *testing.T) {
 	t.Fatal("no portable PreToolUse hook delegates to engram hook claude-pre-tool-use")
 }
 
+// Configuration contract only: Claude Code >= 2.1.295 owns enforcement of
+// onFailure when the authoritative pre-write hook cannot complete successfully.
+func TestClaudePreToolUseMutatingHooksBlockOnFailure(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("cannot read hooks.json: %v", err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command   string `json:"command"`
+				OnFailure string `json:"onFailure"`
+				Timeout   int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("cannot parse hooks.json: %v", err)
+	}
+	found := 0
+	for groupIndex, group := range manifest.Hooks["PreToolUse"] {
+		for hookIndex, hook := range group.Hooks {
+			if hook.Command != "engram hook claude-pre-tool-use" {
+				continue
+			}
+			found++
+			if hook.OnFailure != "block" {
+				t.Errorf("PreToolUse[%d].hooks[%d] onFailure = %q, want block so failed rebinding cannot permit a write", groupIndex, hookIndex, hook.OnFailure)
+			}
+			if hook.Timeout != 5 {
+				t.Errorf("PreToolUse[%d].hooks[%d] timeout = %d, want 5", groupIndex, hookIndex, hook.Timeout)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("no authoritative mutating PreToolUse hook found")
+	}
+}
+
 func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "hooks", "hooks.json"))
@@ -211,6 +250,65 @@ func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	for token := range tokens {
 		if !want[token] {
 			t.Errorf("SessionStart session-start.sh matcher %q includes unexpected token %q", matcher, token)
+		}
+	}
+}
+
+// The host-process binding (#1693) is published by an exec-form SessionStart
+// hook: with no shell in between, the hook's parent is the Claude process on
+// Linux, macOS and Windows. A shell-form entry would bind the wrong PID.
+func TestSessionStartBindSessionHookIsExecForm(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("cannot read hooks.json: %v", err)
+	}
+	var manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string   `json:"type"`
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+				Timeout int      `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("cannot parse hooks.json: %v", err)
+	}
+
+	found := 0
+	for _, group := range manifest.Hooks["SessionStart"] {
+		for _, hook := range group.Hooks {
+			if !strings.Contains(strings.Join(hook.Args, " "), "claude-bind-session") && !strings.Contains(hook.Command, "claude-bind-session") {
+				continue
+			}
+			found++
+			if group.Matcher != "startup|resume|clear|fork" {
+				t.Errorf("bind hook matcher = %q, want startup|resume|clear|fork", group.Matcher)
+			}
+			if hook.Type != "command" || hook.Command != "engram" || strings.Join(hook.Args, " ") != "hook claude-bind-session" {
+				t.Errorf("bind hook = %+v, want exec form command=engram args=[hook claude-bind-session]", hook)
+			}
+			if hook.Timeout != 5 {
+				t.Errorf("bind hook timeout = %d, want 5", hook.Timeout)
+			}
+			if len(group.Hooks) != 1 {
+				t.Errorf("bind hook group has %d hooks, want it alone", len(group.Hooks))
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("SessionStart has %d claude-bind-session hooks, want 1", found)
+	}
+
+	script, err := os.ReadFile(filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "session-start.sh"))
+	if err != nil {
+		t.Fatalf("cannot read session-start.sh: %v", err)
+	}
+	for _, stale := range []string{"claude-bind-session", "ENGRAM_HOST_PID"} {
+		if strings.Contains(string(script), stale) {
+			t.Errorf("session-start.sh still mentions %q; $PPID is not the Claude process under sh -c/Git Bash", stale)
 		}
 	}
 }

@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -73,7 +76,7 @@ func loadOrCreateRepositoryBinding(commonDir, legacyProject string) (repositoryB
 	temporary := path + ".tmp-" + id
 	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return repositoryBinding{}, fmt.Errorf("%w: cannot create the binding; check Git metadata permissions or configure project_name explicitly", ErrRepositoryBinding)
+		return repositoryBinding{}, fmt.Errorf("%w: cannot create the binding; check Git metadata permissions or configure project_name explicitly: %w", ErrRepositoryBinding, err)
 	}
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		_ = file.Close()
@@ -86,10 +89,10 @@ func loadOrCreateRepositoryBinding(commonDir, legacyProject string) (repositoryB
 	}
 	defer os.Remove(temporary)
 
-	if err := os.Link(temporary, path); err == nil {
+	if err := identityfile.Publish(temporary, path); err == nil {
 		return binding, nil
 	} else if !errors.Is(err, fs.ErrExist) {
-		return repositoryBinding{}, fmt.Errorf("%w: cannot atomically create the binding; check Git metadata permissions or configure project_name explicitly", ErrRepositoryBinding)
+		return repositoryBinding{}, fmt.Errorf("%w: cannot atomically create the binding; check Git metadata permissions or configure project_name explicitly: %w", ErrRepositoryBinding, err)
 	}
 
 	return readRepositoryBinding(commonDir)
@@ -107,12 +110,15 @@ func readRepositoryBinding(commonDir string) (repositoryBinding, error) {
 	if err := json.Unmarshal(data, &binding); err != nil || !validRepositoryBinding(binding) {
 		return repositoryBinding{}, fmt.Errorf("%w: binding is invalid; configure project_name explicitly before retrying", ErrRepositoryBinding)
 	}
+	// Older bindings may retain an NFD label. Canonicalize only the returned
+	// identity, without rewriting private Git metadata or historical memories.
+	binding.Project = norm.NFC.String(binding.Project)
 	return binding, nil
 }
 
 func validRepositoryBinding(binding repositoryBinding) bool {
 	project, err := normalizeProjectName(binding.Project)
-	if err != nil || project != binding.Project || binding.Version != repositoryBindingVersion {
+	if err != nil || project != norm.NFC.String(binding.Project) || binding.Version != repositoryBindingVersion {
 		return false
 	}
 	if len(binding.ID) != 32 {

@@ -50,6 +50,79 @@ func IsRepairableCode(code string) bool {
 	return ok
 }
 
+type syncMutationRepairStore interface {
+	RepairPendingSessionDirectories(string, bool) ([]store.SyncMutationDirectoryRepairAction, error)
+	RepairObservationMutationTitles(string, bool) (store.SyncMutationTitleRepairReport, error)
+	SupersedeUnenrolledLegacyMutations(string, string, bool) (store.SyncMutationSupersedeReport, error)
+	QuarantineIrreparableSyncMutations(string, string, bool) (store.SyncMutationQuarantineReport, error)
+	RepairObservationSourceTitles(string, bool) (store.ObservationSourceTitleRepairReport, error)
+}
+
+// SyncMutationRepairResult aggregates the existing store repair results.
+// The caller owns presentation; store owns each repair's data and backup behavior.
+type SyncMutationRepairResult struct {
+	Quarantine             store.SyncMutationQuarantineReport
+	DirectoryRepairs       []store.SyncMutationDirectoryRepairAction
+	Repairs                []store.SyncMutationTitleRepairAction
+	Superseded             []store.SyncMutationSupersedeAction
+	SourceRepairs          []store.ObservationSourceTitleRepairAction
+	SourceRepairBackupPath string
+	SourceUnrepairable     []store.ObservationSourceUnrepairable
+}
+
+// RepairSyncMutationRequiredFields runs the existing five repairs in order.
+// Errors stop later repairs without rolling back earlier store effects.
+func RepairSyncMutationRequiredFields(s syncMutationRepairStore, project string, mode RepairMode) (SyncMutationRepairResult, error) {
+	apply := mode == RepairModeApply
+	directoryRepairs, err := s.RepairPendingSessionDirectories(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	repairs, err := s.RepairObservationMutationTitles(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	superseded, err := s.SupersedeUnenrolledLegacyMutations(store.DefaultSyncTargetKey, project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	if !apply {
+		handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions)+len(directoryRepairs))
+		for _, action := range directoryRepairs {
+			handledSeqs[action.Seq] = struct{}{}
+		}
+		for _, action := range repairs.Actions {
+			handledSeqs[action.Seq] = struct{}{}
+		}
+		for _, action := range superseded.Actions {
+			handledSeqs[action.Seq] = struct{}{}
+		}
+		remaining := report.Actions[:0]
+		for _, action := range report.Actions {
+			if _, handled := handledSeqs[action.Seq]; !handled {
+				remaining = append(remaining, action)
+			}
+		}
+		report.Actions = remaining
+	}
+	sourceRepairs, err := s.RepairObservationSourceTitles(project, apply)
+	if err != nil {
+		return SyncMutationRepairResult{}, err
+	}
+	if apply {
+		report.Applied = len(directoryRepairs) > 0 || len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
+	}
+	return SyncMutationRepairResult{
+		Quarantine: report, DirectoryRepairs: directoryRepairs, Repairs: repairs.Actions,
+		Superseded: superseded.Actions, SourceRepairs: sourceRepairs.Actions,
+		SourceRepairBackupPath: sourceRepairs.BackupPath, SourceUnrepairable: sourceRepairs.Unrepairable,
+	}, nil
+}
+
 type ProjectReclassifyAction struct {
 	SessionID      string `json:"session_id"`
 	FromProject    string `json:"from_project"`
@@ -145,6 +218,11 @@ func BuildRepairPlan(ctx context.Context, scope Scope, report Report, check stri
 		return RepairPlan{}, fmt.Errorf("unsupported repair check %q", check)
 	}
 
+	if check == CheckSessionProjectDirectoryMismatch || check == CheckManualSessionNameProjectMismatch {
+		if err := vetoProjectAliasMoves(&plan, scope); err != nil {
+			return RepairPlan{}, err
+		}
+	}
 	dedupeAndSortRepairPlan(&plan)
 	if len(plan.Actions) == 0 && len(plan.TargetActions) == 0 && len(plan.PlaceholderSessions) == 0 && plan.OrphanedPendingRelations == nil {
 		plan.Status = "noop"
@@ -305,6 +383,33 @@ func PlanSessionIdentityReplacement(scope Scope, report Report, plan RepairPlan,
 		plan.Counts.CorrectedMutationsPlanned = 1 + identity.Observations + identity.Prompts
 	}
 	return plan
+}
+
+// Re-read aliases and persisted directories even when the report predates an
+// alias change. This shared gate cannot create an action or select an owner.
+func vetoProjectAliasMoves(plan *RepairPlan, scope Scope) error {
+	sessions, err := scope.Store.ListDiagnosticSessions("")
+	if err != nil {
+		return err
+	}
+	directories := make(map[string]string, len(sessions))
+	for _, session := range sessions {
+		directories[session.ID] = session.Directory
+	}
+	actions := plan.Actions[:0]
+	for _, action := range plan.Actions {
+		aliases, err := sessionProjectAliases(scope, directories[action.SessionID])
+		if err != nil {
+			return err
+		}
+		if aliases.Conflict || ((aliases.KeyAlias != nil || aliases.CwdAlias != nil) && aliases.Project != action.ToProject) {
+			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: action.SessionID, ReasonCode: "project_alias_contradicts_reclassification", Message: "Local project aliases conflict with this move; review alias evidence. Aliases never authorize historical reclassification."})
+			continue
+		}
+		actions = append(actions, action)
+	}
+	plan.Actions = actions
+	return nil
 }
 
 func planDirectoryMismatchRepair(plan *RepairPlan, report Report) {

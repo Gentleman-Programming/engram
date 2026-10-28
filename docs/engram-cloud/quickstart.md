@@ -43,7 +43,11 @@ engram sync --cloud --status --project smoke-project
 ### 5) Verify browser dashboard
 
 Open:
-- `http://127.0.0.1:18080/dashboard`
+- `http://127.0.0.1:18080/` — redirects to `/dashboard/` with HTTP 302.
+- `http://127.0.0.1:18080/dashboard` — direct dashboard entrypoint.
+
+In authenticated deployments, an unauthenticated browser is then redirected to
+`/dashboard/login`. Unknown paths still return HTTP 404.
 
 In compose smoke mode, `/dashboard/login` redirects to `/dashboard/` (no bearer login needed).
 
@@ -164,6 +168,28 @@ ENGRAM_CLOUD_HOST=0.0.0.0
 ENGRAM_CLOUD_MAX_PUSH_BYTES=8388608
 ENGRAM_PORT=18080
 ```
+
+### PostgreSQL credentials
+
+For a fresh PostgreSQL volume, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+`POSTGRES_DB` initialize the database. `ENGRAM_DATABASE_URL` must connect to that
+same user and database with the same password. Changing the initialization values
+in `.env` does not change credentials in an already-initialized PostgreSQL volume.
+
+Keep the password literal in `POSTGRES_PASSWORD`. In `ENGRAM_DATABASE_URL`,
+percent-encode reserved characters in the password component, not the entire URL.
+For example, the synthetic password `example@pass:word/` becomes
+`example%40pass%3Aword%2F` in the URL (do not use this example password):
+
+```dotenv
+POSTGRES_PASSWORD=example@pass:word/
+ENGRAM_DATABASE_URL=postgres://engram:example%40pass%3Aword%2F@postgres:5432/engram_cloud?sslmode=disable
+```
+
+A successful PostgreSQL `pg_isready` healthcheck does not verify Engram's runtime
+credentials or database target. Engram checks its actual connection during cloud
+startup using `cloudstore.New` and `PingContext`; a readiness check alone does not
+prove that connection will succeed.
 
 Notes:
 - Keep `.env` on the server only. Do not commit it.

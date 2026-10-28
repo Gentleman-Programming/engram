@@ -1,12 +1,15 @@
 package cloudstore
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
@@ -121,163 +124,183 @@ func newDashboardEntityKey(project, entityKey string) dashboardEntityKey {
 	}
 }
 
-func buildDashboardReadModel(chunks []dashboardChunkRow) (dashboardReadModel, error) {
-	return buildDashboardReadModelFromRows(chunks, nil)
+// Session map keys must not share generated-key whitespace normalization.
+func newDashboardSessionKey(project, sessionID string) dashboardEntityKey {
+	return dashboardEntityKey{project: strings.TrimSpace(project), entityKey: sessionID}
 }
 
-func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []dashboardMutationRow) (dashboardReadModel, error) {
-	ordered := append([]dashboardChunkRow(nil), chunks...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if !ordered[i].createdAt.Equal(ordered[j].createdAt) {
-			return ordered[i].createdAt.Before(ordered[j].createdAt)
-		}
-		if ordered[i].chunkID != ordered[j].chunkID {
-			return ordered[i].chunkID < ordered[j].chunkID
-		}
-		if ordered[i].project != ordered[j].project {
-			return ordered[i].project < ordered[j].project
-		}
-		return ordered[i].createdBy < ordered[j].createdBy
-	})
+// dashboardReadModelFold accumulates the read model one row at a time so callers
+// can stream rows without keeping every decoded chunk alive. Callers must apply
+// all chunks in canonical chunk order, then all mutations in seq order, then
+// call finish exactly once.
+type dashboardReadModelFold struct {
+	projectChunkCounts  map[string]int
+	contributors        map[string]*DashboardContributorRow
+	contributorProjects map[string]map[string]struct{}
+	projectContributors map[string]map[string]*DashboardContributorRow
 
-	projectChunkCounts := make(map[string]int)
-	contributors := make(map[string]*DashboardContributorRow)
-	contributorProjects := make(map[string]map[string]struct{})
-	projectContributors := make(map[string]map[string]*DashboardContributorRow)
+	sessions     map[dashboardEntityKey]DashboardSessionRow
+	observations map[dashboardEntityKey]DashboardObservationRow
+	prompts      map[dashboardEntityKey]DashboardPromptRow
 
-	sessions := make(map[dashboardEntityKey]DashboardSessionRow)
-	observations := make(map[dashboardEntityKey]DashboardObservationRow)
-	prompts := make(map[dashboardEntityKey]DashboardPromptRow)
+	// mutationKeys holds entity -> project -> entity key for every applied
+	// cloud_mutations row; it drives pruneDashboardEntitiesWithoutCloudMutation.
+	mutationKeys map[string]map[string]map[string]struct{}
+}
 
-	for _, chunk := range ordered {
-		project := strings.TrimSpace(chunk.project)
-		if project == "" {
+func newDashboardReadModelFold() *dashboardReadModelFold {
+	return &dashboardReadModelFold{
+		projectChunkCounts:  make(map[string]int),
+		contributors:        make(map[string]*DashboardContributorRow),
+		contributorProjects: make(map[string]map[string]struct{}),
+		projectContributors: make(map[string]map[string]*DashboardContributorRow),
+		sessions:            make(map[dashboardEntityKey]DashboardSessionRow),
+		observations:        make(map[dashboardEntityKey]DashboardObservationRow),
+		prompts:             make(map[dashboardEntityKey]DashboardPromptRow),
+		mutationKeys:        make(map[string]map[string]map[string]struct{}),
+	}
+}
+
+func (f *dashboardReadModelFold) applyChunk(chunk dashboardChunkRow) error {
+	sessions, observations, prompts := f.sessions, f.observations, f.prompts
+	contributors, contributorProjects, projectContributors := f.contributors, f.contributorProjects, f.projectContributors
+
+	project := strings.TrimSpace(chunk.project)
+	if project == "" {
+		return nil
+	}
+	f.projectChunkCounts[project]++
+
+	for _, session := range chunk.parsed.Sessions {
+		endedAt := ""
+		if session.EndedAt != nil {
+			endedAt = *session.EndedAt
+		}
+		summary := ""
+		if session.Summary != nil {
+			summary = *session.Summary
+		}
+		// R4-1: Preserve fields from prior sessions-array passes (e.g. open chunk
+		// sets started_at+project; close chunk sets ended_at+summary but omits them).
+		// Inherit any non-empty field from the existing row before calling upsert.
+		sessionID := session.ID
+		sessionProject := resolveProjectValue(session.Project, project)
+		if existing, ok := sessions[newDashboardSessionKey(sessionProject, sessionID)]; ok {
+			if session.StartedAt == "" {
+				session.StartedAt = existing.StartedAt
+			}
+			if endedAt == "" {
+				endedAt = existing.EndedAt
+			}
+			if summary == "" {
+				summary = existing.Summary
+			}
+			if session.Directory == "" {
+				session.Directory = existing.Directory
+			}
+			if strings.TrimSpace(session.Project) == "" && existing.Project != "" {
+				// Resolve project below will use existing.Project as primary if session.Project is empty.
+				session.Project = existing.Project
+			}
+		}
+		upsertDashboardSession(sessions, session.ID, sessionProject, session.StartedAt, endedAt, summary, session.Directory)
+	}
+	for _, obs := range chunk.parsed.Observations {
+		obsProject := project
+		if obs.Project != nil {
+			obsProject = resolveProjectValue(*obs.Project, project)
+		}
+		if obs.DeletedAt != nil && strings.TrimSpace(*obs.DeletedAt) != "" {
+			delete(observations, newDashboardEntityKey(obsProject, obs.SyncID))
 			continue
 		}
-		projectChunkCounts[project]++
-
-		for _, session := range chunk.parsed.Sessions {
-			endedAt := ""
-			if session.EndedAt != nil {
-				endedAt = *session.EndedAt
-			}
-			summary := ""
-			if session.Summary != nil {
-				summary = *session.Summary
-			}
-			// R4-1: Preserve fields from prior sessions-array passes (e.g. open chunk
-			// sets started_at+project; close chunk sets ended_at+summary but omits them).
-			// Inherit any non-empty field from the existing row before calling upsert.
-			trimmedID := strings.TrimSpace(session.ID)
-			sessionProject := resolveProjectValue(session.Project, project)
-			if existing, ok := sessions[newDashboardEntityKey(sessionProject, trimmedID)]; ok {
-				if session.StartedAt == "" {
-					session.StartedAt = existing.StartedAt
-				}
-				if endedAt == "" {
-					endedAt = existing.EndedAt
-				}
-				if summary == "" {
-					summary = existing.Summary
-				}
-				if session.Directory == "" {
-					session.Directory = existing.Directory
-				}
-				if strings.TrimSpace(session.Project) == "" && existing.Project != "" {
-					// Resolve project below will use existing.Project as primary if session.Project is empty.
-					session.Project = existing.Project
-				}
-			}
-			upsertDashboardSession(sessions, session.ID, sessionProject, session.StartedAt, endedAt, summary, session.Directory)
+		topicKey := ""
+		if obs.TopicKey != nil {
+			topicKey = *obs.TopicKey
 		}
-		for _, obs := range chunk.parsed.Observations {
-			obsProject := project
-			if obs.Project != nil {
-				obsProject = resolveProjectValue(*obs.Project, project)
-			}
-			if obs.DeletedAt != nil && strings.TrimSpace(*obs.DeletedAt) != "" {
-				delete(observations, newDashboardEntityKey(obsProject, obs.SyncID))
-				continue
-			}
-			topicKey := ""
-			if obs.TopicKey != nil {
-				topicKey = *obs.TopicKey
-			}
-			toolName := ""
-			if obs.ToolName != nil {
-				toolName = *obs.ToolName
-			}
-			upsertDashboardObservation(observations, obs.SyncID, obsProject, obs.SessionID, obs.Type, obs.Title, obs.Content, topicKey, toolName, chunk.chunkID, obs.CreatedAt)
+		toolName := ""
+		if obs.ToolName != nil {
+			toolName = *obs.ToolName
 		}
-		for _, prompt := range chunk.parsed.Prompts {
-			upsertDashboardPrompt(prompts, prompt.SyncID, resolveProjectValue(prompt.Project, project), prompt.SessionID, prompt.Content, chunk.chunkID, prompt.CreatedAt)
-		}
+		upsertDashboardObservation(observations, obs.SyncID, obsProject, obs.SessionID, obs.Type, obs.Title, obs.Content, topicKey, toolName, chunk.chunkID, obs.CreatedAt)
+	}
+	for _, prompt := range chunk.parsed.Prompts {
+		upsertDashboardPrompt(prompts, prompt.SyncID, resolveProjectValue(prompt.Project, project), prompt.SessionID, prompt.Content, chunk.chunkID, prompt.CreatedAt)
+	}
 
-		for _, mutation := range chunk.parsed.Mutations {
-			if err := applyDashboardMutation(project, mutation, sessions, observations, prompts); err != nil {
-				return dashboardReadModel{}, fmt.Errorf("cloudstore: invalid dashboard mutation payload in chunk %q: %w", strings.TrimSpace(chunk.chunkID), err)
-			}
-		}
-
-		creator := strings.TrimSpace(chunk.createdBy)
-		if creator != "" {
-			if _, ok := contributors[creator]; !ok {
-				contributors[creator] = &DashboardContributorRow{CreatedBy: creator}
-			}
-			contributors[creator].Chunks++
-			if contributorProjects[creator] == nil {
-				contributorProjects[creator] = make(map[string]struct{})
-			}
-			contributorProjects[creator][project] = struct{}{}
-
-			if projectContributors[project] == nil {
-				projectContributors[project] = make(map[string]*DashboardContributorRow)
-			}
-			if _, ok := projectContributors[project][creator]; !ok {
-				projectContributors[project][creator] = &DashboardContributorRow{CreatedBy: creator}
-			}
-			projectContributors[project][creator].Chunks++
-
-			if chunk.createdAt.After(parseRFC3339(contributors[creator].LastChunkAt)) {
-				contributors[creator].LastChunkAt = chunk.createdAt.UTC().Format(time.RFC3339)
-			}
-			if chunk.createdAt.After(parseRFC3339(projectContributors[project][creator].LastChunkAt)) {
-				projectContributors[project][creator].LastChunkAt = chunk.createdAt.UTC().Format(time.RFC3339)
-			}
+	for _, mutation := range chunk.parsed.Mutations {
+		if err := applyDashboardMutation(project, mutation, sessions, observations, prompts); err != nil {
+			return fmt.Errorf("cloudstore: invalid dashboard mutation payload in chunk %q: %w", strings.TrimSpace(chunk.chunkID), err)
 		}
 	}
 
-	orderedMutations := append([]dashboardMutationRow(nil), mutationRows...)
-	sort.SliceStable(orderedMutations, func(i, j int) bool {
-		if orderedMutations[i].seq != orderedMutations[j].seq {
-			return orderedMutations[i].seq < orderedMutations[j].seq
+	creator := strings.TrimSpace(chunk.createdBy)
+	if creator != "" {
+		if _, ok := contributors[creator]; !ok {
+			contributors[creator] = &DashboardContributorRow{CreatedBy: creator}
 		}
-		if !orderedMutations[i].occurredAt.Equal(orderedMutations[j].occurredAt) {
-			return orderedMutations[i].occurredAt.Before(orderedMutations[j].occurredAt)
+		contributors[creator].Chunks++
+		if contributorProjects[creator] == nil {
+			contributorProjects[creator] = make(map[string]struct{})
 		}
-		if orderedMutations[i].project != orderedMutations[j].project {
-			return orderedMutations[i].project < orderedMutations[j].project
+		contributorProjects[creator][project] = struct{}{}
+
+		if projectContributors[project] == nil {
+			projectContributors[project] = make(map[string]*DashboardContributorRow)
 		}
-		if orderedMutations[i].entity != orderedMutations[j].entity {
-			return orderedMutations[i].entity < orderedMutations[j].entity
+		if _, ok := projectContributors[project][creator]; !ok {
+			projectContributors[project][creator] = &DashboardContributorRow{CreatedBy: creator}
 		}
-		return orderedMutations[i].entityKey < orderedMutations[j].entityKey
-	})
-	for _, mutationRow := range orderedMutations {
-		mutation := store.SyncMutation{
-			Seq:        mutationRow.seq,
-			Entity:     mutationRow.entity,
-			EntityKey:  mutationRow.entityKey,
-			Op:         mutationRow.op,
-			Payload:    strings.TrimSpace(string(mutationRow.payload)),
-			Project:    mutationRow.project,
-			OccurredAt: mutationRow.occurredAt.UTC().Format(time.RFC3339),
+		projectContributors[project][creator].Chunks++
+
+		if chunk.createdAt.After(parseRFC3339(contributors[creator].LastChunkAt)) {
+			contributors[creator].LastChunkAt = chunk.createdAt.UTC().Format(time.RFC3339)
 		}
-		if err := applyDashboardMutation(mutationRow.project, mutation, sessions, observations, prompts); err != nil {
-			return dashboardReadModel{}, fmt.Errorf("cloudstore: invalid dashboard mutation payload in cloud_mutations seq %d: %w", mutationRow.seq, err)
+		if chunk.createdAt.After(parseRFC3339(projectContributors[project][creator].LastChunkAt)) {
+			projectContributors[project][creator].LastChunkAt = chunk.createdAt.UTC().Format(time.RFC3339)
 		}
 	}
-	pruneDashboardEntitiesWithoutCloudMutation(orderedMutations, sessions, observations, prompts)
+	return nil
+}
+
+func (f *dashboardReadModelFold) applyMutation(mutationRow dashboardMutationRow) error {
+	mutation := store.SyncMutation{
+		Seq:        mutationRow.seq,
+		Entity:     mutationRow.entity,
+		EntityKey:  mutationRow.entityKey,
+		Op:         mutationRow.op,
+		Payload:    string(bytes.TrimSpace(mutationRow.payload)),
+		Project:    mutationRow.project,
+		OccurredAt: mutationRow.occurredAt.UTC().Format(time.RFC3339),
+	}
+	if err := applyDashboardMutation(mutationRow.project, mutation, f.sessions, f.observations, f.prompts); err != nil {
+		return fmt.Errorf("cloudstore: invalid dashboard mutation payload in cloud_mutations seq %d: %w", mutationRow.seq, err)
+	}
+	f.recordMutationKey(mutationRow)
+	return nil
+}
+
+func (f *dashboardReadModelFold) recordMutationKey(row dashboardMutationRow) {
+	entity := strings.TrimSpace(row.entity)
+	project := strings.TrimSpace(row.project)
+	key := mutationEntityKey(entity, row.entityKey)
+	if entity == "" || project == "" || strings.TrimSpace(key) == "" {
+		return
+	}
+	if f.mutationKeys[entity] == nil {
+		f.mutationKeys[entity] = make(map[string]map[string]struct{})
+	}
+	if f.mutationKeys[entity][project] == nil {
+		f.mutationKeys[entity][project] = make(map[string]struct{})
+	}
+	f.mutationKeys[entity][project][key] = struct{}{}
+}
+
+func (f *dashboardReadModelFold) finish() dashboardReadModel {
+	sessions, observations, prompts := f.sessions, f.observations, f.prompts
+	contributors, contributorProjects, projectContributors := f.contributors, f.contributorProjects, f.projectContributors
+	projectChunkCounts := f.projectChunkCounts
+	pruneDashboardEntitiesWithoutCloudMutation(f.mutationKeys, sessions, observations, prompts)
 
 	projects := make(map[string]*DashboardProjectRow, len(projectChunkCounts))
 	detailSessions := make(map[string][]DashboardSessionRow)
@@ -389,11 +412,11 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 			Contributors: len(contributorRows),
 			Chunks:       totalChunks,
 		},
-	}, nil
+	}
 }
 
 func pruneDashboardEntitiesWithoutCloudMutation(
-	mutationRows []dashboardMutationRow,
+	currentKeys map[string]map[string]map[string]struct{},
 	sessions map[dashboardEntityKey]DashboardSessionRow,
 	observations map[dashboardEntityKey]DashboardObservationRow,
 	prompts map[dashboardEntityKey]DashboardPromptRow,
@@ -401,24 +424,8 @@ func pruneDashboardEntitiesWithoutCloudMutation(
 	// cloud_chunks remain audit history, but once cloud_mutations has rows for an
 	// entity type, dashboard browser counts should reflect the mutation-backed
 	// current-state keys instead of treating every historical chunk payload row as
-	// currently visible.
-	currentKeys := make(map[string]map[string]map[string]struct{})
-	for _, row := range mutationRows {
-		entity := strings.TrimSpace(row.entity)
-		project := strings.TrimSpace(row.project)
-		key := strings.TrimSpace(row.entityKey)
-		if entity == "" || project == "" || key == "" {
-			continue
-		}
-		if currentKeys[entity] == nil {
-			currentKeys[entity] = make(map[string]map[string]struct{})
-		}
-		if currentKeys[entity][project] == nil {
-			currentKeys[entity][project] = make(map[string]struct{})
-		}
-		currentKeys[entity][project][key] = struct{}{}
-	}
-
+	// currently visible. currentKeys is entity -> project -> entity key, gathered
+	// from cloud_mutations rows by dashboardReadModelFold.recordMutationKey.
 	if keys, ok := currentKeys[store.SyncEntityObservation]; ok {
 		pruneDashboardRowsWithoutCloudMutation(observations, keys, func(row DashboardObservationRow) string { return row.Project }, nil)
 	}
@@ -429,8 +436,7 @@ func pruneDashboardEntitiesWithoutCloudMutation(
 	referencedSessions := make(map[string]map[string]struct{})
 	addReferencedSession := func(project, sessionID string) {
 		project = strings.TrimSpace(project)
-		sessionID = strings.TrimSpace(sessionID)
-		if project == "" || sessionID == "" {
+		if project == "" || strings.TrimSpace(sessionID) == "" {
 			return
 		}
 		if referencedSessions[project] == nil {
@@ -451,10 +457,10 @@ func pruneDashboardEntitiesWithoutCloudMutation(
 
 func pruneDashboardRowsWithoutCloudMutation[T any](rows map[dashboardEntityKey]T, currentKeys map[string]map[string]struct{}, projectOf func(T) string, preserveKeys map[string]map[string]struct{}) {
 	for key := range rows {
-		trimmedKey := strings.TrimSpace(key.entityKey)
+		entityKey := key.entityKey
 		project := strings.TrimSpace(projectOf(rows[key]))
 		if keys, ok := preserveKeys[project]; ok {
-			if _, preserved := keys[trimmedKey]; preserved {
+			if _, preserved := keys[entityKey]; preserved {
 				continue
 			}
 		}
@@ -462,7 +468,7 @@ func pruneDashboardRowsWithoutCloudMutation[T any](rows map[dashboardEntityKey]T
 		if !ok {
 			continue
 		}
-		if _, ok := keys[trimmedKey]; !ok {
+		if _, ok := keys[entityKey]; !ok {
 			delete(rows, key)
 		}
 	}
@@ -476,12 +482,12 @@ func resolveProjectValue(primary string, fallback string) string {
 }
 
 func upsertDashboardSession(sessions map[dashboardEntityKey]DashboardSessionRow, sessionID, project, startedAt, endedAt, summary, directory string) {
-	key := strings.TrimSpace(sessionID)
-	if key == "" {
+	key := sessionID
+	if strings.TrimSpace(key) == "" {
 		return
 	}
 	trimmedProject := strings.TrimSpace(project)
-	sessions[newDashboardEntityKey(trimmedProject, key)] = DashboardSessionRow{
+	sessions[newDashboardSessionKey(trimmedProject, key)] = DashboardSessionRow{
 		Project:   trimmedProject,
 		SessionID: key,
 		StartedAt: strings.TrimSpace(startedAt),
@@ -500,7 +506,7 @@ func upsertDashboardObservation(observations map[dashboardEntityKey]DashboardObs
 	observations[newDashboardEntityKey(trimmedProject, key)] = DashboardObservationRow{
 		SyncID:    key,
 		Project:   trimmedProject,
-		SessionID: strings.TrimSpace(sessionID),
+		SessionID: sessionID,
 		ChunkID:   strings.TrimSpace(chunkID),
 		Type:      strings.TrimSpace(obsType),
 		Title:     strings.TrimSpace(title),
@@ -520,7 +526,7 @@ func upsertDashboardPrompt(prompts map[dashboardEntityKey]DashboardPromptRow, sy
 	prompts[newDashboardEntityKey(trimmedProject, key)] = DashboardPromptRow{
 		SyncID:    key,
 		Project:   trimmedProject,
-		SessionID: strings.TrimSpace(sessionID),
+		SessionID: sessionID,
 		ChunkID:   strings.TrimSpace(chunkID),
 		Content:   strings.TrimSpace(content),
 		CreatedAt: strings.TrimSpace(createdAt),
@@ -572,7 +578,7 @@ func applyDashboardMutation(
 ) error {
 	entity := strings.TrimSpace(mutation.Entity)
 	op := strings.TrimSpace(mutation.Op)
-	entityKey := strings.TrimSpace(mutation.EntityKey)
+	entityKey := mutationEntityKey(entity, mutation.EntityKey)
 
 	switch entity {
 	case store.SyncEntitySession:
@@ -580,10 +586,15 @@ func applyDashboardMutation(
 		if err := chunkcodec.DecodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return err
 		}
-		key := resolveProjectValue(entityKey, body.ID)
+		key := entityKey
+		if strings.TrimSpace(key) == "" {
+			key = body.ID
+		} else if strings.TrimSpace(body.ID) != "" && key != body.ID {
+			return fmt.Errorf("dashboard: session mutation key %q does not match payload id %q", key, body.ID)
+		}
 		project := resolveProjectValue(body.Project, chunkProject)
 		if op == store.SyncOpDelete || body.Deleted || body.HardDelete || (body.DeletedAt != nil && strings.TrimSpace(*body.DeletedAt) != "") {
-			delete(sessions, newDashboardEntityKey(project, key))
+			delete(sessions, newDashboardSessionKey(project, key))
 			return nil
 		}
 		// C3 + R2-5: Preserve close fields and StartedAt from a prior sessions-array pass.
@@ -592,7 +603,7 @@ func applyDashboardMutation(
 		existingEndedAt := ""
 		existingSummary := ""
 		existingDirectory := ""
-		if existing, ok := sessions[newDashboardEntityKey(project, key)]; ok {
+		if existing, ok := sessions[newDashboardSessionKey(project, key)]; ok {
 			existingStartedAt = existing.StartedAt
 			existingEndedAt = existing.EndedAt
 			existingSummary = existing.Summary
@@ -626,7 +637,7 @@ func applyDashboardMutation(
 			project = resolveProjectValue(*body.Project, project)
 		}
 		if project == "" {
-			if session, ok := sessions[newDashboardEntityKey(project, body.SessionID)]; ok {
+			if session, ok := sessions[newDashboardSessionKey(project, body.SessionID)]; ok {
 				project = strings.TrimSpace(session.Project)
 			}
 		}
@@ -694,7 +705,7 @@ func applyDashboardMutation(
 			project = resolveProjectValue(*body.Project, project)
 		}
 		if project == "" {
-			if session, ok := sessions[newDashboardEntityKey(project, body.SessionID)]; ok {
+			if session, ok := sessions[newDashboardSessionKey(project, body.SessionID)]; ok {
 				project = strings.TrimSpace(session.Project)
 			}
 		}
@@ -910,42 +921,84 @@ func (cs *CloudStore) loadDashboardNeutralReadModel() (dashboardReadModel, error
 	}
 	cs.dashboardReadModelMu.RUnlock()
 
-	var (
-		model dashboardReadModel
-		err   error
-	)
-	if cs.dashboardReadModelLoad != nil {
-		model, err = cs.dashboardReadModelLoad()
-	} else {
-		model, err = cs.buildDashboardReadModel()
-	}
-	if err != nil {
-		return dashboardReadModel{}, err
-	}
-
 	cs.dashboardReadModelMu.Lock()
-	defer cs.dashboardReadModelMu.Unlock()
 	if cs.dashboardReadModelOK {
-		return cs.dashboardReadModel, nil
+		cached := cs.dashboardReadModel
+		cs.dashboardReadModelMu.Unlock()
+		return cached, nil
 	}
-	cs.dashboardReadModel = model
-	cs.dashboardReadModelOK = true
-	return cs.dashboardReadModel, nil
+	// Concurrent cache misses share one in-flight build: a full build holds
+	// every live entity in memory, so parallel copies multiply peak usage.
+	if build := cs.dashboardReadModelBuild; build != nil {
+		build.waiters.Add(1)
+		cs.dashboardReadModelMu.Unlock()
+		<-build.done
+		return build.model, build.err
+	}
+	build := &dashboardReadModelBuild{gen: cs.dashboardReadModelGen, done: make(chan struct{})}
+	cs.dashboardReadModelBuild = build
+	cs.dashboardReadModelMu.Unlock()
+
+	finished := false
+	defer func() {
+		if !finished {
+			// The loader panicked: release waiters with an error before the panic unwinds.
+			build.err = errDashboardReadModelBuildAborted
+			cs.finishDashboardReadModelBuild(build)
+		}
+	}()
+	if cs.dashboardReadModelLoad != nil {
+		build.model, build.err = cs.dashboardReadModelLoad()
+	} else {
+		build.model, build.err = cs.buildDashboardReadModel()
+	}
+	if build.err != nil {
+		build.model = dashboardReadModel{}
+	}
+	finished = true
+	cs.finishDashboardReadModelBuild(build)
+	return build.model, build.err
+}
+
+var errDashboardReadModelBuildAborted = errors.New("cloudstore: dashboard read model build aborted")
+
+// dashboardReadModelBuild is one in-flight read-model build shared by every
+// cache miss that arrives while it runs.
+type dashboardReadModelBuild struct {
+	gen     uint64
+	done    chan struct{}
+	waiters atomic.Int32
+	model   dashboardReadModel
+	err     error
+}
+
+// finishDashboardReadModelBuild publishes a successful build only when no
+// invalidation happened since it started, then releases its waiters. Errors
+// are never cached.
+func (cs *CloudStore) finishDashboardReadModelBuild(build *dashboardReadModelBuild) {
+	cs.dashboardReadModelMu.Lock()
+	if cs.dashboardReadModelBuild == build {
+		cs.dashboardReadModelBuild = nil
+	}
+	if build.err == nil && build.gen == cs.dashboardReadModelGen {
+		cs.dashboardReadModel = build.model
+		cs.dashboardReadModelOK = true
+	}
+	cs.dashboardReadModelMu.Unlock()
+	close(build.done)
 }
 
 func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
-	chunks, err := cs.loadChunkRows("")
-	if err != nil {
+	// Rows are streamed in canonical fold order so only one decoded chunk
+	// payload is alive at a time; materializing every chunk exhausted memory.
+	fold := newDashboardReadModelFold()
+	if err := cs.streamDashboardChunkRows(fold.applyChunk); err != nil {
 		return dashboardReadModel{}, err
 	}
-	mutations, err := cs.loadMutationRows("")
-	if err != nil {
+	if err := cs.streamDashboardMutationRows(fold.applyMutation); err != nil {
 		return dashboardReadModel{}, err
 	}
-	model, err := buildDashboardReadModelFromRows(chunks, mutations)
-	if err != nil {
-		return dashboardReadModel{}, err
-	}
+	model := fold.finish()
 	controls, err := cs.ListProjectSyncControls()
 	if err != nil {
 		return dashboardReadModel{}, err
@@ -1124,6 +1177,18 @@ func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardSc
 	if err != nil {
 		return nil, err
 	}
+	// Grants carry normalized identities, while the read model retains canonical
+	// names. An ambiguous identity must authorize neither project, even when a
+	// canonical name itself equals that identity.
+	canonicalByGrant := make(map[string]string, len(model.projects))
+	for _, row := range model.projects {
+		key := NormalizeProjectGrant(row.Project)
+		if _, exists := canonicalByGrant[key]; exists {
+			canonicalByGrant[key] = ""
+		} else {
+			canonicalByGrant[key] = row.Project
+		}
+	}
 	principalAllowed := make(map[string]struct{}, len(projects))
 	principalAll := false
 	for _, project := range projects {
@@ -1131,9 +1196,9 @@ func (cs *CloudStore) DashboardStoreForProjects(projects []string) (*DashboardSc
 			principalAll = true
 			continue
 		}
-		project = NormalizeProjectGrant(project)
-		if project != "" {
-			principalAllowed[project] = struct{}{}
+		key := NormalizeProjectGrant(project)
+		if canonical := canonicalByGrant[key]; key != "" && canonical != "" {
+			principalAllowed[canonical] = struct{}{}
 		}
 	}
 
@@ -1323,7 +1388,6 @@ func (s *DashboardScopedStore) GetSessionDetail(project, sessionID string) (Dash
 	if err != nil {
 		return DashboardSessionRow{}, nil, nil, err
 	}
-	sessionID = strings.TrimSpace(sessionID)
 	for _, session := range detail.Sessions {
 		if session.SessionID != sessionID {
 			continue
@@ -1350,7 +1414,7 @@ func (s *DashboardScopedStore) GetObservationDetail(project, sessionID, syncID s
 	if err != nil {
 		return DashboardObservationRow{}, DashboardSessionRow{}, nil, err
 	}
-	sessionID, syncID = strings.TrimSpace(sessionID), strings.TrimSpace(syncID)
+	syncID = strings.TrimSpace(syncID)
 	for _, observation := range detail.Observations {
 		if observation.SessionID != sessionID || observation.SyncID != syncID {
 			continue
@@ -1378,7 +1442,7 @@ func (s *DashboardScopedStore) GetPromptDetail(project, sessionID, syncID string
 	if err != nil {
 		return DashboardPromptRow{}, DashboardSessionRow{}, nil, err
 	}
-	sessionID, syncID = strings.TrimSpace(sessionID), strings.TrimSpace(syncID)
+	syncID = strings.TrimSpace(syncID)
 	for _, prompt := range detail.Prompts {
 		if prompt.SessionID != sessionID || prompt.SyncID != syncID {
 			continue
@@ -1544,88 +1608,92 @@ type dashboardMutationRow struct {
 	occurredAt time.Time
 }
 
-func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error) {
+// dashboardChunkStreamQuery reproduces the buildDashboardReadModelFromRows chunk
+// sort: created_at, chunk_id, project_name, created_by ascending. COLLATE "C"
+// makes text comparison byte-wise, matching Go string ordering.
+const dashboardChunkStreamQuery = `SELECT chunk_id, project_name, created_by, created_at, payload FROM cloud_chunks
+	ORDER BY created_at ASC, chunk_id COLLATE "C" ASC, project_name COLLATE "C" ASC, created_by COLLATE "C" ASC`
+
+// dashboardMutationStreamQuery reproduces the mutation sort; seq is the unique
+// BIGSERIAL primary key, so it alone determines the order.
+const dashboardMutationStreamQuery = `SELECT seq, project, entity, entity_key, op, payload, occurred_at FROM cloud_mutations
+	ORDER BY seq ASC`
+
+// streamDashboardChunkRows decodes cloud_chunks one row at a time in canonical
+// fold order. The decoded payload is only valid for the duration of apply.
+func (cs *CloudStore) streamDashboardChunkRows(apply func(dashboardChunkRow) error) error {
 	if cs == nil || cs.db == nil {
-		return nil, fmt.Errorf("cloudstore: not initialized")
+		return fmt.Errorf("cloudstore: not initialized")
 	}
-	project = strings.TrimSpace(project)
-	query := `SELECT chunk_id, project_name, created_by, created_at, payload FROM cloud_chunks`
-	args := []any{}
 	// Cache inputs are permission-neutral; public readers apply credential scope.
-	if project != "" {
-		query += ` WHERE project_name = $1`
-		args = append(args, project)
-	}
-	query += ` ORDER BY created_at DESC, chunk_id DESC`
-	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	rows, err := cs.db.QueryContext(context.Background(), dashboardChunkStreamQuery)
 	if err != nil {
-		return nil, fmt.Errorf("cloudstore: dashboard query chunks: %w", err)
+		return fmt.Errorf("cloudstore: dashboard query chunks: %w", err)
 	}
 	defer rows.Close()
 
-	result := make([]dashboardChunkRow, 0)
 	for rows.Next() {
 		var chunkID string
 		var projectName string
 		var createdBy string
 		var createdAt time.Time
-		var payload []byte
+		// RawBytes avoids copying payloads that can reach tens of megabytes; it
+		// is only read by json.Unmarshal before the next Scan.
+		var payload sql.RawBytes
 		if err := rows.Scan(&chunkID, &projectName, &createdBy, &createdAt, &payload); err != nil {
-			return nil, fmt.Errorf("cloudstore: dashboard scan chunk row: %w", err)
+			return fmt.Errorf("cloudstore: dashboard scan chunk row: %w", err)
 		}
 		parsed := engramsync.ChunkData{}
 		if err := json.Unmarshal(payload, &parsed); err != nil {
-			return nil, fmt.Errorf("cloudstore: dashboard decode chunk payload for chunk %q: %w", strings.TrimSpace(chunkID), err)
+			return fmt.Errorf("cloudstore: dashboard decode chunk payload for chunk %q: %w", strings.TrimSpace(chunkID), err)
 		}
-		result = append(result, dashboardChunkRow{chunkID: strings.TrimSpace(chunkID), project: projectName, createdBy: strings.TrimSpace(createdBy), createdAt: createdAt.UTC(), parsed: parsed})
+		row := dashboardChunkRow{chunkID: strings.TrimSpace(chunkID), project: projectName, createdBy: strings.TrimSpace(createdBy), createdAt: createdAt.UTC(), parsed: parsed}
+		if err := apply(row); err != nil {
+			return err
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("cloudstore: dashboard iterate chunks: %w", err)
+		return fmt.Errorf("cloudstore: dashboard iterate chunks: %w", err)
 	}
-	return result, nil
+	return nil
 }
 
-func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, error) {
+// streamDashboardMutationRows reads cloud_mutations one row at a time in seq
+// order. row.payload aliases driver memory and is only valid during apply.
+func (cs *CloudStore) streamDashboardMutationRows(apply func(dashboardMutationRow) error) error {
 	if cs == nil || cs.db == nil {
-		return nil, fmt.Errorf("cloudstore: not initialized")
+		return fmt.Errorf("cloudstore: not initialized")
 	}
-	project = strings.TrimSpace(project)
-	query := `SELECT seq, project, entity, entity_key, op, payload::text, occurred_at FROM cloud_mutations`
-	args := []any{}
 	// Cache inputs are permission-neutral; public readers apply credential scope.
-	if project != "" {
-		query += ` WHERE project = $1`
-		args = append(args, project)
-	}
-	query += ` ORDER BY seq ASC, occurred_at ASC`
-	rows, err := cs.db.QueryContext(context.Background(), query, args...)
+	rows, err := cs.db.QueryContext(context.Background(), dashboardMutationStreamQuery)
 	if err != nil {
-		return nil, fmt.Errorf("cloudstore: dashboard query mutations: %w", err)
+		return fmt.Errorf("cloudstore: dashboard query mutations: %w", err)
 	}
 	defer rows.Close()
 
-	result := make([]dashboardMutationRow, 0)
 	for rows.Next() {
 		var row dashboardMutationRow
-		var payloadText string
-		if err := rows.Scan(&row.seq, &row.project, &row.entity, &row.entityKey, &row.op, &payloadText, &row.occurredAt); err != nil {
-			return nil, fmt.Errorf("cloudstore: dashboard scan mutation row: %w", err)
+		var payload sql.RawBytes
+		if err := rows.Scan(&row.seq, &row.project, &row.entity, &row.entityKey, &row.op, &payload, &row.occurredAt); err != nil {
+			return fmt.Errorf("cloudstore: dashboard scan mutation row: %w", err)
 		}
 		row.project = strings.TrimSpace(row.project)
 		row.entity = strings.TrimSpace(row.entity)
-		row.entityKey = strings.TrimSpace(row.entityKey)
+		row.entityKey = mutationEntityKey(row.entity, row.entityKey)
 		row.op = strings.TrimSpace(row.op)
-		row.payload = []byte(strings.TrimSpace(payloadText))
+		row.payload = bytes.TrimSpace(payload)
 		row.occurredAt = row.occurredAt.UTC()
 		if len(row.payload) == 0 {
 			row.payload = []byte(`{}`)
 		}
-		result = append(result, row)
+		if err := apply(row); err != nil {
+			return err
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("cloudstore: dashboard iterate mutations: %w", err)
+		return fmt.Errorf("cloudstore: dashboard iterate mutations: %w", err)
 	}
-	return result, nil
+	return nil
 }
 
 // ─── SystemHealth ─────────────────────────────────────────────────────────────
@@ -1890,7 +1958,6 @@ func (cs *CloudStore) GetSessionDetail(project, sessionID string) (DashboardSess
 	if !ok {
 		return DashboardSessionRow{}, nil, nil, fmt.Errorf("%w: %s", ErrDashboardProjectNotFound, normalizedProject)
 	}
-	sessionID = strings.TrimSpace(sessionID)
 	var sess DashboardSessionRow
 	found := false
 	for _, s := range detail.Sessions {
@@ -1938,7 +2005,6 @@ func (cs *CloudStore) GetObservationDetail(project, sessionID, syncID string) (D
 		return DashboardObservationRow{}, DashboardSessionRow{}, nil, fmt.Errorf("%w: %s", ErrDashboardProjectNotFound, normalizedProject)
 	}
 	syncID = strings.TrimSpace(syncID)
-	sessionID = strings.TrimSpace(sessionID)
 	var obs DashboardObservationRow
 	found := false
 	for _, o := range detail.Observations {
@@ -1984,7 +2050,6 @@ func (cs *CloudStore) GetPromptDetail(project, sessionID, syncID string) (Dashbo
 		return DashboardPromptRow{}, DashboardSessionRow{}, nil, fmt.Errorf("%w: %s", ErrDashboardProjectNotFound, normalizedProject)
 	}
 	syncID = strings.TrimSpace(syncID)
-	sessionID = strings.TrimSpace(sessionID)
 	var prompt DashboardPromptRow
 	found := false
 	for _, p := range detail.Prompts {

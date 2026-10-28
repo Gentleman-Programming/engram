@@ -2,6 +2,58 @@
 
 `engram doctor` runs read-only operational diagnostics against the local SQLite store and, for unfiltered CLI runs, generic MCP client registrations. It detects, explains, and suggests safe next steps; the base diagnostic command does **not** repair data, apply migrations, delete rows, or mutate sync cursors.
 
+## SQLite CANTOPEN context
+
+SQLite errors with primary result code `SQLITE_CANTOPEN` (14) returned through
+Engram's store driver fence now include the failing driver operation and full
+numeric result code, for example:
+
+```text
+SQLite CANTOPEN during conn.exec_context (code 14)
+```
+
+Connection open/prepare/begin, context execution/query, ping/session reset,
+file-control, statement, transaction and row error boundaries are covered.
+Fallbacks retain the operation that actually ran; an already annotated error
+keeps its innermost operation. Caller context may precede this text.
+The diagnostic does not render the original driver message, SQL, arguments,
+DSN or private paths. The original error remains available via Go `errors.Is`
+and `errors.As`; extended SQLite codes are retained. Other errors are unchanged.
+
+This is error annotation, not a new doctor check. It adds no filesystem probes,
+opens/closes, retries, repairs, environment or pragma changes. Existing generation
+checks and cleanup still run as before. It cannot identify the failing OS
+filename, TEMP location or Win32 error, distinguish permission from resource
+failures, or establish the unexplained cause of #1937. That issue remains open;
+this diagnostic scope is tracked separately in #2025.
+
+## Project alias evidence and repair veto
+
+Directory and manual-name mismatch findings include `project_aliases` evidence.
+Doctor resolves the exact session cwd and the actual Git-root candidate key,
+not the remote label or private project binding (see [aliases](PROJECT-ALIASES.md)).
+An unavailable or invalid root key supplies no key-alias evidence; the exact cwd
+alias is still inspected. Such a root does not invalidate independent repair evidence.
+Repair planning reads aliases afresh: conflicting key/cwd aliases or an alias
+pointing away from the proposed target produce a
+`project_alias_contradicts_reclassification` skip. With no remaining actions,
+even `--apply` is a nonmutating `noop`. Thus `"from_project": "my-name",` /
+`"to_project": "upstream-name",` is not proposed when a relevant alias contradicts it.
+Aliases never establish historical ownership or authorize moves; agreeing aliases
+only leave an independently supported repair eligible. No-alias behavior is unchanged.
+
+## Automatic repair backup privacy
+
+On Unix, automatic SQLite repair snapshots under `<ENGRAM_DATA_DIR>/backups/` are reserved with mode `0600` before SQLite writes to them. New backup directories are created with mode `0700`. Reservation or close errors stop the backup before repair proceeds. Windows access remains governed by inherited ACLs.
+
+Existing directories and snapshots keep their permissions and contents; there is no automatic permission migration or cleanup. Older snapshots can remain readable by other local users when their parent directories are traversable. Review those copies separately, since they contain the plaintext memory store. This change does not retroactively make them private.
+
+A failed attempt can leave an empty or incomplete backup reservation. File presence alone is not proof of a valid recovery copy; verify a backup before restoring it.
+
+## Enrolled sync journal repair
+
+Before export or autosync push, missing journal entries are repaired in bounded atomic batches. A failed or cancelled attempt preserves earlier committed batches; retry resumes missing work without treating partial progress as completion. Other operations such as enrollment, project merge and cloud upgrade retain their caller-owned atomic transactions. This does not turn the base doctor command into a repair operation or promise a writer latency bound.
+
 ## CLI
 
 ```bash
@@ -21,7 +73,7 @@ Flags:
 - `--check CODE` runs one registered check and fails loudly for unknown codes.
 - `doctor repair` supports exactly `invalid_session_identity`, `manual_session_name_project_mismatch`, `orphaned_observation_session`, `orphaned_pending_relations`, `session_project_directory_mismatch`, `sync_mutation_required_fields`, and `sync_target_closed_space`. It requires `--check` and exactly one mode: `--plan`, `--dry-run`, or `--apply`, plus `--project` for every check except `sync_mutation_required_fields` (optional project scoping) and `orphaned_pending_relations` (spans all projects). `sync_mutation_required_fields` may also omit the mode; an omitted mode defaults to `--dry-run`. Its optional project scopes session-directory backfill, title repair, supersession, quarantine, and source-title repair. The diagnostic-only checks are `ambiguous_active_runtime_sessions`, `sqlite_lock_contention`, and `unowned_session_project`; a rejected repair names the corresponding `engram doctor --check <code>` continuation.
 
-An unfiltered CLI `engram doctor` also reports generic adapter Engram MCP entries whose absolute executable command no longer exists and whose parsed fields match the entry shape written by setup (apart from the executable path). Each finding names the client and recommends `engram setup <slug>` to refresh its registration; doctor never runs the configured executable or edits the config. Missing configs/entries, bare commands, and entries with different or extra fields are skipped. Matching the setup shape cannot prove who created an entry: check for custom launchers before rerunning setup, which replaces the `engram` registration. This CLI-only inspection is not a registered `--check` or MCP `mem_doctor` check.
+An unfiltered CLI `engram doctor` also reports generic adapter Engram MCP entries whose absolute executable command no longer exists and whose parsed fields match the entry shape written by setup (apart from the executable path). Each finding names the client and recommends `engram setup <slug>` to refresh its registration; doctor never runs the configured executable or edits the config. Missing configs/entries, zero-byte configs, configs containing only JSON whitespace (space, tab, CR, LF), bare commands, and entries with different or extra fields are skipped. Empty configs do not prevent inspection of later clients. Nonempty malformed JSON remains an inspection error; doctor does not rewrite these files. Matching the setup shape cannot prove who created an entry: check for custom launchers before rerunning setup, which replaces the `engram` registration. This CLI-only inspection is not a registered `--check` or MCP `mem_doctor` check.
 
 For `invalid_session_identity`, supply an unused canonical `--replacement-id`. Without it repair remains a nonmutating `noop`. Plan and dry-run show `identity_repair` with exact source, replacement, reference and retired journal counts; `blockers` explains collisions and unsafe evidence. For multiple whitespace-only sources specify the exact `--source-id SOURCE` (use `--source-id ''` for the empty string). The repair JSON `counts.corrected_mutations_planned` estimates corrected current-state publications as one session plus each observation and prompt for an enrolled project; local-only projects report zero. `counts.corrected_mutations_applied` is zero for plan, dry-run, blocked and noop results, and on apply reports the number actually published by the store. Both count fields are always present (zero outside applicable work); neither counts retired historical journal rows, which remain in `identity_repair.retired_mutations`. Apply revalidates under the SQLite writer lock, backs up the database, atomically remaps references and retires legacy journal evidence; corrected state is published only for enrolled projects. Quarantined pulled identities are not locally repairable. Unrepaired findings remain in `skipped`; an apply that repairs one source while others remain reports `partial`. Re-run doctor after apply; other malformed sources may remain. To roll back, stop Engram and manually restore the reported backup.
 
@@ -71,6 +123,66 @@ Operate only in a trusted database namespace and process. Private snapshot safet
 
 Database changes roll back together if apply fails; an already-created backup/reservation remains. To undo a successful local discard, stop all Engram processes and manually restore a verified backup with normal SQLite/WAL recovery precautions. Restoring local data cannot retract a delete already sent remotely. Re-run diagnosis after apply: other unrelated invalid mutations may remain.
 
+## Optional caller-binding diagnostic
+
+`POST /doctor/caller-binding` is read-only despite using POST: caller identities
+belong in the JSON body, never the URL. Existing project-only HTTP, CLI and MCP
+reports are unchanged. Project health and caller-binding assessment are separate;
+a healthy project does not establish a usable runtime binding.
+
+```json
+{
+  "project": "example",
+  "runtime_session_id": "runtime-root",
+  "effective_session_id": "runtime-root:resume:2",
+  "host_context": {"append_entry_available": true, "branch_available": true}
+}
+```
+
+All fields are optional; missing caller evidence reports `unknown`, not readiness.
+Host capability fields accept booleans or null. Unknown fields, malformed types,
+non-object bodies, trailing JSON and bodies exceeding 16 KiB return a sanitized
+400 error. Pi supplies actual execution-context/API facts, not model parameters.
+Go reads persisted root and effective session rows and evaluates project ownership
+and canonical continuation mapping (`root:resume:N`, N >= 2).
+
+The successful response is a direct assessment, not the project-report envelope:
+
+```json
+{
+  "status": "ok",
+  "root_state": "ended",
+  "effective_state": "active",
+  "reason_code": "binding_observed",
+  "safe_next_step": "No action required; a later write is not guaranteed.",
+  "write_success_guaranteed": false
+}
+```
+
+States are `active`, `ended`, `missing` or `unknown`; status is `ok`, `warning`,
+`blocked` or `unknown`. Missing identities/project, unregistered root, missing
+effective row and missing host capabilities have distinct unknown reasons.
+Project names use the shared explicit-name validator before canonical comparison:
+path separators and embedded control characters are invalid. An invalid caller
+project reports `unknown` / `caller_context_missing`; an invalid persisted project
+reports `blocked` / `session_project_conflict`. Valid normalized spellings remain
+accepted. Project conflicts and invalid mappings block. A live valid effective continuation
+is not blocked merely because its root ended or host persistence is unavailable.
+An ended effective session blocks when either host API is known unavailable;
+when both are available it warns `resume_required`, without selecting or creating
+a continuation. Missing capability evidence remains unknown.
+
+Diagnosis performs no writes, lease renewal, registration, session ending or
+repair. Safe-resume guidance reflects Go continuation support, not a caller's
+claimed `safe_resume` flag. A passing assessment never promises a later write.
+Unavailable lookup reports `caller_binding_unavailable`; an adapter encountering
+an unsupported endpoint or transport error must return a sanitized unknown
+fallback. The optional Pi `caller_binding` section is separate from the unchanged
+project result. Only this new section is privacy-safe for sharing: it contains no
+identities, projects, paths, request bodies or raw errors. The original project
+report is not asserted privacy-safe. This diagnostic neither resolves #1622 or
+#1635 nor weakens session guards.
+
 ## MCP
 
 Agents can call `mem_doctor` with the same contract as `engram doctor --json`:
@@ -115,13 +227,55 @@ The CLI `--json` and MCP tool return:
 - `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: any pending non-enrolled row there is legacy or otherwise pre-existing backlog, because new unenrolled local writes are not journaled.
 - `orphaned_observation_session` — warns when active or soft-deleted observations reference a missing session. Findings are grouped by the stored observation project and session ID. After reviewing a plan, `doctor repair` can create an immediately-ended, local-only, project-owned placeholder for a group with complete evidence; it preserves observations and never emits sync state. Apply revalidates the current observations inside the same transaction and derives the placeholder's start time and observation count from them, so a stale plan or a concurrent change cannot persist outdated placeholder metadata; a planned orphan that resolves before apply reports `noop` with zero applied rows.
 - `orphaned_pending_relations` — warns when pending `memory_relations` rows reference missing observations on both endpoints (no active row with that `sync_id`; a soft-deleted endpoint counts as absent, matching the conflicts listing). Such rows can never show a title in `engram conflicts show` and no verdict can ever be recorded against them, so they only inflate the pending backlog. The finding aggregates counts (candidates, one-endpoint-missing pending, live pending) with a bounded sample of candidate rows. The listing is deliberately unscoped: a relation with both endpoints absent belongs to no project. After review, `engram doctor repair --check orphaned_pending_relations --plan|--dry-run|--apply` reclassifies only those rows into the audited `orphaned` disposition — the same terminal state the hard-delete orphaning writers already produce — without recreating observations, fabricating verdicts, deleting audit rows, or touching relations that still have a live endpoint. Apply revalidates the predicate inside the transaction (a row judged after planning is never reclassified), backs up the database first, emits no sync journal mutation, and is idempotent; a rerun reports `noop` with zero applied rows. To roll back, stop Engram and manually restore the reported backup.
-- `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. The listing is deliberately unscoped.
+- `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. Rescue assigns the project and classifies a blank ownership mode in the same transaction, without requiring a store reopen. Existing ownership modes are preserved, and each rescued session is counted once. The listing is deliberately unscoped.
 - Session modes are `shared` and `project_owned`. Runtime and HTTP-created sessions default to `shared`; deterministic CLI and MCP manual-save sessions are `project_owned`. Shared sync can use old peers. Project-owned sync requires a mode-capable manifest (version 2); returning to an older manifest after project-owned sessions exist is unsupported and fails loudly.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
+
+`sync_target_closed_space` reports foreign sync targets as warnings when they have zero unacknowledged mutations (inert drift), and as errors when pending mutations require review. Mixed findings retain an error result. Existing guidance and finding-level confirmation requirements are unchanged; diagnosis does not repair these rows.
 
 ## Safety
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
+
+### Manual-save session collisions across machines
+
+CLI `engram save` and MCP writes without `session_id` (when no matching runtime
+session is active) normally use `manual-save-{project}`. If that ID already
+belongs to a different project, new writes use an independent, deterministic
+`manual-fallback-{sha256(project)}` session. Newly created fallback sessions are
+`project_owned`; registration preserves the classification of any existing
+same-project session, including `shared`, rather than promoting it automatically.
+Repeated writes reuse that alternative ID; its registration still rejects a
+conflicting owner. The old session, observations, and prompts are not moved or
+rewritten. Explicit MCP `session_id` requests do not use this collision fallback.
+
+This unblocks new writes after importing or syncing a database from another
+machine; it does not transfer old history or repair stale project ownership.
+Review diagnostic evidence separately before any supported ownership repair.
+
+### Manual-save ownership normalization and previously rescued sessions
+
+For ownership classification, the `manual-save-` prefix is literal, but the
+suffix and target project are normalized before comparison. For example,
+`manual-save-Athlos` and project `athlos` match during legacy backfill, ownership
+rescue, and project reclassification. An unrelated suffix does not establish
+ownership. HTTP and runtime registrations still default to `shared`.
+
+Legacy backfill only classifies sessions with a NULL ownership mode. Ownership
+rescue only stamps a missing mode; it does not promote an existing `shared`
+session. Consequently, a session incorrectly stamped `shared` by an older
+rescue remains `shared` after upgrading or repeating the rescue, even if its
+manual-save suffix matches its project. A clean doctor report does not prove
+that such a session is project-owned.
+
+If you already ran the older rescue, retain its backup and review the affected
+session IDs, persisted projects, and ownership modes with a maintainer. There is
+no general supported command to promote these already-shared sessions in place;
+a targeted recovery requires a separately reviewed procedure. Do not clear
+ownership modes or promote all manual-looking sessions with bulk SQL: valid
+shared sessions can use those names too. Do not restore an older backup over a
+live store or discard records written since that backup without reviewing the
+rollback consequences.
 
 ### Network filesystem startup rejection
 
@@ -144,13 +298,19 @@ This condition has no automatic repair, quarantine, checkpoint, or rollback-jour
 - `session_project_directory_mismatch`, using trusted `git_remote` or `git_root` evidence from doctor findings.
 - `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions when trusted Git directory evidence does not establish ownership. Unknown suffixes remain unrepaired; basename evidence can corroborate persisted ownership but cannot authorize a conflicting move.
 
-Session-directory backfill under `sync_mutation_required_fields` repairs pending session upserts with a valid payload ID matching the journal entity key and a missing directory, when the local session belongs to the same project and has a nonblank authoritative directory. It needs no cloud enrollment. Run `engram doctor repair --check sync_mutation_required_fields --plan` or `--dry-run` to inspect `directory_repairs` before `--apply`; add `--project <project>` to limit the repair. Apply rewrites only the payload in place, retaining sequence and disposition metadata. Already-quarantined rows are never backfilled. This repair does not create a SQLite backup.
+Explicit `project_owned` session upserts may omit `directory` or carry a blank string, including isolated cross-project sessions. Doctor does not classify these valid payloads as missing-directory legacy mutations or backfill their directories. JSON null and non-string directories remain invalid.
+
+Session-directory backfill under `sync_mutation_required_fields` repairs pending shared or legacy session upserts with a valid payload ID matching the journal entity key and a missing directory, when the local session belongs to the same project and has a nonblank authoritative directory. It needs no cloud enrollment. Run `engram doctor repair --check sync_mutation_required_fields --plan` or `--dry-run` to inspect `directory_repairs` before `--apply`; add `--project <project>` to limit the repair. Project selection and ownership checks use normalized names, so historical case-variant journal spellings are included both with and without `--project`. Apply backfills the payload and canonicalizes the repaired journal row's `project` in place, retaining sequence and disposition metadata; it does not rename the local project or session. Already-quarantined rows are never backfilled. This repair does not create a SQLite backup.
 
 Orphaned-pending-relation reclassification under `orphaned_pending_relations` is similarly narrow: it moves only pending rows whose source AND target endpoints are both absent into the existing `orphaned` disposition (no schema migration), reports `relations_planned` and `relations_applied`, and surfaces its `backup_path` on apply. Plan and dry-run never mutate. It needs no `--project`; a provided one is accepted but cannot scope rows that belong to no project.
 
 Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. Run `engram doctor repair --check sync_mutation_required_fields --dry-run` first (add `--project <project>` to scope it); cloud-upgrade tooling instead requires configured cloud sync. The repair derives a sanitized, bounded title from local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
 
-The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Superseded evidence missing its reason, evidence, or timestamp remains blocking until manually repaired; complete terminal quarantined and superseded rows remain informational without keeping doctor in warning or blocked status.
+Local observation sources are reported separately from pending mutations. `source_repairs` lists titles recoverable from the source's existing content. Missing `type` or `content` cannot be reconstructed: these fields require manual investigation, not automatic deletion or invented memory data. `source_unrepairable` lists each unresolved source's `id`, `sync_id`, `project`, remaining `missing_fields`, and explanatory `reason`, without exposing its content. A source may appear in both lists when its title is recoverable but another field remains missing. Sources without a derivable valid title also appear in `source_unrepairable`. An empty `source_repairs` list does not mean these findings have been resolved. `--plan` and `--dry-run` leave sources and sync mutations unchanged.
+
+The same repair also supersedes a pending local upsert when a local session/observation delete tombstone or prompt tombstone proves the entity was deleted while its project was unenrolled. A hard `engram delete project` records the same evidence at project granularity: an `entity = 'project'` tombstone keyed by the normalized project name supersedes the project's queued upserts recorded before the delete, while upserts for a project recreated under the same name after the tombstone's `deleted_at` keep pending so their content still syncs. Repair changes only the qualifying journal sequences, not newer generations of the same identity. Sessions retained for another project's references keep their pending upserts; a project tombstone alone does not prove those sessions were deleted. `superseded` is auditable local evidence, not a cloud acknowledgement: it is excluded from transport and allows re-enrollment backfill to reconstruct the current local delete state. Superseded evidence missing its reason, evidence, or timestamp remains blocking until manually repaired; complete terminal quarantined and superseded rows remain informational without keeping doctor in warning or blocked status.
+
+Legacy mutation project spellings use normalized project identity for both scoped reconciliation and enrollment exclusion, so `Alpha` belongs to `alpha` but remains protected when `alpha` is enrolled.
 
 Project reclassification never deletes or deduplicates rows. Identity repair replaces the malformed source session row after remapping its references; it retains old journal rows as auditable retired evidence rather than deleting their payload history. Repair never edits sync cursors, acknowledges undelivered mutations, or writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
 
@@ -169,7 +329,7 @@ A strict `project_owned` registration of an ended legacy session with no project
 
 All repair modes print stable JSON to stdout:
 
-For `sync_mutation_required_fields`, `directory_repairs` lists pending session-directory payload backfills (`seq`, `project`, `entity_key`); `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence.
+For `sync_mutation_required_fields`, `directory_repairs` lists pending session-directory payload backfills (`seq`, `project`, `entity_key`); `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`; `superseded` lists obsolete local upserts retired by durable local delete evidence. `source_repairs` lists recoverable source titles; `source_unrepairable` lists source fields requiring manual investigation and their reasons, including when no repair action is possible.
 
 ```json
 {

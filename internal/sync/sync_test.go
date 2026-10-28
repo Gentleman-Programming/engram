@@ -455,7 +455,7 @@ func TestExportImportFlowWithProjectFilter(t *testing.T) {
 	syncDir := filepath.Join(t.TempDir(), ".engram")
 	exporter := New(srcStore, syncDir)
 
-	exportResult, err := exporter.Export("alice", "proj-a")
+	exportResult, err := exporter.ExportWithOptions("alice", "proj-a", GitExportOptions{IncludePrompts: true})
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestExportImportFlowWithProjectFilter(t *testing.T) {
 		t.Fatalf("unexpected manifest after export: %+v", manifest.Chunks)
 	}
 
-	secondExport, err := exporter.Export("alice", "proj-a")
+	secondExport, err := exporter.ExportWithOptions("alice", "proj-a", GitExportOptions{IncludePrompts: true})
 	if err != nil {
 		t.Fatalf("second export: %v", err)
 	}
@@ -2086,6 +2086,7 @@ func TestExportErrors(t *testing.T) {
 			t.Fatalf("store export: %v", err)
 		}
 		chunk := sy.filterNewData(data, "")
+		chunk.Prompts = nil // Match the default Git policy in this known-hash fixture.
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
 			t.Fatalf("marshal chunk: %v", err)
@@ -2093,6 +2094,10 @@ func TestExportErrors(t *testing.T) {
 		hash := sha256.Sum256(chunkJSON)
 		chunkID := hex.EncodeToString(hash[:])[:8]
 
+		// A healthy known-ID no-op requires payload bytes, not only a reference.
+		if err := sy.transport.WriteChunk(chunkID, chunkJSON, ChunkEntry{ID: chunkID}); err != nil {
+			t.Fatalf("write known chunk payload: %v", err)
+		}
 		writeManifestFile(t, sy.syncDir, &Manifest{
 			Version: 1,
 			Chunks: []ChunkEntry{{

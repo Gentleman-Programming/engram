@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // ResolutionMode makes the omission contract explicit at every entry point.
@@ -123,7 +125,7 @@ func normalizeProjectName(name string) (string, error) {
 // CanonicalizeProjectName returns the canonical storage form of a project name.
 // Callers that accept external input must validate it before canonicalizing.
 func CanonicalizeProjectName(name string) string {
-	canonical := strings.TrimSpace(strings.ToLower(name))
+	canonical := norm.NFC.String(strings.TrimSpace(strings.ToLower(norm.NFC.String(name))))
 	for strings.Contains(canonical, "--") {
 		canonical = strings.ReplaceAll(canonical, "--", "-")
 	}

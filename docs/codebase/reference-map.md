@@ -25,6 +25,12 @@
 | `docs/engram-cloud/quickstart.md` | Recommended cloud path. |
 | `docs/engram-cloud/troubleshooting.md` | Cloud failures and recovery. |
 | `docs/CODEBASE-GUIDE.md` | Codebase guide landing page and reading path. |
+| `docs/ci-issue-validation.md` | Inactive issue-policy evaluator, API contract, regressions and evidence limits. |
+| `docs/ci-issue-check-publisher.md` | Inactive bounded Checks publisher, response binding, failures and evidence limits. |
+| `docs/ci-issue-refresh-rollout.md` | Trusted workflow bootstrap, manual recovery, live evidence checklist and legacy/queue windows. |
+| `docs/ci-issue-refresh-dispatch.md` | Inactive approval-label discovery/dispatch, authoritative PR reads, partial failures and SDK evidence limits. |
+| `docs/ci-issue-refresh-router.md` | Inactive metadata rerun helper, trusted run/source admission, SDK regressions and live-evidence limits. |
+| `docs/ci-issue-native-policy.md` | Candidate native jobs/head-bound adapter, future router scope, local verification and unproven rollout boundary. |
 | `docs/codebase/*.md` | Split codebase guide pages by topic. |
 
 ## Main source files

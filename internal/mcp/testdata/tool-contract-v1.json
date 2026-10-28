@@ -22,6 +22,23 @@
       },
       "required": ["confidence","memory_id_a","memory_id_b","reasoning","relation"],
       "additionalProperties": true},
+    "mem_consolidate": {
+      "type": ["object"],
+      "properties": {
+        "confirm": {"type":["boolean"],"additionalProperties":true},
+        "expected_project": {"type":["string"],"additionalProperties":true},
+        "fingerprint": {"type":["string"],"additionalProperties":true},
+        "ids_to_delete": {
+          "type": ["array"],
+          "items": {"type":["integer"],"additionalProperties":true},
+          "additionalProperties": true},
+        "new_content": {"type":["string"],"additionalProperties":true},
+        "new_title": {"type":["string"],"additionalProperties":true},
+        "topic_key": {"type":["string"],"additionalProperties":true},
+        "type": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["expected_project","ids_to_delete","new_content","new_title"],
+      "additionalProperties": true},
     "mem_context": {
       "type": ["object"],
       "properties": {
@@ -50,7 +67,9 @@
     "mem_get_observation": {
       "type": ["object"],
       "properties": {
+        "history_cursor": {"type":["number"],"additionalProperties":true},
         "id": {"type":["number"],"additionalProperties":true},
+        "include_history": {"type":["boolean"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true}
       },
       "required": ["id"],
@@ -67,6 +86,7 @@
       },
       "required": ["judgment_id","relation"],
       "additionalProperties": true},
+    "mem_list_projects": {"type":["object"],"additionalProperties":true},
     "mem_merge_projects": {
       "type": ["object"],
       "properties": {

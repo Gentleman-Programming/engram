@@ -1,4 +1,7 @@
-name: Stale Issues and PRs
+name: Stale PRs
+
+# Issues are handled by close-stale-issues.yml (closed after 21 days of
+# inactivity together with their linked PRs).
 
 on:
   schedule:
@@ -15,16 +18,6 @@ jobs:
     steps:
       - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10
         with:
-          stale-issue-message: >
-            This issue has been inactive for 30 days. If it's still relevant,
-            please leave a comment with updated context or a reproduction.
-            Otherwise it will be closed in 14 days.
-
-            If you're waiting for a maintainer response, feel free to ping
-            with a comment — we don't auto-close approved issues.
-          close-issue-message: >
-            Closing due to inactivity. Feel free to reopen with updated
-            context, a fresh reproduction, or new information.
           stale-pr-message: >
             This PR has been inactive for 30 days. Please rebase, update it,
             or leave a comment — otherwise it will be closed in 14 days.
@@ -34,8 +27,7 @@ jobs:
             Discussion or comment on the linked issue.
           days-before-stale: 30
           days-before-close: 14
-          stale-issue-label: 'status:stale'
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
           stale-pr-label: 'status:stale'
-          exempt-issue-labels: 'status:approved,status:in-progress,priority:high,priority:critical'
           exempt-pr-labels: 'status:in-progress'
-          close-issue-label: 'status:wontfix'

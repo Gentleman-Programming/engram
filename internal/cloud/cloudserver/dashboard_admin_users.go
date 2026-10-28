@@ -120,7 +120,7 @@ func parseDashboardMutationForm(w http.ResponseWriter, r *http.Request) bool {
 // (s.dashboardDisplayName, s.isDashboardAdmin) so the two surfaces are
 // visually consistent.
 func (s *CloudServer) dashboardAdminLayout(r *http.Request, title string, component templ.Component) templ.Component {
-	return dashboard.Layout(title, s.dashboardDisplayName(r), "admin", s.isDashboardAdmin(r), component)
+	return dashboard.Layout(title, s.dashboardDisplayName(r), "admin", s.isDashboardAdmin(r), s.version, component)
 }
 
 // handleDashboardCreateManagedUser handles POST /dashboard/admin/users.

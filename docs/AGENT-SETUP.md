@@ -62,7 +62,7 @@ Install Engram's Pi-native package:
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.2.0`, then ensures Pi settings contain that package, replacing earlier `0.1.8`, `0.1.11`, `0.1.12`, `0.1.14`, `0.1.15`, and `0.1.16` pins when present. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. Earlier `0.1.16` `pi-engram init` still registers Engram MCP and must not be used for native-only setup; version `0.2.0` init does not create or change `mcp.json` and warns about an existing `mcpServers.engram` entry. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
+This source version of `engram setup pi` runs `pi install npm:gentle-engram@0.4.1`, then ensures Pi settings contain that package, replacing earlier `0.1.8`, `0.1.11`, `0.1.12`, `0.1.14`, `0.1.15`, `0.1.16`, `0.2.0`, `0.3.0`, and `0.4.0` pins when present. Engram core `3.3.1` uses the same `0.4.1` pin; older core `3.3.0` binaries pin `0.3.0`, so use the explicit manual install below to select `0.4.1` with an older core. Pi agent writes use native `mem_*` tools, not Engram MCP registration. `engram setup pi` does not create or change `mcpServers.engram`. Earlier `0.1.16` `pi-engram init` still registers Engram MCP and must not be used for native-only setup; version `0.2.0` init does not create or change `mcp.json` and warns about an existing `mcpServers.engram` entry. If the Pi agent directory's `mcp.json` already contains `mcpServers.engram`, Go setup warns with its exact path and key; manually remove only that key and restart/reload Pi for the native-only guarantee. Until then native-only agent writes are **not guaranteed**. Other MCP servers are preserved.
 
 Pi 0.99.0 and later ship built-in MCP (`mcp.json`, `/mcp`, `pi mcp add`); an installed `pi-mcp-adapter` replaces that built-in support, so neither `engram setup pi` nor `pi-engram init` adds it. An existing adapter entry in `settings.json` is left untouched.
 
@@ -73,7 +73,7 @@ When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also
 Manual equivalent:
 
 ```bash
-pi install npm:gentle-engram@0.2.0
+pi install npm:gentle-engram@0.4.1
 ```
 
 Restart Pi after installation.
@@ -107,6 +107,8 @@ If the binary is missing, Pi-native local server startup reports an error withou
 ### Project auto-detection (important)
 
 `mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Automatic Git detection stores the first normalized remote/root label in private shared Git metadata, so remote renames, linked worktrees, and repository moves keep using that label. If that binding is corrupt or cannot be written, detection fails closed; set `.engram/config.json` to the intended project rather than relying on the current remote name. Global local/cloud `project_id` propagation and alias migration remain deferred. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
+
+MCP also exposes deferred `mem_judge_many` (ordered per-item decisions) and `mem_session_finalize` (atomic caller-authored summary plus close). Finalize requires an existing exact session and matching project ownership; retries are local-only. These tools do not change the native Pi/HTTP wrappers or host lifecycle hooks. See [the MCP reference](../DOCS.md#mcp-tools-27-tools).
 
 Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
 
@@ -231,7 +233,7 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 
 `mem_get_observation` retains its read-only stored-owner fallback: only when cwd detection is ambiguous and the observation has a nonblank stored project does it use that project (`project_source: "stored_project"`, `project_path: ""`). This identifies the record's owner, not a verified repository path, and does not bypass malformed or unknown explicit/process overrides.
 
-`mem_update` and `mem_delete` require caller-supplied `expected_project`, including for personal/global scopes. Never fetch the target to fill a missing assertion. The normalized stored owner is checked atomically with the mutation. Native `mem_update` also retains known-current/process ownership checks and rejects ambiguous cwd rather than using a stored-owner write fallback. The assertion is not a recovery token or permission to bypass context rules; existing recovery and session ownership protections remain unchanged.
+`mem_update` and `mem_delete` require caller-supplied `expected_project`, including for personal/global scopes. Never fetch the target to fill a missing assertion. The normalized stored owner is checked atomically with the mutation. ID-addressed updates/deletes do not resolve server cwd or process overrides: a matching assertion works on shared multi-project servers, while an incorrect assertion is rejected without mutation. Update responses report the matched owner with `project_source: "explicit_override"` and an empty `project_path`. The assertion is not authentication, a permission grant, or a recovery token; save/recovery and session ownership protections remain unchanged.
 
 This is an intentional compatibility break for clients omitting `expected_project`. The in-repository Pi schema and forwarding require it; external gentle-engram relays need separate adaptation.
 
@@ -241,7 +243,7 @@ This is an intentional compatibility break for clients omitting `expected_projec
 
 > **Prerequisite**: Install the `engram` binary first (via [Homebrew](INSTALLATION.md#homebrew-macos--linux), [Windows binary](INSTALLATION.md#windows), [binary download](INSTALLATION.md#download-binary-all-platforms), or [source](INSTALLATION.md#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking.
 
-**Recommended: Full setup with one command** — installs the plugin AND registers the MCP server in `opencode.json` automatically:
+**Recommended: Full setup with one command** — installs the plugin AND registers the MCP server in your global `opencode.json` or `opencode.jsonc` automatically:
 
 ```bash
 engram setup opencode
@@ -250,8 +252,20 @@ engram setup opencode
 This does three things:
 
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
-2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (19 agent-facing tools)
+2. Adds the `engram` MCP server entry to your global OpenCode configuration with `--tools=agent` (21 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
+
+MCP registration adds a missing local Engram entry and refreshes only `command[0]` for an existing local entry, preserving all other configuration bytes, including comments, trailing commas, formatting, key order, flags, options, and other servers. It supports both V1 `mcp.engram` and V2 `mcp.servers.engram`; remote entries are left untouched. Setup uses `opencode.jsonc` when it exists, otherwise `opencode.json`; OpenCode loads both global files and merges `.jsonc` last. The directory is `$XDG_CONFIG_HOME/opencode` when set, otherwise `~/.config/opencode` on all platforms. Project and environment overrides may take precedence over this global entry.
+
+Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` or `mcp.servers` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
+
+### Recover after moving the Engram binary
+
+Setup bakes the current executable path into the OpenCode plugin. After a disk migration or binary move, run `engram setup opencode` using the current Engram installation, then restart OpenCode. A nonblank `ENGRAM_BIN` overrides that baked default; correct or unset a stale override before restarting. A missing selected binary does not trigger automatic PATH fallback.
+
+Early local readiness diagnostics distinguish `binary-not-found`, `identity-command-failed` (launch error or nonzero exit), and `identity-output-invalid` (not a 32-character lowercase hexadecimal identity). They identify `ENGRAM_BIN override` versus `setup-default` without exposing paths or command output. `identity-mismatch` separately means the responding server did not match the selected binary's identity; do not bypass that check or replace a running server to silence it. HTTP rejection and acknowledgement diagnostics remain separate.
+
+These diagnostics narrow an early failure; they do not establish or resolve the original cause of attribution failures with an otherwise healthy server.
 
 ### Verify each layer after setup
 
@@ -268,9 +282,9 @@ The plugin auto-starts the HTTP server if needed for session tracking. If your e
 engram serve &
 ```
 
-> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
+> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and the global `opencode.json(c)` selected as described above. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
 
-**Alternative: Manual MCP-only setup** (no plugin, all 23 tools by default):
+**Alternative: Manual MCP-only setup** (no plugin, all 27 tools by default):
 
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` on all platforms, or project-level):
 
@@ -322,11 +336,13 @@ engram setup claude-code
 
 The supported plugin-and-hook setup requires `jq` and `curl` on `PATH` before installation. On Windows, `curl.exe` satisfies curl detection, but `jq` must also be installed and available to the shell Claude Code uses. If those hook prerequisites are unavailable, use **Option C (Bare MCP)**, the MCP-only fallback; it does not install or run plugin hooks.
 
+When the plugin is already installed, `engram setup claude-code` runs `claude plugin marketplace update engram` followed by `claude plugin update engram@engram --scope user`. Setup installs and updates the user-scope copy; it does not update existing project- or local-scope copies. If either update fails, setup returns an error before MCP registration. Restart Claude Code after updating to load the new hooks. Updating the Engram binary alone does not update the plugin.
+
 `engram setup claude-code` delegates MCP registration to Claude CLI. Claude writes the user-scope top-level `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`); when `CLAUDE_CONFIG_DIR` is set, Claude uses `$CLAUDE_CONFIG_DIR/.claude.json`. Engram reads only that documented entry: an omitted `type` or explicit `"stdio"` with the exact absolute command and arguments (`<absolute-engram-path> mcp --tools=agent`) is a no-op; explicit `null`, empty or other types, and mismatched commands or arguments remain conflicts. A missing entry is added with `claude mcp add --transport stdio --scope user engram -- <absolute-engram-path> mcp --tools=agent` and then verified. A mismatched or unreadable entry is reported as a conflict and is never overwritten. If verification fails after a proven-absent add, setup asks Claude to remove that user-scope entry and reports both errors if rollback fails. You'll be asked whether to add Engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
-**Option C: Bare MCP** — all 23 tools by default, no session management:
+**Option C: Bare MCP** — 23 agent-profile tools, no session management:
 
 Use Claude CLI to register the user-scope server (replace the placeholder with the absolute Engram executable path):
 
@@ -449,7 +465,9 @@ engram setup codex
 - Registers `[mcp_servers.engram]` in the active Codex config (`$CODEX_HOME/config.toml` when `CODEX_HOME` is absolute, otherwise `~/.codex/config.toml`; on Windows the default is `%USERPROFILE%\.codex\config.toml`) and pins the current absolute executable path
 - Writes `engram-instructions.md` and `engram-compact-prompt.md` beside the active config as informational copies of the Memory Protocol
 - Installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`. The plugin hooks inject the Memory Protocol additively, so this is how Codex actually receives it. If the CLI is missing or either command fails, setup returns an error, not complete success. The MCP config and informational instruction files remain written, but plugin activation is incomplete. Ensure `codex` is in `PATH`, resolve the reported command error, and run both commands above manually (or rerun `engram setup codex`), then restart Codex. Do not wire the informational files into prompt override keys as a workaround.
-- Removes legacy `model_instructions_file` / `experimental_compact_prompt_file` keys if a previous Engram version wrote them
+- Removes complete top-level legacy `model_instructions_file` / `experimental_compact_prompt_file` string assignments, including quoted keys and multiline strings, if a previous Engram version wrote them
+
+Setup prepares legacy-key cleanup and MCP changes before writing `config.toml`. It preserves unrelated text, comments, and line endings. If a string/container is unterminated, an obsolete setting has a non-string value, or MCP is registered through an unsupported dotted/inline form instead of `[mcp_servers.engram]`, setup returns an error without changing the config or invoking the Codex plugin commands. Resolve the reported input manually and rerun setup. This bounded preservation check is not a general TOML validator and adds no parser dependency.
 
 > **Do not set `model_instructions_file` in Codex.** Unlike most instruction mechanisms, that key *replaces* Codex's built-in system instructions instead of adding to them. Pointing it at `engram-instructions.md` wipes Codex's own base prompt (`You are Codex, ...`) and degrades the agent. Earlier Engram versions did this automatically; current versions strip the keys instead. If you set them manually, you are deliberately opting into overriding Codex's base prompt.
 

@@ -27,10 +27,15 @@ type CloudStore struct {
 	dashboardReadModel     dashboardReadModel
 	dashboardReadModelOK   bool
 	dashboardReadModelLoad func() (dashboardReadModel, error)
+	// dashboardReadModelGen is bumped by every invalidation; a build only
+	// publishes its result when the generation it started under is current.
+	dashboardReadModelGen   uint64
+	dashboardReadModelBuild *dashboardReadModelBuild
 }
 
 var ErrChunkNotFound = errors.New("cloudstore: chunk not found")
 var ErrChunkConflict = errors.New("cloudstore: chunk id conflict")
+var ErrSessionIndexHistoricalResolutionRequired = errors.New("cloudstore: session index requires explicit historical resolution")
 
 func New(cfg cloud.Config) (*CloudStore, error) {
 	dsn := strings.TrimSpace(cfg.DSN)
@@ -298,6 +303,10 @@ func (cs *CloudStore) invalidateDashboardReadModel() {
 	defer cs.dashboardReadModelMu.Unlock()
 	cs.dashboardReadModel = dashboardReadModel{}
 	cs.dashboardReadModelOK = false
+	cs.dashboardReadModelGen++
+	// Detach the in-flight build so later callers start a fresh one; its
+	// existing waiters still receive its (unpublished) result.
+	cs.dashboardReadModelBuild = nil
 }
 
 func (cs *CloudStore) KnownSessionIDs(ctx context.Context, project string) (map[string]struct{}, error) {
@@ -320,8 +329,7 @@ func (cs *CloudStore) KnownSessionIDs(ctx context.Context, project string) (map[
 		if err := rows.Scan(&sessionID); err != nil {
 			return nil, fmt.Errorf("cloudstore: scan session index: %w", err)
 		}
-		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
+		if strings.TrimSpace(sessionID) == "" {
 			continue
 		}
 		known[sessionID] = struct{}{}
@@ -356,6 +364,15 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 	return nil
 }
 
+// mutationEntityKey retains the local opaque session contract while preserving
+// the existing normalization for generated observation, prompt and relation keys.
+func mutationEntityKey(entity, key string) string {
+	if strings.TrimSpace(entity) == store.SyncEntitySession {
+		return key
+	}
+	return strings.TrimSpace(key)
+}
+
 func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]MutationEntry, error) {
 	project = strings.TrimSpace(project)
 	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts)+len(chunk.Mutations))
@@ -366,8 +383,8 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		typedUpserts[entry.Entity+"\x00"+entry.EntityKey] = struct{}{}
 	}
 	for i, session := range chunk.Sessions {
-		entityKey := strings.TrimSpace(session.ID)
-		if entityKey == "" {
+		entityKey := session.ID
+		if strings.TrimSpace(entityKey) == "" {
 			return nil, fmt.Errorf("cloudstore: materialize chunk: sessions[%d].id is required", i)
 		}
 		payload, err := json.Marshal(session)
@@ -438,8 +455,8 @@ func materializeChunkMutation(project string, mutation store.SyncMutation) (*Mut
 	if entity != store.SyncEntityRelation && op != store.SyncOpUpsert && op != store.SyncOpDelete {
 		return nil, nil
 	}
-	entityKey := strings.TrimSpace(mutation.EntityKey)
-	if entityKey == "" {
+	entityKey := mutationEntityKey(entity, mutation.EntityKey)
+	if strings.TrimSpace(entityKey) == "" {
 		return nil, fmt.Errorf("entity_key is required for %s", entity)
 	}
 	payload := json.RawMessage(strings.TrimSpace(mutation.Payload))
@@ -452,18 +469,18 @@ func materializeChunkMutation(project string, mutation store.SyncMutation) (*Mut
 		}
 	}
 	entry := MutationEntry{Project: strings.TrimSpace(project), Entity: entity, EntityKey: entityKey, Op: op, Payload: payload}
-	if op == store.SyncOpUpsert {
-		if err := validateMaterializedChunkUpsert(entry); err != nil {
-			return nil, fmt.Errorf("invalid %s upsert payload: %w", entity, err)
+	if op == store.SyncOpUpsert || (entity == store.SyncEntitySession && op == store.SyncOpDelete) {
+		if err := validateMaterializedChunkPayload(entry); err != nil {
+			return nil, fmt.Errorf("invalid %s %s payload: %w", entity, op, err)
 		}
 	}
 	return &entry, nil
 }
 
-// validateMaterializedChunkUpsert rejects malformed typed upsert payloads before
-// either direct chunk uploads or mutation-push chunks can materialize them.
-func validateMaterializedChunkUpsert(entry MutationEntry) error {
-	if strings.TrimSpace(string(entry.Payload)) == "null" {
+// validateMaterializedChunkPayload rejects malformed typed upserts and inconsistent
+// session delete identities before either producer path can materialize them.
+func validateMaterializedChunkPayload(entry MutationEntry) error {
+	if entry.Op == store.SyncOpUpsert && strings.TrimSpace(string(entry.Payload)) == "null" {
 		return errors.New("payload must be a JSON object")
 	}
 	var identity, field string
@@ -489,7 +506,9 @@ func validateMaterializedChunkUpsert(entry MutationEntry) error {
 	default:
 		return nil
 	}
-	identity = strings.TrimSpace(identity)
+	if entry.Entity != store.SyncEntitySession {
+		identity = strings.TrimSpace(identity)
+	}
 	if identity != "" && identity != entry.EntityKey {
 		return fmt.Errorf("payload.%s %q does not match entity_key %q", field, identity, entry.EntityKey)
 	}
@@ -505,7 +524,7 @@ func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []Muta
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
 			VALUES ($1, $2, $3, $4, $5)`,
-			strings.TrimSpace(entry.Project), strings.TrimSpace(entry.Entity), strings.TrimSpace(entry.EntityKey), strings.TrimSpace(entry.Op), payload,
+			strings.TrimSpace(entry.Project), strings.TrimSpace(entry.Entity), mutationEntityKey(entry.Entity, entry.EntityKey), strings.TrimSpace(entry.Op), payload,
 		)
 		if err != nil {
 			return fmt.Errorf("cloudstore: insert materialized chunk mutation %s/%s/%s: %w", entry.Project, entry.Entity, entry.EntityKey, err)
@@ -520,12 +539,30 @@ func (cs *CloudStore) backfillProjectSessionsFromChunks(ctx context.Context) err
 		return fmt.Errorf("cloudstore: backfill session index: %w", err)
 	}
 	defer rows.Close()
+	knownByProject := make(map[string]map[string]struct{})
 
 	for rows.Next() {
 		var project string
 		var payload []byte
 		if err := rows.Scan(&project, &payload); err != nil {
 			return fmt.Errorf("cloudstore: backfill session index scan: %w", err)
+		}
+		// A correctly ingested opaque ID already has its exact index entry.
+		// Missing padded entries are historical state, not permission to repair it.
+		known, loaded := knownByProject[project]
+		if !loaded {
+			known, err = cs.KnownSessionIDs(ctx, project)
+			if err != nil {
+				return err
+			}
+			knownByProject[project] = known
+		}
+		for sessionID := range collectSessionIDsFromPayload(payload) {
+			if sessionID != strings.TrimSpace(sessionID) {
+				if _, exists := known[sessionID]; !exists {
+					return fmt.Errorf("%w: project %q session_id %q has no exact index entry", ErrSessionIndexHistoricalResolutionRequired, project, sessionID)
+				}
+			}
 		}
 		if err := cs.indexChunkSessions(ctx, project, payload); err != nil {
 			return fmt.Errorf("cloudstore: backfill session index row: %w", err)
@@ -556,8 +593,8 @@ func parseChunkData(payload []byte) (engramsync.ChunkData, error) {
 func collectSessionIDs(chunk engramsync.ChunkData) map[string]struct{} {
 	sessionIDs := make(map[string]struct{})
 	for _, session := range chunk.Sessions {
-		sessionID := strings.TrimSpace(session.ID)
-		if sessionID != "" {
+		sessionID := session.ID
+		if strings.TrimSpace(sessionID) != "" {
 			sessionIDs[sessionID] = struct{}{}
 		}
 	}
@@ -570,7 +607,7 @@ func collectSessionIDs(chunk engramsync.ChunkData) map[string]struct{} {
 		if err != nil {
 			continue
 		}
-		if sessionID := strings.TrimSpace(session.ID); sessionID != "" {
+		if sessionID := session.ID; strings.TrimSpace(sessionID) != "" {
 			sessionIDs[sessionID] = struct{}{}
 		}
 	}
@@ -799,12 +836,6 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			indexed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (project_name, session_id)
 		)`,
-		`INSERT INTO cloud_project_sessions (project_name, session_id)
-		 SELECT c.project_name, btrim(elem->>'id')
-		 FROM cloud_chunks c,
-		      jsonb_array_elements(COALESCE(c.payload->'sessions', '[]'::jsonb)) AS elem
-		 WHERE btrim(COALESCE(elem->>'id', '')) <> ''
-		 ON CONFLICT (project_name, session_id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS cloud_project_controls (
 		    project       TEXT PRIMARY KEY,
 		    sync_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
@@ -955,7 +986,7 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	for batchIndex, entry := range batch {
 		project := strings.TrimSpace(entry.Project)
 		entity := strings.TrimSpace(entry.Entity)
-		entityKey := strings.TrimSpace(entry.EntityKey)
+		entityKey := mutationEntityKey(entry.Entity, entry.EntityKey)
 		op := strings.TrimSpace(entry.Op)
 		payload := entry.Payload
 		if len(payload) == 0 {
@@ -1296,7 +1327,7 @@ func mutationEntrySignature(entry MutationEntry) (string, error) {
 	doc := engramsync.ChunkData{Mutations: []store.SyncMutation{{
 		Project:   project,
 		Entity:    strings.TrimSpace(entry.Entity),
-		EntityKey: strings.TrimSpace(entry.EntityKey),
+		EntityKey: mutationEntityKey(entry.Entity, entry.EntityKey),
 		Op:        strings.TrimSpace(entry.Op),
 		Payload:   string(payload),
 	}}}
@@ -1326,7 +1357,7 @@ func syncMutationSignature(mutation store.SyncMutation) (string, error) {
 	return strings.Join([]string{
 		strings.TrimSpace(mutation.Project),
 		strings.TrimSpace(mutation.Entity),
-		strings.TrimSpace(mutation.EntityKey),
+		mutationEntityKey(mutation.Entity, mutation.EntityKey),
 		strings.TrimSpace(mutation.Op),
 		normalized,
 	}, "\x00"), nil
