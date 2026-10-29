@@ -10488,9 +10488,10 @@ func syncDeleteTombstoneNeedsBackfill(alias string) string {
 	// 'session'). Project-level tombstones carry delete evidence only and have
 	// no transportable delete mutation, so they must never look like missing
 	// backfill work.
-	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.entity IN ('observation', 'session') AND %[1]s.last_remote_mutation_seq IS NULL AND NOT EXISTS (
+	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.entity IN ('observation', 'session') AND NOT EXISTS (
 		SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = %[1]s.entity
-		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.acked_at IS NULL AND sm.disposition IN ('pending', 'quarantined')
+		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
+		AND sm.seq > %[1]s.last_mutation_seq
 	)`, alias)
 }
 
@@ -10540,7 +10541,7 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 	if entity != SyncEntitySession && entity != SyncEntityObservation {
 		return nil
 	}
-	_, err := s.execHook(tx, `UPDATE sync_delete_tombstones SET active = 0 WHERE entity = ? AND entity_key = ?`, entity, entityKey)
+	_, err := s.execHook(tx, `UPDATE sync_delete_tombstones SET active = 0, last_mutation_seq = 0 WHERE entity = ? AND entity_key = ?`, entity, entityKey)
 	return err
 }
 
