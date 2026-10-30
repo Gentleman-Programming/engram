@@ -23,9 +23,159 @@ function race(text) {
     assert.ok(body.split('\n').some(value => value.trim() === line), line);
   }
   assert.match(body, /permissions:\n      contents: read\n    env:/);
-  assert.doesNotMatch(body, /continue-on-error|needs:|\n\s+if:|\|\| true| -run | -short| -skip|secrets\.|: write|environment:/);
+  // Only the cache writer may be conditional; checkout, preparation and tests never are.
+  const save = raceSteps(body).filter(step => /uses: actions\/cache\/save@/.test(step));
+  if (save.length) raceWriter(text);
+  const guard = save.length === 1 ? save[0].match(/^        if: \$\{\{ .+ \}\}\n/m)?.[0] : undefined;
+  const unconditional = guard ? body.replace(save[0], () => save[0].replace(guard, '')) : body;
+  assert.doesNotMatch(unconditional, /continue-on-error|needs:|\n\s+if:|\|\| true| -run | -short| -skip|secrets\.|: write|environment:/);
   for (const action of body.matchAll(/uses: (.+)/g)) assert.match(action[1], /@[a-f0-9]{40} # v\d+$/);
 }
+
+// This is deliberately the Race step layout, not a general YAML parser.
+const raceSteps = body => body.match(/^      - name: .*\n[\s\S]*?(?=^      - name: |$(?![\s\S]))/gm) ?? [];
+const cachePin = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+function cacheSteps(text) {
+  const steps = raceSteps(job(text, 'race-tests'));
+  const select = action => {
+    const found = steps.filter(step => step.includes(`uses: actions/${action}@`));
+    assert.equal(found.length, 1, `single ${action} owner`);
+    return found[0];
+  };
+  return { steps, restore: select('cache/restore'), save: select('cache/save') };
+}
+function raceOwner(text) {
+  const body = job(text, 'race-tests');
+  const { steps, restore, save } = cacheSteps(text);
+  assert.equal((body.match(/uses: actions\/cache\//g) ?? []).length, 2);
+  assert.doesNotMatch(body, /uses: actions\/cache@|enableCrossOsArchive: true|cache-mode:|(?:lookup-only|fail-on-cache-miss): true/);
+  assert.match(steps.find(s => s.includes('uses: actions/setup-go@')) ?? '', /go-version: "1\.26\.10"\n          cache: false\n/);
+  for (const step of [restore, save]) {
+    assert.match(step, /path: \|\n            \$\{\{ steps\.race-cache\.outputs\.gomodcache \}\}\n            \$\{\{ steps\.race-cache\.outputs\.gocache \}\}/);
+    assert.match(step, /key: \$\{\{ steps\.race-cache\.outputs\.key \}\}/);
+    assert.doesNotMatch(step, /cache-primary-key|retry|continue-on-error/);
+  }
+  assert.match(restore, /id: race-cache-restore\n/);
+  assert.match(restore, /restore-keys: \$\{\{ steps\.race-cache\.outputs\.prefix \}\}\n/);
+  assert.doesNotMatch(save, /restore-keys:/);
+  const prepare = steps.find(s => s.includes('id: race-cache\n'));
+  assert.ok(prepare, 'precomputed cache inputs');
+  assert.ok(steps.indexOf(prepare) < steps.indexOf(restore));
+  assert.ok(body.indexOf(restore) < body.indexOf('run: /usr/bin/time -p go test -race'));
+  assert.ok(body.indexOf(save) > body.indexOf('run: /usr/bin/time -p go test -race'));
+}
+function raceIdentity(text) {
+  const { steps, restore, save } = cacheSteps(text);
+  for (const [step, action] of [[restore, 'restore'], [save, 'save']]) {
+    assert.ok(step.includes(`uses: actions/cache/${action}@${cachePin} # v6\n`), 'verified immutable v6.1.0 pin');
+  }
+  const prepare = steps.find(s => s.includes('id: race-cache\n')) ?? '';
+  // Identity must bind actual toolchain/compiler inputs, not just the label "gcc".
+  for (const input of ['runner.os', 'runner.arch', 'ImageOS', 'ImageVersion',
+    'go env GOVERSION', 'go env GOOS', 'go env GOARCH', 'go env CGO_ENABLED',
+    "hashFiles('go.mod', 'go.sum')", 'command -v', 'readlink -f', 'sha256sum',
+    '-dumpfullversion', '-dumpmachine', '--version', 'go env GOMODCACHE', 'go env GOCACHE',
+    'GITHUB_OUTPUT', 'github.sha', 'race']) assert.ok(prepare.includes(input), `cache identity: ${input}`);
+  assert.match(prepare, /set -euo pipefail/);
+  assert.match(prepare, /\[\[.*\/\*.*\]\]/, 'absolute cache paths validated');
+  assert.match(prepare, /\[\[.*[\\]r.*[\\]n.*\]\]/, 'scalar outputs reject record injection');
+  for (const field of ['gomodcache', 'gocache', 'prefix', 'key']) {
+    assert.ok(prepare.includes(`${field}=%s\\n`), `fixed output record ${field}`);
+  }
+  assert.match(prepare, /prefix=.*(?:compat|identity)/, 'complete compatibility prefix');
+  assert.match(prepare, /key=.*\$\{?prefix\}?.*\$\{?[^\n]*(?:sha|revision)/, 'primary extends same prefix with tested revision');
+  assert.equal((restore.match(/restore-keys:/g) ?? []).length, 1);
+  assert.doesNotMatch(restore, /restore-keys: \|/, 'no additional broad fallback');
+}
+function raceWriter(text) {
+  const { save } = cacheSteps(text);
+  const expression = save.match(/^        if: \$\{\{ (.+) \}\}$/m)?.[1];
+  // Evaluate the declared predicate, constrained to the approved fixed expression.
+  // No disconnected duplicate implementation or arbitrary workflow evaluation.
+  const expected = "success() && github.repository == 'Gentleman-Programming/engram' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.race-cache-restore.outputs.cache-hit != 'true'";
+  assert.equal(expression, expected, 'only trusted successful main misses may save');
+  const executable = expression.replaceAll('steps.race-cache-restore.outputs.cache-hit', 'hit');
+  const evaluate = new Function('success', 'github', 'hit', `return (${executable});`);
+  for (const event_name of ['pull_request', 'merge_group', 'push']) {
+    for (const repository of ['Gentleman-Programming/engram', 'fork/engram']) {
+      for (const ref of ['refs/heads/main', 'refs/heads/feature', 'refs/pull/1/merge']) {
+        for (const outcome of ['success', 'failure', 'cancelled']) {
+          for (const hit of ['true', 'false', '', undefined]) {
+            const allowed = event_name === 'push' && repository === 'Gentleman-Programming/engram'
+              && ref === 'refs/heads/main' && outcome === 'success' && hit !== 'true';
+            assert.equal(evaluate(() => outcome === 'success', { event_name, repository, ref }, hit), allowed,
+              JSON.stringify({ event_name, repository, ref, outcome, hit }));
+          }
+        }
+      }
+    }
+  }
+}
+for (const [name, check] of Object.entries({ raceOwner, raceIdentity, raceWriter })) {
+  test(`${name} explicit Race cache contract (#2192)`, () => check(source));
+}
+test('Race checkout, prerequisites and full suite remain unconditional with cache (#2192)', () => {
+  raceOwner(source);
+  race(source);
+  const original = job(source, 'race-tests');
+  for (const step of raceSteps(original).filter(s => !s.includes('uses: actions/cache/save@'))) {
+    const changed = step.replace(/^(      - name: .*\n)/, '$1        if: false\n');
+    assert.throws(() => race(source.replace(original, () => original.replace(step, () => changed))), undefined, step.split('\n')[0]);
+  }
+});
+test('Race save guard cannot hide forbidden step policies (#2192)', () => {
+  race(source);
+  const original = job(source, 'race-tests');
+  const { save } = cacheSteps(source);
+  for (const inserted of ['env: ${{ secrets.ESCAPE }}', 'permissions: write',
+    'environment: escape', 'if: false', 'continue-on-error: true']) {
+    const changed = save.replace(/^(      - name: .*\n)/, `$1        ${inserted}\n`);
+    assert.throws(() => race(source.replace(original, () => original.replace(save, () => changed))), undefined, inserted);
+  }
+});
+test('Race cache rejects isolated owner, identity, fallback and writer regressions (#2192)', () => {
+  raceOwner(source); raceIdentity(source); raceWriter(source);
+  const original = job(source, 'race-tests');
+  const { restore } = cacheSteps(source);
+  for (const option of ['lookup-only', 'fail-on-cache-miss']) {
+    const withOption = value => restore.replace('        with:\n', () => `        with:\n          ${option}: ${value}\n`);
+    const changed = source.replace(original, () => original.replace(restore, () => withOption('false')));
+    // Bash ANSI-C quoting ($') and positional parameters are literal source, not JS replacement tokens.
+    assert.equal(changed.replace(withOption('false'), () => restore), source, 'only the intended restore option changes');
+    assert.equal(job(changed, 'race-tests').replace(withOption('false'), () => restore), original);
+    raceOwner(changed);
+    assert.throws(() => raceOwner(source.replace(original, () => original.replace(restore, () => withOption('true')))), undefined, option);
+  }
+  for (const [before, after, check] of [
+    ['cache: false', 'cache: true', raceOwner],
+    [cachePin, 'v6', raceIdentity],
+    ["hashFiles('go.mod', 'go.sum')", "hashFiles('go.mod')", raceIdentity],
+    ['-dumpmachine', '-dumpversion', raceIdentity],
+    ['ImageVersion', 'IgnoredImage', raceIdentity],
+    ['ImageOS', 'IgnoredOS', raceIdentity],
+    ['runner.arch', 'runner.name', raceIdentity],
+    ['go env GOVERSION', 'go version', raceIdentity],
+    ['go env CGO_ENABLED', 'echo 1', raceIdentity],
+    ['github.sha', 'github.ref', raceIdentity],
+    ['readlink -f', 'echo', raceIdentity],
+    ['sha256sum', 'echo', raceIdentity],
+    ['-dumpfullversion', '-dumpversion', raceIdentity],
+    ['outputs.gocache', 'outputs.gomodcache', raceOwner],
+    ['outputs.prefix', 'outputs.legacy', raceOwner],
+    ['outputs.key', 'outputs.cache-primary-key', raceOwner],
+    ["success() &&", '', raceWriter],
+    ["github.repository == 'Gentleman-Programming/engram' && ", '', raceWriter],
+    ["github.event_name == 'push' && ", '', raceWriter],
+    ["github.ref == 'refs/heads/main' && ", '', raceWriter],
+    [" != 'true'", " == 'true'", raceWriter],
+  ]) {
+    const target = check === raceIdentity && before !== cachePin
+      ? raceSteps(original).find(step => step.includes('id: race-cache\n')) : original;
+    assert.ok(target?.includes(before), `Race mutation target: ${before}`);
+    const changed = original.replace(target, () => target.replace(before, () => after));
+    assert.throws(() => check(source.replace(original, () => changed)), undefined, before);
+  }
+});
 
 function verification(text) {
   assert.match(text, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main\n/);
@@ -139,8 +289,10 @@ for (const [category, cases] of Object.entries(mutations)) {
   const check = { race, verification, concurrency }[category];
   test(`${category} rejects isolated workflow regressions`, () => {
     for (const [before, after] of cases) {
-      assert.ok(source.includes(before), `fixture target: ${before}`);
-      assert.throws(() => check(source.replace(before, after)), undefined, `${before} -> ${after}`);
+      const target = category === 'race' ? job(source, 'race-tests') : source;
+      assert.ok(target.includes(before), `fixture target: ${before}`);
+      const changed = target.replace(before, () => after);
+      assert.throws(() => check(category === 'race' ? source.replace(target, () => changed) : changed), undefined, `${before} -> ${after}`);
     }
   });
 }
@@ -149,11 +301,11 @@ test('verification rejects missing setup and reordered preflight/build stages', 
   const setup = '      - name: Set up Go\n        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6\n        with:\n          go-version: "1.26.10"\n';
   const unit = job(source, 'unit-tests');
   assert.ok(unit.includes(setup));
-  assert.throws(() => verification(source.replace(unit, unit.replace(setup, ''))));
+  assert.throws(() => verification(source.replace(unit, () => unit.replace(setup, ''))));
   for (const [first, second] of [['go mod tidy -diff', 'make templ'], ['make templ', 'make deadcode-check'],
     ['make deadcode-check', 'go test ./...'], ['go test ./...', 'go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick']]) {
-    const changed = unit.replace(first, '__SWAP__').replace(second, first).replace('__SWAP__', second);
-    assert.throws(() => verification(source.replace(unit, changed)), undefined, `${first} before ${second}`);
+    const changed = unit.replace(first, '__SWAP__').replace(second, () => first).replace('__SWAP__', () => second);
+    assert.throws(() => verification(source.replace(unit, () => changed)), undefined, `${first} before ${second}`);
   }
 });
 
@@ -193,9 +345,9 @@ test('native macOS rejects scope, prerequisites, budget and failure regressions'
     ['if: ${{ !cancelled() }}', 'if: success()'], ['persist-credentials: false', 'persist-credentials: true'],
   ]) {
     assert.ok(original.includes(before), before);
-    assert.throws(() => macos(source.replace(original, original.replace(before, after))), undefined, before);
+    assert.throws(() => macos(source.replace(original, () => original.replace(before, () => after))), undefined, before);
   }
-  assert.throws(() => macos(source.replace(original, original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
+  assert.throws(() => macos(source.replace(original, () => original.replace('    steps:', '    continue-on-error: true\n    steps:'))));
 });
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -259,10 +411,10 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
     'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
     '--test-concurrency=1', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
     assert.ok(original.includes(before), before);
-    assert.throws(() => adapters(source.replace(original, original.replace(before, '__REMOVED__'))), undefined, before);
+    assert.throws(() => adapters(source.replace(original, () => original.replace(before, '__REMOVED__'))), undefined, before);
   }
   for (const inserted of ['continue-on-error: true', 'needs: plugin-tests', 'permissions:\n      contents: write']) {
-    assert.throws(() => adapters(source.replace(original, original.replace('    steps:', '    ' + inserted + '\n    steps:'))));
+    assert.throws(() => adapters(source.replace(original, () => original.replace('    steps:', () => '    ' + inserted + '\n    steps:'))));
   }
 });
 
