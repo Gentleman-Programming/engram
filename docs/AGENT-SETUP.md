@@ -259,6 +259,14 @@ MCP registration adds a missing local Engram entry and refreshes only `command[0
 
 Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` or `mcp.servers` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
 
+### Recover after moving the Engram binary
+
+Setup bakes the current executable path into the OpenCode plugin. After a disk migration or binary move, run `engram setup opencode` using the current Engram installation, then restart OpenCode. A nonblank `ENGRAM_BIN` overrides that baked default; correct or unset a stale override before restarting. A missing selected binary does not trigger automatic PATH fallback.
+
+Early local readiness diagnostics distinguish `binary-not-found`, `identity-command-failed` (launch error or nonzero exit), and `identity-output-invalid` (not a 32-character lowercase hexadecimal identity). They identify `ENGRAM_BIN override` versus `setup-default` without exposing paths or command output. `identity-mismatch` separately means the responding server did not match the selected binary's identity; do not bypass that check or replace a running server to silence it. HTTP rejection and acknowledgement diagnostics remain separate.
+
+These diagnostics narrow an early failure; they do not establish or resolve the original cause of attribution failures with an otherwise healthy server.
+
 ### Verify each layer after setup
 
 `engram setup opencode` confirms only that it wrote the plugin and, when no warning was printed, the OpenCode MCP registration. It cannot confirm that OpenCode connected to the server or that an already-running agent session exposes the tools.

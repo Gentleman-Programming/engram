@@ -343,6 +343,9 @@ type autosyncFakeStore struct {
 	mu        sync.Mutex
 	mutations []fakeStoredMutation
 	pullSeq   int64
+
+	// Instance-local scheduling seam for the concurrent pagination regression.
+	beforeAppend func()
 }
 
 type fakeStoredMutation struct {
@@ -357,6 +360,9 @@ func newAutosyncFakeStore() *autosyncFakeStore {
 func (s *autosyncFakeStore) addMutation(entityKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.beforeAppend != nil {
+		s.beforeAppend()
+	}
 	s.mutations = append(s.mutations, fakeStoredMutation{
 		seq:       int64(len(s.mutations) + 1),
 		entityKey: entityKey,
@@ -406,7 +412,7 @@ func (s *autosyncFakeStore) MaxPendingSyncMutationSeq(string) (int64, error) {
 }
 
 func (s *autosyncFakeStore) ListPendingSyncMutationsAfterSeq(target string, after int64, limit int) ([]store.SyncMutation, error) {
-	pending, err := s.ListPendingSyncMutations(target, len(s.mutations))
+	pending, err := s.ListPendingSyncMutations(target, 0)
 	if err != nil {
 		return nil, err
 	}
