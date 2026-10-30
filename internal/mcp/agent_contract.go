@@ -133,7 +133,7 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 		SessionPolicy: "optional shared session_id is provenance for every item, not proof of host authority; item-level session_id is not used",
 		Guarantees:    []string{"require an array of 1..32 caller-authored judgments before processing any item", "each item requires judgment_id and relation; supplied reason/evidence must be strings and confidence must be finite and between 0 and 1", "process items in submitted order and return ordered outcomes with index, judgment_id, status and relation or error", "item errors do not stop later items", "retries converge verdicts but refresh existing sync mutations; not exactly-once"},
 		ErrorEffects:  "invalid batch shape or shared session_id type is rejected before item writes; item failures do not roll back successful items; a later error or lost acknowledgement does not prove rollback",
-		PiDifferences: []string{"mem_judge_many is Go/MCP-only; Pi has no recipe or dispatch for this operation"},
+		PiDifferences: []string{"Pi sends one HTTP POST and preserves ordered partial outcomes in its native envelope; shared provenance is caller-authored and omission does not inject the host ID; no client loop or uncertain-POST replay"},
 	},
 	"mem_session_finalize": {
 		Effect: "write-summary-and-end-session", Risk: "persistent-write",
@@ -141,7 +141,7 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 		SessionPolicy: "required session_id selects an existing exact identity; never trimmed, implicitly created, or mapped from a host continuation",
 		Guarantees:    []string{"nonempty session_id and summary strings are required", "Go atomically saves a session_summary observation, ends the session, queues normal sync mutations, and records a local retry journal", "preserve the legacy free-text session summary", "successful local retries return the original summary_id and summary_sync_id without writes even if valid retry text differs", "sessions ended separately or imported already ended without the local finalization journal reject", "the retry journal is local-only and is not synced or exported; local atomicity does not guarantee remote visibility"},
 		ErrorEffects:  "validation and ownership refusals do not finalize the session; finalization transaction failures roll back its local writes; a lost acknowledgement is not proof of rollback and retry identity depends on the local journal",
-		PiDifferences: []string{"mem_session_finalize is Go/MCP-only; Pi has no recipe or dispatch for this operation; existing Pi session summary and end behavior is unchanged"},
+		PiDifferences: []string{"Pi requires confirmed current host/effective-session ownership, injects the exact session ID and explicit owner into HTTP, and accepts no model session identity; unknown acknowledgement pins the identity and blocks lifecycle reopening, with explicit same-host retry only and no automatic POST replay or legacy-end substitution"},
 	},
 	"mem_consolidate": {
 		Effect: "consolidate-observations", Risk: "persistent-write",
@@ -149,13 +149,21 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 		SessionPolicy: "source session and scope are inherited; model arguments cannot override them",
 		Guarantees:    []string{"preview is the default and does not write", "confirmation requires the exact preview arguments and opaque fingerprint", "drift refuses without writes and returns a replacement preview that must not be automatically confirmed", "at least two distinct live observation IDs must have the asserted owner", "consolidation is locally atomic, not a guarantee of remote visibility"},
 		ErrorEffects:  "validation and drift refusals do not mutate local observations; a lost or uncertain write result must not be automatically retried or treated as rollback",
-		PiDifferences: []string{"mem_consolidate is Go/MCP-only; Pi has no recipe or dispatch for this operation"},
+		PiDifferences: []string{"Pi projects HTTP status, flat errors and optional replacement plans into native error metadata; Go owns the opaque fingerprint and confirmation validation; Pi does not auto-confirm replacement previews or replay uncertain POSTs"},
 	},
 	"mem_search": {
 		Effect: "read", Risk: "read-only", ProjectPolicy: readProjectPolicy, SessionPolicy: "no session attribution required; MCP activity is tracked separately",
 		Guarantees:    []string{"all_projects=true ignores project selection", "match_mode is all by default or any; other values are rejected", "personal scope without explicit project searches across projects", "default limit is 10"},
 		ErrorEffects:  "no observation mutation; invalid MCP match_mode/response_format is rejected before project resolution",
 		PiDifferences: []string{"Pi sends its resolved project to HTTP, while MCP clears the project filter for implicit personal scope", "MCP uses bounded previews by default; HTTP/Pi uses full search result rows unless response_format=compact"},
+	},
+	"mem_search_prompts": {
+		Effect: "read", Risk: "read-only",
+		ProjectPolicy: "resolved current project by default; explicit known project or all_projects=true; conflicting selectors reject",
+		SessionPolicy: "stored session_id is context, not proof of human authorship or current instructions",
+		Guarantees:    []string{"require query", "return full original prompt content and id, created_at, project and session_id", "default limit is 10; nonpositive limits use the default", "preserve FTS ranking and short-term LIKE newest-first ordering", "empty results are an empty array"},
+		ErrorEffects:  "no prompt or observation mutation; validation and store failures are tool errors",
+		PiDifferences: []string{"MCP returns results within its project envelope; HTTP/Pi returns a prompt array"},
 	},
 	"mem_context": {
 		Effect: "read", Risk: "read-only", ProjectPolicy: readProjectPolicy, SessionPolicy: "no session attribution required",
@@ -172,7 +180,7 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 	"mem_current_project": {
 		Effect: "detect", Risk: "read-only", ProjectPolicy: "process override or Go detection of directory/cwd; return detection metadata instead of inventing a successful owner", SessionPolicy: "no session attribution required",
 		Guarantees: []string{"MCP reports ambiguous detection as a successful informational envelope with error_hint"}, ErrorEffects: "detection metadata is not write authorization",
-		PiDifferences: []string{"Pi exposes cwd but not the MCP directory alias; default cwd comes from the host", "Pi can use local configuration fallback when the HTTP route is unavailable"},
+		PiDifferences: []string{"Pi intentionally exposes canonical cwd only, not the MCP directory alias, to select host detector input rather than duplicate transport aliases; omitted or empty cwd uses host cwd, while whitespace is forwarded and HTTP trims blank input to server cwd", "Pi can use local configuration fallback when the HTTP route is unavailable"},
 	},
 	"mem_list_projects": {
 		Effect: "read", Risk: "read-only", ProjectPolicy: "all projects; no implicit current-project filter", SessionPolicy: "no session attribution required",
@@ -187,7 +195,7 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 	"mem_suggest_topic_key": {
 		Effect: "compute", Risk: "read-only", ProjectPolicy: "not applicable", SessionPolicy: "not applicable",
 		Guarantees: []string{"require nonblank title or content", "Go owns the topic-key algorithm; no records are saved"}, ErrorEffects: "invalid input does not mutate records",
-		PiDifferences: []string{"Pi currently computes its own slug instead of calling the Go topic-key endpoint, including different empty-input behavior"},
+		PiDifferences: []string{"Pi forwards type/title/content to the Go HTTP topic-key endpoint and returns its result through the native envelope; Go owns the algorithm and empty-input rejection, with no local slug or fallback"},
 	},
 	"mem_save": {
 		Effect: "write-observation", Risk: "persistent-write", ProjectPolicy: writeProjectPolicy, SessionPolicy: implicitSessionPolicy,
@@ -198,7 +206,7 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 	"mem_update": {
 		Effect: "update-observation", Risk: "persistent-write", ProjectPolicy: "expected_project is a required caller-authored owner assertion; do not move the observation to another project", SessionPolicy: "id identifies an existing observation",
 		Guarantees: []string{"only supplied fields change", "at least one update field is required", "owner validation is enforced in Go", "literal find/replace requires a pair and cannot be combined with content"}, ErrorEffects: mutationErrorEffects,
-		PiDifferences: []string{"Pi omits find and replace although the Go HTTP update route supports them"},
+		PiDifferences: []string{"Pi forwards supplied find and replace through existing redaction to HTTP PATCH, preserving omission and empty strings; Go owns owner assertion, pairing, content conflict and mutation validation; HTTP results/errors use the native envelope with no client replay"},
 	},
 	"mem_save_prompt": {
 		Effect: "write-prompt", Risk: "persistent-write", ProjectPolicy: "existing MCP session association takes precedence; ambiguous-project recovery is explicitly validated", SessionPolicy: implicitSessionPolicy,
@@ -228,9 +236,9 @@ var agentContractSemantics = map[string]agentOperationSemantics{
 		PiDifferences:   []string{"Pi end is deliberately limited to its current host/effective session with local ownership and persistence evidence"},
 	},
 	"mem_review": {
-		Effect: "read-or-mark-reviewed", Risk: "persistent-write", ProjectPolicy: "list: explicit known project or all projects; current MCP mark_reviewed ignores the project argument and uses current/process resolution", SessionPolicy: "observation_id (or id alias) identifies an observation",
-		Guarantees: []string{"actions are list or mark_reviewed", "omitted-project list is global", "mark_reviewed is confined when a project is resolved"}, ErrorEffects: "invalid action/ID is rejected before mutation; reload can fail after marking reviewed",
-		PiDifferences: []string{"Pi accepts an explicit project for mark_reviewed; the current MCP branch only uses project for list"},
+		Effect: "read-or-mark-reviewed", Risk: "persistent-write", ProjectPolicy: "list: explicit known project or all projects; mark_reviewed: explicit project or resolved current project; never global", SessionPolicy: "observation_id (or id alias) identifies an observation",
+		Guarantees: []string{"actions are list or mark_reviewed", "omitted-project list is global", "mark_reviewed requires a resolved project and confines the mutation"}, ErrorEffects: "invalid action/ID is rejected before mutation; reload can fail after marking reviewed",
+		PiDifferences: []string{"Pi forwards explicit/resolved project over HTTP; MCP resolves explicit/current project in Go"},
 		TargetRule:    "mark_reviewed: explicit project confines the mutation; omission requires the current resolved project; never mark globally",
 	},
 	"mem_pin": {

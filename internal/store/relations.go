@@ -121,6 +121,9 @@ type CandidateTimings struct {
 
 // ListRelationsOptions controls ListRelations and CountRelations queries.
 type ListRelationsOptions struct {
+	// ActionableOnly excludes pending pairs rejected by the cross-project guard.
+	// Inclusive evidence enumeration remains the default.
+	ActionableOnly bool
 	// Project filters by the project of the source OR target observation (via JOIN).
 	// Empty means no project filter (return all).
 	Project string
@@ -371,8 +374,10 @@ type JudgeRelationParams struct {
 // sync_id is exposed as Candidate.JudgmentID.
 // Candidates with an existing judged relation in either direction are excluded.
 //
-// Errors from this method are expected to be logged and swallowed by callers —
-// detection failure must never fail the originating save.
+// Detection failure must never roll back the originating save. In insertion mode,
+// a non-nil error can accompany confirmed candidates and already-persisted relations.
+// A RowsAffected error leaves that insert's outcome unknown; it is not returned as
+// a confirmed candidate. Callers must report incomplete detection, not no conflicts.
 func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
 	if opts.Timings != nil {
 		*opts.Timings = CandidateTimings{}
@@ -494,6 +499,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		defer func() { opts.Timings.Inserts = time.Since(started) }()
 	}
 	candidates := make([]Candidate, 0, len(raw))
+	var insertErrors []error
 	for _, rc := range raw {
 		judgmentID := newSyncID("rel")
 		result, err := s.execHook(s.db, `
@@ -507,13 +513,12 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			)
 		`, judgmentID, sourceSyncID, rc.syncID, sourceSyncID, rc.syncID, rc.syncID, sourceSyncID)
 		if err != nil {
-			// Log and skip — don't fail the whole detection.
-			log.Printf("[store] FindCandidates: conditional insert src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			insertErrors = append(insertErrors, fmt.Errorf("FindCandidates: conditional insert src=%s cand=%s: %w", sourceSyncID, rc.syncID, err))
 			continue
 		}
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
-			log.Printf("[store] FindCandidates: conditional insert rows affected src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			insertErrors = append(insertErrors, fmt.Errorf("FindCandidates: conditional insert rows affected src=%s cand=%s: %w", sourceSyncID, rc.syncID, err))
 			continue
 		}
 		if rowsAffected != 1 {
@@ -530,7 +535,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		})
 	}
 
-	return candidates, nil
+	return candidates, errors.Join(insertErrors...)
 }
 
 // ─── SaveRelation ─────────────────────────────────────────────────────────────
@@ -1216,6 +1221,18 @@ func (s *Store) CountRelations(opts ListRelationsOptions) (int, error) {
 	return total, nil
 }
 
+// Resolve ownership exactly as validateCrossProjectGuard does, independently of
+// the visibility JOINs (which intentionally omit deleted observations).
+const actionableRelationsPredicate = ` AND NOT coalesce((r.judgment_status = 'pending' AND
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.source_id) != '' AND
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.target_id) != '' AND
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.source_id) !=
+ (SELECT coalesce(nullif(o.project,''), s.project, '') FROM observations o
+  LEFT JOIN sessions s ON s.id = o.session_id WHERE o.sync_id = r.target_id)), 0)`
+
 // buildRelationsQuery constructs the SQL for ListRelations and CountRelations.
 // When countOnly=true, generates SELECT count(*) instead of the full column list.
 func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []any) {
@@ -1237,6 +1254,9 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
 		WHERE 1=1`
 
+	if opts.ActionableOnly {
+		query += actionableRelationsPredicate
+	}
 	if opts.Project != "" {
 		query += ` AND (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)`
 		args = append(args, opts.Project, opts.Project)
@@ -1254,7 +1274,7 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 	}
 
 	if !countOnly {
-		query += ` ORDER BY r.created_at DESC`
+		query += ` ORDER BY r.created_at DESC, r.id DESC`
 		if opts.Limit > 0 {
 			query += ` LIMIT ?`
 			args = append(args, opts.Limit)
@@ -1274,6 +1294,15 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 // the deferred and dead queue totals. Two queries are executed: one GROUP BY
 // and one delegated to CountDeferredAndDead.
 func (s *Store) GetRelationStats(project string) (RelationStats, error) {
+	return s.getRelationStats(project, false)
+}
+
+// GetActionableRelationStats retains judged evidence but omits known cross-project pending pairs.
+func (s *Store) GetActionableRelationStats(project string) (RelationStats, error) {
+	return s.getRelationStats(project, true)
+}
+
+func (s *Store) getRelationStats(project string, actionable bool) (RelationStats, error) {
 	stats := RelationStats{
 		Project:          project,
 		ByRelation:       map[string]int{},
@@ -1303,6 +1332,11 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 		`
 	}
 
+	if actionable {
+		q, args = buildRelationsQuery(ListRelationsOptions{Project: project, ActionableOnly: true, ExcludeNotConflict: true}, true)
+		q = strings.Replace(q, "SELECT count(*)", "SELECT r.relation, r.judgment_status, count(*)", 1)
+		q += " GROUP BY r.relation, r.judgment_status"
+	}
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return stats, fmt.Errorf("GetRelationStats: query: %w", err)
@@ -1472,11 +1506,6 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 	}
 
 	// ── Phase 4: collect all (source, candidate) pairs for semantic scan ──────
-	// candidatePair represents a source+candidate pair to be semantically judged.
-	type candidatePair struct {
-		sourceSnippet    ObservationSnippet
-		candidateSnippet ObservationSnippet
-	}
 	var semanticPairs []candidatePair
 	semanticPairKeys := map[string]struct{}{}
 	hasUnprocessedWork := func(candidateIndex, candidateCount int) bool {
@@ -1516,9 +1545,12 @@ scan:
 			// In semantic mode, accumulate pairs for the worker pool.
 			// We need the full content for prompt building — fetch from DB.
 			var srcTitle, srcType, srcContent string
-			_ = s.db.QueryRow(
+			if err := s.db.QueryRow(
 				`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, obs.syncID,
-			).Scan(&srcTitle, &srcType, &srcContent)
+			).Scan(&srcTitle, &srcType, &srcContent); err != nil {
+				log.Printf("[store] ScanProject: source snippet obs=%s: %v", obs.syncID, err)
+				continue
+			}
 			srcSnippet := ObservationSnippet{
 				ID:      obs.id,
 				SyncID:  obs.syncID,
@@ -1540,9 +1572,12 @@ scan:
 					break scan
 				}
 				var candTitle, candType, candContent string
-				_ = s.db.QueryRow(
+				if err := s.db.QueryRow(
 					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
-				).Scan(&candTitle, &candType, &candContent)
+				).Scan(&candTitle, &candType, &candContent); err != nil {
+					log.Printf("[store] ScanProject: candidate snippet obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+					continue
+				}
 				semanticPairs = append(semanticPairs, candidatePair{
 					sourceSnippet: srcSnippet,
 					candidateSnippet: ObservationSnippet{
@@ -1611,11 +1646,28 @@ scan:
 		return result, nil
 	}
 
-	type pairResult struct {
-		judged  int
-		skipped int
-		errors  int
-	}
+	counts := s.executeSemanticWorkers(opts, semanticPairs, concurrency, timeoutPerCall)
+	result.SemanticJudged += counts.judged
+	result.SemanticSkipped += counts.skipped
+	result.SemanticErrors += counts.errors
+	return result, nil
+}
+
+// candidatePair represents a source+candidate pair to be semantically judged.
+type candidatePair struct {
+	sourceSnippet    ObservationSnippet
+	candidateSnippet ObservationSnippet
+}
+
+type semanticWorkerCounts struct {
+	judged  int
+	skipped int
+	errors  int
+}
+
+// executeSemanticWorkers judges the selected pairs and accounts for each outcome.
+func (s *Store) executeSemanticWorkers(opts ScanOptions, semanticPairs []candidatePair, concurrency int, timeoutPerCall time.Duration) semanticWorkerCounts {
+	var counts semanticWorkerCounts
 
 	pairCh := make(chan candidatePair, len(semanticPairs))
 	for _, p := range semanticPairs {
@@ -1639,7 +1691,7 @@ scan:
 							log.Printf("[store] ScanProject: runner.Compare panic pair=(%s,%s): %v",
 								pair.sourceSnippet.SyncID, pair.candidateSnippet.SyncID, r)
 							mu.Lock()
-							result.SemanticErrors++
+							counts.errors++
 							mu.Unlock()
 						}
 					}()
@@ -1653,14 +1705,14 @@ scan:
 						log.Printf("[store] ScanProject: runner.Compare pair=(%s,%s) error: %v",
 							pair.sourceSnippet.SyncID, pair.candidateSnippet.SyncID, err)
 						mu.Lock()
-						result.SemanticErrors++
+						counts.errors++
 						mu.Unlock()
 						return
 					}
 
 					if !opts.Apply && verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
 						mu.Lock()
-						result.SemanticSkipped++
+						counts.skipped++
 						mu.Unlock()
 						return
 					}
@@ -1674,7 +1726,7 @@ scan:
 						isValidRelationVerb(verdict.Relation) &&
 						isValidConfidence(verdict.Confidence) {
 						mu.Lock()
-						result.SemanticJudged++
+						counts.judged++
 						mu.Unlock()
 						return
 					}
@@ -1692,13 +1744,13 @@ scan:
 						log.Printf("[store] ScanProject: JudgeBySemantic pair=(%s,%s) error: %v",
 							pair.sourceSnippet.SyncID, pair.candidateSnippet.SyncID, judgeErr)
 						mu.Lock()
-						result.SemanticErrors++
+						counts.errors++
 						mu.Unlock()
 						return
 					}
 
 					mu.Lock()
-					result.SemanticJudged++
+					counts.judged++
 					mu.Unlock()
 				}()
 			}
@@ -1707,5 +1759,5 @@ scan:
 
 	wg.Wait()
 
-	return result, nil
+	return counts
 }

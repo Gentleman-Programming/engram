@@ -48,13 +48,37 @@ test('trusted checkout and static dispatcher call use exact existing pins', () =
 test('workflow baselines retain readiness guards and pin original-event identity emission', () => {
   // Integrated fc438498 baselines plus the approved #1501 reference port/readiness guards;
   // native adds only the original-event steps. CI includes the independently/native-approved
-  // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b.
+  // eight-line Go bootstrap for #1872 in 07a234c59ebeb01be536e8b1d973a0f61ff4bf2b,
+  // plus the approved #1994 TypeBox test bootstrap in f65380cc79ffa6fe63d4594b1e5341733d51f288.
+  // #2030 adds dormant boundaries/source pins to native/legacy workflows only.
+  // CI retains main's selected-proof bootstrap plus #2043's mandatory selected-Pi source test.
+  // #1810 adds the dormant authenticated fork configuration path; other guards stay exact.
+  // #2068 adds only the existing non-mutating tidy check to required Unit Tests after Go setup.
+  // #2071 adds an isolated, read-only jq 1.6 compatibility job; existing CI jobs stay exact.
+  // #2019 adds independent read-only scanner jobs and their policy-test step only.
+  // #2096 adds only guarded workflow-level concurrency; existing CI jobs stay exact.
+  // #2107 updates the nine explicit CI toolchain pins to Go 1.26.10; job guards stay exact.
+  // #2017 adds only the isolated PostgreSQL job and its policy-test step; existing guards stay exact.
+  // #2018 adds the independent Linux race job with its measured 20m per-binary budget;
+  // existing jobs stay exact.
+  // #2100/#2055 add approved Node24 unit bootstrap and policy regression registration only.
+  // #2144 adds only explicit technical-contract discovery alongside the unchanged issue wildcard.
+  // #2149 adds only the eight outer job ceilings accepted in #2020 comment 6423158281.
+  // #2121 adds only the independent advisory native macOS ARM64 baseline; existing jobs stay exact.
+  // Its bounded follow-up resolves the physical fixture root and lists observed PG/Windows skip reasons only.
+  // The summary-only follow-up requires the actual native-test outcome to be success for completeness.
+  // #2150 adds only the independent advisory macOS adapter lane and its inline evidence report.
+  // #2160 scopes its TAP reporter flags to the CLI, preserving child fixture environments.
+  // #2160 permits repeated parameterized names while retaining numeric TAP identity checks.
+  // #1891 adds only the observational Windows suite/discovery, including trusted Bash/jq prerequisites,
+  // Git/bin root resolution and its native Windows path contract step.
+  // #2192 adds only compatible Race cache restore/refresh; other jobs and guards stay exact.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
-    '.github/workflows/pr-check.yml': '963bf7f27237527df684b9d7a28894b741bf47f61a45de577327c5925abfeb00',
+    '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
-    '.github/workflows/issue-policy.yml': '1a3091c88771ecc5b51059aad6987d31c97177b48f4522bfdb8963d0c4bc952c',
-    '.github/workflows/ci.yml': 'fb9737560203dc812f750b757fc5ccc84ec297fa1db92a9a4ab547b2b104be15',
+    '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
+    '.github/workflows/ci.yml': '0266f252c818bd1d5ea07810473510aa1e905a6a7abb9dea599039419a0e32ec',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

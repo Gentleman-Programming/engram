@@ -338,6 +338,9 @@ func normalizeLegacyMutationPayload(entry MutationEntry, project string) (string
 		return "", err
 	}
 	key := strings.TrimSpace(entry.EntityKey)
+	if entity == "session" {
+		key = entry.EntityKey
+	}
 	if op == "upsert" {
 		switch entity {
 		case "session":

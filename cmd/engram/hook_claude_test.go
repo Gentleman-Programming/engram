@@ -22,6 +22,36 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
+// Legacy confirmation fixtures deliberately ask the server to interpret a
+// synthetic cwd. Select local transport explicitly so those tests continue to
+// exercise their original lookup, permission and timeout contracts.
+func useLegacyLocalHookEndpoint(t *testing.T, endpoint string) {
+	t.Helper()
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Port() == "" {
+		t.Fatalf("legacy hook endpoint must have a port: %q (%v)", endpoint, err)
+	}
+	// A closed managed endpoint now enters recovery. Keep legacy denial
+	// fixtures synthetic and stop at launch admission instead of executing
+	// this test binary as `serve` or consulting the user's default store.
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("ENGRAM_DATA_DIR", root)
+	if err := os.WriteFile(filepath.Join(root, "engram.db"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	launch := hookLocalServerLaunch
+	hookLocalServerLaunch = func(context.Context, string, string, []string) error {
+		return errors.New("legacy fixture does not launch a server")
+	}
+	t.Cleanup(func() { hookLocalServerLaunch = launch })
+	t.Setenv("ENGRAM_URL", "")
+	t.Setenv("ENGRAM_SOCKET", "")
+	t.Setenv("ENGRAM_PORT", parsed.Port())
+}
+
 func claudeHookStdin(t *testing.T, input string, closed bool) *os.File {
 	t.Helper()
 	reader, writer, err := os.Pipe()
@@ -240,11 +270,12 @@ func TestCodexEndedSessionStart409DeniesWrite(t *testing.T) {
 		_, _ = w.Write(capture.Body.Bytes())
 	}))
 	defer endpoint.Close()
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	codexTestHookBinary(t, root)
 	input, _ := json.Marshal(map[string]string{"session_id": "host", "cwd": root})
 	command := exec.Command("bash", filepath.Join("..", "..", "plugin", "codex", "scripts", "session-start.sh"))
 	command.Stdin = strings.NewReader(string(input))
-	command.Env = append(os.Environ(), "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "data"), "ENGRAM_URL="+endpoint.URL, "ENGRAM_SOCKET=", "ENGRAM_PROJECT=", "ENGRAM_PORT=")
+	command.Env = append(os.Environ(), "HOME="+root, "ENGRAM_DATA_DIR="+filepath.Join(root, "data"), "ENGRAM_URL="+endpoint.URL, "ENGRAM_SOCKET=", "ENGRAM_PROJECT=")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Codex SessionStart: %v: %s", err, output)
@@ -252,7 +283,7 @@ func TestCodexEndedSessionStart409DeniesWrite(t *testing.T) {
 	if registrationStatus != 409 || strings.Contains(string(output), `"session_id":"host"`) || strings.Contains(string(output), "Registered runtime session") {
 		t.Fatalf("409 handoff: status=%d output=%s", registrationStatus, output)
 	}
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	// Continue using the same legacy-local endpoint as SessionStart.
 	response := guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"` + filepath.ToSlash(root) + `","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","project":"project-a","title":"blocked"}}`))
 	var result struct {
 		HookSpecificOutput struct {
@@ -335,7 +366,7 @@ func TestCodexCallConfirmsSharedHostBeforeBinding(t *testing.T) {
 		_, _ = w.Write(capture.Body.Bytes())
 	}))
 	defer endpoint.Close()
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	input := []byte(`{"session_id":"host","cwd":"` + filepath.ToSlash(root) + `","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","project":"project-b","title":"retained","content":"cross-project observation"}}`)
 	var result struct {
 		HookSpecificOutput struct {
@@ -428,7 +459,7 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer endpoint.Close()
-			t.Setenv("ENGRAM_URL", endpoint.URL)
+			useLegacyLocalHookEndpoint(t, endpoint.URL)
 			response := guardCodexPreToolUse([]byte(`{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{}}`))
 			var result struct {
 				HookSpecificOutput struct {
@@ -583,7 +614,7 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 					_, _ = io.WriteString(w, `{"id":"host","status":"created"}`)
 				}))
 				defer endpoint.Close()
-				t.Setenv("ENGRAM_URL", endpoint.URL)
+				useLegacyLocalHookEndpoint(t, endpoint.URL)
 				oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
 				t.Cleanup(func() { os.Stdin, claudeHookOutput, exitFunc = oldStdin, oldOutput, oldExit })
 				os.Stdin = claudeHookStdin(t, `{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","title":"preserved"}}`, false)
@@ -641,7 +672,7 @@ func TestHookSessionConfirmationSharedDeadline(t *testing.T) {
 	for _, agent := range []string{"claude", "codex"} {
 		t.Run(agent, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				t.Setenv("ENGRAM_URL", "http://hook.test")
+				useLegacyLocalHookEndpoint(t, "http://127.0.0.1:7437")
 				oldTransport := http.DefaultTransport
 				oldStdin, oldOutput, oldExit := os.Stdin, claudeHookOutput, exitFunc
 				t.Cleanup(func() {
@@ -814,7 +845,7 @@ func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
 	production := server.New(db, 0).Handler()
 	endpoint := httptest.NewServer(production)
 	defer endpoint.Close()
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 
 	gate := func(t *testing.T, session, cwd string) (decision, reason string, updatedInput map[string]any) {
 		t.Helper()
@@ -1101,7 +1132,7 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 				}
 			}))
-			t.Setenv("ENGRAM_URL", endpoint.URL)
+			useLegacyLocalHookEndpoint(t, endpoint.URL)
 			if tc.sessionGet == nil {
 				endpoint.Close() // transport failure: connection refused
 			} else {
@@ -1231,7 +1262,7 @@ func TestCmdHookWritesTransformedResponse(t *testing.T) {
 		t.Errorf("unexpected request: %s", r.URL)
 	}))
 	defer server.Close()
-	t.Setenv("ENGRAM_URL", server.URL)
+	useLegacyLocalHookEndpoint(t, server.URL)
 	os.Stdin = claudeHookStdin(t, `{"session_id":"claude-session","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"title":"decision"}}`, false)
 	var output []byte
 	claudeHookOutput = func(response []byte) error { output = append([]byte(nil), response...); return nil }
@@ -1744,7 +1775,7 @@ func TestCodexPreToolUseCommandWritesAllowAndBoundInput(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"host","status":"resolved"}`))
 	}))
 	defer endpoint.Close()
-	t.Setenv("ENGRAM_URL", endpoint.URL)
+	useLegacyLocalHookEndpoint(t, endpoint.URL)
 	oldStdin, oldOutput := os.Stdin, claudeHookOutput
 	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
 	os.Stdin = claudeHookStdin(t, `{"session_id":"host","cwd":"/work","tool_name":"mcp__engram__mem_save","tool_input":{"session_id":"model","title":"retained"}}`, false)

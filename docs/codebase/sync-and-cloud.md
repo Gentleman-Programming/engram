@@ -34,6 +34,8 @@ Prompt exclusion happens before serialization, hashing, and counting, without ch
 
 During incremental local project exports, an observation absent from available chunk history bypasses the manifest watermark. A direct historical row or an observation mutation, including a tombstone, establishes historical presence. Opt-in prompts use stable-ID presence in available history, not their creation timestamps: prompts omitted by earlier exports remain eligible even after other memories advance the watermark. Both legacy prompt arrays and prompt mutations establish presence; tombstoned identities remain suppressed. Repeated opt-in does not resend those identities. Sessions retain timestamp filtering, but parents needed by emitted observations or prompts are included once per chunk for dependency closure.
 
+If the current local export generates a known chunk ID whose payload is missing, export restores that payload before recording sync success, without duplicating its manifest entry or changing source records. An available payload remains a no-op; corruption and write failures remain errors. This restores only the current chunk, not all missing historical payloads, and does not prune old references or change cloud sync. Prompt sharing still requires the current export's explicit opt-in.
+
 This is not redaction: observations and other shared fields can still contain sensitive data. Inspect chunks before committing. Existing chunks are never rewritten, and excluding prompts now does not remove content already retained in Git history.
 
 Cloud exports are size-bounded: `engram sync --cloud` splits the pending mutation replay into deterministic, dependency-complete chunks of at most 4 MiB each, so a large initial replay stays within the server's `ENGRAM_CLOUD_MAX_PUSH_BYTES` limit (default 8 MiB). Each chunk acknowledges only its own mutation sequences after a successful push, so an interrupted sync resumes from the first unacknowledged mutation instead of replaying acknowledged work.
@@ -86,6 +88,55 @@ conflicts deferred` lists the raw row. The same doctor check reports blank
 identities found in the local `sessions` table as blocking findings. Neither is
 auto-repaired, because inventing a canonical session ID would fabricate identity
 data.
+
+### Opaque session identities and historical compatibility
+
+Direct `CloudStore.WriteChunk` and mutation-batch ingestion reject a session
+DELETE whose nonblank payload ID differs byte-for-byte from its entity key,
+before persisting any part of the chunk or batch. Matching padded IDs remain
+valid; sparse legacy session DELETE payloads retain the existing key fallback.
+Other entity DELETE validation is unchanged. This is producer validation, not
+historical startup repair.
+
+Nonblank session IDs are opaque, byte-exact identifiers. In the same project,
+`session` and ` session ` identify different sessions. Cloud chunk and mutation
+ingestion must retain those IDs, their observation/prompt `session_id` values,
+and session-index keys unchanged. Trimming is a blank check, not an identity
+transformation. Generated observation, prompt and relation keys keep their
+existing normalization rules. Chunk replay retains exact session keys in dependency
+matching and typed mutation synthesis, including repeated imports. This shared
+import path also preserves the same IDs in local Git chunks.
+
+Dashboard session maps and observation/prompt references preserve those bytes too.
+Session, observation and prompt detail routes use the decoded session path segment
+unchanged, so `%20session%20` does not look up `session`. Project grants and generated
+child IDs keep their existing normalization. A mismatched historical session key
+and payload ID is an explicit dashboard load error, not a guessed association.
+
+A supplied session mutation key must exactly match its payload ID. In particular,
+a historical key `session` paired with payload ID ` session ` is inconsistent,
+not a legacy alias to accept silently. Pulled inconsistent identities retain the
+existing quarantine-plus-evidence behavior described above.
+
+| Historical evidence | Compatibility boundary |
+| --- | --- |
+| Original local store/journal or retained typed chunk arrays | May retain exact IDs and child associations. Preserve these sources. |
+| Materialized mutation with trimmed key and original payload ID | Inconsistency is detectable; do not silently rekey or merge it. |
+| Mutation normalized before storage, including a chunk generated from it | Original padding and child ownership may be irrecoverably ambiguous. Do not infer them. |
+| Mixed typed arrays and explicit normalized mutations | Conflicting representations require explicit review, not a guessed winner for repair. |
+| Session index or dashboard projection | Derived state can be rebuilt only from complete, unambiguous source history. Rebuilding cannot recover bytes absent from every source. |
+
+This change does not rewrite historical chunks, their content hashes, mutation
+rows, or local databases. The existing startup backfill still completes ordinary
+session-index entries. It does not invent trimmed aliases or add missing padded
+historical identities: startup fails with `cloudstore: session index requires
+explicit historical resolution` when a retained padded ID has no exact index
+entry. Correctly ingested padded IDs already have that entry and reopen normally.
+Existing aliases are not pruned. A maintainer must separately authorize historical
+recovery after checking source completeness, conflicts and child ownership; do
+not retry startup expecting a repair or guess the missing identity. A dry-run
+mutation chunk backfill uses exact session identities when comparing signatures;
+it is not a historical identity repair command.
 
 ### Session directory admission: local-partial, cloud ownership-aware, cloud-mutation-compatible
 

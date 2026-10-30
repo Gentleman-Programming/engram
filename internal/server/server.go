@@ -515,7 +515,6 @@ func (s *Server) routes() {
 
 	// Prompts
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
-	s.mux.HandleFunc("GET /prompts/search", s.handleSearchPrompts)
 	s.mux.HandleFunc("DELETE /prompts/{id}", requireAuth(s.handleDeletePrompt))
 
 	// Context
@@ -1195,18 +1194,12 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
-	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	resolved, err := s.resolveRequestProjectWithDetector(r, projectpkg.ResolutionCurrent, true, s.captureProjectDetector(false))
 	if err != nil {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
-	markReviewed := s.store.MarkReviewed
-	if resolved.Project != "" {
-		markReviewed = func(observationID int64) error {
-			return s.store.MarkReviewedForProject(observationID, resolved.Project)
-		}
-	}
-	if err := markReviewed(id); err != nil {
+	if err := s.store.MarkReviewedForProject(id, resolved.Project); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
 			if resolved.Project != "" {
 				jsonError(w, http.StatusNotFound, "observation not found in resolved project")
@@ -1651,13 +1644,24 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:      projectpkg.ResolutionCurrent,
 		Directory: cwd,
-		Detect:    s.store.DetectProject,
+		Detect:    s.captureProjectDetector(false),
 	})
 	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		s.writeProjectResolutionError(w, res, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, currentProjectPayload(cwd, res))
+}
+
+// captureProjectDetector protects context negotiation without tightening ordinary reads.
+// Inspection callers retain their no-binding contract; current-project keeps its
+// existing binding behavior after the HOME guard and history checks succeed.
+func (s *Server) captureProjectDetector(inspectOnly bool) func(string) projectpkg.DetectionResult {
+	return func(directory string) projectpkg.DetectionResult {
+		return projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{
+			InspectOnly: inspectOnly, HistoryLookup: s.store.ProjectHistory, RequireExplicitHomeProject: true,
+		})
+	}
 }
 
 // currentProjectPayload builds the shared current-project response metadata.
@@ -1744,6 +1748,10 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectp
 	}
 	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		code = "ambiguous_project"
+		status = http.StatusConflict
+	}
+	if errors.Is(err, projectpkg.ErrExplicitProjectRequired) {
+		code = "explicit_project_required"
 		status = http.StatusConflict
 	}
 	var transition *projectpkg.ProjectTransitionError
@@ -1911,6 +1919,7 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 		Status:             status,
 		Limit:              limit,
 		Offset:             offset,
+		ActionableOnly:     true,
 		ExcludeNotConflict: true,
 	}
 
@@ -1935,6 +1944,7 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 		Project:            project,
 		Status:             status,
 		SinceTime:          opts.SinceTime,
+		ActionableOnly:     true,
 		ExcludeNotConflict: true,
 	}
 	total, err := s.store.CountRelations(countOpts)
@@ -1961,7 +1971,7 @@ func (s *Server) handleConflictsStats(w http.ResponseWriter, r *http.Request) {
 	}
 	project := resolved.Project
 
-	stats, err := s.store.GetRelationStats(project)
+	stats, err := s.store.GetActionableRelationStats(project)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -1,11 +1,64 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   findTransientArtifacts,
   isTransientArtifactPath,
   listPullRequestFiles,
 } from './transient-artifacts.mjs';
+
+test('checkout ignores root release output without hiding source or nested dist directories', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'engram-release-ignore-'));
+  try {
+    const emptyConfig = join(fixture, 'empty-config');
+    const emptyTemplate = join(fixture, 'empty-template');
+    writeFileSync(emptyConfig, '');
+    mkdirSync(emptyTemplate);
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')),
+    );
+    Object.assign(env, {
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: emptyConfig,
+      GIT_CONFIG_SYSTEM: emptyConfig,
+    });
+    const repository = join(fixture, 'repository');
+    mkdirSync(repository);
+    const git = (args, status, stdout) => {
+      const result = spawnSync('git', [
+        '-c', `core.excludesFile=${emptyConfig}`,
+        '-c', `core.hooksPath=${emptyTemplate}`,
+        ...args,
+      ], { cwd: repository, env, encoding: 'utf8', timeout: 5000 });
+      assert.ifError(result.error);
+      assert.equal(result.status, status, `git ${args.join(' ')}: ${result.stderr}`);
+      assert.equal(result.stderr, '');
+      assert.equal(result.stdout, stdout);
+    };
+    git(['init', '--quiet', `--template=${emptyTemplate}`], 0, '');
+    copyFileSync(new URL('../../.gitignore', import.meta.url), join(repository, '.gitignore'));
+    const ignored = ['dist/metadata.json', 'dist/nested/output.txt', 'engram', 'tool.exe'];
+    const visible = ['source-marker.txt', 'subproject/dist/source-marker.txt'];
+    for (const path of [...ignored, ...visible]) {
+      mkdirSync(join(repository, path, '..'), { recursive: true });
+      writeFileSync(join(repository, path), 'fixture\n');
+    }
+    for (const path of ignored) {
+      git(['check-ignore', '--', path], 0, `${path}\n`);
+    }
+    for (const path of visible) {
+      git(['check-ignore', '--', path], 1, '');
+    }
+    git(['status', '--porcelain=v1', '--untracked-files=all'], 0,
+      '?? .gitignore\n?? source-marker.txt\n?? subproject/dist/source-marker.txt\n');
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test('identifies every configured transient artifact classifier and variant', () => {
   const rejectedCases = [

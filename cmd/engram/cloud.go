@@ -116,6 +116,7 @@ func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+		cloudserver.WithVersion(version),
 	}
 	if authenticator != nil {
 		options = append(options, cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: grantStore}))

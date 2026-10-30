@@ -136,7 +136,9 @@ resolve_project() {
     return 1
   }
   [ -n "$response" ] || return 1
-  printf '%s' "$response" | jq -er '
+  # Let Bash emit the LF: native Windows jq uses CRLF, and jq 1.6 has no -b.
+  printf '%s' "$response" | jq -sej '
+    if length == 1 then .[0] else error("expected one project response") end |
     if (.project | type) == "string"
       and (.project | gsub("^[[:space:]]+|[[:space:]]+$"; "") | length) > 0
       and (.project_source | type) == "string"
@@ -149,4 +151,5 @@ resolve_project() {
     [ -n "$ENGRAM_SOCKET" ] && printf '%s\n' "warning: Engram could not resolve the project over the Unix socket; check that the server is running and ENGRAM_SOCKET is configured." >&2
     return 1
   }
+  printf '\n'
 }

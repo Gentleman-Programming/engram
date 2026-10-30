@@ -108,7 +108,7 @@ If the binary is missing, Pi-native local server startup reports an error withou
 
 `mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Automatic Git detection stores the first normalized remote/root label in private shared Git metadata, so remote renames, linked worktrees, and repository moves keep using that label. If that binding is corrupt or cannot be written, detection fails closed; set `.engram/config.json` to the intended project rather than relying on the current remote name. Global local/cloud `project_id` propagation and alias migration remain deferred. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
 
-MCP also exposes deferred `mem_judge_many` (ordered per-item decisions) and `mem_session_finalize` (atomic caller-authored summary plus close). Finalize requires an existing exact session and matching project ownership; retries are local-only. These tools do not change the native Pi/HTTP wrappers or host lifecycle hooks. See [the MCP reference](../DOCS.md#mcp-tools-26-tools).
+MCP also exposes deferred `mem_judge_many` (ordered per-item decisions) and `mem_session_finalize` (atomic caller-authored summary plus close). Finalize requires an existing exact session and matching project ownership; retries are local-only. These tools do not change the native Pi/HTTP wrappers or host lifecycle hooks. See [the MCP reference](../DOCS.md#mcp-tools-27-tools).
 
 Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
 
@@ -259,6 +259,14 @@ MCP registration adds a missing local Engram entry and refreshes only `command[0
 
 Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` or `mcp.servers` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
 
+### Recover after moving the Engram binary
+
+Setup bakes the current executable path into the OpenCode plugin. After a disk migration or binary move, run `engram setup opencode` using the current Engram installation, then restart OpenCode. A nonblank `ENGRAM_BIN` overrides that baked default; correct or unset a stale override before restarting. A missing selected binary does not trigger automatic PATH fallback.
+
+Early local readiness diagnostics distinguish `binary-not-found`, `identity-command-failed` (launch error or nonzero exit), and `identity-output-invalid` (not a 32-character lowercase hexadecimal identity). They identify `ENGRAM_BIN override` versus `setup-default` without exposing paths or command output. `identity-mismatch` separately means the responding server did not match the selected binary's identity; do not bypass that check or replace a running server to silence it. HTTP rejection and acknowledgement diagnostics remain separate.
+
+These diagnostics narrow an early failure; they do not establish or resolve the original cause of attribution failures with an otherwise healthy server.
+
 ### Verify each layer after setup
 
 `engram setup opencode` confirms only that it wrote the plugin and, when no warning was printed, the OpenCode MCP registration. It cannot confirm that OpenCode connected to the server or that an already-running agent session exposes the tools.
@@ -276,7 +284,7 @@ engram serve &
 
 > **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and the global `opencode.json(c)` selected as described above. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
 
-**Alternative: Manual MCP-only setup** (no plugin, all 26 tools by default):
+**Alternative: Manual MCP-only setup** (no plugin, all 27 tools by default):
 
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` on all platforms, or project-level):
 
@@ -334,7 +342,7 @@ When the plugin is already installed, `engram setup claude-code` runs `claude pl
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
-**Option C: Bare MCP** — all 26 tools by default, no session management:
+**Option C: Bare MCP** — 23 agent-profile tools, no session management:
 
 Use Claude CLI to register the user-scope server (replace the placeholder with the absolute Engram executable path):
 
@@ -457,7 +465,9 @@ engram setup codex
 - Registers `[mcp_servers.engram]` in the active Codex config (`$CODEX_HOME/config.toml` when `CODEX_HOME` is absolute, otherwise `~/.codex/config.toml`; on Windows the default is `%USERPROFILE%\.codex\config.toml`) and pins the current absolute executable path
 - Writes `engram-instructions.md` and `engram-compact-prompt.md` beside the active config as informational copies of the Memory Protocol
 - Installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`. The plugin hooks inject the Memory Protocol additively, so this is how Codex actually receives it. If the CLI is missing or either command fails, setup returns an error, not complete success. The MCP config and informational instruction files remain written, but plugin activation is incomplete. Ensure `codex` is in `PATH`, resolve the reported command error, and run both commands above manually (or rerun `engram setup codex`), then restart Codex. Do not wire the informational files into prompt override keys as a workaround.
-- Removes legacy `model_instructions_file` / `experimental_compact_prompt_file` keys if a previous Engram version wrote them
+- Removes complete top-level legacy `model_instructions_file` / `experimental_compact_prompt_file` string assignments, including quoted keys and multiline strings, if a previous Engram version wrote them
+
+Setup prepares legacy-key cleanup and MCP changes before writing `config.toml`. It preserves unrelated text, comments, and line endings. If a string/container is unterminated, an obsolete setting has a non-string value, or MCP is registered through an unsupported dotted/inline form instead of `[mcp_servers.engram]`, setup returns an error without changing the config or invoking the Codex plugin commands. Resolve the reported input manually and rerun setup. This bounded preservation check is not a general TOML validator and adds no parser dependency.
 
 > **Do not set `model_instructions_file` in Codex.** Unlike most instruction mechanisms, that key *replaces* Codex's built-in system instructions instead of adding to them. Pointing it at `engram-instructions.md` wipes Codex's own base prompt (`You are Codex, ...`) and degrades the agent. Earlier Engram versions did this automatically; current versions strip the keys instead. If you set them manually, you are deliberately opting into overriding Codex's base prompt.
 

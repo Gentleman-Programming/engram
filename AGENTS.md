@@ -2,6 +2,8 @@
 
 Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md) for the issue-first workflow.
 
+The [contribution policy transition](docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE**; continue following the active issue-first requirements.
+
 When working on this project, load the relevant skill(s) BEFORE writing any code.
 
 ## How to Use

@@ -7,6 +7,9 @@ const codeRoot = fileURLToPath(new URL("../", import.meta.url));
 const help = `Usage: node tools/validate-pi-package.mjs --core-ref refs/tags/vSEMVER --pi-ref refs/tags/pi-vSEMVER
 
 Uses the current directory as the candidate metadata/package root.
+Full refs define an ordered pair of independent strict SemVer versions.
+Go JSON version means core; piVersion means Pi and binds metadata/pin/archive.
+Identity is metadata only, not remote tag/source/digest or compatibility proof.
 Go validates refs, metadata and the installer pin. npm pack runs offline with
 lifecycle scripts disabled; Go validates the tarball without extraction.
 Requires local Go/npm and existing Go caches. Does not install dependencies.
@@ -82,11 +85,11 @@ async function validate(refs) {
     const goArgs = ["run", "./tools/release-candidate", "-root", root, ...refs];
     // Go remains the only SemVer/metadata authority; no npm work before this.
     const metadata = JSON.parse(subprocess("go", goArgs, codeRoot, env));
-    if (typeof metadata.version !== "string") throw new Error("invalid metadata export");
+    if (typeof metadata.version !== "string" || typeof metadata.piVersion !== "string") throw new Error("invalid metadata export");
     subprocess(process.execPath, [await npmEntrypoint(), "pack", "--offline", "--ignore-scripts", "--json", "--workspaces=false", "--pack-destination", temporary], join(root, "plugin/pi"), env);
-    const tarball = join(temporary, `gentle-engram-${metadata.version}.tgz`);
+    const tarball = join(temporary, `gentle-engram-${metadata.piVersion}.tgz`);
     const result = JSON.parse(subprocess("go", [...goArgs, "-pi-tarball", tarball], codeRoot, env));
-    if (result.validation !== "local-package-only" || result.version !== metadata.version || !Number.isInteger(result.files) || result.files < 1) throw new Error("invalid package validation result");
+    if (result.validation !== "local-package-only" || result.version !== metadata.version || result.piVersion !== metadata.piVersion || !Number.isInteger(result.files) || result.files < 1) throw new Error("invalid package validation result");
   } finally {
     // Only this invocation's mkdtemp directory, never caller caches/source files.
     await rm(temporary, { recursive: true, force: true });

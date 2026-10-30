@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -87,7 +88,7 @@ func TestAgentContractInventoryAndMCPParity(t *testing.T) {
 		t.Fatalf("unexpected identity or parity status: %#v", document)
 	}
 	operations := document["operations"].(map[string]any)
-	want := []string{"mem_capture_passive", "mem_compare", "mem_consolidate", "mem_context", "mem_current_project", "mem_doctor", "mem_get_observation", "mem_judge", "mem_judge_many", "mem_list_projects", "mem_pin", "mem_review", "mem_save", "mem_save_prompt", "mem_search", "mem_session_end", "mem_session_finalize", "mem_session_start", "mem_session_summary", "mem_suggest_topic_key", "mem_unpin", "mem_update"}
+	want := []string{"mem_capture_passive", "mem_compare", "mem_consolidate", "mem_context", "mem_current_project", "mem_doctor", "mem_get_observation", "mem_judge", "mem_judge_many", "mem_list_projects", "mem_pin", "mem_review", "mem_save", "mem_save_prompt", "mem_search", "mem_search_prompts", "mem_session_end", "mem_session_finalize", "mem_session_start", "mem_session_summary", "mem_suggest_topic_key", "mem_unpin", "mem_update"}
 	var got []string
 	for name := range operations {
 		got = append(got, name)
@@ -145,7 +146,7 @@ func TestAgentContractInventoryAndMCPParity(t *testing.T) {
 	}
 	// Exporting the agent profile must not narrow the existing all-tools server.
 	all := NewServer(newMCPTestStore(t)).ListTools()
-	if len(all) != 26 || ResolveTools("") != nil || ResolveTools("all") != nil {
+	if len(all) != 27 || ResolveTools("") != nil || ResolveTools("all") != nil {
 		t.Fatalf("legacy all-tools inventory changed: %d tools", len(all))
 	}
 	wantShared := []string{"mem_judge_many", "mem_session_finalize"}
@@ -178,8 +179,8 @@ func TestAgentContractSharedOperationsMetadataOnly(t *testing.T) {
 	srv := server.NewMCPServer("engram-contract-test", "metadata")
 	registerToolsWithQueue(srv, nil, MCPConfig{}, ProfileAgent, nil, nil)
 	registered := srv.ListTools()
-	if len(registered) != 22 {
-		t.Fatalf("metadata-only agent inventory = %d, want 22", len(registered))
+	if len(registered) != 23 {
+		t.Fatalf("metadata-only agent inventory = %d, want 23", len(registered))
 	}
 	document, _ := readAgentContract(t)
 	operations := document["operations"].(map[string]any)
@@ -239,10 +240,18 @@ func TestAgentContractConsolidationPreservesUpstreamRegistration(t *testing.T) {
 		t.Fatalf("consolidation safety annotations drifted: %#v", annotations)
 	}
 	semantics := operation["semantics"].(map[string]any)
-	wantDifference := "mem_consolidate is Go/MCP-only; Pi has no recipe or dispatch for this operation"
 	differences := semantics["pi_differences"].([]any)
-	if !slices.Contains(differences, any(wantDifference)) {
-		t.Fatalf("consolidation silently claims Pi support: %#v", differences)
+	for _, fact := range []string{
+		"Pi projects HTTP status, flat errors and optional replacement plans into native error metadata",
+		"Go owns the opaque fingerprint and confirmation validation",
+		"Pi does not auto-confirm replacement previews or replay uncertain POSTs",
+	} {
+		if !slices.ContainsFunc(differences, func(value any) bool {
+			difference, ok := value.(string)
+			return ok && strings.Contains(difference, fact)
+		}) {
+			t.Errorf("consolidation projection missing %q: %#v", fact, differences)
+		}
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -649,11 +650,14 @@ func TestRemoveTopLevelTOMLKeyWhitespace(t *testing.T) {
 				preserved := key + "_extra = \"keep\"\nother = \"keep\"\n[profile]\n" + key + "\t= \"table value\"\n"
 				input := "\ufeff" + key + whitespace + "= \"legacy\"\n" + preserved
 				want := "\ufeff" + preserved
-				got := removeTopLevelTOMLKey(input, key)
+				got, err := removeTopLevelTOMLKey(input, key)
+				if err != nil {
+					t.Fatal(err)
+				}
 				if got != want {
 					t.Fatalf("got %q, want %q", got, want)
 				}
-				if again := removeTopLevelTOMLKey(got, key); again != got {
+				if again, err := removeTopLevelTOMLKey(got, key); err != nil || again != got {
 					t.Fatalf("not idempotent: %q", again)
 				}
 			})
@@ -816,7 +820,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	}
 	// Pi >= 0.99.0 ships built-in MCP and an installed pi-mcp-adapter replaces it,
 	// so setup must never install the adapter.
-	wantCommands := []string{"pi install npm:gentle-engram@0.4.2"}
+	wantCommands := []string{"pi install npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -831,7 +835,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	if want := []string{"npm:gentle-engram@0.4.2"}; !reflect.DeepEqual(settings.Packages, want) {
+	if want := []string{"npm:gentle-engram@0.5.1"}; !reflect.DeepEqual(settings.Packages, want) {
 		t.Fatalf("expected fresh settings packages %#v without pi-mcp-adapter, got %#v", want, settings.Packages)
 	}
 
@@ -885,7 +889,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings after install: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.4.2"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("expected settings packages to preserve unrelated entries and migrate legacy pins: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -982,7 +986,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatalf("parse migrated settings: %v", err)
 	}
-	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.4.2"}
+	wantPackages := []string{"npm:existing", "npm:pi-mcp-adapter", "npm:gentle-engram@0.5.1"}
 	if !reflect.DeepEqual(settings.Packages, wantPackages) {
 		t.Fatalf("unexpected migrated packages: got %#v want %#v", settings.Packages, wantPackages)
 	}
@@ -999,7 +1003,7 @@ func TestEnsurePiPackageSettingsMigratesLegacyPackageIdempotently(t *testing.T) 
 func TestEnsurePiPackageSettingsDoesNotAddMCPAdapter(t *testing.T) {
 	resetSetupSeams(t)
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.4.2"]}`), 0644); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing","npm:gentle-engram@0.5.1"]}`), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 	original, err := os.ReadFile(settingsPath)
@@ -1029,7 +1033,7 @@ func TestInstallPiCommandFailure(t *testing.T) {
 		return []byte("boom"), errors.New("exit 1")
 	}
 	_, err := Install("pi")
-	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.4.2") {
+	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.5.1") {
 		t.Fatalf("expected pi install error, got %v", err)
 	}
 }
@@ -3305,7 +3309,10 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 			"command = \"other\"",
 		}, "\n")
 
-		output := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
+		output, err := upsertCodexEngramBlock(input, "/usr/local/bin/engram")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if strings.Count(output, "[mcp_servers.engram]") != 1 {
 			t.Fatalf("expected one engram block, got:\n%s", output)
 		}
@@ -3316,7 +3323,10 @@ func TestGeminiAndCodexHelpersErrorPaths(t *testing.T) {
 
 	t.Run("upsertCodexEngramBlock from empty content", func(t *testing.T) {
 		resetSetupSeams(t)
-		output := upsertCodexEngramBlock("\n\n", "engram")
+		output, err := upsertCodexEngramBlock("\n\n", "engram")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if output != codexEngramBlock+"\n" {
 			t.Fatalf("unexpected output for empty content:\n%s", output)
 		}
@@ -3658,12 +3668,29 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 	prompts := make(chan capturedPrompt, 8)
 	const cwd = "/workspace with space/mañana"
 	const project = "hook test?mañana"
+	var decisionRequests, promptRequests atomic.Int32
+	var invocationOutput [][2]string
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		t.Logf("no-jq fixture: OS=%s bash=%q controlled PATH=%q invocations=%d capture-decision requests=%d prompt POST requests=%d", runtime.GOOS, bashPath, pathDirs, len(invocationOutput), decisionRequests.Load(), promptRequests.Load())
+		for i, output := range invocationOutput {
+			for stream, text := range output {
+				if len(text) > 4096 {
+					text = text[:4096] + "…"
+				}
+				t.Logf("hook invocation %d %s: %q", i+1, []string{"stdout", "stderr"}[stream], text)
+			}
+		}
+	}()
 	const expectedPrompt = "quote \" slash \\ newline\nbmp Ω pair 😃 esc \x1b"
 	input := `{"cwd":"/workspace with space/mañana","session_id":"session-677","prompt":"quote \" slash \\ newline\nbmp \u03a9 pair \uD83D\uDE03 esc \u001b"}`
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/prompts/capture-decision":
+			decisionRequests.Add(1)
 			var request struct{ Source, Cwd, Content string }
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode capture decision: %v", err)
@@ -3682,6 +3709,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			observationProjects <- r.URL.Query().Get("project")
 			_, _ = w.Write([]byte(`[{"created_at":"2000-01-01T00:00:00Z"}]`))
 		case "/prompts":
+			promptRequests.Add(1)
 			body, err := io.ReadAll(r.Body)
 			var payload promptPayload
 			if err == nil {
@@ -3723,7 +3751,9 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		runErr := cmd.Run()
+		invocationOutput = append(invocationOutput, [2]string{stdout.String(), stderr.String()})
+		if runErr != nil {
 			stderrText := stderr.String()
 			if len(stderrText) > 4096 {
 				stderrText = stderrText[:4096] + "…"
@@ -3731,7 +3761,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			if ctx.Err() != nil {
 				t.Fatalf("user prompt hook timed out: %v\nstderr: %s", ctx.Err(), stderrText)
 			}
-			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", err, stderrText)
+			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", runErr, stderrText)
 		}
 		if strings.Contains(stderr.String(), "jq:") {
 			t.Fatalf("user prompt hook invoked jq without jq on PATH: %s", stderr.String())

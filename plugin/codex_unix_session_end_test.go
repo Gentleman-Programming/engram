@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,17 +16,18 @@ import (
 	"time"
 )
 
-func TestCodexUnixSessionEndAdapter(t *testing.T) {
-	bashPath := codexTestBash(t)
-	requireCodexUnixTools(t, bashPath)
-	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "session-end.sh")
-
-	requests := make(chan string, 8)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// Each adapter case owns its HTTP server and unread request queue, even when
+// an assertion terminates the case before consuming a request.
+func newCodexUnixSessionEndFixture(t *testing.T) (port string, requests chan string, isolationQueued, isolationHandlerDone chan struct{}) {
+	t.Helper()
+	requests = make(chan string, 8)
+	isolationQueued = make(chan struct{})
+	isolationHandlerDone = make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions/") {
+			http.NotFound(w, r) // External unknown hosts require client inspection.
+			return
+		}
 		if r.URL.Path == "/project/current" {
 			_, _ = io.WriteString(w, `{"project":"end-project","project_source":"config"}`)
 			return
@@ -36,26 +38,48 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		}
 		requests <- r.Method + " " + r.URL.EscapedPath() + " " + payload.ID
 		if payload.ID == "slow" {
+			if *codexSessionEndIsolationChild {
+				close(isolationQueued)
+				defer close(isolationHandlerDone)
+			}
 			<-r.Context().Done()
 			return
 		}
 		_, _ = fmt.Fprintf(w, `{"id":%q,"status":"ended"}`, payload.ID)
-	})}
-	defer server.Close()
-	go func() { _ = server.Serve(listener) }()
-	port := strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:")
+	}))
+	// httptest.Close closes connections and waits for handlers to finish, so
+	// handler assertions cannot outlive the owning subtest, including on Fatal.
+	t.Cleanup(server.Close)
+	port = strings.TrimPrefix(server.URL, "http://127.0.0.1:")
+	return
+}
+
+func TestCodexUnixSessionEndAdapter(t *testing.T) {
+	bashPath := codexTestBash(t)
+	requireCodexUnixTools(t, bashPath)
+	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "session-end.sh")
 
 	t.Run("posts to a valid custom port", func(t *testing.T) {
+		port, requests, _, _ := newCodexUnixSessionEndFixture(t)
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"custom-port"}`, &port, "")
 		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end custom-port")
 	})
 
 	t.Run("preserves reserved session ID in JSON rather than URL path", func(t *testing.T) {
+		port, requests, _, _ := newCodexUnixSessionEndFixture(t)
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"session id/with?characters#%"}`, &port, "")
 		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end session id/with?characters#%")
 	})
 
 	t.Run("bounds an unresponsive HTTP request", func(t *testing.T) {
+		port, requests, isolationQueued, isolationHandlerDone := newCodexUnixSessionEndFixture(t)
+		if *codexSessionEndIsolationChild {
+			queueCodexSessionEndIsolationRequest(t, port, isolationQueued, isolationHandlerDone)
+			if got := len(requests); got != 1 {
+				t.Fatalf("isolation setup: queued requests = %d, want 1", got)
+			}
+			t.Fatal(codexSessionEndIsolationMarker)
+		}
 		assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, `{"session_id":"slow"}`, &port, "")
 		assertCodexUnixRequest(t, requests, "POST /runtime-sessions/end slow")
 	})
@@ -75,6 +99,7 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 		{name: "object session ID", input: `{"session_id":{}}`},
 	} {
 		t.Run(tc.name+" makes no request", func(t *testing.T) {
+			port, requests, _, _ := newCodexUnixSessionEndFixture(t)
 			assertSilentCodexUnixSessionEnd(t, bashPath, adapterPath, tc.input, &port, "")
 			assertNoCodexUnixRequest(t, requests)
 		})
@@ -135,14 +160,27 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 	})
 }
 
+func TestCodexTestBashWithoutFixtureOverrides(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Git for Windows discovery")
+	}
+	t.Setenv("CODEX_TEST_TRUSTED_BASH", "")
+	t.Setenv("CODEX_TEST_TRUSTED_JQ", "")
+	bash := codexTestBash(t)
+	info, err := os.Stat(bash)
+	if err != nil || !info.Mode().IsRegular() || !filepath.IsAbs(bash) || !strings.EqualFold(filepath.Base(bash), "bash.exe") {
+		t.Fatalf("expected discovered Git Bash executable, got %q: %v", bash, err)
+	}
+}
+
 func codexTestBash(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {
-		path, err := exec.LookPath("bash")
+		_, err := exec.LookPath("bash")
 		if err != nil {
 			t.Fatalf("find bash: %v", err)
 		}
-		return path
+		return newCodexIntentFixture(t).bash
 	}
 
 	gitPath, err := exec.LookPath("git.exe")
@@ -215,7 +253,9 @@ func TestCodexTestBashCandidates(t *testing.T) {
 
 func requireCodexUnixTools(t *testing.T, bashPath string) {
 	t.Helper()
+	cwd := t.TempDir()
 	check := exec.Command(bashPath, "--noprofile", "--norc", "-c", "command -v jq >/dev/null && command -v curl >/dev/null")
+	check.Env, check.Dir = codexHandoffEnv(t, cwd, "http://127.0.0.1:1"), cwd
 	if output, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("Unix SessionEnd runtime tests require jq and curl: %v: %s", err, output)
 	}
@@ -234,6 +274,11 @@ func assertSilentCodexUnixSessionEnd(t *testing.T, bashPath, adapterPath, input 
 	}
 	run := exec.Command(bashPath, adapterPath)
 	run.Dir = cwd
+	id, validID := payload["session_id"].(string)
+	validInput := validID && strings.TrimSpace(id) != "" && payload["cwd"] == cwd
+	if validInput {
+		codexFixtureProject(t, cwd, "end-project")
+	}
 	run.Env = codexHandoffEnv(t, cwd, "http://127.0.0.1:"+*port, buildCodexFixtureCLI(t))
 	run.Stdin = strings.NewReader(input)
 	var stdout, stderr strings.Builder
@@ -250,6 +295,11 @@ func assertSilentCodexUnixSessionEnd(t *testing.T, bashPath, adapterPath, input 
 			code = exitErr.ExitCode()
 		} else {
 			t.Fatalf("run Unix adapter: %v", err)
+		}
+	}
+	if !validInput {
+		if _, err := os.Stat(filepath.Join(cwd, ".engram")); !os.IsNotExist(err) {
+			t.Fatal("rejected input acquired project configuration")
 		}
 	}
 	if code != 0 || stdout.String() != "" || stderr.String() != "" {

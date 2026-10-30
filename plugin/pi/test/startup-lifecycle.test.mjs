@@ -139,7 +139,7 @@ test("owned child authenticates every path and reload closes transport without e
   assert.equal(before[0].tokenShape,true);
   assert.ok(before.some(e=>e.path?.startsWith('/observations/save-result')));
   assert.ok(before.filter(e=>e.path).every(e=>e.authorized));
-  assert.equal(tools.size,22);
+  assert.equal(tools.size,23);
   assert.ok(before.findIndex(e=>e.method==='POST')>before.findIndex(e=>e.path==='/runtime-contract'));
   await hooks.get('session_shutdown')({reason:'reload'},ctx);
   const after=await events();assert.ok(after.some(e=>e.eof));assert.ok(!after.some(e=>e.path?.endsWith('/end')));
@@ -353,7 +353,7 @@ for (const mismatch of [false, true]) {
       plugin = await loadPlugin({ port, cwd: dir, sandbox: await createPluginSandbox(dir) });
       assert.equal(process.env.ENGRAM_BIN, undefined, "actual PATH lookup, not an explicit binary");
       assert.equal(process.env.ENGRAM_URL, undefined);
-      assert.equal(plugin.tools.size, 22);
+      assert.equal(plugin.tools.size, 23);
       await plugin.hooks.get("session_start")({}, plugin.ctx);
       const result = await plugin.tools.get("mem_save").execute("path-save", { title: "PATH", content: "Synthetic transport", project: "path-project" }, undefined, undefined, plugin.ctx);
       const records = () => readFile(process.env.ENGRAM_PATH_TEST_LOG, "utf8").then(text => text.trim().split("\n").map(JSON.parse));

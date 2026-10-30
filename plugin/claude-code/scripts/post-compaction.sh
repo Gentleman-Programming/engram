@@ -14,13 +14,29 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
-# Ensure session exists
+# Ensure session exists. Claude keeps the session ID across compaction as it
+# does on --resume, so the root may already be ended; resume=true lets the
+# server register a live continuation instead of refusing with
+# session_already_ended, which would leave every later write denied by the
+# PreToolUse gate. Registers exactly like session-start.sh.
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
+  # Roots created before Claude registered project_owned sessions are shared;
+  # resuming one keeps that mode so its continuation stays resolvable.
+  OWNERSHIP_MODE="project_owned"
+  ENCODED_SESSION_ID=$(printf '%s' "$SESSION_ID" | jq -sRr @uri 2>/dev/null)
+  SESSION=""
+  if [ -n "$ENCODED_SESSION_ID" ]; then
+    SESSION=$(engram_curl -sf "${ENGRAM_URL}/sessions/${ENCODED_SESSION_ID}" --max-time 1 2>/dev/null)
+  fi
+  if [ -n "$SESSION" ] && printf '%s' "$SESSION" \
+    | jq -e --arg id "$SESSION_ID" '.id == $id and .ended_at != null and .ownership_mode == "shared"' >/dev/null 2>&1; then
+    OWNERSHIP_MODE="shared"
+  fi
   engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
-      '{id: $id, project: $project, directory: $dir}')" \
+    -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" --arg mode "$OWNERSHIP_MODE" \
+      '{id: $id, project: $project, directory: $dir, ownership_mode: $mode, resume: true}')" \
     > /dev/null
 fi
 
@@ -58,33 +74,34 @@ mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem
 
 Use ToolSearch for other tools: mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
-### PROACTIVE SAVE — do NOT wait for user to ask
-Call `mem_save` IMMEDIATELY after ANY of these:
-- Decision made (architecture, convention, workflow, tool choice)
-- Bug fixed (include root cause)
-- Convention or workflow documented/updated
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Non-obvious discovery, gotcha, or edge case found
-- Pattern established (naming, structure, approach)
-- User preference or constraint learned
-- Feature implemented with non-obvious approach
-- Configuration change or environment setup done
-- User confirms your recommendation
-- User rejects an approach or expresses a preference
-- Discussion concludes with a clear direction chosen
+### SELECTIVE MEMORY
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
-**Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+For selected writes, use mem_search on the bounded topic in the intended project and scope before writing.
+Read candidates in full with mem_get_observation; snippets are not identity evidence.
+For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact,
+and record superseded facts as history. For a genuinely new topic use mem_save with a deliberate,
+distinct topic_key. If already covered, write nothing.
+On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save.
+A failed read is not evidence of absence. A suggested topic_key is a hint, not proof of identity.
+Never merge across projects or scopes. Structure content as What, Why, Where, Learned.
+
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
 
 ### DELIVERY GUARANTEE
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
-### SEARCH MEMORY when:
-- User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
-- Starting work on something that might have been done before
-- User mentions a topic you have no context on
-
-### SESSION CLOSE — before saying "done":
-Call `mem_session_summary` with: Goal, Instructions, Discoveries, Accomplished, Next Steps, Relevant Files.
+### SEARCH AND SESSION CLOSE
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+For recall: mem_context, then mem_search with distinctive keywords, then mem_get_observation for full content.
+Narrow by project/type after broad recall as needed.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
 Summary persistence does not end the session; Claude's SessionEnd hook owns lifecycle closure.
 
 ### PASSIVE CAPTURE — adapter-specific safety net

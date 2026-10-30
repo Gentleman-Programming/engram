@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { createInterface } from "node:readline"
 import { createRequire, syncBuiltinESMExports } from "node:module"
 import { test } from "node:test"
@@ -11,6 +12,27 @@ const childProcess = require("node:child_process")
 const fs = require("node:fs")
 
 const source = readFileSync(new URL("./engram.ts", import.meta.url), "utf8")
+
+// Prose contract only: these checks do not establish actual model compliance.
+test("selective cadence preserves OpenCode session-only recovery and adapter ownership", () => {
+  const block = source.match(/const MEMORY_INSTRUCTIONS = `([\s\S]*?)\n`/)
+  assert.ok(block, "delivered OpenCode instructions must exist")
+  const instructions = block[1].replaceAll("\\`", "`").replace(/\s+/g, " ")
+  assert.match(instructions, /verified.{0,100}durable.{0,100}costly to reconstruct/i)
+  assert.match(instructions, /not every (task|response|event)|no per-(task|event)/i)
+  assert.doesNotMatch(instructions, /after EVERY task|Call `mem_save` IMMEDIATELY|When completing a task or subtask, include/i)
+  assert.match(instructions, /session-only compaction context.{0,120}Do not automatically call `mem_context`/)
+  assert.match(instructions, /mem_context.{0,120}project-scoped.{0,120}only when explicitly requested/)
+  assert.match(instructions, /IMMEDIATELY call `mem_session_summary` with the compacted summary content/)
+  assert.match(instructions, /server-confirmed identity.{0,100}authoritative root session/)
+  assert.match(instructions, /Do not invent or override this value/)
+  assert.match(instructions, /adapter owns session registration and lifecycle closure/i)
+  assert.match(instructions, /read-only tools are unchanged/i)
+  assert.match(instructions, /eligible.{0,120}(delegated|subagent).{0,120}server-side extraction/i)
+  assert.match(instructions, /Ordinary responses.{0,100}not automatically captured/i)
+  assert.match(instructions, /section alone does not guarantee storage/i)
+  assert.match(instructions, /explicit extraction path is a safety net, not a replacement/i)
+})
 
 let runtimeImport = 0
 const PROJECT_ID = "project-1"
@@ -124,6 +146,9 @@ async function createRuntime(t, {
 	projectCurrentOK = true,
 	manifestExists = false,
   identityLookupFails = false,
+  identityResult,
+  healthInstanceID = "00000000000000000000000000000000",
+  bakedBin,
   emitSpawnError = false,
   emitSpawnExit = false,
   spawnExit = [1, null],
@@ -182,6 +207,7 @@ async function createRuntime(t, {
   }
   childProcess.spawnSync = (command, args, options) => {
     syncSpawns.push({ args: [command, ...args], options })
+    if (args[0] === "instance-id" && identityResult) return identityResult
     return {
       status: args[0] === "instance-id" && !identityLookupFails ? 0 : 1,
       stdout: args[0] === "instance-id" && !identityLookupFails ? "00000000000000000000000000000000\n" : "",
@@ -219,7 +245,7 @@ async function createRuntime(t, {
     const path = new URL(url).pathname
 		if (path === "/health") {
       healthURLs.push(String(url))
-      return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
+      return httpResponse({ status: "ok", instance_id: healthInstanceID }, typeof healthOK === "function" ? healthOK() : healthOK)
     }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
@@ -262,6 +288,13 @@ async function createRuntime(t, {
     syncBuiltinESMExports()
 	})
   runtimeImport += 1
+  if (bakedBin) {
+    const dir = mkdtempSync(join(tmpdir(), "engram-opencode-baked-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+    const file = join(dir, "engram.ts")
+    fs.writeFileSync(file, source.replace('?? "engram"', `?? ${JSON.stringify(bakedBin)}`))
+    adapterPath = pathToFileURL(file).href
+  }
   const moduleURL = new URL(`${adapterPath}?sdk-runtime=${runtimeImport}`, import.meta.url)
   const module = await import(moduleURL.href)
   let factory = module.Engram
@@ -646,6 +679,60 @@ test("adapter returns hooks when local identity lookup fails", async (t) => {
 
   assert.equal(typeof runtime.plugin.event, "function")
   assert.equal(typeof runtime.plugin["chat.message"], "function")
+})
+
+for (const scenario of [
+  { name: "stale baked path", bakedBin: "C:\\private\\old\\engram.exe", identityResult: { status: null, error: { code: "ENOENT" }, stdout: "" }, reason: /binary-not-found.*setup-default/, recovery: /engram setup opencode.*restart OpenCode/ },
+  { name: "invalid override", engramBin: "C:\\private\\override.exe", identityResult: { status: null, error: { code: "ENOENT" }, stdout: "" }, reason: /binary-not-found.*ENGRAM_BIN override/, recovery: /Correct or unset ENGRAM_BIN/ },
+  { name: "launch failure", identityResult: { status: null, error: { code: "EACCES" }, stdout: "private stdout" }, reason: /identity-command-failed/, recovery: /instance-id/ },
+  { name: "nonzero exit", identityResult: { status: 1, stdout: "private stdout" }, reason: /identity-command-failed/, recovery: /instance-id/ },
+  { name: "invalid output", identityResult: { status: 0, stdout: "private banner" }, reason: /identity-output-invalid/, recovery: /instance-id/ },
+  { name: "identity mismatch", healthInstanceID: "11111111111111111111111111111111", reason: /identity-mismatch/, recovery: /configured server/ },
+]) {
+  test(`readiness diagnostic: ${scenario.name} blocks attribution without leaking details`, async (t) => {
+    const runtime = await createRuntime(t, scenario)
+    const output = toolOutput()
+    await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, output), (error) => {
+      assert.match(error.message, /could not confirm Engram session registration/)
+      assert.match(error.message, scenario.reason)
+      assert.match(error.message, scenario.recovery)
+      assert.doesNotMatch(error.message, /private|11111111111111111111111111111111/)
+      return true
+    })
+    assert.equal(output.args.session_id, MODEL_SESSION_ID)
+    assert.deepEqual(runtime.requests, [])
+    if (scenario.identityResult) {
+      assert.deepEqual(runtime.healthURLs, [])
+      assert.deepEqual(runtime.spawns, [])
+      assert.ok(runtime.syncSpawns.every(({ args }) => args[0] === (scenario.engramBin ?? scenario.bakedBin ?? "engram")))
+    }
+    const warning = { output: "original" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, warning)
+    assert.match(warning.output, scenario.reason)
+    assert.match(warning.output, scenario.recovery)
+    assert.doesNotMatch(warning.output, /private|11111111111111111111111111111111/)
+    const next = { output: "next" }
+    await runtime.after({ tool: "read", sessionID: "runtime" }, next)
+    assert.equal(next.output, "next", "warning is delivered once")
+  })
+}
+
+test("readiness diagnostic: binary source stays frozen after environment changes", async (t) => {
+  const runtime = await createRuntime(t, { engramBin: "selected-engram", identityResult: { status: null, error: { code: "ENOENT" }, stdout: "" } })
+  delete process.env.ENGRAM_BIN
+  await assert.rejects(runtime.before({ sessionID: "runtime", tool: "mem_save" }, toolOutput()), /binary-not-found.*ENGRAM_BIN override/)
+  assert.ok(runtime.syncSpawns.every(({ args }) => args[0] === "selected-engram"))
+  assert.deepEqual(runtime.requests, [])
+})
+
+test("readiness diagnostic: valid override wins over stale baked path", async (t) => {
+  const runtime = await createRuntime(t, { bakedBin: "C:\\private\\old.exe", engramBin: "current-engram" })
+  const output = toolOutput()
+  await runtime.before({ sessionID: "runtime", tool: "mem_save" }, output)
+  assert.equal(output.args.session_id, "runtime")
+  assert.deepEqual(runtime.registeredIDs, ["runtime"])
+  assert.ok(runtime.syncSpawns.every(({ args }) => args[0] === "current-engram"))
+  assert.deepEqual(runtime.spawns, [])
 })
 
 test("manifest import ignores an asynchronous child launch error", async (t) => {
@@ -1455,8 +1542,9 @@ for (const system of [[], ["base prompt"], ["base prompt", "host override"]]) {
     assert.match(instructions, /The agent MUST follow this protocol without waiting for activation/)
     assert.match(instructions, /engram_mem_save/)
     assert.doesNotMatch(instructions, /ToolSearch|Deferred tools|mcp__engram__|permissions allowlist/)
-    assert.match(instructions, /User confirms/)
-    assert.match(instructions, /User rejects/)
+    assert.match(instructions, /verified knowledge that is durable and costly to reconstruct/)
+    assert.match(instructions, /decisions with rationale/)
+    assert.match(instructions, /Group related conclusions deliberately, not every task, response, or event/)
     assert.match(instructions, /Summary persistence does not end the session/)
     assert.match(instructions, /If memory work fails or needs follow-up, still send the answer/)
   })
@@ -1841,3 +1929,19 @@ test("OpenCode host bindings survive real server persistence and replace ended r
   }
   if (shutdownError) throw shutdownError
 })
+
+for (const projectID of [PROJECT_ID, 'global', 'foreign']) {
+  test(`V1 runtime ownership remains project equality for ${projectID}`, async (t) => {
+    const runtime = await createRuntime(t, { sessionGet: async () => sdkResult({ id: 'root', projectID, location: { directory: '/work/engram' } }) })
+    const output = { args: { session_id: 'unchanged' } }
+    const pending = runtime.before({ tool: 'mem_save', sessionID: 'root' }, output)
+    if (projectID === PROJECT_ID) {
+      await pending
+      assert.equal(output.args.session_id, 'root')
+    } else {
+      await assert.rejects(pending, RESOLUTION_ERROR)
+      assert.deepEqual(output.args, { session_id: 'unchanged' })
+      assert.deepEqual(runtime.registeredIDs, [])
+    }
+  })
+}

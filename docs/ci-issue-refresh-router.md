@@ -100,6 +100,30 @@ check, broader credentials, cancellation or automatic retry (`retries: 0`).
 The wrapper reports any error with `core.setFailed`; partial target success
 cannot turn aggregate failure into workflow success or roll back earlier requests.
 
+For aggregate target failures, the original `Issue refresh blocked for PRs: ...`
+line is followed by `Issue refresh diagnostics: <JSON>`. It lists outcomes in
+attempted-target order: `requested` with the admitted `runId` and `fromAttempt`,
+or `failed` with an owned guard reason, validated HTTP status/method when
+available, or `unknown`. `fromAttempt` is the original attempt, not proof of a
+new attempt or completion. For example:
+
+```text
+Issue refresh blocked for PRs: 10
+Issue refresh diagnostics: {"outcomes":[{"pullNumber":7,"outcome":"requested","runId":90,"fromAttempt":2},{"pullNumber":10,"outcome":"failed","reason":"guard","message":"native run PR/event binding unavailable"}],"omitted":0}
+```
+
+Only the first 20 outcomes are printed; `omitted` explicitly counts the rest.
+The original full `results`, `failures`, and aggregate errors remain available
+programmatically. Owned guard messages are recorded at the guard itself;
+arbitrary error text, request URLs/headers, tokens, stacks, and response bodies
+are not copied into these added records. Cause inspection stops at eight objects
+or a cycle. Discovery errors outside aggregate target handling are unchanged.
+A failed call can still have an ambiguous POST outcome: diagnostics do not prove
+that GitHub rejected a request, explain an HTTP status beyond observed evidence,
+retry a target, reconstruct old missing logs, or establish live gate selection.
+Historical runs keep their original code; this output requires delivery to the
+trusted workflow revision before a separately authorized future live test.
+
 An eligible **Issue Approval Refresh Router** run can be
 rerun from the Actions UI to rediscover currently affected PRs. Verify its
 original trusted revision contains the dispatcher/helper and the admitted native

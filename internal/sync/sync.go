@@ -626,8 +626,17 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 	// Generate chunk ID from content hash
 	chunkID := chunkcodec.ChunkID(chunkJSON)
 
-	// Check if this exact chunk already exists
-	if _, exists := knownChunks[chunkID]; exists {
+	// Tracking and manifest references do not prove the payload is available.
+	// Restore only the current content-addressed chunk when its bytes are missing.
+	payloadAvailable := false
+	if knownChunks[chunkID] {
+		_, payloadErr := sy.transport.ReadChunk(chunkID)
+		if payloadErr != nil && !errors.Is(payloadErr, ErrChunkNotFound) {
+			return nil, fmt.Errorf("read chunk %s: %w", chunkID, payloadErr)
+		}
+		payloadAvailable = payloadErr == nil
+	}
+	if payloadAvailable {
 		if !locallySyncedChunks[chunkID] {
 			if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
 				return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
@@ -646,16 +655,27 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 		Prompts:   len(chunk.Prompts),
 	}
 
-	// Write chunk via transport
+	// Retain existing metadata when restoring a referenced payload.
+	inManifest := false
+	for _, existing := range manifest.Chunks {
+		if existing.ID == chunkID {
+			entry = existing
+			inManifest = true
+			break
+		}
+	}
+
+	// Write chunk via transport before acknowledging or reconciling tracking.
 	if err := sy.transport.WriteChunk(chunkID, chunkJSON, entry); err != nil {
 		return nil, fmt.Errorf("write chunk: %w", err)
 	}
 
-	// Update manifest
-	manifest.Chunks = append(manifest.Chunks, entry)
-
-	if err := sy.writeManifest(manifest); err != nil {
-		return nil, fmt.Errorf("write manifest: %w", err)
+	// A restored payload already has a manifest entry; never duplicate it.
+	if !inManifest {
+		manifest.Chunks = append(manifest.Chunks, entry)
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
 	}
 
 	// Record this chunk as synced in the local DB
@@ -1068,14 +1088,17 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	if len(pendingEntries) == 0 {
 		return result, nil
 	}
-	legacyChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
+	// decodedChunks holds pending chunks already parsed in this import, so the
+	// apply loop reuses them instead of reading and decoding them again. The
+	// legacy ownership preflight seeds it; local classification adds the rest.
+	decodedChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
 	if err != nil {
 		return nil, err
 	}
 	availableSessionIDs := map[string]struct{}{}
 	if mode == importModeLocal {
 		var err error
-		availableSessionIDs, err = sy.sessionIDsAvailableInChunks(entries, knownChunks)
+		availableSessionIDs, err = sy.sessionIDsAvailableInChunks(entries, knownChunks, decodedChunks)
 		if err != nil {
 			return nil, err
 		}
@@ -1087,7 +1110,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	// such edges before apply and surface them as visible warnings instead.
 	var dependencyOracle *importDependencyOracle
 	if mode == importModeCloud {
-		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, legacyChunks, manifestVersion)
+		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, decodedChunks, manifestVersion)
 	}
 
 	lastErrors := map[string]error{}
@@ -1096,7 +1119,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 		nextPending := make([]ChunkEntry, 0, len(pendingEntries))
 
 		for _, entry := range pendingEntries {
-			chunk, loaded := legacyChunks[entry.ID]
+			chunk, loaded := decodedChunks[entry.ID]
 			if !loaded && dependencyOracle != nil {
 				if cached, ok := dependencyOracle.cachedChunk(entry.ID); ok {
 					chunk, loaded = cached, true
@@ -1197,6 +1220,10 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			importResult := estimateMutationImportResult(chunk)
 			knownChunks[entry.ID] = true
 			delete(lastErrors, entry.ID)
+			if mode == importModeLocal {
+				// An imported chunk is never applied again; release its decode.
+				delete(decodedChunks, entry.ID)
+			}
 
 			result.ChunksImported++
 			result.SessionsImported += importResult.SessionsImported
@@ -1565,30 +1592,40 @@ func importDependencyError(chunk ChunkData, err error) error {
 	return fmt.Errorf("%w; pending session dependencies: %s", err, strings.Join(sessions, ", "))
 }
 
-func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks map[string]bool) (map[string]struct{}, error) {
+// sessionIDsAvailableInChunks collects the session upserts of every manifest
+// entry, already-known entries included. It reuses chunks in decoded and adds
+// each pending chunk it parses there, so the apply loop never decodes it again;
+// already-known chunks are scanned but not retained. Retained chunks skip the
+// apply loop's ownership check safely: it is a no-op for current manifests, and
+// legacy pending chunks were already checked and seeded by the preflight.
+func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks map[string]bool, decoded map[string]ChunkData) (map[string]struct{}, error) {
 	available := make(map[string]struct{})
 	for _, entry := range entries {
-		chunkJSON, err := sy.transport.ReadChunk(entry.ID)
-		if err != nil {
-			if errors.Is(err, ErrChunkNotFound) || knownChunks[entry.ID] {
-				continue
+		chunk, ok := decoded[entry.ID]
+		if !ok {
+			chunkJSON, err := sy.transport.ReadChunk(entry.ID)
+			if err != nil {
+				if errors.Is(err, ErrChunkNotFound) || knownChunks[entry.ID] {
+					continue
+				}
+				return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 			}
-			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
-		}
-
-		var chunk ChunkData
-		if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
-			if knownChunks[entry.ID] {
-				continue
+			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+				if knownChunks[entry.ID] {
+					continue
+				}
+				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
 			}
-			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+			if !knownChunks[entry.ID] {
+				decoded[entry.ID] = chunk
+			}
 		}
 		for _, mutation := range buildImportMutations(chunk) {
 			if mutation.Entity != store.SyncEntitySession || mutation.Op != store.SyncOpUpsert {
 				continue
 			}
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				available[sessionID] = struct{}{}
 			}
 		}
@@ -1667,7 +1704,7 @@ func buildImportMutations(chunk ChunkData) []store.SyncMutation {
 	merged := make([]store.SyncMutation, 0, len(synthesized)+len(explicit))
 	for _, mutation := range retainedSynthesized {
 		if mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
-			if _, required := requiredSessionIDs[strings.TrimSpace(mutation.EntityKey)]; !required {
+			if _, required := requiredSessionIDs[mutation.EntityKey]; !required {
 				continue
 			}
 		}
@@ -1685,8 +1722,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 		}
 		switch mutation.Entity {
 		case store.SyncEntitySession:
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		case store.SyncEntityObservation, store.SyncEntityPrompt:
@@ -1696,8 +1733,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1719,8 +1756,8 @@ func referencedSessionIDsFromNonSessionUpserts(mutations []store.SyncMutation) m
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1743,8 +1780,8 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID == "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) == "" {
 				continue
 			}
 			project, _ := store.NormalizeProject(strings.TrimSpace(mutation.Project))
@@ -1762,7 +1799,11 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 }
 
 func mutationIdentityKey(mutation store.SyncMutation) string {
-	return fmt.Sprintf("%s:%s", mutation.Entity, strings.TrimSpace(mutation.EntityKey))
+	key := mutation.EntityKey
+	if mutation.Entity != store.SyncEntitySession {
+		key = strings.TrimSpace(key)
+	}
+	return fmt.Sprintf("%s:%s", mutation.Entity, key)
 }
 
 func (sy *Syncer) chunkTrackingTargetKey(project string) string {
@@ -1921,7 +1962,7 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		}
 		mutations = append(mutations, store.SyncMutation{
 			Entity:    store.SyncEntitySession,
-			EntityKey: strings.TrimSpace(session.ID),
+			EntityKey: session.ID,
 			Op:        store.SyncOpUpsert,
 			Payload:   string(payload),
 		})
@@ -2020,9 +2061,9 @@ func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk C
 				}
 			}
 			if isDelete || payload.Deleted || payload.HardDelete {
-				id := strings.TrimSpace(payload.ID)
-				if id == "" {
-					id = strings.TrimSpace(mutation.EntityKey)
+				id := payload.ID
+				if strings.TrimSpace(id) == "" {
+					id = mutation.EntityKey
 				}
 				session, err := sy.store.GetSession(id)
 				if errors.Is(err, sql.ErrNoRows) {
@@ -2782,7 +2823,7 @@ func resolveMutationProject(mutation store.SyncMutation, sessionProjectByID map[
 			return strings.TrimSpace(normalized)
 		}
 	}
-	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[strings.TrimSpace(payload.SessionID)])); strings.TrimSpace(normalized) != "" {
+	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[payload.SessionID])); strings.TrimSpace(normalized) != "" {
 		return strings.TrimSpace(normalized)
 	}
 	return ""

@@ -7,8 +7,28 @@ const protectedPaths = [workflowPath, '.github/scripts/issue-native-policy.mjs',
 const shaValid = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
 const text = (value) => typeof value === 'string' && value.length > 0;
+const guardReasons = new WeakMap();
 function requireEvidence(condition, message) {
-  if (!condition) throw new Error(message);
+  if (!condition) {
+    const error = new Error(message);
+    guardReasons.set(error, message);
+    throw error;
+  }
+}
+
+/** Only owned guard text and bounded HTTP metadata are safe for workflow output. */
+export function issueRefreshFailureDiagnostic(error) {
+  const seen = new Set();
+  for (let depth = 0; depth < 8 && error && typeof error === 'object' && !seen.has(error); depth += 1) {
+    seen.add(error);
+    if (guardReasons.has(error)) return { reason: 'guard', message: guardReasons.get(error) };
+    if (Number.isInteger(error.status) && error.status >= 400 && error.status <= 599) {
+      const method = error.request?.method;
+      return { reason: 'api', httpStatus: error.status, ...(['GET', 'POST'].includes(method) ? { method } : {}) };
+    }
+    error = error.cause;
+  }
+  return { reason: 'unknown' };
 }
 function binding(pull, upstream) {
   requireEvidence(positive(pull?.number) && pull.state === 'open'

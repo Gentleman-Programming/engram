@@ -26,6 +26,8 @@ function optionalEnvironmentValue(value: string | undefined): string | undefined
 const ENGRAM_PORT = parseInt(optionalEnvironmentValue(process.env.ENGRAM_PORT) ?? "7437")
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL)
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
+const ENGRAM_BIN_OVERRIDE = optionalEnvironmentValue(process.env.ENGRAM_BIN)
+// Keep this declaration compatible with setup's literal fallback-path patch.
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
@@ -80,37 +82,16 @@ host interface, not a universal bootstrap or deferred-tool split.
 - \`mem_update\`, \`mem_review\`, \`mem_pin\`, \`mem_unpin\`, \`mem_suggest_topic_key\`
 - \`mem_session_start\`, \`mem_session_end\`, \`mem_doctor\`, \`mem_capture_passive\`
 
-## PROACTIVE SAVE TRIGGERS (REQUIRED — do NOT wait for the user to ask)
+## SELECTIVE MEMORY
 
-Call \`mem_save\` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
-### After decisions or conventions
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-
-### After completing work
-- Bug fix completed (include root cause)
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Configuration change or environment setup done
-
-### After discoveries
-- Non-obvious discovery about the codebase
-- Gotcha, edge case, or unexpected behavior found
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-
-### After user confirmation or rejection
-- User confirms a recommendation you made ("go with that", "let's do that", "sounds good", "agreed", "perfect", or the equivalent in the user's language)
-- User rejects an option or approach ("no, better X", "not that one", or the equivalent in the user's language)
-- User expresses a preference ("I prefer X over Y", "always do it this way", or the equivalent in the user's language)
-- User makes a decision after you presented tradeoffs or options
-- A discussion concludes with a clear direction chosen — even if the agent proposed it
-
-### Self-check — ask yourself after EVERY task:
-> "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something non-obvious, or establish a convention? If yes, call mem_save NOW."
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
@@ -125,10 +106,12 @@ Format for \`mem_save\`:
 
 ### Topic update rules (REQUIRED)
 
-- Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)
-- If the same topic evolves, call \`mem_save\` with the same \`topic_key\` so memory is updated (upsert) instead of creating a new observation
-- If unsure about the key, call \`mem_suggest_topic_key\` first, then reuse that key consistently
-- If you already know the exact ID to fix, use \`mem_update\`
+- Use mem_search on the bounded topic in the intended project and scope before writing.
+- Read candidates in full with mem_get_observation; snippets are not identity evidence.
+- For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact, and record superseded facts as history.
+- For a genuinely new topic use mem_save with a deliberate, distinct topic_key. If already covered, write nothing.
+- On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save. A failed read is not evidence of absence.
+- A suggested topic_key is a hint, not proof of identity. Never merge across projects or scopes.
 
 ## WHEN TO SEARCH MEMORY
 
@@ -138,10 +121,8 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call \`mem_search\` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use \`mem_get_observation\` for full untruncated content
 
-Also search memory PROACTIVELY when:
-- Starting work on something that might have been done before
-- The user mentions a topic you have no context on — check if past sessions covered it
-- The user's FIRST message references the project, a feature, or a problem — call \`mem_search\` with keywords from their message to check for prior work before responding
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+Narrow by project/type after broad recall as needed.
 
 ## DELIVERY GUARANTEE
 
@@ -149,45 +130,18 @@ Memory operations are internal bookkeeping, never the user-facing answer. Comple
 
 ## SESSION CLOSE PROTOCOL (REQUIRED)
 
-Before ending a session or saying "done" / "that's it", you MUST:
-1. Call \`mem_session_summary\` with this structure:
-
-## Goal
-[What we were working on this session]
-
-## Instructions
-[User preferences or constraints discovered — skip if none]
-
-## Discoveries
-- [Technical findings, gotchas, non-obvious learnings]
-
-## Accomplished
-- [Completed items with key details]
-
-## Next Steps
-- [What remains to be done — for the next session]
-
-## Relevant Files
-- path/to/file — [what it does or what changed]
-
-This is NOT OPTIONAL. If you skip this, the next session starts blind.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
 Summary persistence does not end the session. The OpenCode adapter owns lifecycle
 registration and closure independently of the agent's summary.
 
 ## PASSIVE CAPTURE — adapter-specific safety net
 
-When completing a task or subtask, include a "## Key Learnings:" section with
-numbered items. Automatic capture is adapter-specific: OpenCode forwards eligible
+Automatic capture is adapter-specific: OpenCode forwards eligible
 completed delegated task/subagent tool outputs for server-side extraction.
 Ordinary responses and non-delegation tool outputs are not automatically captured;
 the section alone does not guarantee storage. Use \`mem_save\` as the primary path
 for significant, verified knowledge.
-
-Example:
-## Key Learnings:
-
-1. bcrypt cost=12 is the right balance for our server performance
-2. JWT refresh tokens need atomic rotation to prevent race conditions
 
 You can also call \`mem_capture_passive(content)\` directly with any text that contains a learning section.
 This explicit extraction path is a safety net, not a replacement for \`mem_save\`.
@@ -220,6 +174,7 @@ type DegradedReason = "readiness" | "startup" | "import" | "transport" | "HTTP" 
 
 function createEngramClient(warn: (reason: DegradedReason) => void) {
 let localReady = CONFIGURED_ENGRAM_URL !== undefined
+let readinessDiagnostic = ""
 
 async function engramFetch(
   path: string,
@@ -267,7 +222,20 @@ async function engramFetchResult(
 function localInstanceID(): string {
   const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", windowsHide: true })
   const id = (result.stdout ?? "").toString().trim()
-  if (result.status !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
+  const reason = result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT"
+    ? "binary-not-found"
+    : result.error || result.status !== 0 ? "identity-command-failed"
+    : !/^[a-f0-9]{32}$/.test(id) ? "identity-output-invalid" : ""
+  if (reason) {
+    const overridden = ENGRAM_BIN_OVERRIDE !== undefined
+    const recovery = reason === "binary-not-found"
+      ? overridden ? "Correct or unset ENGRAM_BIN, then restart OpenCode."
+        : "Run engram setup opencode from the current Engram installation, then restart OpenCode."
+      : "Verify that the selected binary can run instance-id successfully and returns only 32 lowercase hexadecimal characters."
+    readinessDiagnostic = `${reason} (binary source: ${overridden ? "ENGRAM_BIN override" : "setup-default"}). ${recovery}`
+    throw new Error("gentle-engram could not resolve its local server identity")
+  }
+  readinessDiagnostic = ""
   return id
 }
 
@@ -276,7 +244,12 @@ async function isEngramRunning(expectedID = ""): Promise<boolean> {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     })
-    if (!res.ok || (expectedID && (await res.json())?.instance_id !== expectedID)) return false
+    if (!res.ok) return false
+    if (expectedID && (await res.json())?.instance_id !== expectedID) {
+      readinessDiagnostic = "identity-mismatch. Verify that the selected binary and configured server use the intended Engram installation; do not bypass identity verification."
+      return false
+    }
+    readinessDiagnostic = ""
     return true
   } catch {
     return false
@@ -317,6 +290,7 @@ async function resolveProjectName(directory: string): Promise<{ project: string;
 }
 
 return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning,
+  get readinessDiagnostic() { return readinessDiagnostic },
   get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
@@ -372,6 +346,7 @@ export function shouldNudgeForObservations(
 // capture. A symbol keeps it out of the V1 hook names OpenCode enumerates.
 const CAPTURE_PROMPT = Symbol("engram.capturePrompt")
 const DELIVER_WARNING = Symbol("engram.deliverWarning")
+const REVOKE_GLOBAL_AUTHORITY = Symbol("engram.revokeGlobalAuthority")
 type CapturePrompt = (sourceSessionID: string, content: string, sourceInboxID?: string) => Promise<void>
 type DeliverWarning = (append: (text: string) => boolean) => void
 
@@ -382,7 +357,10 @@ type EngramHooks = {
 } & { [key: string]: (...args: unknown[]) => unknown } & {
   [CAPTURE_PROMPT]: CapturePrompt
   [DELIVER_WARNING]: DeliverWarning
+  [REVOKE_GLOBAL_AUTHORITY]: (data: any) => void
 }
+
+const V2_RUNTIME_DIRECTORY = Symbol("engram.v2RuntimeDirectory")
 
 export const Engram: Plugin = async (ctx) => {
   // Finite categories bound deduplication and pending memory per instance.
@@ -397,7 +375,9 @@ export const Engram: Plugin = async (ctx) => {
   const { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning } = client
   const deliverWarning = (append: (text: string) => boolean): void => {
     if (!pendingWarnings.size) return
-    const text = `Engram degraded (${[...pendingWarnings].join(", ")}); automatic memory operations may be incomplete. Verify Engram availability before relying on persistence.`
+    const diagnostic = (pendingWarnings.has("startup") || pendingWarnings.has("readiness")) && client.readinessDiagnostic
+      ? ` ${client.readinessDiagnostic}` : ""
+    const text = `Engram degraded (${[...pendingWarnings].join(", ")}); automatic memory operations may be incomplete. Verify Engram availability before relying on persistence.${diagnostic}`
     if (append(text)) pendingWarnings.clear()
   }
 	let project = "unknown"
@@ -550,7 +530,23 @@ export const Engram: Plugin = async (ctx) => {
     return endSessionInEngram(sessionId)
   }
 
-  function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
+  // Global is a runtime sentinel, not project authority. Only V2 supplies
+  // authoritative location evidence; concrete project matching stays unchanged.
+  function sessionOwnershipFailure(info: { projectID?: unknown; location?: unknown } | undefined): string {
+    const projectID = info?.projectID
+    if (typeof projectID !== "string" || !projectID) return "session-metadata-invalid"
+    const directory = (ctx as any)[V2_RUNTIME_DIRECTORY]
+    if (projectID === "global" && typeof directory === "string") {
+      const location = info?.location as { directory?: unknown } | undefined
+      if (typeof location?.directory !== "string" || !location.directory) return "global-location-missing-or-malformed"
+      return location.directory === directory ? "" : "global-location-mismatch"
+    }
+    return ctx.project?.id && projectID !== ctx.project.id ? "foreign-project" : ""
+  }
+
+  const globalSessions = new Set<string>()
+
+  function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown; location?: unknown } | undefined): boolean {
     const rawSessionID = info?.id
     const sessionId = typeof rawSessionID === "string" && rawSessionID ? rawSessionID : ""
     if (!sessionId || closedSessions.has(sessionId)) return false
@@ -560,12 +556,7 @@ export const Engram: Plugin = async (ctx) => {
       : typeof rawParentID === "string" && rawParentID
         ? rawParentID
         : undefined
-    const rawProjectID = info?.projectID
-    const invalidProjectID = (
-      typeof rawProjectID !== "string" ||
-      !rawProjectID ||
-      (ctx.project?.id && rawProjectID !== ctx.project.id)
-    )
+    const invalidProjectID = sessionOwnershipFailure(info)
     if (parentID === undefined || invalidProjectID) {
       parentSessions.delete(sessionId)
       subAgentSessions.delete(sessionId)
@@ -584,12 +575,17 @@ export const Engram: Plugin = async (ctx) => {
       return false
     }
     parentSessions.set(sessionId, parentID)
+    if ((ctx as any)[V2_RUNTIME_DIRECTORY] !== undefined && info?.projectID === "global") globalSessions.add(sessionId)
     return true
   }
 
-  async function resolveAuthoritativeSessionID(sessionId: string): Promise<string> {
-    if (!sessionId || invalidSessions.has(sessionId)) return ""
-    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return ""
+  async function resolveAuthoritativeSessionID(sessionId: string, failure?: { reason: string }): Promise<string> {
+    const refuse = (reason: string): string => {
+      if (failure) failure.reason = reason
+      return ""
+    }
+    if (!sessionId || invalidSessions.has(sessionId)) return refuse("session-unavailable-or-invalid-chain")
+    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return refuse("session-unavailable-or-invalid-chain")
     const visited = new Set<string>()
     const resolvedParents = new Map<string, string | null>()
     const publishResolvedParents = (): void => {
@@ -606,10 +602,10 @@ export const Engram: Plugin = async (ctx) => {
     }
     let current = sessionId
     while (true) {
-      if (visited.has(current)) return ""
+      if (visited.has(current)) return refuse("session-unavailable-or-invalid-chain")
       if (invalidSessions.has(current) || closeRequestedSessions.has(current) || closedSessions.has(current)) {
         invalidateResolvedTree(current)
-        return ""
+        return refuse("session-unavailable-or-invalid-chain")
       }
       visited.add(current)
 
@@ -621,37 +617,36 @@ export const Engram: Plugin = async (ctx) => {
         try {
           result = await ctx.client.session.get({ path: { id: current } })
         } catch {
-          return ""
+          return refuse("session-lookup-failed")
         }
         if (invalidSessions.has(current)) {
           invalidateResolvedTree(current)
-          return ""
+          return refuse("session-unavailable-or-invalid-chain")
         }
         if (parentSessions.has(current)) {
           parentID = parentSessions.get(current) ?? null
         } else {
           const info = result?.data
           const status = result?.response?.status
+          if (result?.error || (typeof status === "number" && status >= 400)) return refuse("session-lookup-failed")
           if (
-            result?.error ||
-            (typeof status === "number" && status >= 400) ||
             !info ||
             typeof info.id !== "string" ||
             info.id !== current ||
-            typeof info.projectID !== "string" ||
-            !info.projectID ||
-            (ctx.project?.id && info.projectID !== ctx.project.id) ||
             (info.parentID !== undefined && (typeof info.parentID !== "string" || !info.parentID))
           ) {
-            return ""
+            return refuse("session-metadata-invalid")
           }
+          const ownershipFailure = sessionOwnershipFailure(info)
+          if (ownershipFailure) return refuse(ownershipFailure)
+          if ((ctx as any)[V2_RUNTIME_DIRECTORY] !== undefined && info.projectID === "global") globalSessions.add(current)
           parentID = info.parentID ?? null
           resolvedParents.set(current, parentID)
         }
       }
 
       if (parentID === null) {
-        if (subAgentSessions.has(current)) return ""
+        if (subAgentSessions.has(current)) return refuse("session-unavailable-or-invalid-chain")
         for (const [resolvedID, resolvedParentID] of resolvedParents) {
           const invalidID = invalidSessions.has(resolvedID)
             ? resolvedID
@@ -660,7 +655,7 @@ export const Engram: Plugin = async (ctx) => {
               : ""
           if (invalidID) {
             invalidateResolvedTree(invalidID)
-            return ""
+            return refuse("session-unavailable-or-invalid-chain")
           }
         }
         publishResolvedParents()
@@ -807,6 +802,14 @@ export const Engram: Plugin = async (ctx) => {
   return {
     [CAPTURE_PROMPT]: capturePrompt,
     [DELIVER_WARNING]: deliverWarning,
+    [REVOKE_GLOBAL_AUTHORITY]: (data: any) => {
+      // Inspect updates before the V2 foreign-location filter drops them. Only
+      // previously accepted global sessions gain this stricter lifecycle rule.
+      if (!globalSessions.has(data?.sessionID)) return
+      if (data.projectID !== "global" || sessionOwnershipFailure(data)) {
+        invalidateSessionTree(data.sessionID)
+      }
+    },
 
 		dispose: async () => {
       disposed = true
@@ -894,14 +897,15 @@ export const Engram: Plugin = async (ctx) => {
 
     "tool.execute.before": async (input, output) => {
       if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(canonicalEngramToolName(input.tool))) return
-      const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      const failure = { reason: "session-unavailable-or-invalid-chain" }
+      const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID, failure)
       if (!authoritativeSessionID) {
-        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${canonicalEngramToolName(input.tool)} [${failure.reason}]. Reopen the session in the current project and retry; if it persists, check OpenCode runtime session metadata.`)
       }
       const registered = await ensureSession(authoritativeSessionID, true)
-      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID, failure)
       if (confirmedSessionID !== authoritativeSessionID) {
-        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${canonicalEngramToolName(input.tool)} [${failure.reason}]. Reopen the session in the current project and retry; if it persists, check OpenCode runtime session metadata.`)
       }
       if (!registered) {
         const tool = canonicalEngramToolName(input.tool)
@@ -912,7 +916,7 @@ export const Engram: Plugin = async (ctx) => {
           return
         }
 			if (projectResolutionError) throw new Error(projectResolutionError)
-        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}${registrationErrors.has(authoritativeSessionID) ? `: ${registrationErrors.get(authoritativeSessionID)}` : ""}; verify that the Engram server is available and retry`)
+        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}${!client.localReady && client.readinessDiagnostic ? `: ${client.readinessDiagnostic}` : registrationErrors.has(authoritativeSessionID) ? `: ${registrationErrors.get(authoritativeSessionID)}` : ""}; verify that the Engram server is available and retry`)
       }
       output.args.session_id = effectiveSessions.get(authoritativeSessionID)!.id
     },
@@ -1156,7 +1160,7 @@ function v1SessionEvent(event: any, directory: string): any {
   if (event.type === "session.created" || event.type === "session.updated") {
     // The V2 server is shared across locations; V1 only saw its own instance.
     if (data.location?.directory && data.location.directory !== directory) return undefined
-    return { type: event.type, properties: { info: { id: data.sessionID, parentID: data.parentID, projectID: data.projectID } } }
+    return { type: event.type, properties: { info: { id: data.sessionID, parentID: data.parentID, projectID: data.projectID, location: data.location } } }
   }
   if (event.type === "session.deleted") {
     return { type: event.type, properties: { info: { id: data.sessionID } } }
@@ -1199,6 +1203,7 @@ function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 
 async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
   const hooks: EngramHooks = await Engram({
+    [V2_RUNTIME_DIRECTORY]: ctx.location.directory,
     directory: ctx.location.directory,
     project: { id: ctx.location.project?.id },
     client: {
@@ -1277,6 +1282,9 @@ async function setupEngramV2(ctx: V2Context): Promise<() => Promise<void>> {
             try {
               const prompt = v2InboxPrompt(event, ctx.location.directory)
               if (prompt) await (hooks[CAPTURE_PROMPT] as CapturePrompt)(prompt.sessionID, prompt.text, prompt.inboxID)
+              if (event?.type === "session.created" || event?.type === "session.updated") {
+                hooks[REVOKE_GLOBAL_AUTHORITY](event.data)
+              }
               const translated = v1SessionEvent(event, ctx.location.directory)
               if (translated) await hooks.event({ event: translated })
             } catch {

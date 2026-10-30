@@ -61,6 +61,7 @@ func (s *Server) runtimeRoutes() []runtimeRoute {
 		{"conflict-judge-many", "POST /conflicts/judge-many", s.handleJudgeMany, true},
 		{"session-finalize", "POST /sessions/{id}/finalize", s.handleFinalizeSession, true},
 		{"search", "GET /search", s.handleSearch, false},
+		{"prompt-search", "GET /prompts/search", s.handleSearchPrompts, false},
 		{"timeline", "GET /timeline", s.handleTimeline, false},
 		{"observation-get", "GET /observations/{id}", s.handleGetObservation, false},
 		{"review-list", "GET /review", s.handleReviewList, false},
@@ -108,6 +109,7 @@ func RuntimeContractProjection() (RuntimeContract, error) {
 	// formatting/fallback algorithms are deliberately not certified by this map.
 	bindings := map[string][]string{
 		"mem_search": {"search"}, "mem_context": {"context"},
+		"mem_search_prompts":    {"prompt-search"},
 		"mem_get_observation":   {"observation-get"},
 		"mem_save":              {"observation-add", "observation-save-result"},
 		"mem_session_summary":   {"observation-add"},

@@ -514,6 +514,14 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     function stopAbandonedChild(proc) {
       ${extractFunctionBody("stopAbandonedChild", "{\n  if (proc === undefined) return;")}
     }
+    function basename(path) {
+      const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\\\"));
+      return index === -1 ? path : path.slice(index + 1);
+    }
+    const SESSION_SCRATCH_NAME = /^(?:gp|ga)[A-Za-z0-9]{6}$/;
+    function detachedServeEnv(env) {
+      ${extractFunctionBody("detachedServeEnv", "{\n  // Opt into cloud autosync")}
+    }
     function spawnAndWaitForEngram(deadline, expectedID = "") {
       ${spawnBody}
     }
@@ -721,7 +729,9 @@ test("memory protocol enforces the canonical topic workflow", () => {
   assert.match(workflow, /hint, not proof of identity/);
 
   assert.doesNotMatch(workflow, /Call `mem_save` IMMEDIATELY/);
-  assert.match(source, /Bug fix completed[\s\S]*Architecture or design decision made[\s\S]*User preference or constraint learned/);
+  assert.match(workflow, /verified knowledge that is durable and costly to reconstruct/);
+  assert.match(workflow, /decisions with rationale[\s\S]*non-obvious root causes[\s\S]*real constraints/);
+  assert.match(workflow, /Group related conclusions deliberately, not every task, response, or event/);
   assert.match(source, /Format for \\`mem_update\\`:/);
   assert.match(source, /expected_project[\s\S]*project that owns the observation/);
   assert.match(source, /full rewritten content including every still-valid fact/);
@@ -926,6 +936,7 @@ test("normalization preserves typed ownership evidence without text classificati
   }
   const normalize = new Function("ForeignOwnershipError", "ENGRAM_URL", `
     class RuntimeContractError extends Error {}
+    class EngramUnavailableError extends Error {}
     return function normalizeInitializationError(error) {
       ${extractFunctionBody("normalizeInitializationError", "{\n  const message")}
     };
@@ -2449,4 +2460,13 @@ test("concurrent owned startups share one in-flight start so no child is orphane
   assert.equal(starts, 2, "a finished start does not block a later restart");
   release();
   await restart;
+});
+
+test("the detached serve spawn does not hand the session scratch temp to the server", () => {
+  const start = source.indexOf('proc = spawn(ENGRAM_BIN, ["serve"]');
+  assert.notEqual(start, -1, "detached serve spawn not found");
+  const call = source.slice(start, source.indexOf("});", start));
+  assert.match(call, /env: detachedServeEnv\(process\.env\)/);
+  assert.doesNotMatch(call, /\.\.\.process\.env/);
+  assert.match(source, /const SESSION_SCRATCH_NAME = \/\^\(\?:gp\|ga\)\[A-Za-z0-9\]\{6\}\$\//);
 });

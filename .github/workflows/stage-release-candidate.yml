@@ -1,0 +1,141 @@
+name: Stage release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed full candidate commit SHA
+        required: true
+        type: string
+      core_version:
+        description: Core version (major.minor.patch, no v prefix)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      CORE_VERSION: ${{ inputs.core_version }}
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      OUT: ${{ github.workspace }}/staging
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CORE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+      - name: Checkout trusted policy
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: policy
+          persist-credentials: false
+
+      - name: Checkout candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+          cache: false
+
+      - name: Build unsigned binaries
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(go env GOVERSION)" = go1.26.10
+          mkdir -p "$OUT"
+          for os in linux darwin windows; do
+            for arch in amd64 arm64; do
+              name="engram_${os}_${arch}"
+              if [[ "$os" == windows ]]; then name="$name.exe"; fi
+              GOOS="$os" GOARCH="$arch" go build -mod=readonly -trimpath -buildvcs=true \
+                -ldflags "-s -w -X main.version=$CORE_VERSION" -o "$OUT/$name" ./cmd/engram
+              go version -m "$OUT/$name" > "$OUT/$name.buildinfo.txt"
+              grep -Fqx $'\tbuild\tvcs.revision='"$SOURCE_SHA" "$OUT/$name.buildinfo.txt"
+              grep -Fqx $'\tbuild\tvcs.modified=false' "$OUT/$name.buildinfo.txt"
+            done
+          done
+
+      - name: Pack Pi locally
+        working-directory: candidate/plugin/pi
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --ignore-scripts --json --pack-destination "$OUT" > "$OUT/npm-pack.json"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Manifest
+        shell: bash
+        env:
+          workflow_sha: ${{ github.workflow_sha }}
+          candidate_sha: ${{ inputs.source_sha }}
+          run_id: ${{ github.run_id }}
+          run_attempt: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, tarfile
+          out = pathlib.Path(os.environ['OUT'])
+          metadata = json.loads((out / 'npm-pack.json').read_text())
+          if len(metadata) != 1:
+              raise SystemExit('expected exactly one package')
+          package = metadata[0]
+          filename = package['filename']
+          if pathlib.Path(filename).name != filename or not filename.endswith('.tgz'):
+              raise SystemExit('unsafe package filename')
+          tarball = out / filename
+          integrity = 'sha512-' + base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
+          if integrity != package['integrity']:
+              raise SystemExit('npm integrity mismatch')
+          # Inspect archive names only; never extract or execute package code.
+          with tarfile.open(tarball) as archive:
+              for member in archive.getmembers():
+                  parts = pathlib.PurePosixPath(member.name).parts
+                  if not parts or parts[0] != 'package' or '..' in parts or member.issym() or member.islnk():
+                      raise SystemExit('unsafe package member')
+                  if any(p in {'.git', '.npmrc', '.env'} or p.startswith('.env.') for p in parts):
+                      raise SystemExit('forbidden package member')
+          binaries = ['engram_' + system + '_' + arch + ('.exe' if system == 'windows' else '')
+                      for system in ('linux', 'darwin', 'windows') for arch in ('amd64', 'arm64')]
+          expected = set(binaries + [n + '.buildinfo.txt' for n in binaries] + [filename, 'npm-pack.json'])
+          if {p.name for p in out.iterdir()} != expected:
+              raise SystemExit('unexpected or missing staging output')
+          files = []
+          for name in sorted(expected):
+              data = (out / name).read_bytes()
+              files.append({'name': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                            'sri': 'sha512-' + base64.b64encode(hashlib.sha512(data).digest()).decode()})
+          manifest = {k: os.environ[k] for k in ('workflow_sha', 'candidate_sha', 'run_id', 'run_attempt')}
+          manifest.update(core_version=os.environ['CORE_VERSION'], package_name=package['name'],
+                          package_version=package['version'], files=files)
+          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+
+      - name: Upload
+        if: success()
+        # v7 requires a supported GitHub-hosted runner; not a GHES workflow.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/staging/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 7

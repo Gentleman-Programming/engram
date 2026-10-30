@@ -16,7 +16,7 @@ import (
 )
 
 // This opt-in check supports the package's literal file/directory allowlist.
-// It never extracts archives, executes package code, or establishes release parity.
+// Validation never executes package code or establishes release parity.
 const maxPackageBytes int64 = 64 << 20
 const maxPackageFiles = 4096
 
@@ -153,6 +153,14 @@ func (r *packageTarFraming) Read(p []byte) (int, error) {
 }
 
 func validatePackage(root, version, filename string) (int, error) {
+	return validatePackageInto(root, version, filename, "")
+}
+
+// validatePackageInto optionally materializes validated archive bytes into a new
+// owned child directory. Callers must not use that directory until validation
+// succeeds; an empty destination retains validation-only behavior. The parent
+// must be caller-controlled: this is not a hostile-filesystem sandbox.
+func validatePackageInto(root, version, filename, destination string) (count int, resultErr error) {
 	expected, manifest, err := sourcePackage(root)
 	if err != nil {
 		return 0, errPackageRejected
@@ -173,6 +181,19 @@ func validatePackage(root, version, filename string) (int, error) {
 	}
 	// Close does not validate gzip integrity; exhausting the reader below does.
 	defer func() { _ = gz.Close() }()
+	if destination != "" {
+		// Mkdir, not MkdirAll, claims only a new child; never an existing target.
+		if err := os.Mkdir(destination, 0700); err != nil {
+			return 0, errPackageRejected
+		}
+		defer func() {
+			if resultErr != nil {
+				if err := os.RemoveAll(destination); err != nil {
+					resultErr = errors.Join(resultErr, err)
+				}
+			}
+		}()
+	}
 	bounded := &io.LimitedReader{R: gz, N: maxPackageBytes + 1}
 	framing := &packageTarFraming{Reader: bounded}
 	reader := tar.NewReader(framing)
@@ -206,6 +227,7 @@ func validatePackage(root, version, filename string) (int, error) {
 		if !ok || header.Size < 0 || header.Size > maxPackageBytes {
 			return 0, errPackageRejected
 		}
+		var materialized bytes.Buffer
 		if name == "package.json" {
 			// npm may normalize JSON formatting, but not the candidate's metadata.
 			data, err := io.ReadAll(io.LimitReader(reader, maxPackageBytes+1))
@@ -223,13 +245,35 @@ func validatePackage(root, version, filename string) (int, error) {
 			if json.Unmarshal(data, &packed) != nil || packed.Name != "gentle-engram" || packed.Version != version || decoder.Decode(&document) != nil || !reflect.DeepEqual(document, manifest) {
 				return 0, errPackageRejected
 			}
+			if destination != "" {
+				materialized.Write(data)
+			}
 		} else {
 			if header.Size != source.size {
 				return 0, errPackageRejected
 			}
 			hash := sha256.New()
-			n, err := io.Copy(hash, reader)
+			var output io.Writer = hash
+			if destination != "" {
+				output = io.MultiWriter(hash, &materialized)
+			}
+			n, err := io.Copy(output, reader)
 			if err != nil || n != source.size || !bytes.Equal(hash.Sum(nil), source.sum[:]) {
+				return 0, errPackageRejected
+			}
+		}
+		if destination != "" {
+			filename := filepath.Join(destination, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+				return 0, errPackageRejected
+			}
+			output, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if err != nil {
+				return 0, errPackageRejected
+			}
+			n, writeErr := output.Write(materialized.Bytes())
+			closeErr := output.Close()
+			if writeErr != nil || closeErr != nil || n != materialized.Len() {
 				return 0, errPackageRejected
 			}
 		}

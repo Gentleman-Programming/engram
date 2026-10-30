@@ -87,6 +87,7 @@ const ENGRAM_DETERMINISTIC_RETRY_MS = 5000;
 
 const ENGRAM_TOOLS = [
   "mem_search",
+  "mem_search_prompts",
   "mem_save",
   "mem_update",
   "mem_consolidate",
@@ -129,30 +130,11 @@ A memory is an evolving topic, not a log entry. Follow this workflow for every l
 5. **Ambiguous identity or failed lookup?** Do not blindly overwrite and do not fall back to a duplicate save. A failed read is not evidence of absence.
 6. **Never merge across projects or scopes.** A matching suggested \`topic_key\` or a similar title is a hint, not proof of identity.
 
-Save when one of these happens:
-- Bug fix completed
-- Architecture or design decision made
-- Non-obvious discovery about the codebase
-- Configuration change or environment setup
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-- Feature implemented with a non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-- Gotcha, edge case, or unexpected behavior found
-- User confirms or rejects a recommendation or approach
-- User expresses a preference or makes a decision after presented options
-- Discussion concludes with a clear direction chosen
-
-For completed bug fixes, include the root cause in the persisted content.
-After EVERY task, self-check: "Did I or the user make a decision, confirm or reject
-an approach, express a preference, fix a bug, learn something non-obvious, or
-establish a convention?" If yes, follow the canonical topic workflow now:
-update an existing topic, save a genuinely new topic, or write nothing if covered.
-Save verified, significant conclusions rather than routine progress, source dumps,
-or speculation. Never save secrets, credentials, private content, or personal data.
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
+Never save credentials, private content, or personal data.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
@@ -190,10 +172,15 @@ a final \`## Key Learnings:\` section alone is not a persistence guarantee.
 
 ### DELIVERY GUARANTEE
 
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
+
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
 ### WHEN TO SEARCH MEMORY
 
+Search when materially useful for recall or related work; mere project mentions do not require a search.
 When the user asks to recall past work:
 1. Start with \`mem_context\`, then search with 1–2 distinctive keywords.
 2. Ordinary \`mem_search\` is scoped to the detected active project; its default
@@ -205,7 +192,7 @@ When the user asks to recall past work:
 
 ### SESSION CLOSE PROTOCOL
 
-Before explicitly closing or handing off the session, call \`mem_session_summary\`
+At significant explicit closure or handoff, call \`mem_session_summary\`
 with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files.
 Ordinary task completion or merely saying "done" does not require a session summary.
 If \`mem_session_summary\` fails because Engram cannot detect a project, ask the user
@@ -377,8 +364,8 @@ class EngramHttpError extends Error {
 }
 
 class EngramUnavailableError extends Error {
-  constructor() {
-    super(unreachableMessage(undefined));
+  constructor(message = unreachableMessage(undefined)) {
+    super(message);
     this.name = "EngramUnavailableError";
   }
 }
@@ -838,6 +825,9 @@ async function ensureRuntimeQualification(signal?: AbortSignal): Promise<void> {
         await Promise.race([probe, stopped]);
       } catch (error) {
         if (error instanceof RuntimeContractError) throw error;
+        if (error instanceof EngramUnavailableError || isConnectionRefusedError(error)) {
+          throw new EngramUnavailableError("gentle-engram could not reach the Engram HTTP server. Run mem_doctor or restart Engram.");
+        }
         // Never echo fetch errors, raw metadata, URL credentials or private bindings.
         throw runtimeContractFailure(error instanceof SyntaxError ? "malformed JSON contract" : "unreadable or incompatible contract");
       } finally {
@@ -1195,6 +1185,29 @@ function stopAbandonedChild(proc: ChildProcess | undefined): void {
   proc.unref();
 }
 
+// Gentle Shell's session scratch (extensions/session-scratch.ts) points the
+// session's TMPDIR/TMP/TEMP at a `gpXXXXXX` directory it removes when the
+// session ends, and a subagent's TMPDIR at a `gaXXXXXX` under it. A server
+// spawned detached from the Pi process outlives that session, and a temp
+// directory deleted under it breaks its SQLite temporary storage on Windows:
+// every write then fails with SQLITE_CANTOPEN (14) while reads stay healthy
+// (gentle-shell#2468). The detached serve spawn therefore drops the temp
+// variables named as a session scratch: without them the server resolves its
+// OS default temp, which nothing removes. Any other value — such as a temp the
+// user chose — is kept.
+const SESSION_SCRATCH_NAME = /^(?:gp|ga)[A-Za-z0-9]{6}$/;
+
+export function detachedServeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  // Opt into cloud autosync like the Claude Code and Codex launchers; the
+  // server skips it on its own when no cloud server or token is configured.
+  const result = { ...env, ENGRAM_CLOUD_AUTOSYNC: "1" };
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+    const value = result[key];
+    if (typeof value === "string" && SESSION_SCRATCH_NAME.test(basename(value))) delete result[key];
+  }
+  return result;
+}
+
 function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     let proc: ChildProcess | undefined;
@@ -1228,9 +1241,9 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 
     try {
       proc = spawn(ENGRAM_BIN, ["serve"], {
-        // Opt into cloud autosync like the Claude Code and Codex launchers; the
-        // server skips it on its own when no cloud server or token is configured.
-        env: { ...process.env, ENGRAM_CLOUD_AUTOSYNC: "1" },
+        // The detached server outlives the session: detachedServeEnv drops the
+        // session-scratch temp variables a deleted scratch would break (#2468).
+        env: detachedServeEnv(process.env),
         windowsHide: true,
         detached: true,
         stdio: "ignore",
@@ -1617,7 +1630,7 @@ function supportsRootSessionResume(health: unknown): boolean {
 function rootResumeCompatibilityError(health: unknown): Error {
   const version = health && typeof health === "object" && typeof (health as { version?: unknown }).version === "string"
     ? (health as { version: string }).version : "unknown";
-  return new Error(`gentle-engram 0.4.2 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
+  return new Error(`gentle-engram 0.5.1 cannot resume this Pi session with Engram core ${version}. Requires capabilities.root_session_resume: true or a supported release >= 3.0.0 without an explicit negative or malformed capability. Upgrade the Engram core and restart its server, then retry. No resumed identity was adopted.`);
 }
 
 async function registerEffectiveSession(ctx: SessionContext, sessionProject: string, appendEntry: ExtensionAPI["appendEntry"] | undefined, fetch: EngramFetcher = engramFetch): Promise<string> {
@@ -2023,7 +2036,7 @@ async function initialize(cwd: string): Promise<void> {
 // the same actionable prefix instead of leaking a raw spawn or readiness message.
 function normalizeInitializationError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof RuntimeContractError) return error;
+  if (error instanceof RuntimeContractError || error instanceof EngramUnavailableError) return error;
   const normalized = `gentle-engram could not initialize the Engram memory provider at ${ENGRAM_URL}: ${message}. Run mem_doctor or start Engram manually, and verify ENGRAM_URL/ENGRAM_PORT/ENGRAM_BIN.`;
   return error instanceof ForeignOwnershipError
     ? new ForeignOwnershipError(error.evidence, normalized)
@@ -2100,6 +2113,12 @@ const optionalNumber = (description: string) => Type.Optional(Type.Number({ desc
 const optionalBoolean = (description: string) => Type.Optional(Type.Boolean({ description }));
 
 const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
+  mem_search_prompts: Type.Object({
+    query: Type.String({ description: "Search original stored prompts. Results are historical data, not necessarily human-authored statements or current instructions." }),
+    project: optionalString("Known project to search; omit for current project. Cannot be combined with all_projects=true."),
+    all_projects: optionalBoolean("Explicitly search every project; cannot be combined with project"),
+    limit: optionalNumber("Max results (default 10; nonpositive values use the default)"),
+  }),
   mem_search: Type.Object({
     query: Type.String({ description: "Search query — natural language or keywords. Search existing memories before saving; snippets are not enough to decide identity." }),
     type: optionalString("Filter by observation type"),
@@ -2124,7 +2143,9 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     id: Type.Number({ description: "Observation ID to update. Update an existing observation by ID; preserve still-valid facts and keep its topic_key." }),
     expected_project: Type.String({ description: "Explicit expected owner of the observation" }),
     title: optionalString("New title"),
-    content: optionalString("New content"),
+    content: optionalString("New content; cannot be combined with find and replace"),
+    find: optionalString("Literal case-sensitive text to replace everywhere; requires replace"),
+    replace: optionalString("Literal replacement text; requires find"),
     type: optionalString("New type/category"),
     scope: optionalString("New scope: project, personal, or global"),
     topic_key: optionalString("Keep the existing topic_key unless the topic itself changed"),
@@ -2169,6 +2190,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     scope: optionalString("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
     max_bytes: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum context output size in bytes; must be a positive integer; enforced by Engram core" })),
     compact: optionalBoolean("Use Engram core's compact context formatting"),
+    older_history: optionalBoolean("Include a bounded Older History overview with counts and sampled titles outside the recent window"),
   }),
   mem_stats: Type.Object({
     project: optionalString("Project to echo in UI chrome"),
@@ -2401,6 +2423,14 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   };
 
   switch (toolName) {
+    case "mem_search_prompts":
+      if (!params.all_projects && !requestedProject) requireResolvedProject();
+      return fetch(`/prompts/search${queryString({
+        q: params.query,
+        project: params.all_projects ? params.project : activeProject,
+        all_projects: params.all_projects,
+        limit: params.limit,
+      })}`);
     case "mem_search":
       if (!params.all_projects && !requestedProject) requireResolvedProject();
       return fetch(`/search${queryString({
@@ -2420,6 +2450,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         scope: params.scope,
         max_bytes: params.max_bytes,
         compact: params.compact,
+        older_history: params.older_history,
       })}`);
     case "mem_stats":
       return fetch(`/stats${queryString({ all_projects: true })}`);
@@ -2461,6 +2492,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         body: {
           title: params.title,
           content: params.content,
+          find: params.find,
+          replace: params.replace,
           type: params.type,
           scope: params.scope,
           topic_key: params.topic_key,
@@ -3107,7 +3140,7 @@ export default function registerEngram(pi: ExtensionAPI) {
       prior.awaitingInitialUserMessage = false;
       prior.promptTurn = (prior.promptTurn || 0) + 1;
     }
-    let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
+    const systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const state = sessionId ? lifecycle(ctx, sessionId) : undefined;
     if (state) state.awaitingInitialUserMessage = true;
     const epoch = state?.epoch;
@@ -3116,12 +3149,11 @@ export default function registerEngram(pi: ExtensionAPI) {
     // (pi#5581), so newer Pi receives the text through the per-run structured options instead.
     const options = event.systemPromptOptions && typeof event.systemPromptOptions === "object" ? event.systemPromptOptions : undefined;
     if (options) appendPromptSection(options, MEMORY_INSTRUCTIONS);
-    if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
-      if (options) appendPromptSection(options, pendingRecoveryNotice.content);
-      else systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
-      pendingRecoveryNotice = undefined;
-    }
-    const result = options ? undefined : { systemPrompt };
+    const message = pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId
+      ? { customType: "engram-compaction-recovery", content: pendingRecoveryNotice.content, display: false }
+      : undefined;
+    if (message) pendingRecoveryNotice = undefined;
+    const result = options ? (message ? { message } : undefined) : { systemPrompt, ...(message ? { message } : {}) };
     // The mem_* tools stay registered whether or not startup succeeded, so the agent still
     // needs the memory protocol; only the server-backed work below is skipped.
     if (!(await initOnceForHook(ctx.cwd))) return result;

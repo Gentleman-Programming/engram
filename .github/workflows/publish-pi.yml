@@ -44,10 +44,14 @@ jobs:
       - name: Build release candidate checker
         run: go build -mod=readonly -o "$RUNNER_TEMP/engram-release-candidate" ./tools/release-candidate
 
+      - name: Install Pi test dependencies
+        working-directory: plugin/pi
+        run: npm ci --ignore-scripts --legacy-peer-deps
+
       - name: Run Pi plugin tests
         working-directory: plugin/pi
         run: npm test
 
       - name: Publish to npm with provenance
         working-directory: plugin/pi
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag candidate
