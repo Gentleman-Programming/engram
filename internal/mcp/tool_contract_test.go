@@ -486,6 +486,9 @@ func TestMCPToolContractV1(t *testing.T) {
 	if err := removeApprovedOlderHistoryDelta(live); err != nil {
 		t.Fatal(err)
 	}
+	if err := removeApprovedOrgDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyMCPToolContract(fixture, live, before); err != nil {
 		t.Fatal(err)
 	}
@@ -578,6 +581,28 @@ func removeApprovedCurrentProjectDelta(live map[string]mcpToolSchema) error {
 		delete(tool.Properties, prop)
 	}
 	live["mem_current_project"] = tool
+	return nil
+}
+
+// removeApprovedOrgDelta strips this PR's approved org grouping-axis parameter
+// (#776) from mem_list_projects before the v1 ratchet. The v1 baseline already
+// carries org for mem_search and mem_save; mem_list_projects gains the same
+// optional, free-text string filter here, which never narrows an existing
+// field. It operates on observed schemas, never on the baseline fixture.
+func removeApprovedOrgDelta(live map[string]mcpToolSchema) error {
+	tool, ok := live["mem_list_projects"]
+	if !ok {
+		return fmt.Errorf("mem_list_projects is missing")
+	}
+	field, ok := tool.Properties["org"]
+	if !ok || !slices.Equal(field.Types, []string{"string"}) || len(field.Properties) != 0 || len(field.Required) != 0 || field.Items != nil || len(field.Enum) != 0 || !field.Additional {
+		return fmt.Errorf("mem_list_projects org must retain the optional string schema: %#v", field)
+	}
+	if slices.Contains(tool.Required, "org") {
+		return fmt.Errorf("mem_list_projects org must be optional")
+	}
+	delete(tool.Properties, "org")
+	live["mem_list_projects"] = tool
 	return nil
 }
 

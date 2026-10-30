@@ -251,7 +251,7 @@ func aliasProtectedState(t *testing.T, s *Store) string {
 	record("stats", stats, err)
 	projectStats, err := s.StatsProject("old-name")
 	record("project-stats", projectStats, err)
-	projects, err := s.ListProjectsWithStats()
+	projects, err := s.ListProjectsWithStats("")
 	record("projects", projects, err)
 	operationID, err := s.GetObservationSaveResult("alias-history-operation")
 	record("operation", operationID, err)
