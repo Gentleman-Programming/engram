@@ -1,0 +1,278 @@
+{
+  "contract_id": "engram.pi-http-runtime/v1",
+  "revision": 1,
+  "status": "pi-http-server-contract",
+  "digest": "0af9af176928e98562ab1396d3196efe582dd5d1c5d2c5f8f546ab4ed609810f",
+  "operations": {
+    "mem_capture_passive": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/observations/passive",
+          "server_contract": "observation-passive/v1"
+        }
+      ]
+    },
+    "mem_compare": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/conflicts/compare",
+          "server_contract": "conflict-compare/v1"
+        }
+      ]
+    },
+    "mem_consolidate": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/observations/consolidate",
+          "server_contract": "observation-consolidate/v1",
+          "configured_auth": true
+        }
+      ]
+    },
+    "mem_context": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/context",
+          "server_contract": "context/v1"
+        }
+      ]
+    },
+    "mem_current_project": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/project/current",
+          "server_contract": "current-project/v1"
+        }
+      ]
+    },
+    "mem_doctor": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/doctor",
+          "server_contract": "doctor/v1"
+        },
+        {
+          "method": "POST",
+          "path": "/doctor/caller-binding",
+          "server_contract": "caller-binding/v1"
+        }
+      ]
+    },
+    "mem_get_observation": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/observations/{id}",
+          "server_contract": "observation-get/v1"
+        }
+      ]
+    },
+    "mem_judge": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/conflicts/judge",
+          "server_contract": "conflict-judge/v1"
+        }
+      ]
+    },
+    "mem_judge_many": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/conflicts/judge-many",
+          "server_contract": "conflict-judge-many/v1",
+          "configured_auth": true
+        }
+      ]
+    },
+    "mem_list_projects": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/projects",
+          "server_contract": "projects/v1"
+        }
+      ]
+    },
+    "mem_pin": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "PUT",
+          "path": "/observations/{id}/pin",
+          "server_contract": "observation-pin/v1"
+        }
+      ]
+    },
+    "mem_review": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/review",
+          "server_contract": "review-list/v1"
+        },
+        {
+          "method": "POST",
+          "path": "/review/mark_reviewed",
+          "server_contract": "review-mark/v1"
+        }
+      ]
+    },
+    "mem_save": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/observations",
+          "server_contract": "observation-add/v1"
+        },
+        {
+          "method": "GET",
+          "path": "/observations/save-result",
+          "server_contract": "observation-save-result/v1"
+        }
+      ]
+    },
+    "mem_save_prompt": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/prompts",
+          "server_contract": "prompt-add/v1"
+        }
+      ]
+    },
+    "mem_search": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/search",
+          "server_contract": "search/v1"
+        }
+      ]
+    },
+    "mem_search_prompts": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "GET",
+          "path": "/prompts/search",
+          "server_contract": "prompt-search/v1"
+        }
+      ]
+    },
+    "mem_session_end": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/sessions/{id}/end",
+          "server_contract": "session-end/v1"
+        }
+      ]
+    },
+    "mem_session_finalize": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/sessions/{id}/finalize",
+          "server_contract": "session-finalize/v1",
+          "configured_auth": true
+        }
+      ]
+    },
+    "mem_session_start": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/sessions",
+          "server_contract": "session-create/v1"
+        }
+      ]
+    },
+    "mem_session_summary": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/observations",
+          "server_contract": "observation-add/v1"
+        }
+      ]
+    },
+    "mem_suggest_topic_key": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "POST",
+          "path": "/topic-keys/suggest",
+          "server_contract": "topic-key-suggest/v1"
+        }
+      ]
+    },
+    "mem_unpin": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "DELETE",
+          "path": "/observations/{id}/pin",
+          "server_contract": "observation-unpin/v1"
+        }
+      ]
+    },
+    "mem_update": {
+      "kind": "http",
+      "bindings": [
+        {
+          "method": "PATCH",
+          "path": "/observations/{id}",
+          "server_contract": "observation-update/v1"
+        }
+      ]
+    }
+  },
+  "supporting_routes": {
+    "compaction-context": {
+      "method": "GET",
+      "path": "/context/compaction",
+      "server_contract": "compaction-context/v1"
+    },
+    "prompt-capture-decision": {
+      "method": "POST",
+      "path": "/prompts/capture-decision",
+      "server_contract": "prompt-capture-decision/v1"
+    },
+    "runtime-session-end": {
+      "method": "POST",
+      "path": "/runtime-sessions/end",
+      "server_contract": "runtime-session-end/v1"
+    },
+    "runtime-session-resolve": {
+      "method": "POST",
+      "path": "/runtime-sessions/resolve",
+      "server_contract": "runtime-session-resolve/v1"
+    }
+  }
+}

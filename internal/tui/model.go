@@ -12,10 +12,10 @@ package tui
 import (
 	"errors"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	"github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/version"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"

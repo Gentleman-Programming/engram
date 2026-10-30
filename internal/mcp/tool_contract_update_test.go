@@ -15,6 +15,14 @@ func TestWriteMCPToolContractFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Match the ordinary ratchet's explicit approved deltas; adding a tool
+	// must not rebaseline unrelated legacy mutation/discovery schemas.
+	if err := removeApprovedExpectedProjectDelta(live); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeApprovedCurrentProjectDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeMCPToolContractFixture(os.Getenv("ENGRAM_MCP_CONTRACT_WRITE"), filepath.Join("testdata", "tool-contract-v1.json"), live, os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != ""); err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { PLUGIN_ROOT, importPluginFromSandbox, withPluginSandbox } from "./plugin-sandbox.mjs";
@@ -11,13 +12,19 @@ async function scenario(headersFirst, delayMs = 3500) {
   let requests = 0;
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
     if (path === "/project/current") { response.end(JSON.stringify({ project: "pi" })); return; }
-    if (path === "/sessions") { response.end(JSON.stringify({ status: "created" })); return; }
+    if (path === "/sessions") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      response.end(JSON.stringify({ id: JSON.parse(body).id, status: "created" }));
+      return;
+    }
     if (path === "/observations") {
       requests++;
       for await (const _chunk of request) { /* Ensure the server receives the complete write. */ }
-      if (headersFirst) { response.writeHead(200, { "Content-Type": "application/json" }); response.write('{"id":'); }
-      setTimeout(() => response.end(headersFirst ? "1}" : '{"id":1}'), delayMs);
+      if (headersFirst) { response.writeHead(201, { "Content-Type": "application/json" }); response.write('{"id":'); }
+      setTimeout(() => response.end(headersFirst ? '1,"status":"saved"}' : '{"id":1,"status":"saved"}'), delayMs);
       return;
     }
     response.statusCode = 404; response.end();

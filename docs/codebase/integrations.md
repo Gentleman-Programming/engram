@@ -68,12 +68,41 @@ persistence or decide which session an omitted ID should select.
 
 | Adapter | Runtime-to-Engram mapping | Registration before identity use |
 | --- | --- | --- |
-| Claude Code | The SessionStart hook posts the host `session_id` with its resolved project and directory. | The hook attempts registration but does not inspect the response before continuing; do not treat its attempt as a confirmed identity handoff to MCP tools. |
-| Codex | The hook posts the host `session_id` with its resolved project and directory; its helper hands the same opaque ID to the model. | The helper hands it off only after HTTP 201 with matching `id` and `status: "created"`; otherwise it instructs the model to omit `session_id`. |
-| OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. | Before session-attributed tool writes it attempts root registration, rechecks ownership, and injects the root `session_id` into tool arguments. Failed requests block injection, but an HTTP-success response is not checked for matching session identity. |
+| Claude Code | SessionStart posts the host `session_id` with its resolved project and directory. | SessionStart alone does not confirm registration. Before binding a classified Engram write/session tool, PreToolUse confirms project-owned registration for the host ID: a registered session is confirmed against its registered owner project (#1717), and only first registration derives the project from the cwd. Confirmation requires HTTP 201, matching `id`, and `status: "created"`; otherwise it denies the call with the cause the server reports. |
+| Codex | Genuine startup/resume/clear registers with `resume: true`. Go validates HTTP 201, `status: "created"`, and an exact root ID or numeric continuation with matching `resumed_from`. | PreToolUse, prompt capture and post-compaction resolve the existing effective identity through `/runtime-sessions/resolve`, without registration. Failed confirmation blocks attributed writes and withholds the active protocol. Host closing uses `/runtime-sessions/end`; model `mem_session_end` is rewritten to the resolved effective ID for unchanged exact-ID MCP ending. No private identity map or raw-ID fallback is used. |
+| OpenCode | The plugin follows authoritative `parentID` links to the root host session; child sessions do not own top-level Engram sessions. The core selects a live continuation when the root has ended. | Before session-attributed tool writes it registers the root with `resume: true`, rechecks host ownership, and injects the acknowledged effective `id` as `session_id`. Injection requires an HTTP-success response with `status: "created"` and an `id` equal to the root or prefixed by `<root>:resume:`; missing or foreign acknowledgements block injection. |
+
+Claude and Codex PreToolUse confirmation use a four-second total HTTP budget
+by default for the session lookup followed by Claude's owner-bound registration
+or Codex's health preflight, cwd project resolution and runtime resolution.
+Set `ENGRAM_HOOK_SESSION_CONFIRMATION_TIMEOUT` in the hook process environment
+to a positive Go duration (for example, `8s` or `500ms`) to override this budget.
+Unset, blank, invalid, overflowed, zero, or negative values retain `4s`.
+All confirmation requests share the same deadline; there is no per-request reset.
+
+If increasing the budget, also increase the host's configured PreToolUse timeout
+so it exceeds the budget with headroom for process startup and verdict output.
+The shipped host limits are five seconds for Claude and ten seconds for Codex;
+this environment variable does not update either host configuration. For example,
+an `8s` confirmation budget needs an outer hook timeout greater than eight seconds.
+This is a slow-server mitigation, not a fix for autosync latency or permission to
+skip confirmation. A timeout still denies the call with
+`Claude host session confirmation timed out (server slow or unavailable)` or
+`Codex host session confirmation timed out (server slow or unavailable)`.
+Unexplained Claude failures use the registration-denial message;
+server-explained denials name the reported cause (`already ended`,
+`session_project_conflict`, or a first-registration project-resolution
+failure) and Codex failures use
+`Codex host session resolution could not be confirmed`, respectively.
+Every gated call validates the response and the adapter's ownership requirements;
+Claude confirms registration while Codex resolves the existing identity without
+registering again. Neither guard caches confirmation or retries.
+Codex prompt capture uses its separate, unchanged budget.
 
 Parent/root translation is specific to OpenCode's session hierarchy, not a
-universal adapter rule. Go owns the HTTP session registration and persistence
+universal adapter rule. Hook-level binding cannot protect calls when a hook is
+skipped, bypassed, or timed out; independent direct/manual MCP saves remain
+outside these adapters. Go owns the HTTP session registration and persistence
 contract ([Sessions](../../DOCS.md#sessions)), project/session validation and
 omitted-ID cardinality ([Write tools: explicit/session/cwd project resolution](../../DOCS.md#write-tools-explicitsessioncwd-project-resolution)).
 

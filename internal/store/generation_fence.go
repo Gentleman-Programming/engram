@@ -18,6 +18,17 @@ import (
 // this process was running. Restart Engram before accessing the store again.
 var ErrDatabaseGenerationChanged = errors.New("Engram database generation changed; restart Engram")
 
+// GenerationError returns only an already observed permanent invalidation.
+// It performs no filesystem probes and does not initiate a generation check.
+func (s *Store) GenerationError() error {
+	if s == nil || s.generation == nil {
+		return nil
+	}
+	s.generation.mu.Lock()
+	defer s.generation.mu.Unlock()
+	return s.generation.err
+}
+
 var statFile = os.Stat
 
 type databaseGeneration struct {
@@ -101,13 +112,17 @@ func ensureDatabaseFile(path string) error {
 }
 
 var openDB = func(dbPath string, generation *databaseGeneration) (*sql.DB, error) {
-	sqliteDriver := &sqlite.Driver{}
-	sqliteDriver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
-		if fc, ok := conn.(sqlite.FileControl); ok {
-			_, _ = fc.FileControlPersistWAL("main", 1)
-		}
-		return nil
-	})
+	// Obtain the registered driver without opening a connection. A fresh
+	// sqlite.Driver would omit deterministic functions registered at startup.
+	// Do not mutate shared driver hooks or copy its private implementation.
+	registry, err := sql.Open("sqlite", storeDSN(dbPath))
+	if err != nil {
+		return nil, err
+	}
+	sqliteDriver := registry.Driver()
+	if err := registry.Close(); err != nil {
+		return nil, err
+	}
 	d := &generationDriver{Driver: sqliteDriver, generation: generation}
 	return sql.OpenDB(generationConnector{driver: d, name: storeDSN(dbPath)}), nil
 }
@@ -133,7 +148,12 @@ func (d *generationDriver) Open(name string) (driver.Conn, error) {
 	}
 	conn, err := d.Driver.Open(name)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "open")
+	}
+	// Keep WAL persistence initialization local to this fenced connection,
+	// in the same position as the former per-driver connection hook.
+	if fc, ok := conn.(sqlite.FileControl); ok {
+		_, _ = fc.FileControlPersistWAL("main", 1)
 	}
 	if err := d.generation.check(); err != nil {
 		_ = conn.Close()
@@ -153,7 +173,7 @@ func (c generationConn) Prepare(query string) (driver.Stmt, error) {
 	}
 	stmt, err := c.Conn.Prepare(query)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "conn.prepare")
 	}
 	if err := c.generation.check(); err != nil {
 		_ = stmt.Close()
@@ -163,7 +183,7 @@ func (c generationConn) Prepare(query string) (driver.Stmt, error) {
 }
 
 func (c generationConn) Close() error {
-	return c.Conn.Close()
+	return annotateSQLiteCantopen(c.Conn.Close(), "conn.close")
 }
 
 func (c generationConn) Begin() (driver.Tx, error) {
@@ -172,7 +192,7 @@ func (c generationConn) Begin() (driver.Tx, error) {
 	}
 	tx, err := c.Conn.Begin()
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "conn.begin")
 	}
 	if err := c.generation.check(); err != nil {
 		_ = tx.Rollback()
@@ -188,7 +208,7 @@ func (c generationConn) PrepareContext(ctx context.Context, query string) (drive
 		}
 		stmt, err := prepared.PrepareContext(ctx, query)
 		if err != nil {
-			return nil, err
+			return nil, annotateSQLiteCantopen(err, "conn.prepare_context")
 		}
 		if err := c.generation.check(); err != nil {
 			_ = stmt.Close()
@@ -209,7 +229,7 @@ func (c generationConn) ExecContext(ctx context.Context, query string, args []dr
 	}
 	result, err := execer.ExecContext(ctx, query, args)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "conn.exec_context")
 	}
 	if err := c.generation.check(); err != nil {
 		return nil, err
@@ -227,7 +247,7 @@ func (c generationConn) QueryContext(ctx context.Context, query string, args []d
 	}
 	rows, err := queryer.QueryContext(ctx, query, args)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "conn.query_context")
 	}
 	if err := c.generation.checkRead(); err != nil {
 		_ = rows.Close()
@@ -243,7 +263,7 @@ func (c generationConn) BeginTx(ctx context.Context, opts driver.TxOptions) (dri
 		}
 		tx, err := begin.BeginTx(ctx, opts)
 		if err != nil {
-			return nil, err
+			return nil, annotateSQLiteCantopen(err, "conn.begin_tx")
 		}
 		if err := c.generation.check(); err != nil {
 			_ = tx.Rollback()
@@ -263,7 +283,7 @@ func (c generationConn) Ping(ctx context.Context) error {
 		return driver.ErrSkip
 	}
 	if err := pinger.Ping(ctx); err != nil {
-		return err
+		return annotateSQLiteCantopen(err, "conn.ping")
 	}
 	return c.generation.check()
 }
@@ -274,7 +294,7 @@ func (c generationConn) ResetSession(ctx context.Context) error {
 	}
 	if resetter, ok := c.Conn.(driver.SessionResetter); ok {
 		if err := resetter.ResetSession(ctx); err != nil {
-			return err
+			return annotateSQLiteCantopen(err, "conn.reset_session")
 		}
 	}
 	return c.generation.check()
@@ -309,7 +329,27 @@ func (c generationConn) FileControlPersistWAL(dbName string, mode int) (int, err
 	}
 	result, err := fc.FileControlPersistWAL(dbName, mode)
 	if err != nil {
+		return 0, annotateSQLiteCantopen(err, "conn.persist_wal")
+	}
+	if err := c.generation.check(); err != nil {
 		return 0, err
+	}
+	return result, nil
+}
+
+// FileControlDataVersion forwards modernc's data version query while rejecting
+// results from a database generation that changed before or during the call.
+func (c generationConn) FileControlDataVersion(dbName string) (uint32, error) {
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	fc, ok := c.Conn.(sqlite.FileControl)
+	if !ok {
+		return 0, errors.New("database connection does not implement sqlite.FileControl")
+	}
+	result, err := fc.FileControlDataVersion(dbName)
+	if err != nil {
+		return 0, annotateSQLiteCantopen(err, "conn.data_version")
 	}
 	if err := c.generation.check(); err != nil {
 		return 0, err
@@ -327,7 +367,7 @@ func (s generationStmt) Close() error {
 	if generationErr := s.generation.check(); generationErr != nil {
 		return generationErr
 	}
-	return err
+	return annotateSQLiteCantopen(err, "stmt.close")
 }
 
 func (s generationStmt) Exec(args []driver.Value) (driver.Result, error) {
@@ -336,7 +376,7 @@ func (s generationStmt) Exec(args []driver.Value) (driver.Result, error) {
 	}
 	result, err := s.Stmt.Exec(args)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "stmt.exec")
 	}
 	if err := s.generation.check(); err != nil {
 		return nil, err
@@ -350,7 +390,7 @@ func (s generationStmt) Query(args []driver.Value) (driver.Rows, error) {
 	}
 	rows, err := s.Stmt.Query(args)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "stmt.query")
 	}
 	if err := s.generation.check(); err != nil {
 		_ = rows.Close()
@@ -369,7 +409,7 @@ func (s generationStmt) ExecContext(ctx context.Context, args []driver.NamedValu
 	}
 	result, err := execer.ExecContext(ctx, args)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "stmt.exec_context")
 	}
 	if err := s.generation.check(); err != nil {
 		return nil, err
@@ -387,7 +427,7 @@ func (s generationStmt) QueryContext(ctx context.Context, args []driver.NamedVal
 	}
 	rows, err := queryer.QueryContext(ctx, args)
 	if err != nil {
-		return nil, err
+		return nil, annotateSQLiteCantopen(err, "stmt.query_context")
 	}
 	if err := s.generation.check(); err != nil {
 		_ = rows.Close()
@@ -407,7 +447,7 @@ func (t generationTx) Commit() error {
 		return err
 	}
 	if err := t.Tx.Commit(); err != nil {
-		return err
+		return annotateSQLiteCantopen(err, "tx.commit")
 	}
 	return t.generation.check()
 }
@@ -417,7 +457,7 @@ func (t generationTx) Rollback() error {
 	if generationErr := t.generation.check(); generationErr != nil {
 		return generationErr
 	}
-	return err
+	return annotateSQLiteCantopen(err, "tx.rollback")
 }
 
 type generationRows struct {
@@ -430,7 +470,7 @@ func (r generationRows) Close() error {
 	if generationErr := r.generation.checkRead(); generationErr != nil {
 		return generationErr
 	}
-	return err
+	return annotateSQLiteCantopen(err, "rows.close")
 }
 
 func (r generationRows) Next(dest []driver.Value) error {
@@ -441,7 +481,7 @@ func (r generationRows) Next(dest []driver.Value) error {
 	if generationErr := r.generation.checkRead(); generationErr != nil {
 		return generationErr
 	}
-	return err
+	return annotateSQLiteCantopen(err, "rows.next")
 }
 
 func (r generationRows) HasNextResultSet() bool {
@@ -462,7 +502,7 @@ func (r generationRows) NextResultSet() error {
 		_ = r.Rows.Close()
 		return generationErr
 	}
-	return err
+	return annotateSQLiteCantopen(err, "rows.next_result_set")
 }
 
 func (r generationRows) ColumnTypeDatabaseTypeName(index int) string {

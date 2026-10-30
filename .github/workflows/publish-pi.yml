@@ -31,11 +31,22 @@ jobs:
           echo "Active npm: $(npm --version)"
 
       - name: Verify Pi release version
-        if: github.event_name == 'push'
         working-directory: plugin/pi
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: node test/release-contract.mjs "$RELEASE_TAG"
+          RELEASE_REF: ${{ github.ref }}
+        run: node test/release-contract.mjs "$RELEASE_REF"
+
+      - name: Set up Go for Pi checks
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build release candidate checker
+        run: go build -mod=readonly -o "$RUNNER_TEMP/engram-release-candidate" ./tools/release-candidate
+
+      - name: Install Pi test dependencies
+        working-directory: plugin/pi
+        run: npm ci --ignore-scripts --legacy-peer-deps
 
       - name: Run Pi plugin tests
         working-directory: plugin/pi
@@ -43,4 +54,4 @@ jobs:
 
       - name: Publish to npm with provenance
         working-directory: plugin/pi
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag candidate

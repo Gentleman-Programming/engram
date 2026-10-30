@@ -2,14 +2,214 @@
 // process, so these tests exercise the actual spawn/readiness/failure lifecycle instead of
 // re-implementing it with stubs.
 import assert from "node:assert/strict";
+import { fixtureContract } from "./support/runtime-contract-fixture.mjs";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { createServer as createHTTPServer } from "node:http";
+import { createServer as createHTTPServer, get } from "node:http";
 import { createServer } from "node:net";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT as ROOT, RUNTIME_STUB_MARKER, createPluginSandbox, importPluginFromSandbox } from "./plugin-sandbox.mjs";
+
+test("package advertises the implemented session-owned protocol to bundled launchers", async () => {
+  const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8"));
+  assert.equal(pkg.engram.startupPolicy, 1);
+  assert.equal(pkg.engram.sessionOwned, 1);
+});
+
+async function withOwnedFixture(options, run) {
+  const dir = await mkdtemp(join(tmpdir(), "engram-owned-pi fixture-"));
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  const saved = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")));
+  for (const key of Object.keys(saved)) delete process.env[key];
+  let hooks, ctx;
+  try {
+    process.env.ENGRAM_SERVER_MODE = options.mode ?? "session-owned";
+    process.env.ENGRAM_DATA_DIR = join(dir, "store");
+    Object.assign(process.env, options.env ?? {});
+    const log = join(dir, "events.log");
+    await writeFile(log, "");
+    const bin = join(dir, "owned.cjs");
+    await writeFile(bin, `#!/usr/bin/env node
+const {createServer}=require('node:http');
+const {appendFileSync}=require('node:fs');
+const {resolve}=require('node:path');
+const log=(v)=>appendFileSync(${JSON.stringify(log)},JSON.stringify(v)+'\\n');
+// A Node preload sees the synthetic command in argv[1], not its own script path.
+const syntheticServePath=resolve('serve');
+const invocationArgs=process.argv.slice(process.argv[1]===__filename?2:1);
+if (invocationArgs[0]===syntheticServePath) invocationArgs[0]='serve';
+log({args:invocationArgs,tokenShape:/^[a-f0-9]{64}$/.test(process.env.ENGRAM_TOKEN||'')});
+if (!invocationArgs.includes('--session-owned')) process.exit(3);
+if (process.argv[1]!==__filename && invocationArgs[0]==='serve') process.once('uncaughtException',(error)=>{
+ if (error?.code==='MODULE_NOT_FOUND' && error.message.includes("Cannot find module '"+syntheticServePath+"'")) return;
+ throw error;
+});
+const server=createServer(async(req,res)=>{
+ log({path:req.url,authorized:req.headers.authorization==='Bearer '+process.env.ENGRAM_TOKEN});
+ let body='';for await(const c of req)body+=c;
+ if(req.url==='/observations'){req.socket.destroy();return;}
+ res.setHeader('content-type','application/json');
+ if(req.url==='/runtime-contract'){res.end(${JSON.stringify(JSON.stringify(fixtureContract()))});return;}
+ res.end(JSON.stringify(req.url.startsWith('/project/current')?{project:'owned-project'}:req.url==='/sessions'?{id:JSON.parse(body).id,status:'created'}:req.url.startsWith('/observations/save-result')?{id:1,status:'committed'}:{}));
+});
+server.listen(0,'127.0.0.1',()=>{
+ const ready={protocol:'engram-session-owned-v1',endpoint:'http://127.0.0.1:'+server.address().port,pid:process.pid,instance_id:'0'.repeat(32)};
+ ${options.bad === "unknown" ? "ready.extra=true;" : ""}
+ ${options.bad === "foreign" ? "ready.endpoint='http://example.com:7437';" : ""}
+ ${options.bad === "oversize" ? "ready.extra='x'.repeat(2048);" : ""}
+ ${options.bad === "exit" ? "process.exit(7);" : `setTimeout(()=>process.stdout.write(JSON.stringify(ready)+'\\n'),${options.readyDelay ?? 0});`}
+});
+process.stdin.resume();process.stdin.on('end',()=>{log({eof:true});server.close(()=>process.exit(0));});
+setTimeout(()=>process.exit(9),15000).unref();
+`);
+    await chmod(bin, 0o755);
+    // Windows cannot directly execute a shebang .cjs file. Preload the real fake
+    // child through Node without changing the production spawn arguments.
+    if (options.preload ?? process.platform === "win32") {
+      process.env.ENGRAM_BIN = process.execPath;
+      process.env.NODE_OPTIONS = `--require "${bin.replaceAll("\\", "\\\\")}"`;
+    } else {
+      process.env.ENGRAM_BIN = bin;
+    }
+    const sandbox = await createPluginSandbox(dir);
+    const register = await importPluginFromSandbox(sandbox);
+    const tools = new Map(); hooks = new Map();
+    register({ registerTool: tool => tools.set(tool.name, tool), on: (name, fn) => hooks.set(name, fn) });
+    const warnings = [], statuses = [];
+    ctx = { cwd: dir, hasUI: true, sessionManager: {getSessionId:()=>"owned-session"}, ui:{notify:(m)=>warnings.push(m),setStatus:(_k,v)=>statuses.push(v)} };
+    await run({hooks,ctx,tools,warnings,statuses,log,events:async()=> (await readFile(log,"utf8")).trim().split('\n').filter(Boolean).map(v=>JSON.parse(v))});
+  } finally {
+    if (hooks && ctx) await hooks.get("session_shutdown")?.({reason:"reload"},ctx);
+    for (const key of Object.keys(process.env)) if (key.startsWith("ENGRAM_") || key.startsWith("GENTLE_")) delete process.env[key];
+    Object.assign(process.env,saved);
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+    await rm(dir,{recursive:true,force:true});
+  }
+}
+
+test("owned preload launches a real child with actual argv and restores Node options", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--no-warnings";
+  try {
+    await withOwnedFixture({ preload: true }, async ({ hooks, ctx, events, statuses }) => {
+      assert.equal(process.env.ENGRAM_BIN, process.execPath);
+      assert.equal(process.env.NODE_OPTIONS,
+        `--require "${join(ctx.cwd, "owned.cjs").replaceAll("\\", "\\\\")}"`);
+      await hooks.get("session_start")({}, ctx);
+      assert.ok(statuses.some(value => value?.includes("ready")));
+      const records = await events();
+      assert.deepEqual(records[0].args, ["serve", "--session-owned"]);
+      assert.equal(records[0].tokenShape, true);
+      await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+      assert.ok((await events()).some(record => record.eof));
+    });
+    assert.equal(process.env.NODE_OPTIONS, "--no-warnings");
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+});
+
+test("owned preload restores Node options after a fixture callback rejects", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--no-warnings";
+  try {
+    await assert.rejects(withOwnedFixture({ preload: true }, async () => {
+      throw new Error("fixture callback rejected");
+    }), { message: "fixture callback rejected" });
+    assert.equal(process.env.NODE_OPTIONS, "--no-warnings");
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+});
+
+test("owned child authenticates every path and reload closes transport without ending conversation", async()=> {
+ await withOwnedFixture({},async({hooks,ctx,tools,events,statuses})=>{
+  await hooks.get('session_start')({},ctx);
+  await tools.get('mem_save').execute('owned-save', {title:'Test',content:'Test observation',project:'owned-project'},undefined,undefined,ctx);
+  assert.ok(statuses.some(v=>v?.includes('ready')));
+  const before=await events();
+  assert.deepEqual(before[0].args,['serve','--session-owned']);
+  assert.equal(before[0].tokenShape,true);
+  assert.ok(before.some(e=>e.path?.startsWith('/observations/save-result')));
+  assert.ok(before.filter(e=>e.path).every(e=>e.authorized));
+  await hooks.get('session_shutdown')({reason:'reload'},ctx);
+  const after=await events();assert.ok(after.some(e=>e.eof));assert.ok(!after.some(e=>e.path?.endsWith('/end')));
+ });
+});
+
+test("owned resources close even with missing session identity and preserve other hosted roots",async()=>{
+ await withOwnedFixture({},async({hooks,ctx,events})=>{
+  const second={...ctx,sessionManager:{getSessionId:()=>undefined}};
+  await hooks.get('session_start')({},ctx);await hooks.get('session_start')({},second);
+  await hooks.get('session_shutdown')({reason:'reload'},ctx);
+  assert.ok(!(await events()).some(e=>e.eof));
+  await hooks.get('session_shutdown')({},second);
+  assert.ok((await events()).some(e=>e.eof));
+ });
+});
+
+test("owned startup and cleanup never probe or terminate an existing shared fixture", async () => {
+  let requests = 0;
+  const shared = createHTTPServer((_request, response) => {
+    requests += 1;
+    response.end('{}');
+  });
+  await new Promise(resolve => shared.listen(0, '127.0.0.1', resolve));
+  try {
+    await withOwnedFixture({}, async ({ hooks, ctx }) => {
+      await hooks.get('session_start')({}, ctx);
+      await hooks.get('session_shutdown')({ reason: 'reload' }, ctx);
+      assert.equal(requests, 0);
+      const response = await fetch(`http://127.0.0.1:${shared.address().port}/health`);
+      assert.equal(response.status, 200);
+      assert.equal(requests, 1);
+    });
+  } finally {
+    await new Promise(resolve => shared.close(resolve));
+  }
+});
+
+test("owned reload cancels pending startup and leaves no child transport", async () => {
+  await withOwnedFixture({ readyDelay: 500 }, async ({ hooks, ctx, events }) => {
+    const startup = hooks.get("session_start")({}, ctx);
+    const deadline = Date.now() + 2000;
+    while ((await events()).length === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await hooks.get("session_shutdown")({ reason: "reload" }, ctx);
+    await startup;
+    const records = await events();
+    assert.ok(records.some(record => record.eof));
+    assert.ok(!records.some(record => record.path));
+  });
+});
+
+for(const bad of ['unknown','foreign','oversize','exit']) test(`owned rejects ${bad} readiness and closes exact child`,async()=>{
+ await withOwnedFixture({bad},async({hooks,ctx,statuses,events})=>{
+  await hooks.get('session_start')({},ctx);
+  assert.ok(!statuses.some(v=>v?.includes('ready')));
+  const records = await events();
+  assert.deepEqual(records[0].args, ['serve', '--session-owned']);
+  assert.ok(!records.some(e=>e.path));
+ });
+});
+
+for(const env of [{ENGRAM_URL:'http://127.0.0.1:7437'},{ENGRAM_PORT:'7437'},{ENGRAM_SOCKET:''}]) test(`owned rejects transport conflict ${Object.keys(env)[0]} before spawn`,async()=>{
+ await withOwnedFixture({env},async({hooks,ctx,events})=>{
+  await hooks.get('session_start')({},ctx);assert.deepEqual(await events(),[]);
+ });
+});
+for(const mode of ['', 'shared','SESSION-OWNED']) test(`explicit malformed owned mode ${JSON.stringify(mode)} fails closed`,async()=>{
+ await withOwnedFixture({mode},async({hooks,ctx,events})=>{
+  await hooks.get('session_start')({},ctx);assert.deepEqual(await events(),[]);
+ });
+});
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -39,13 +239,29 @@ const { appendFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
+// A preloaded fake sees the synthetic command in argv[1], not its own script path.
+const invocationArgs = process.argv.slice(process.argv[1] === __filename ? 2 : 1);
+const syntheticCommand = ["instance-id", "version", "serve", "sync"]
+  .find((name) => invocationArgs[0] === resolve(name));
+if (syntheticCommand) invocationArgs[0] = syntheticCommand;
+appendFileSync(${JSON.stringify(spawnLog)}, "invoke=" + JSON.stringify(invocationArgs) + "\\n");
 const syntheticServePath = resolve("serve");
 const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; ${instanceIdHandler} ${versionHandler}
+if (process.argv.includes("sync") || process.argv.includes("--import")) { appendFileSync(${JSON.stringify(spawnLog)}, "sync --import\\n"); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
+  appendFileSync(${JSON.stringify(spawnLog)}, "autosync=" + (process.env.ENGRAM_CLOUD_AUTOSYNC ?? "<unset>") + "\\n");
   ${exitCode === undefined
-      ? `const server = createServer((req, res) => {
+      ? `const server = createServer(async (req, res) => {
+  if (req.url === "/runtime-contract") { res.end(${JSON.stringify(JSON.stringify(fixtureContract()))}); return; }
+  if (req.url === "/sessions") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: JSON.parse(body).id, status: "created" }));
+    return;
+  }
   if (req.url.startsWith("/project/current")) {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ project: "fake-project" }));
@@ -84,8 +300,49 @@ setTimeout(() => {
     : { engramBin: binPath };
 }
 
-async function loadPlugin({ engramBin, port, cwd, sandbox }) {
-  delete process.env.ENGRAM_URL;
+test("fake CLI logs logical argv for direct and preload launches", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "engram-pi-cli argv fixture-"));
+  try {
+    const spawnLog = join(dir, "spawns.log");
+    await writeFakeEngramBin(dir, {
+      spawnLog, port: 0, readyAfterMs: 0, cliVersion: "2.0.0-fixture",
+    });
+    const scriptPath = join(dir, "fake-engram.cjs");
+    for (const mode of ["direct", "preload"]) {
+      await t.test(mode, async () => {
+        for (const { args, stdout, extraLog = "" } of [
+          { args: ["instance-id"], stdout: "00000000000000000000000000000000\n" },
+          { args: ["version"], stdout: "2.0.0-fixture\n" },
+          { args: ["sync", "--import"], stdout: "", extraLog: "sync --import\n" },
+        ]) {
+          await writeFile(spawnLog, "", "utf8");
+          const child = spawnSync(process.execPath, mode === "direct" ? [scriptPath, ...args] : args, {
+            cwd: dir,
+            env: {
+              ...process.env,
+              NODE_OPTIONS: mode === "preload" ? `--require "${scriptPath.replaceAll("\\", "\\\\")}"` : "",
+            },
+            encoding: "utf8",
+            timeout: 5000,
+          });
+          assert.equal(child.error, undefined, `${mode}: ${args.join(" ")}`);
+          assert.equal(child.status, 0, child.stderr);
+          assert.equal(child.signal, null);
+          assert.equal(child.stdout, stdout);
+          assert.equal(child.stderr, "");
+          assert.equal(await readFile(spawnLog, "utf8"),
+            `invoke=${JSON.stringify(args)}\n${extraLog}`);
+        }
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function loadPlugin({ engramBin, port, cwd, sandbox, explicitUrl }) {
+  if (explicitUrl) process.env.ENGRAM_URL = `http://127.0.0.1:${port}`;
+  else delete process.env.ENGRAM_URL;
   process.env.ENGRAM_BIN = engramBin;
   process.env.ENGRAM_PORT = String(port);
 
@@ -103,12 +360,14 @@ async function loadPlugin({ engramBin, port, cwd, sandbox }) {
   });
 
   const statusCalls = [];
+  const warnings = [];
   const ctx = {
+    hasUI: true,
     cwd,
     sessionManager: { getSessionId: () => "session-startup" },
-    ui: { setStatus: (key, text) => statusCalls.push([key, text]) },
+    ui: { setStatus: (key, text) => statusCalls.push([key, text]), notify: (message, severity) => warnings.push([message, severity]) },
   };
-  return { tools, hooks, ctx, statusCalls };
+  return { tools, hooks, ctx, statusCalls, warnings };
 }
 
 async function withFixture(options, run) {
@@ -117,14 +376,33 @@ async function withFixture(options, run) {
   const originalPort = process.env.ENGRAM_PORT;
   const originalUrl = process.env.ENGRAM_URL;
   const originalNodeOptions = process.env.NODE_OPTIONS;
+  const originalPolicy = process.env.ENGRAM_STARTUP_POLICY;
+  const originalNotice = process.env.ENGRAM_STARTUP_NOTICE;
+  const originalDataDir = process.env.ENGRAM_DATA_DIR;
+  const originalChild = process.env.GENTLE_PI_AGENTS_CHILD;
   let readyServer;
   try {
+    delete process.env.GENTLE_PI_AGENTS_CHILD;
+    if (options.policy === undefined) delete process.env.ENGRAM_STARTUP_POLICY;
+    else process.env.ENGRAM_STARTUP_POLICY = options.policy;
+    if (options.notice === undefined) delete process.env.ENGRAM_STARTUP_NOTICE;
+    else process.env.ENGRAM_STARTUP_NOTICE = options.notice;
+    process.env.ENGRAM_DATA_DIR = join(dir, "store");
+    await mkdir(process.env.ENGRAM_DATA_DIR);
     const spawnLog = join(dir, "spawns.log");
     await writeFile(spawnLog, "", "utf8");
     const port = await freePort();
-    readyServer = options.readyServer && createHTTPServer((request, response) => {
+    readyServer = options.readyServer && createHTTPServer(async (request, response) => {
       options.requests?.push({ method: request.method, url: request.url });
-      response.writeHead(200, { "content-type": "application/json" });
+      if (request.url === "/runtime-contract") { response.end(JSON.stringify(fixtureContract())); return; }
+      if (request.url === "/sessions") {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(JSON.stringify({ id: JSON.parse(body).id, status: "created" }));
+        return;
+      }
+      response.writeHead(request.url === "/health" ? (options.healthStatus ?? 200) : 200, { "content-type": "application/json" });
       response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : (options.healthBody ?? { instance_id: "00000000000000000000000000000000" })));
     });
     if (readyServer) await new Promise((resolve, reject) => {
@@ -141,9 +419,13 @@ async function withFixture(options, run) {
       process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
     }
     const sandbox = await createPluginSandbox(dir);
-    const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox });
+    const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox, explicitUrl: options.explicitUrl });
     await run({ ...plugin, spawnLog, dir, port, stopServer: () => new Promise((resolve) => readyServer.close(resolve)) });
   } finally {
+    if (originalChild === undefined) delete process.env.GENTLE_PI_AGENTS_CHILD; else process.env.GENTLE_PI_AGENTS_CHILD = originalChild;
+    if (originalPolicy === undefined) delete process.env.ENGRAM_STARTUP_POLICY; else process.env.ENGRAM_STARTUP_POLICY = originalPolicy;
+    if (originalNotice === undefined) delete process.env.ENGRAM_STARTUP_NOTICE; else process.env.ENGRAM_STARTUP_NOTICE = originalNotice;
+    if (originalDataDir === undefined) delete process.env.ENGRAM_DATA_DIR; else process.env.ENGRAM_DATA_DIR = originalDataDir;
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
@@ -152,6 +434,144 @@ async function withFixture(options, run) {
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+for (const policy of ["disabled", "invalid", "", " ", "ALLOW"]) {
+  for (const explicitUrl of [false, true]) {
+    test(`startup policy ${JSON.stringify(policy)} blocks all memory effects (explicit URL=${explicitUrl})`, async () => {
+      const requests = [];
+      const notice = 'Fixture recovery notice; $(touch must-not-execute)';
+      await withFixture({ policy, notice, explicitUrl, readyServer: true, requests }, async ({ hooks, tools, ctx, dir, spawnLog, warnings, statusCalls }) => {
+        const store = join(dir, "store");
+        const names = ["engram.db", "engram.db-wal", "engram.db-shm", ".instance-id"];
+        const bytes = names.map((name) => Buffer.from(`fixture bytes: ${name}\u0000`));
+        await Promise.all(names.map((name, index) => writeFile(join(store, name), bytes[index])));
+        assert.equal(tools.size, 0, "disabled memory exposes no normal tools");
+        assert.deepEqual([...hooks.keys()], ["session_start"], "only the warning/status hook is permitted");
+        const event = { systemPrompt: "base", prompt: "A sufficiently long user prompt", systemPromptOptions: { appendSystemPrompt: "existing" } };
+        for (const reason of ["fresh", "reload"]) {
+          await hooks.get("session_start")({ reason }, ctx);
+          for (const [name, payload] of [
+            ["input", { source: "interactive" }], ["message_start", { message: { role: "user" } }],
+            ["before_agent_start", event], ["tool_execution_end", { toolName: "Read", result: "x".repeat(100) }],
+            ["session_compact", { compactionEntry: { summary: "fixture summary" } }],
+            ["session_shutdown", { reason: reason === "reload" ? "reload" : "quit" }],
+          ]) assert.equal(await hooks.get(name)?.(payload, ctx), undefined);
+        }
+        assert.deepEqual(event, { systemPrompt: "base", prompt: "A sufficiently long user prompt", systemPromptOptions: { appendSystemPrompt: "existing" } });
+        assert.ok(warnings.length > 0);
+        for (const [message, severity] of warnings) {
+          assert.equal(severity, "warning");
+          assert.match(message, /memory.*disabled/i);
+          for (const step of ["back", "update", "restart", "recheck"]) assert.match(message, new RegExp(step, "i"));
+          assert.ok(message.includes(notice), "notice is display-only text");
+        }
+        assert.ok(statusCalls.every(([key, text]) => key === "engram" && /disabled/.test(text)));
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(await readFile(spawnLog, "utf8"), "", "no identity, version, serve or other binary invocation");
+        assert.deepEqual(requests, [], "no HTTP, retries or shutdown writes");
+        assert.deepEqual((await readdir(store)).sort(), [...names].sort(), "no new locks or identity files");
+        for (const [index, name] of names.entries()) assert.deepEqual(await readFile(join(store, name)), bytes[index]);
+        assert.equal(existsSync(join(dir, "must-not-execute")), false);
+      });
+    });
+  }
+}
+
+for (const policy of [undefined, "allow"]) {
+  test(`startup policy ${policy ?? "absent"} preserves normal memory`, async () => {
+    const requests = [];
+    await withFixture({ policy, readyServer: true, requests }, async ({ hooks, tools, ctx, spawnLog }) => {
+      assert.ok(tools.has("mem_save"));
+      await hooks.get("session_start")({}, ctx);
+      const result = await hooks.get("before_agent_start")({ systemPrompt: "base", prompt: "A normal user prompt" }, ctx);
+      assert.match(result.systemPrompt, /Engram Persistent Memory/);
+      await hooks.get("session_shutdown")({ reason: "quit" }, ctx);
+      assert.equal(await readFile(spawnLog, "utf8"), 'invoke=["instance-id"]\n');
+      for (const path of ["/sessions", "/prompts", "/sessions/session-startup/end"]) assert.ok(requests.some(({ url }) => url === path), path);
+    });
+  });
+}
+
+for (const replacement of ["retry", "recovery"]) {
+  test(`satellite transport validates replacement capability on ${replacement}`, async () => {
+    await withFixture({ readyServer: true }, async ({ hooks, tools, ctx }) => {
+      await hooks.get("session_start")({}, ctx);
+      const originalFetch = globalThis.fetch;
+      let attempts = 0;
+      let unsafePosts = 0;
+      let recoveryProbes = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/health") {
+          if (attempts >= 2) recoveryProbes++;
+          return new Response(JSON.stringify({ instance_id: "00000000000000000000000000000000",
+            capabilities: { isolated_session_registration: attempts < (replacement === "retry" ? 1 : 2) } }));
+        }
+        if (path === "/sessions") {
+          attempts++;
+          if (replacement === "retry" ? attempts === 1 : attempts <= 2) {
+            throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+          }
+          unsafePosts++;
+          return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }), { status: 201 });
+        }
+        if (path === "/observations") return new Response('{"id":1}', { status: 201 });
+        return originalFetch(url, init);
+      };
+      try {
+        const result = await tools.get("mem_save").execute("replacement", { title: "t", content: "c", project: "foreign-project" }, undefined, undefined, ctx);
+        assert.equal(result.isError, true, JSON.stringify(result));
+        assert.match(result.content[0].text, /upgrade[\s\S]*isolated_session_registration/i);
+        assert.equal(unsafePosts, 0, "replacement must never receive satellite POST");
+        if (replacement === "recovery") assert.ok(recoveryProbes > 0, "fixture must exercise the recovery probe");
+      } finally { globalThis.fetch = originalFetch; }
+    });
+  });
+}
+
+for (const staysOffline of [false, true]) {
+  test(`capable satellite recovery is bounded (offline=${staysOffline})`, async () => {
+    await withFixture({ readyServer: true }, async ({ hooks, tools, ctx }) => {
+      await hooks.get("session_start")({}, ctx);
+      const originalFetch = globalThis.fetch;
+      let posts = 0;
+      let writes = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/health") return new Response(JSON.stringify({ instance_id: "00000000000000000000000000000000", capabilities: { isolated_session_registration: true } }));
+        if (path === "/sessions") {
+          posts++;
+          if (staysOffline || posts <= 2) throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+          return new Response(JSON.stringify({ id: JSON.parse(init.body).id, status: "created" }), { status: 201 });
+        }
+        if (path === "/observations") { writes++; return new Response('{"id":1}', { status: 201 }); }
+        return originalFetch(url, init);
+      };
+      try {
+        const result = await tools.get("mem_save").execute("recovery", { title: "t", content: "c", project: "foreign-project" }, undefined, undefined, ctx);
+        assert.equal(result.isError, staysOffline ? true : undefined, JSON.stringify(result));
+        assert.equal(posts, staysOffline ? 4 : 3, "only one bounded recovery replay");
+        assert.equal(writes, staysOffline ? 0 : 1);
+      } finally { globalThis.fetch = originalFetch; }
+    });
+  });
+}
+
+test("manifest presence never triggers import while startup still detects the project", async () => {
+  for (const manifestPresent of [true, false]) {
+    await withFixture({ readyServer: true }, async ({ hooks, ctx, dir, spawnLog, statusCalls }) => {
+      if (manifestPresent) {
+        await mkdir(join(dir, ".engram"));
+        await writeFile(join(dir, ".engram", "manifest.json"), "{}", "utf8");
+      }
+      await hooks.get("session_start")({}, ctx);
+      assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]]);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.deepEqual((await readFile(spawnLog, "utf8")).trim().split("\n"), ['invoke=["instance-id"]'],
+        `startup with manifestPresent=${manifestPresent} must only resolve identity, not import`);
+    });
+  }
+});
 
 async function countSpawns(spawnLog) {
   const log = await readFile(spawnLog, "utf8");
@@ -213,6 +633,35 @@ test("an initially unavailable Engram provider publishes offline status", async 
   });
 });
 
+test("an unhealthy external listener stays offline with bounded startup attempts and retains its port", { timeout: 60_000, concurrency: false }, async () => {
+  await withFixture({ readyServer: true, healthStatus: 500 }, async ({ hooks, tools, ctx, statusCalls, dir, spawnLog, port }) => {
+    // Use HTTP directly so fetch stubs cannot fabricate evidence that the listener survived.
+    const listenerStatus = () => new Promise((resolve, reject) => {
+      const request = get(`http://127.0.0.1:${port}/health`, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode));
+        response.once("error", reject);
+      });
+      request.once("error", reject);
+      request.setTimeout(2_000, () => request.destroy(new Error("fixture health request timed out")));
+    });
+    assert.equal(await listenerStatus(), 500, "the external listener occupies the port before startup");
+
+    await hooks.get("session_start")({}, ctx);
+    assert.deepEqual(statusCalls, [["engram", `🧠 ${dir.split(/[\\/]/).at(-1).toLowerCase()} · offline`]]);
+    assert.equal(await countSpawns(spawnLog), 1, "HTTP 500 currently triggers a real startup attempt");
+
+    for (let call = 0; call < 50; call += 1) {
+      const result = await tools.get("mem_search").execute(`unhealthy-${call}`, { query: "startup" }, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /could not initialize the Engram memory provider/);
+    }
+    const spawns = await countSpawns(spawnLog);
+    assert.ok(spawns >= 1 && spawns <= 2, `50 failing tool calls produced ${spawns} startup attempts, not a bounded retry`);
+    assert.equal(await listenerStatus(), 500, "startup and repeated operations leave the external listener alive on the same port");
+  });
+});
+
 test("a slow health probe never authorizes a duplicate spawn", async () => {
   await withFixture({ readyAfterMs: 600 }, async ({ hooks, ctx, spawnLog }) => {
     const sessionStart = hooks.get("session_start");
@@ -227,6 +676,24 @@ test("a slow health probe never authorizes a duplicate spawn", async () => {
 
     assert.equal(await countSpawns(spawnLog), 1, "concurrent hooks share one spawned server");
   });
+});
+
+test("a plugin-launched server starts with cloud autosync enabled", async () => {
+  const previous = process.env.ENGRAM_CLOUD_AUTOSYNC;
+  delete process.env.ENGRAM_CLOUD_AUTOSYNC;
+  try {
+    await withFixture({ readyAfterMs: 0 }, async ({ hooks, ctx, spawnLog }) => {
+      await hooks.get("session_start")({}, ctx);
+
+      assert.equal(await countSpawns(spawnLog), 1, "the plugin spawns the server");
+      const log = await readFile(spawnLog, "utf8");
+      assert.ok(log.split("\n").includes("autosync=1"),
+        "the daemon must opt into cloud autosync, like the Claude Code and Codex launchers");
+    });
+  } finally {
+    if (previous === undefined) delete process.env.ENGRAM_CLOUD_AUTOSYNC;
+    else process.env.ENGRAM_CLOUD_AUTOSYNC = previous;
+  }
 });
 
 test("a child that exits before readiness surfaces a normalized tool error", async () => {
@@ -249,6 +716,11 @@ test("a child that exits before readiness never escapes the session hooks", asyn
 
     const result = await hooks.get("before_agent_start")({ systemPrompt: "base", prompt: "hello there" }, ctx);
     assert.match(result.systemPrompt, /^base\n\n/, "memory instructions still reach the agent");
+
+    const options = { appendSystemPrompt: "existing" };
+    const structured = await hooks.get("before_agent_start")({ systemPrompt: "base", systemPromptOptions: options, prompt: "hello there" }, ctx);
+    assert.equal(structured, undefined, "structured options never receive a forced replacement");
+    assert.match(options.appendSystemPrompt, /^existing\n\n## Engram Persistent Memory — Protocol/);
   });
 });
 
@@ -386,18 +858,78 @@ test("a missing binary is reported as not found, not as an outdated version", as
   });
 });
 
-test("a foreign server keeps the byte-identical ownership mismatch message", async () => {
+test("a foreign server retains actionable evidence and doctor diagnoses locally", async () => {
+  const requests = [];
   await withFixture({
     readyServer: true,
     healthBody: { status: "ok", service: "engram", version: "2.0.0", instance_id: "ffffffffffffffffffffffffffffffff" },
     cliVersion: "2.0.0",
+    requests,
   }, async ({ tools, ctx, spawnLog }) => {
     const result = await tools.get("mem_search").execute("call-foreign", { query: "startup" }, undefined, undefined, ctx);
 
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /: Engram server ownership mismatch at http:\/\/127\.0\.0\.1:\d+\. Run mem_doctor/);
+    assert.match(result.content[0].text, /ownership mismatch/);
+    assert.match(result.content[0].text, /local ID 00000000000000000000000000000000/);
+    assert.match(result.content[0].text, /remote ID ffffffffffffffffffffffffffffffff/);
+    assert.match(result.content[0].text, /local version 2\.0\.0, remote version 2\.0\.0/);
+    assert.match(result.content[0].text, /WSL2.*possible cause/);
+    assert.match(result.content[0].text, /ENGRAM_PORT=<port>/);
+    const beforeDoctor = requests.length;
+    const doctor = await tools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+    assert.equal(doctor.isError, true);
+    assert.equal(doctor.details.data.source, "LOCAL");
+    assert.equal(doctor.details.data.code, "ownership_mismatch");
+    assert.deepEqual(doctor.details.data.evidence, {
+      localInstanceID: "00000000000000000000000000000000",
+      remoteInstanceID: "ffffffffffffffffffffffffffffffff",
+      localVersion: "2.0.0", remoteVersion: "2.0.0",
+    });
+    assert.equal(requests.length, beforeDoctor, "doctor uses cached failure, not a new probe");
+    assert.ok(requests.every(({ url }) => url === "/health"), "foreign endpoint receives no project, session, doctor or memory requests");
     assert.equal(await countSpawns(spawnLog), 0, "a foreign server is never adopted, terminated, or replaced");
   });
+});
+
+test("foreign doctor reports unavailable versions as unknown and honors cancellation", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, requests,
+    healthBody: { instance_id: "ffffffffffffffffffffffffffffffff" },
+  }, async ({ tools, ctx, spawnLog }) => {
+    const doctor = tools.get("mem_doctor");
+    const result = await doctor.execute("unknown", {}, undefined, undefined, ctx);
+    assert.equal(result.details.data.evidence.localVersion, "unknown");
+    assert.equal(result.details.data.evidence.remoteVersion, "unknown");
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(doctor.execute("cancelled", {}, controller.signal, undefined, ctx), /cancelled/);
+    assert.deepEqual(requests.map(({ url }) => url), ["/health"]);
+    assert.equal(await countSpawns(spawnLog), 0);
+  });
+});
+
+test("normal doctor still calls the server after project detection", async () => {
+  const requests = [];
+  await withFixture({ readyServer: true, requests }, async ({ tools, ctx }) => {
+    const result = await tools.get("mem_doctor").execute("normal", {}, undefined, undefined, ctx);
+    assert.equal(result.isError, undefined);
+    assert.ok(requests.some(({ url }) => url.startsWith("/project/current")));
+    assert.ok(requests.some(({ url }) => url.startsWith("/doctor?project=fake-project")));
+    assert.notEqual(result.details.data.source, "LOCAL");
+  });
+});
+
+test("doctor does not bypass unrelated deterministic initialization failures", async () => {
+  for (const healthBody of [{ version: "1.20.0" }, { version: "2.0.0" }, { version: "malformed", instance_id: null }]) {
+    const requests = [];
+    await withFixture({ readyServer: true, healthBody, requests }, async ({ tools, ctx, spawnLog }) => {
+      const result = await tools.get("mem_doctor").execute("unrelated", {}, undefined, undefined, ctx);
+      assert.equal(result.isError, true);
+      assert.equal(result.details.data, undefined, "no local ownership fallback for legacy/missing identity");
+      assert.deepEqual(requests.map(({ url }) => url), ["/health"]);
+      assert.equal(await countSpawns(spawnLog), 0);
+    });
+  }
 });
 
 test("loading the plugin leaves the checkout's node_modules untouched", async () => {

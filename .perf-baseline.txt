@@ -1,6 +1,6 @@
 goos: windows
 goarch: amd64
-pkg: github.com/Gentleman-Programming/engram/v2/internal/store
+pkg: github.com/Gentleman-Programming/engram/v3/internal/store
 cpu: AMD Ryzen 5 5600 6-Core Processor
 BenchmarkScanProject_Page5000-12         	       1	5467176800 ns/op
 BenchmarkScanProject_Page5000-12         	       1	5448613300 ns/op
@@ -73,4 +73,4 @@ BenchmarkSearchContext_AllMode_Hit-12    	      32	  35247878 ns/op
 BenchmarkSearchContext_AllMode_Hit-12    	      28	  44643682 ns/op
 BenchmarkSearchContext_AllMode_Hit-12    	      28	  36219129 ns/op
 PASS
-ok  	github.com/Gentleman-Programming/engram/v2/internal/store	179.015s
+ok  	github.com/Gentleman-Programming/engram/v3/internal/store	179.015s

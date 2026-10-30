@@ -13,7 +13,7 @@
   },
   "features": {
     "ghcr.io/devcontainers/features/go:1": {
-      "version": "1.25"
+      "version": "1.26"
     }
   },
   "postCreateCommand": "echo 'Run: cd plugin/obsidian && npm ci --ignore-scripts'"

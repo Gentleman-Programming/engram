@@ -3,19 +3,22 @@ package cloudstore
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -55,15 +58,55 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 	}
 
 	schema := fmt.Sprintf("cloudstore_modern_%d", time.Now().UnixNano())
+	// Registered first so this observes the schema after all fixture cleanups.
+	t.Cleanup(func() {
+		observer, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Error("open fixture cleanup observer failed")
+			return
+		}
+		defer func() {
+			if err := observer.Close(); err != nil {
+				t.Error("close fixture cleanup observer failed")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var exists bool
+		if err := observer.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, schema).Scan(&exists); err != nil {
+			t.Error("query fixture schema cleanup failed")
+			return
+		}
+		if exists {
+			t.Error("migration fixture schema remains after cleanup")
+			return
+		}
+		t.Log("migration fixture schema removed")
+	})
 	adminDB, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open admin db: %v", err)
 	}
-	defer adminDB.Close()
+	// Cleanups run in reverse registration order: drop the schema before closing.
+	t.Cleanup(func() {
+		if err := adminDB.Close(); err != nil {
+			t.Error("close migration fixture admin database failed")
+		}
+	})
 	if _, err := adminDB.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	t.Cleanup(func() { _, _ = adminDB.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := adminDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
+			// Driver errors may include connection details; keep diagnostics bounded.
+			t.Error("drop migration fixture schema failed")
+		}
+	})
+	if os.Getenv("ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE") == "1" {
+		t.Fatal("intentional failure after migration fixture creation")
+	}
 
 	testDSN := dsn + "?search_path=" + schema
 	if strings.Contains(dsn, "?") {
@@ -94,6 +137,97 @@ func TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns(t *testing.T) {
 		t.Fatalf("New should migrate modern cloud_chunks without imported_at/sessions/memories/prompts: %v", err)
 	}
 	cs.Close()
+}
+
+func migrationFixtureCleanupDiagnostic(output string) string {
+	for _, diagnostic := range []string{
+		"open fixture cleanup observer failed",
+		"close fixture cleanup observer failed",
+		"query fixture schema cleanup failed",
+		"migration fixture schema remains after cleanup",
+		"close migration fixture admin database failed",
+		"drop migration fixture schema failed",
+	} {
+		if strings.Contains(output, diagnostic) {
+			return diagnostic
+		}
+	}
+	return ""
+}
+
+func TestMigrationFixtureCleanupDiagnostics(t *testing.T) {
+	const removed = "migration fixture schema removed\n"
+	const intentional = "intentional failure after migration fixture creation\n"
+	for _, diagnostic := range []string{
+		"open fixture cleanup observer failed",
+		"close fixture cleanup observer failed",
+		"query fixture schema cleanup failed",
+		"migration fixture schema remains after cleanup",
+		"close migration fixture admin database failed",
+		"drop migration fixture schema failed",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			output := intentional + diagnostic + "\n" + removed
+			if got := migrationFixtureCleanupDiagnostic(output); got != diagnostic {
+				t.Errorf("cleanup diagnostic = %q, want %q", got, diagnostic)
+			}
+		})
+	}
+	for _, output := range []string{removed, intentional + removed} {
+		if got := migrationFixtureCleanupDiagnostic(output); got != "" {
+			t.Errorf("healthy cleanup reported diagnostic %q", got)
+		}
+	}
+}
+
+func TestMigrationFixtureCleanup(t *testing.T) {
+	dsn := os.Getenv("CLOUDSTORE_TEST_DSN")
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		t.Skip("requires URL-style CLOUDSTORE_TEST_DSN and disposable PostgreSQL")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		name     string
+		fail     string
+		wantExit int
+	}{
+		{name: "success", fail: "0", wantExit: 0},
+		{name: "failure_after_creation", fail: "1", wantExit: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestMigrateAcceptsModernCloudChunksWithoutLegacyColumns$", "-test.v", "-test.timeout=20s")
+			cmd.Env = append(os.Environ(), "ENGRAM_TEST_MIGRATION_FIXTURE_FAILURE="+scenario.fail)
+			output, err := cmd.CombinedOutput()
+			exitCode := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run migration fixture subprocess: %v", err)
+				}
+				exitCode = exitErr.ExitCode()
+			}
+			if exitCode != scenario.wantExit {
+				t.Errorf("exit code = %d, want %d", exitCode, scenario.wantExit)
+			}
+			if diagnostic := migrationFixtureCleanupDiagnostic(string(output)); diagnostic != "" {
+				t.Errorf("subprocess reported cleanup error: %s", diagnostic)
+			}
+			if !strings.Contains(string(output), "migration fixture schema removed") {
+				t.Error("subprocess did not confirm schema removal")
+			}
+			if strings.Contains(string(output), "intentional failure after migration fixture creation") != (scenario.fail == "1") {
+				t.Error("subprocess did not reach the expected success/failure path")
+			}
+			if t.Failed() {
+				t.Logf("migration fixture subprocess output:\n%s", output)
+			}
+		})
+	}
 }
 
 func TestMaterializedMutationBatchChunkIncludesObservationAlongsidePromptAndSession(t *testing.T) {
@@ -807,6 +941,81 @@ func TestInsertMutationBatchFailureIdentifiesFailingEntryAndRollsBack(t *testing
 	}
 	if !errors.Is(entryErr, cause) {
 		t.Fatal("expected wrapped cause to remain discoverable with errors.Is")
+	}
+}
+
+type replayIndexDriver struct {
+	indexErr error
+	inserts  int
+}
+
+type replayIndexConn struct{ state *replayIndexDriver }
+type replayIndexRows struct {
+	payload []byte
+	done    bool
+}
+
+func (d *replayIndexDriver) Open(string) (driver.Conn, error) { return &replayIndexConn{state: d}, nil }
+func (d *replayIndexDriver) Connect(context.Context) (driver.Conn, error) {
+	return d.Open("")
+}
+func (d *replayIndexDriver) Driver() driver.Driver { return d }
+func (c *replayIndexConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepare")
+}
+func (c *replayIndexConn) Close() error { return nil }
+func (c *replayIndexConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("unexpected transaction")
+}
+func (c *replayIndexConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if !strings.Contains(query, "SELECT payload::text FROM cloud_chunks") {
+		return nil, fmt.Errorf("unexpected query: %s", query)
+	}
+	return &replayIndexRows{payload: []byte(`{"sessions":[{"id":"s-1"}]}`)}, nil
+}
+func (c *replayIndexConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if !strings.Contains(query, "INSERT INTO cloud_project_sessions") {
+		return nil, fmt.Errorf("unexpected exec: %s", query)
+	}
+	c.state.inserts++
+	if c.state.indexErr != nil {
+		return nil, c.state.indexErr
+	}
+	return driver.RowsAffected(0), nil
+}
+func (r *replayIndexRows) Columns() []string { return []string{"payload"} }
+func (r *replayIndexRows) Close() error      { return nil }
+func (r *replayIndexRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.payload
+	return nil
+}
+
+func TestWriteChunkReplayIndexFailure(t *testing.T) {
+	cause := errors.New("session index unavailable")
+	for _, tt := range []struct {
+		name     string
+		indexErr error
+	}{
+		{name: "index failure", indexErr: cause},
+		{name: "healthy replay"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &replayIndexDriver{indexErr: tt.indexErr}
+			db := sql.OpenDB(state)
+			t.Cleanup(func() { _ = db.Close() })
+			payload := []byte(`{"sessions":[{"id":"s-1"}]}`)
+			err := (&CloudStore{db: db}).WriteChunk(context.Background(), "project", chunkIDFromPayload(payload), "tester", "", payload)
+			if !errors.Is(err, tt.indexErr) || (tt.indexErr != nil && !strings.Contains(err.Error(), `index session "s-1"`)) {
+				t.Fatalf("replay error = %v, want index error %v", err, tt.indexErr)
+			}
+			if state.inserts != 1 {
+				t.Fatalf("index insert count = %d, want 1", state.inserts)
+			}
+		})
 	}
 }
 

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // Token-classification coverage: one test per row.
@@ -34,6 +34,9 @@ func TestCmdSetupHelpAnyPositionShowsProtocolFlagAndSkipsStdin(t *testing.T) {
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 		if recovered != nil || stderr != "" {
 			t.Fatalf("args=%v: setup --help should exit cleanly, panic=%v stderr=%q", args, recovered, stderr)
+		}
+		if !strings.Contains(stdout, "Claude Code: already-installed engram@engram is updated at user scope; update failures fail setup.") {
+			t.Fatalf("args=%v: usage output missing the exact plugin update scope: %q", args, stdout)
 		}
 		if !strings.Contains(stdout, "--protocol") {
 			t.Fatalf("args=%v: usage output missing literal --protocol: %q", args, stdout)

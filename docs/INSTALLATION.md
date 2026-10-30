@@ -45,20 +45,21 @@ brew update && brew upgrade engram
 
 **Option A: Install via `go install` (recommended for technical users)**
 
-If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it.
+If you have Go installed, you can compile the binary locally from source, but this does not guarantee protection from antivirus alerts or Windows security-policy blocking.
 
-Two paths exist because Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule appends `/v2` (and above) to the module path starting at major version 2. Pick the line that matches the major version you want:
+Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule puts the major version in the module path starting at major version 2, so each major line has its own `go install` path. Pick the line that matches the major version you want:
 
 ```powershell
-# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
-go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+# Current line (v3.x)
+go install github.com/Gentleman-Programming/engram/v3/cmd/engram@latest
 
-# v2 line (first post-migration release candidate or any later v2 release)
+# Previous lines, only if you must stay on an older major version
 go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
+go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 ```
 
-The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
+The `/v3` command requires `v3.0.0` or a later v3 release. `@latest` selects the latest released version for the requested module path only; it never moves you to another major line.
 
 Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
@@ -122,8 +123,8 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 > distribution trust problem, not a security problem. The source code is fully auditable.
 >
 > **Recommended workaround:** Technical Windows users should prefer **Option A (`go install`)** or
-> **Option B (build from source)**. Binaries you compile locally will not trigger AV alerts because
-> they originate from your own machine.
+> **Option B (build from source)**. Building locally is an option, not a guarantee against
+> antivirus alerts or Windows security-policy blocking.
 
 > **Other Windows notes:**
 > - Data is stored in `%USERPROFILE%\.engram\engram.db`
@@ -133,20 +134,62 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 
 ---
 
+## Windows troubleshooting: executable blocked before MCP starts
+
+**Distinguish a missing executable from Windows rejecting an existing one.**
+Smart App Control or another security policy can prevent `engram.exe` from
+starting, including a locally compiled `go install` binary. Building locally is
+not a guarantee against security-policy blocking, despite the antivirus guidance
+above.
+
+| Observation | What to check |
+|-------------|---------------|
+| The configured executable does not exist, or the client resolves a different file | Check the exact MCP executable path and the installation location; this is a path-resolution problem. |
+| Windows explicitly reports that security policy blocked the existing executable | Treat this as an OS launch rejection, not an MCP protocol or argument error. |
+| Git Bash reports `Permission denied` / exit 126, or an MCP client reports `EUNKNOWN: uv_spawn` | These errors alone do not identify Smart App Control; correlate them with the Windows launch error and security-policy evidence. |
+| Authenticode status is `NotSigned` | This describes the file's signature, but does not by itself prove which policy blocked it. A signature status alone is not a policy diagnosis. |
+
+Issue #1703 reports Windows 11 Smart App Control enabled, an unsigned
+`engram.exe`, a PowerShell policy rejection, Git Bash exit 126, and a Claude Code
+MCP `EUNKNOWN: uv_spawn` error. These are reported observations, not an
+independently reproduced diagnosis for every similar startup failure.
+
+If Windows rejects the executable before it starts, the MCP server cannot begin
+its protocol exchange. Reinstalling or changing MCP arguments cannot be assumed
+to resolve that rejection. Locally compiled binaries are separate from release
+artifacts: signing a distributed release would not sign a local `go install`
+build. This guidance does not establish the signing status of current downloads
+or identify a signed workaround.
+
+**For a support report, collect only the relevant evidence:**
+
+- Installation route: `go install`, local source build, downloaded release, or installer.
+- Exact executable path configured in the MCP client, and whether that file exists.
+- Exact error from an already attempted direct launch of that same file, including the shell used; do not substitute only the MCP client's generic error.
+- Authenticode signature status for that same file, plus any explicit Windows security-policy message or known Smart App Control state.
+
+Redact personal path components when sharing evidence. Do not disable Smart App
+Control, antivirus, or other security controls to troubleshoot this issue. On a
+managed device, ask the security administrator to review the rejection under the
+organization's policy rather than attempting a bypass.
+
+---
+
 ## Install from source (macOS / Linux)
 
-Pick the line that matches the major version you want — the `/v2` suffix exists starting at major version 2 because of Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule:
+Pick the line that matches the major version you want — the `/vN` suffix exists starting at major version 2 because of Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule:
 
 ```bash
-# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
-go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+# Current line (v3.x)
+go install github.com/Gentleman-Programming/engram/v3/cmd/engram@latest
 
-# v2 line (first post-migration release candidate or any later v2 release)
+# Previous lines, only if you must stay on an older major version
 go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
+go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 # Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
 
-The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
+The `/v3` command requires `v3.0.0` or a later v3 release. `@latest` selects the latest released version for the requested module path only; it never moves you to another major line.
 
 Or build from a local clone:
 
@@ -194,7 +237,7 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 
 ## Requirements
 
-- **Go 1.24+** to build from source (not needed if installing via Homebrew or downloading a binary)
+- **Go 1.26+** to build from source (not needed if installing via Homebrew or downloading a binary)
 - That's it. No runtime dependencies.
 
 The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure Go, no CGO). Works natively on **macOS**, **Linux**, and **Windows** (x86_64 and ARM64).

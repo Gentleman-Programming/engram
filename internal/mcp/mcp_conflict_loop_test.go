@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -646,15 +646,15 @@ func assertNoRelationSyncMutations(t *testing.T, s *store.Store) {
 }
 
 // verifyObsSyncPayloadsExcludeDecayFields checks that no sync_mutations payload
-// for observations contains review_after, expires_at, or embedding* fields.
-// REQ-009: new observation columns must NOT appear in the sync wire format.
+// for observations contains expires_at or embedding* fields.
+// review_after is replicated; other lifecycle metadata remains local-only.
 func verifyObsSyncPayloadsExcludeDecayFields(t *testing.T, s *store.Store) {
 	t.Helper()
 	payloads, err := s.ListObservationSyncPayloads()
 	if err != nil {
 		t.Fatalf("G.4 ListObservationSyncPayloads: %v", err)
 	}
-	forbiddenKeys := []string{"review_after", "expires_at", "embedding", "embedding_model", "embedding_created_at"}
+	forbiddenKeys := []string{"expires_at", "embedding", "embedding_model", "embedding_created_at"}
 	for i, payload := range payloads {
 		raw, err := json.Marshal(payload)
 		if err != nil {

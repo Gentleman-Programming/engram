@@ -6,15 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -313,6 +315,7 @@ func TestCmdMCPStdioFinalToolCallDrainsBeforeEOFShutdown(t *testing.T) {
 func TestCmdMCPStdioSIGTERMRunsGracefulShutdown(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
+	serveMCP = runMCPStdio
 	stubExitWithPanic(t)
 	stubMCPStdioLifecycle(t)
 	enableAutosyncEnv(t)
@@ -354,6 +357,77 @@ func TestCmdMCPStdioSIGTERMRunsGracefulShutdown(t *testing.T) {
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 
 	requireGracefulOutcome(t, stderr, recovered, runStarted, stopCalled)
+}
+
+// gatedShutdownLogWriter holds the signal watcher before it cancels the
+// transport, allowing Listen to return first without scheduler-dependent luck.
+type gatedShutdownLogWriter struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w gatedShutdownLogWriter) Write(p []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return len(p), nil
+}
+
+// TestMCPStdioWaitsForSignalWatcher pins issue #2119: returning from Listen
+// must not leave a signal watcher able to access lifecycle seams after cleanup.
+func TestMCPStdioWaitsForSignalWatcher(t *testing.T) {
+	stubMCPStdioLifecycle(t)
+	oldNotify, oldStop := notifySignals, stopSignals
+	oldLog := log.Writer()
+	t.Cleanup(func() {
+		notifySignals, stopSignals = oldNotify, oldStop
+		log.SetOutput(oldLog)
+	})
+
+	// Keep global restoration on the parent: Test joins every bubble goroutine,
+	// including a broken, unjoined watcher, before these cleanups can run.
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		log.SetOutput(gatedShutdownLogWriter{entered: entered, release: release})
+		notifySignals = func(ch chan<- os.Signal, _ ...os.Signal) { ch <- syscall.SIGTERM }
+		stopSignals = func(chan<- os.Signal) {}
+
+		stopped := make(chan struct{}, 2)
+		mcpStdioStopAutosync = func() { stopped <- struct{}{} }
+		listenMCPStdio = func(context.Context, *mcpserver.MCPServer, io.Reader, io.Writer) error {
+			<-entered
+			return nil
+		}
+		runDone := make(chan error, 1)
+		go func() { runDone <- runMCPStdio(mcpserver.NewMCPServer("test", "1")) }()
+		waitForSignal(t, entered, "signal watcher to enter shutdown")
+		// Log entry alone does not prove Listen's caller reached cleanup. Wait
+		// lets it run until it exits or durably blocks on the watcher join.
+		// The writer blocks on a bubble-local channel; the fake Listen does no
+		// I/O, and runMCPStdio's bubble-local EOF timer is stopped, not pending.
+		synctest.Wait()
+		select {
+		case err := <-runDone:
+			t.Fatalf("runMCPStdio returned before signal watcher completed: %v", err)
+		default:
+		}
+		unblock()
+		synctest.Wait()
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Fatalf("runMCPStdio returned error: %v", err)
+			}
+		default:
+			t.Fatal("runMCPStdio did not return after signal watcher completed")
+		}
+		if got := len(stopped); got != 1 {
+			t.Fatalf("autosync stop calls = %d, want 1", got)
+		}
+	})
 }
 
 // constErrReader always returns the configured error.

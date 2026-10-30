@@ -18,13 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
-	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
-	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
+	versioncheck "github.com/Gentleman-Programming/engram/v3/internal/version"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -174,11 +174,51 @@ func testConfig(t *testing.T) store.Config {
 
 func withArgs(t *testing.T, args ...string) {
 	t.Helper()
+	// Normal main() now changes process TEMP/TMP on Windows. Restore those
+	// values before deleting any root they may reference, and keep an otherwise
+	// unconfigured mocked-store dispatch away from the user's default data dir.
+	if runtime.GOOS == "windows" && len(args) > 1 {
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "test", "compatibility", "migrate-copy", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
+		default:
+			isolateMainStartup(t)
+		}
+	}
 	old := os.Args
 	os.Args = args
 	t.Cleanup(func() {
 		os.Args = old
 	})
+}
+
+// isolateMainStartup leaves explicit fixture configs and configuration errors
+// intact. Only the resolved real default is redirected; no home files are read.
+func isolateMainStartup(t *testing.T) {
+	t.Helper()
+	root := t.TempDir() // Register deletion before environment restoration (LIFO).
+	for _, key := range []string{"TEMP", "TMP"} {
+		value, present := os.LookupEnv(key)
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	oldConfig := storeDefaultConfig
+	storeDefaultConfig = func() (store.Config, error) {
+		cfg, err := oldConfig()
+		if err != nil {
+			return cfg, err
+		}
+		defaultCfg, defaultErr := store.DefaultConfig()
+		if defaultErr == nil && cfg.DataDir == defaultCfg.DataDir {
+			cfg.DataDir = filepath.Join(root, "data")
+		}
+		return cfg, nil
+	}
+	t.Cleanup(func() { storeDefaultConfig = oldConfig })
 }
 
 func withCwd(t *testing.T, dir string) {
@@ -1061,7 +1101,7 @@ func TestCmdSaveUsesDetectionSeamAndPrintsNormalizationWarning(t *testing.T) {
 	withArgs(t, "engram", "save", "resolved-title", "resolved-content")
 
 	originalDetectProjectFull := detectProjectFull
-	detectProjectFull = func(gotCWD string) project.DetectionResult {
+	detectProjectFull = func(gotCWD string, _ project.DetectionOptions) project.DetectionResult {
 		if gotCWD != actualCWD {
 			t.Fatalf("detection cwd = %q, want %q", gotCWD, actualCWD)
 		}
@@ -1273,6 +1313,7 @@ func TestCmdSyncStatusExportAndImport(t *testing.T) {
 }
 
 func TestCmdSyncDefaultProjectNoData(t *testing.T) {
+	t.Setenv(project.EnvProjectOverride, "")
 	fixtureParent := t.TempDir()
 	t.Setenv("GIT_CEILING_DIRECTORIES", fixtureParent)
 	workDir := filepath.Join(fixtureParent, "repo-name")
@@ -1660,7 +1701,11 @@ func TestCmdTimelineStatsAndExportRejectInvalidProjectValues(t *testing.T) {
 	}{
 		{name: "timeline", args: []string{"timeline", "1"}, run: cmdTimeline},
 		{name: "stats", args: []string{"stats"}, run: cmdStats},
-		{name: "export", args: []string{"export", "out.json"}, run: cmdExport},
+		{name: "export", args: []string{"export", "out.json"}, run: func(cfg store.Config) {
+			if _, err := cmdExport(cfg); err != nil {
+				fatal(err)
+			}
+		}},
 	}
 	values := []struct {
 		name string
@@ -1809,6 +1854,177 @@ func TestCmdContextRejectsConflictingProjectSelectors(t *testing.T) {
 }
 
 // ─── Projects command tests ───────────────────────────────────────────────────
+
+func TestProjectsMergeDryRunAndApply(t *testing.T) {
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "merge-session", "acmeapi", "note", "merge-note", "content", "project")
+	for _, tc := range []struct {
+		mode string
+		want string
+	}{{"--dry-run", "No changes made"}, {"--apply", "observations 1"}} {
+		withArgs(t, "engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", tc.mode)
+		out, stderr := captureOutput(t, func() { cmdProjects(cfg) })
+		if stderr != "" || !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: stdout=%q stderr=%q", tc.mode, out, stderr)
+		}
+		s, err := store.New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := s.PreviewExplicitProjectMerge("acmeapi", "acme-api")
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if tc.mode == "--dry-run" && (err != nil || source.ObservationsUpdated != 1) {
+			t.Fatalf("dry-run changed source: %+v %v", source, err)
+		}
+		if tc.mode == "--apply" && err == nil {
+			t.Fatalf("apply left source: %+v", source)
+		}
+	}
+}
+
+func TestProjectsMergeRequiresExplicitMode(t *testing.T) {
+	cfg := testConfig(t)
+	oldExit := exitFunc
+	exitFunc = func(code int) { panic("exit") }
+	t.Cleanup(func() { exitFunc = oldExit })
+	for _, args := range [][]string{
+		{"engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api"},
+		{"engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", "--dry-run", "--apply"},
+		{"engram", "projects", "merge", "--from", "acmeapi", "--to", "acme-api", "--apply", "--apply"},
+	} {
+		withArgs(t, args...)
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+		if recovered == nil || !strings.Contains(stderr, "usage:") {
+			t.Fatalf("args %v: stderr=%q panic=%v", args, stderr, recovered)
+		}
+	}
+}
+
+func TestProjectsMergeRejectsInvalidPairsWithoutMutation(t *testing.T) {
+	for _, tc := range []struct{ name, from, to string }{
+		{"unrelated", "acmeapi", "other-project"},
+		{"normalized equal", "acmeapi", "ACMEAPI"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			mustSeedObservation(t, cfg, "invalid-session", "acmeapi", "note", "invalid-note", "content", "project")
+			oldExit := exitFunc
+			exitFunc = func(code int) { panic(exitCode(code)) }
+			t.Cleanup(func() { exitFunc = oldExit })
+			for _, mode := range []string{"--dry-run", "--apply"} {
+				withArgs(t, "engram", "projects", "merge", "--from", tc.from, "--to", tc.to, mode)
+				stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+				canonical, _ := store.NormalizeProject(tc.to)
+				want := fmt.Sprintf("engram: source project %q must be a distinct legacy case, separator or Unicode normalization variant of canonical project %q\n", tc.from, canonical)
+				if recovered != exitCode(1) || stdout != "" || stderr != want {
+					t.Fatalf("%s: stdout=%q stderr=%q exit=%v", mode, stdout, stderr, recovered)
+				}
+				s, err := store.New(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var count int
+				err = s.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count)
+				if closeErr := s.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+				if err != nil || count != 1 {
+					t.Fatalf("%s mutated source: count=%d err=%v", mode, count, err)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectsMergeSyncOnly(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollProject("foo-bar"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ mode, want string }{{"--dry-run", "Sync identity changes: true"}, {"--apply", "Sync identity may also change"}} {
+		withArgs(t, "engram", "projects", "merge", "--from", "foo-bar", "--to", "foo_bar", tc.mode)
+		out, stderr := captureOutput(t, func() { cmdProjects(cfg) })
+		if stderr != "" || !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: stdout=%q stderr=%q", tc.mode, out, stderr)
+		}
+		s, err := store.New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := s.IsProjectEnrolled("foo-bar")
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := s.IsProjectEnrolled("foo_bar")
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.mode == "--dry-run" && (!source || target) {
+			t.Fatalf("dry-run changed enrollment: source=%t target=%t", source, target)
+		}
+		if tc.mode == "--apply" && (source || !target) {
+			t.Fatalf("apply failed enrollment: source=%t target=%t", source, target)
+		}
+	}
+}
+
+func TestProjectsMergeInvalidFlagsDoNotWrite(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"no mode", []string{"--from", "acmeapi", "--to", "acme-api"}},
+		{"conflicting modes", []string{"--from", "acmeapi", "--to", "acme-api", "--dry-run", "--apply"}},
+		{"unknown", []string{"--from", "acmeapi", "--to", "acme-api", "--aplly"}},
+		{"repeated source", []string{"--from", "acmeapi", "--from", "acmeapi", "--to", "acme-api", "--apply"}},
+		{"repeated target", []string{"--from", "acmeapi", "--to", "acme-api", "--to", "acme-api", "--apply"}},
+		{"repeated mode", []string{"--from", "acmeapi", "--to", "acme-api", "--apply", "--apply"}},
+		{"missing from", []string{"--to", "acme-api", "--apply"}},
+		{"missing to", []string{"--from", "acmeapi", "--apply"}},
+		{"missing value", []string{"--from", "--to", "acme-api", "--apply"}},
+		{"empty value", []string{"--from", " ", "--to", "acme-api", "--apply"}},
+		{"extra position", []string{"--from", "acmeapi", "--to", "acme-api", "--apply", "extra"}},
+		{"equals spelling", []string{"--from=acmeapi", "--to", "acme-api", "--apply"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			mustSeedObservation(t, cfg, "flag-session", "acmeapi", "note", "flag-note", "content", "project")
+			oldExit := exitFunc
+			exitFunc = func(code int) { panic("exit") }
+			t.Cleanup(func() { exitFunc = oldExit })
+			withArgs(t, append([]string{"engram", "projects", "merge"}, tc.args...)...)
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdProjects(cfg) })
+			if recovered == nil || !strings.Contains(stderr, "usage:") {
+				t.Fatalf("stderr=%q panic=%v", stderr, recovered)
+			}
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			err = s.DB().QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'acmeapi'`).Scan(&count)
+			if closeErr := s.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if err != nil || count != 1 {
+				t.Fatalf("source mutated: count=%d err=%v", count, err)
+			}
+		})
+	}
+}
 
 func TestCmdProjectsListEmpty(t *testing.T) {
 	cfg := testConfig(t)
@@ -2855,7 +3071,7 @@ func TestCmdSyncUsesFullProjectDetection(t *testing.T) {
 	// Stub full detection so sync preserves fail-closed automatic Git detection.
 	old := detectProjectFull
 	t.Cleanup(func() { detectProjectFull = old })
-	detectProjectFull = func(dir string) project.DetectionResult {
+	detectProjectFull = func(dir string, _ project.DetectionOptions) project.DetectionResult {
 		return project.DetectionResult{Project: "git-detected-project", Source: project.SourceGitRemote, Path: dir}
 	}
 
@@ -2899,7 +3115,7 @@ func TestCmdSyncFailsClosedWhenFullProjectDetectionFails(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			detectProjectFull = func(string) project.DetectionResult { return tt.detect }
+			detectProjectFull = func(string, project.DetectionOptions) project.DetectionResult { return tt.detect }
 			exportCalled := false
 			syncExport = func(*engramsync.Syncer, string, string) (*engramsync.SyncResult, error) {
 				exportCalled = true
@@ -2974,7 +3190,7 @@ func TestObsidianExportMissingVault(t *testing.T) {
 
 // TestObsidianExportCallsInjectedExporter verifies that when --vault is provided,
 // the injected newObsidianExporter is called with the correct config
-// (REQ-EXPORT-01: happy path with all flags).
+// (REQ-EXPORT-01: happy path with supported flags).
 func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	cfg := testConfig(t)
 	vaultDir := t.TempDir()
@@ -2995,7 +3211,6 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	withArgs(t, "engram", "obsidian-export",
 		"--vault", vaultDir,
 		"--project", "eng",
-		"--limit", "50",
 		"--since", "2026-01-01",
 	)
 
@@ -3010,8 +3225,8 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	if capturedCfg.Project != "eng" {
 		t.Fatalf("expected Project=%q, got %q", "eng", capturedCfg.Project)
 	}
-	if capturedCfg.Limit != 50 {
-		t.Fatalf("expected Limit=50, got %d", capturedCfg.Limit)
+	if capturedCfg.Limit != 0 {
+		t.Fatalf("expected unlimited export (Limit=0), got %d", capturedCfg.Limit)
 	}
 	if capturedCfg.Since.IsZero() {
 		t.Fatalf("expected Since to be set from --since 2026-01-01, got zero")
@@ -3102,6 +3317,52 @@ func TestObsidianExportInHelpText(t *testing.T) {
 	stdout, _ := captureOutput(t, func() { printUsage() })
 	if !strings.Contains(stdout, "obsidian-export") {
 		t.Fatalf("expected 'obsidian-export' in help text, got: %q", stdout)
+	}
+}
+
+// TestDoctorHelpNamesRepairSubcommand guards the top-level help against the
+// #1940 gap: `doctor` itself is read-only, but `engram doctor repair --apply`
+// writes, and a help line that lists only the flags of the base command hides a
+// mutating subcommand behind a "read-only" description.
+func TestDoctorHelpNamesRepairSubcommand(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+
+	lines := strings.Split(stdout, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "  doctor ") {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		t.Fatalf("expected a 'doctor' line in help text, got: %q", stdout)
+	}
+
+	// Continuation lines of an entry are indented to the description column;
+	// the next entry starts at the two-space command column and ends the block.
+	var block strings.Builder
+	block.WriteString(lines[start] + "\n")
+	for _, line := range lines[start+1:] {
+		if !strings.HasPrefix(line, "                     ") {
+			break
+		}
+		block.WriteString(line + "\n")
+	}
+
+	blockText := block.String()
+	for _, want := range []string{
+		"Run read-only operational diagnostics [--json] [--project P] [--check CODE]",
+		"repair --project P --check CODE (--plan|--dry-run|--apply)",
+		"repair mutates state: only --apply writes.",
+	} {
+		if !strings.Contains(blockText, want) {
+			t.Fatalf("expected doctor help block to mention %q, got: %q", want, blockText)
+		}
+	}
+	if strings.Contains(blockText, "default --dry-run") ||
+		strings.Contains(blockText, "default: --dry-run") {
+		t.Fatalf("doctor help must not advertise a default mode for all repair checks: %q", blockText)
 	}
 }
 

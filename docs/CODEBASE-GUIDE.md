@@ -69,6 +69,13 @@ The sentence that organizes the whole repo:
 | Change cloud autosync | `internal/cloud/autosync/manager.go` | [Sync and Cloud](codebase/sync-and-cloud.md), `internal/cloud/remote/transport.go`, `DOCS.md#cloud-autosync` |
 | Change the dashboard | `internal/cloud/dashboard/dashboard.go` | [Dashboard](codebase/dashboard.md), `internal/cloud/dashboard/*_templ.go`, `internal/cloud/dashboard/static/styles.css` |
 | Change agent setup | `internal/setup/registry.go`, `internal/setup/agents.go`, `internal/setup/setup.go` | [Integrations](codebase/integrations.md), `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
+| Run or review CI security/workflow scanners | `.github/scripts/ci-scanner.sh`, `.github/workflows/ci.yml` | [Pinned scanner setup and result interpretation](ci-scanners.md) |
+| Review CI issue-approval metadata | `.github/scripts/issue-validation.mjs` | [Read-only linked-issue validation](ci-issue-validation.md) |
+| Review bounded issue-check publication | `.github/scripts/issue-check-publisher.mjs` | [Inactive issue-check publisher](ci-issue-check-publisher.md) |
+| Bootstrap trusted issue-refresh rollout | `.github/workflows/issue-validation.yml` | [Rollout, consistency windows and trusted recovery](ci-issue-refresh-rollout.md) |
+| Review inactive issue approval discovery/dispatch | `.github/scripts/issue-refresh-dispatch.mjs` | [Discovery, partial failures and evidence limits](ci-issue-refresh-dispatch.md) |
+| Review inactive native metadata rerun admission | `.github/scripts/issue-refresh-router.mjs` | [Caller binding and rerun limits](ci-issue-refresh-router.md) |
+| Review candidate native issue-gating foundation | `.github/workflows/issue-policy.yml`, `.github/scripts/issue-native-policy.mjs` (not yet trusted-main/live proof) | [Native-policy permission and rollout boundary](ci-issue-native-policy.md) |
 
 ## Full technical reference stays in DOCS.md
 

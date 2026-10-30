@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func mustExportLocalChunk(t *testing.T, sy *Syncer, project string) (*SyncResult, ChunkData) {

@@ -1,12 +1,47 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestEnsureInstanceIDContextCancellationAndContinuity(t *testing.T) {
+	dir := t.TempDir()
+	want, err := EnsureInstanceID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireMigrationLock(filepath.Join(dir, ".instance-id.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err = EnsureInstanceIDContext(ctx, dir)
+	unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("contended identity: %v", err)
+	}
+	got, err := EnsureInstanceIDContext(context.Background(), dir)
+	if err != nil || got != want {
+		t.Fatalf("identity continuity: %q, %v", got, err)
+	}
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := EnsureInstanceIDContext(canceled, filepath.Join(dir, "absent")); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "absent")); !os.IsNotExist(err) {
+		t.Fatalf("expired context created directory: %v", err)
+	}
+}
 
 func TestEnsureInstanceIDRecoversMalformedAndTruncatedFiles(t *testing.T) {
 	for name, contents := range map[string]string{
@@ -97,6 +132,30 @@ func TestEnsureInstanceIDSerializesConcurrentRecoveryAndPublication(t *testing.T
 		} else if id != winner {
 			t.Fatalf("concurrent identity = %q, want published winner %q", id, winner)
 		}
+	}
+}
+
+func TestEnsureInstanceIDPublicationCompleteAndPrivate(t *testing.T) {
+	dataDir := t.TempDir()
+	id, err := EnsureInstanceID(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataDir, ".instance-id")
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != id+"\n" {
+		t.Fatalf("persisted identity = %q, %v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("identity permissions = %o", info.Mode().Perm())
+	}
+	temporary, err := filepath.Glob(filepath.Join(dataDir, ".instance-id-*"))
+	if err != nil || len(temporary) != 0 {
+		t.Fatalf("publication left temporary files: %v, %v", temporary, err)
 	}
 }
 

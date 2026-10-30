@@ -10,6 +10,7 @@ ENGRAM_PORT="${ENGRAM_PORT:-7437}"
 ENGRAM_EXTERNAL_URL="${ENGRAM_URL:-}"
 ENGRAM_EXTERNAL_URL="${ENGRAM_EXTERNAL_URL#"${ENGRAM_EXTERNAL_URL%%[![:space:]]*}"}"
 ENGRAM_EXTERNAL_URL="${ENGRAM_EXTERNAL_URL%"${ENGRAM_EXTERNAL_URL##*[![:space:]]}"}"
+ENGRAM_NATIVE_URL="$ENGRAM_EXTERNAL_URL"
 if [ -n "$ENGRAM_EXTERNAL_URL" ]; then
   ENGRAM_URL="$ENGRAM_EXTERNAL_URL"
   ENGRAM_MANAGED_LOCAL=0
@@ -42,7 +43,11 @@ if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
   else
     ENGRAM_SERVE_ERR_LOG="${TMPDIR:-/tmp}/engram-serve.err.log"
   fi
-  ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
+  if [ "${OS:-}" = "Windows_NT" ]; then
+    ENGRAM_CLOUD_AUTOSYNC=1 engram serve-background "$ENGRAM_SERVE_ERR_LOG" || true
+  else
+    ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
+  fi
   sleep 0.5
 fi
 if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
@@ -54,7 +59,7 @@ fi
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Register and retain only the server-confirmed runtime identity.
-SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD")
+SESSION_HANDOFF=$(engram_session_handoff "$INPUT" "$PROJECT" "$CWD" codex-register) && SESSION_REGISTERED=1 || SESSION_REGISTERED=0
 
 # Auto-import git-synced chunks
 if [ -f "${CWD}/.engram/manifest.json" ]; then
@@ -149,44 +154,65 @@ fi
 
 # Inject Memory Protocol + context — stdout is returned to Codex as additionalContext
 printf '%s\n' "$SESSION_HANDOFF"
+if [ "$SESSION_REGISTERED" = 1 ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
-You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
+You have Engram memory tools. The agent MUST follow this protocol without waiting for activation.
 
-### CORE TOOLS — always available, no ToolSearch needed
+### AVAILABLE TOOLS
+Use the Engram tools actually exposed by Codex, with their registered MCP names
+(`mcp__engram__mem_*` or `mcp__plugin_engram_engram__mem_*`). The names below are
+logical names; availability and discovery follow Codex's host-specific interface.
+
 mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
+mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
-Use ToolSearch for other tools: mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
+### SELECTIVE MEMORY
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
-### PROACTIVE SAVE — do NOT wait for user to ask
-Call `mem_save` IMMEDIATELY after ANY of these:
-- Decision made (architecture, convention, workflow, tool choice)
-- Bug fixed (include root cause)
-- Convention or workflow documented/updated
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Non-obvious discovery, gotcha, or edge case found
-- Pattern established (naming, structure, approach)
-- User preference or constraint learned
-- Feature implemented with non-obvious approach
-- User confirms your recommendation ("go with that", "sounds good", or the equivalent in the user's language)
-- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
-- Discussion concludes with a clear direction chosen
+For selected writes, use mem_search on the bounded topic in the intended project and scope before writing.
+Read candidates in full with mem_get_observation; snippets are not identity evidence.
+For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact,
+and record superseded facts as history. For a genuinely new topic use mem_save with a deliberate,
+distinct topic_key. If already covered, write nothing.
+On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save.
+A failed read is not evidence of absence. A suggested topic_key is a hint, not proof of identity.
+Never merge across projects or scopes. Structure content as What, Why, Where, Learned.
 
-**Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
 
 ### DELIVERY GUARANTEE
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
-### SEARCH MEMORY when:
-- User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
-- Starting work on something that might have been done before
-- User mentions a topic you have no context on
-- User's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
+### SEARCH AND SESSION CLOSE
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+For recall: mem_context, then mem_search with distinctive keywords, then mem_get_observation for full content.
+Narrow by project/type after broad recall as needed.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
+Summary persistence does not end the session; Codex's SessionEnd hook owns lifecycle closure.
 
-### SESSION CLOSE — before saying "done":
-Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
+### PASSIVE CAPTURE — adapter-specific safety net
+Codex's SubagentStop hook forwards eligible delegated/subagent output for server-side extraction.
+Ordinary main-agent responses are not automatically captured; the section alone does not guarantee storage.
+Use `mem_save` as the primary path for significant, verified knowledge. Explicit
+`mem_capture_passive(content)` extraction is a safety net, not a replacement for `mem_save`.
+
+### SESSION BINDING
+Codex's PreToolUse command `engram hook codex-pre-tool-use` matches
+`mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. Supported mutating
+Engram calls resolve the authoritative host session before binding `session_id`
+for writes and `id` for session start/end. Never invent or override this identity.
+Read-only tools are unchanged; malformed input or unconfirmed host resolution denies mutating calls.
+For direct/nonintercepted clients, reuse the confirmed lifecycle identity supplied above.
 PROTOCOL
+fi
 
 # Inject memory context if available
 if [ -n "$CONTEXT" ]; then

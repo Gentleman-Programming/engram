@@ -23,6 +23,10 @@
 | TUI | Terminal memory navigation. | `internal/tui` |
 | Obsidian beta | Experimental export/plugin to Obsidian. | `internal/obsidian`, `plugin/obsidian`, `docs/beta/obsidian-brain.md` |
 
+Doctor keeps CLI parsing, errors, and JSON presentation in `cmd/engram/doctor.go`.
+`internal/diagnostic/repair.go` owns repair orchestration and result aggregation;
+`internal/store` retains each repair's data, transaction, and backup behavior.
+
 ## How to navigate the repo
 
 ### Recommended first pass

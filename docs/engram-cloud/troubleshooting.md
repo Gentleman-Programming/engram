@@ -6,6 +6,10 @@ Use this guide when local Engram saves work but cloud sync does not advance. The
 
 ---
 
+## Blank-project pending session mutations
+
+If cloud export reports a pending session mutation with `seq` and `entity_key`, run `engram cloud upgrade doctor --project <project>` and apply its deterministic repair before retrying export. Repair uses the matching local session as authority for project and directory. A conflicting payload or missing local session requires manual investigation; do not assign ownership from the journal payload alone.
+
 ## Quick Triage
 
 Run these commands first:
@@ -25,6 +29,8 @@ Check three things:
 | `cloud status` | configured + auth ready | CLI has a server URL and runtime token |
 | `doctor` | `ready` or actionable repair | Local metadata is safe to upload |
 | `last_acked_seq` | Advances after sync | Cloud accepted the pending journal |
+
+`engram cloud upgrade doctor --project <project>` checks policy failures recorded locally for that project only. A denial recorded for another project in the shared `cloud` sync target does not block the selected project. Doctor does not probe server authorization; it persists its diagnosis as `doctor_ready` or `doctor_blocked`. Use `engram sync --cloud --project <project>` to check the current server response.
 
 If the dashboard shows `0` observations but local saves exist, the cloud server has not accepted the client's pending sync yet. Do not delete local data.
 
@@ -64,6 +70,10 @@ engram cloud config --clear
 `cloud unenroll` is idempotent and stops future replication eligibility for that project. It does not delete local data, remote history, or pending journal rows, and it does not cancel an already in-flight push.
 
 `cloud config --clear` clears only the persisted `cloud.json` server URL and token. Active `ENGRAM_CLOUD_SERVER` and `ENGRAM_CLOUD_TOKEN` overrides remain effective and are reported by the command and status output; unset them separately when you need them inactive.
+
+## Prompt source attestation did not complete
+
+`engram cloud attest-prompt-source --sync-id <exact-sync-id> --owner-project <owner-project>` requires a configured cloud endpoint and human bearer token. If the local preview is absent or ambiguous, verify the exact sync ID; no remote request is sent. A declined or invalid confirmation also sends nothing. A remote denial can mean either project grant is missing: check both grants with your cloud administrator rather than treating the prompt project as ownership proof. If the remote call succeeds but local confirmation fails, the error includes the remote attestation ID; **do not assume local authorization**. Resolve the local mismatch and retry deliberately. No import, pull, or deletion is part of this command.
 
 ## Cloud project was recreated or deleted
 
@@ -129,6 +139,8 @@ write chunk: cloud: push chunk ...: status 400: invalid push payload: observatio
 ```
 
 It means a historical `session` mutation in `sync_mutations` is missing `directory`, a local `sessions` row included in the project export still has an empty/null `directory`, a local `observations` row included in the project export is missing a cloud-push required field, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows, local session rows, or exported local observation rows may still need repair before first cloud upload.
+
+Isolated cross-project sessions are an exception: `ownership_mode: "project_owned"` with an omitted or blank string directory is valid and replicates without a repair. If an older client or cloud server rejects that payload, update both sides to a version supporting isolated cloud sessions. Do not use the directory rescue helper on these sessions: assigning a directory breaks their isolation contract. JSON null and non-string directory values are still invalid.
 
 ### Safe path: helper script
 

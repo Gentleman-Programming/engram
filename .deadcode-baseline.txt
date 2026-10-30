@@ -1,7 +1,6 @@
 internal/cloud/cloudserver/cloudserver.go	CloudServer.withAuthHandler
 internal/cloud/cloudserver/mutations.go	validateLegacyPayload
 internal/cloud/cloudserver/mutations.go	validateMutationEntry
-internal/cloud/cloudstore/dashboard_queries.go	buildDashboardReadModel
 internal/cloud/dashboard/dashboard.go	Handler
 internal/cloud/dashboard/dashboard.go	HandlerWithStatus
 internal/cloud/dashboard/dashboard.go	reasonHeadline
@@ -17,7 +16,6 @@ internal/diagnostic/diagnostic.go	NewRunnerWithRegistry
 internal/mcp/activity.go	SessionActivity.NudgeIfNeeded
 internal/mcp/activity.go	SessionActivity.RecordSave
 internal/mcp/mcp.go	DoctorToolHandler
-internal/server/server.go	Server.Handler
 internal/server/server.go	Server.SetOnWrite
 internal/store/store.go	ClassifyTool
 internal/store/store.go	Store.projectNeedsBackfill

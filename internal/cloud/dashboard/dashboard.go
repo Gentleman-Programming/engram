@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
 	"github.com/a-h/templ"
 )
 
@@ -54,6 +54,20 @@ type MountConfig struct {
 	ManagedUsers      ManagedUsersStore
 	MaxLoginBodyBytes int64
 	StatusProvider    SyncStatusProvider
+	// Version is the display-ready running server build identifier, rendered
+	// verbatim in the dashboard chrome (e.g. "v1.20.3" for a semver build,
+	// "dev" for an un-versioned local build). cloudserver.WithVersion()
+	// produces this shape. When empty the chrome shows "version unknown".
+	Version string
+}
+
+// versionMarker renders the chrome suffix for a build identifier, separator
+// included. Missing build identifiers are explicit on both chrome surfaces.
+func versionMarker(version string) string {
+	if version == "" {
+		return " · version unknown"
+	}
+	return " · " + version
 }
 
 type DashboardStore interface {
@@ -277,7 +291,7 @@ func (h *handlers) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	renderComponent(w, r, LoginPage("", next))
+	renderComponent(w, r, LoginPage("", next, h.cfg.Version))
 }
 
 func (h *handlers) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
@@ -305,12 +319,12 @@ func (h *handlers) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if token == "" {
-		renderComponent(w, r, LoginPage("token is required", next))
+		renderComponent(w, r, LoginPage("token is required", next, h.cfg.Version))
 		return
 	}
 	if h.cfg.ValidateLoginToken != nil {
 		if err := h.cfg.ValidateLoginToken(token); err != nil {
-			renderComponent(w, r, LoginPage("invalid token", next))
+			renderComponent(w, r, LoginPage("invalid token", next, h.cfg.Version))
 			return
 		}
 	}
@@ -336,7 +350,7 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, DashboardHome(p.DisplayName()))
 		return
 	}
-	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName())))
+	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), h.cfg.Version, DashboardHome(p.DisplayName())))
 }
 
 func (h *handlers) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +373,7 @@ func (h *handlers) handleDashboardStats(w http.ResponseWriter, r *http.Request) 
 		renderHTML(w, body)
 		return
 	}
-	renderComponent(w, r, Layout("Stats", p.DisplayName(), "dashboard", p.IsAdmin(), templ.Raw(body)))
+	renderComponent(w, r, Layout("Stats", p.DisplayName(), "dashboard", p.IsAdmin(), h.cfg.Version, templ.Raw(body)))
 }
 
 func (h *handlers) handleDashboardActivity(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +406,7 @@ func (h *handlers) handleDashboardActivity(w http.ResponseWriter, r *http.Reques
 		renderHTML(w, b.String())
 		return
 	}
-	renderComponent(w, r, Layout("Activity", p.DisplayName(), "dashboard", p.IsAdmin(), templ.Raw(b.String())))
+	renderComponent(w, r, Layout("Activity", p.DisplayName(), "dashboard", p.IsAdmin(), h.cfg.Version, templ.Raw(b.String())))
 }
 
 func (h *handlers) handleBrowser(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +432,7 @@ func (h *handlers) handleBrowser(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, component))
 }
 
 func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Request) {
@@ -443,25 +457,20 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardObservationRow, int, error) {
+			return h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch observations page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback observations page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback observations page 1: %v", err)
+		})
 	}
 	partial := ObservationsPartial(rows, pg)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, partial)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, obsType)))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, BrowserPage(nil, nil, project, query, obsType)))
 }
 
 func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request) {
@@ -485,25 +494,20 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardSessionRow, int, error) {
+			return h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch sessions page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback sessions page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback sessions page 1: %v", err)
+		})
 	}
 	partial := SessionsPartial(rows, pg)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, partial)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, "")))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, BrowserPage(nil, nil, project, query, "")))
 }
 
 func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) {
@@ -527,25 +531,20 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardPromptRow, int, error) {
+			return h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch prompts page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback prompts page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback prompts page 1: %v", err)
+		})
 	}
 	partial := PromptsPartial(rows, pg)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, partial)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, "")))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, BrowserPage(nil, nil, project, query, "")))
 }
 
 // handleBrowserSessionDetail handles GET /dashboard/browser/sessions/{sessionID}.
@@ -553,9 +552,9 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 // R5-6: use r.Clone to avoid mutating shared request state when delegating to handleBrowserSessions.
 func (h *handlers) handleBrowserSessionDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
-	if sessionID == "" {
-		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session Detail", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Session Not Found", "No dashboard data exists for that session identifier.")))
+	sessionID := r.PathValue("sessionID")
+	if strings.TrimSpace(sessionID) == "" {
+		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session Detail", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Session Not Found", "No dashboard data exists for that session identifier.")))
 		return
 	}
 	// Clone the request before mutating URL so the original request is not modified.
@@ -572,14 +571,14 @@ func (h *handlers) handleProjects(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Projects", p.DisplayName(), "projects", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Projects", p.DisplayName(), "projects", p.IsAdmin(), h.cfg.Version, component))
 }
 
 func (h *handlers) handleProjectDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
 	if project == "" {
-		renderComponentStatus(w, r, http.StatusNotFound, Layout("Project Detail", p.DisplayName(), "projects", p.IsAdmin(), EmptyState("Project Not Found", "No replicated dashboard data exists for that project.")))
+		renderComponentStatus(w, r, http.StatusNotFound, Layout("Project Detail", p.DisplayName(), "projects", p.IsAdmin(), h.cfg.Version, EmptyState("Project Not Found", "No replicated dashboard data exists for that project.")))
 		return
 	}
 	var stats *cloudstore.DashboardProjectRow
@@ -598,7 +597,7 @@ func (h *handlers) handleProjectDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	component := ProjectDetailPage(project, stats, ctrl)
-	renderComponent(w, r, Layout("Project Detail", p.DisplayName(), "projects", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Project Detail", p.DisplayName(), "projects", p.IsAdmin(), h.cfg.Version, component))
 }
 
 func (h *handlers) handleContributors(w http.ResponseWriter, r *http.Request) {
@@ -611,7 +610,7 @@ func (h *handlers) handleContributors(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Contributors", p.DisplayName(), "contributors", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Contributors", p.DisplayName(), "contributors", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleContributorsList handles GET /dashboard/contributors/list.
@@ -634,18 +633,13 @@ func (h *handlers) handleContributorsList(w http.ResponseWriter, r *http.Request
 	}
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListContributorsPaginated(query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardContributorRow, int, error) {
+			return h.cfg.Store.ListContributorsPaginated(query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch contributors list page %d: %v", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated(query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback contributors list page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback contributors list page 1: %v", err)
+		})
 	}
 	renderComponent(w, r, ContributorsListPartial(rows, pg))
 }
@@ -654,11 +648,11 @@ func (h *handlers) handleContributorDetail(w http.ResponseWriter, r *http.Reques
 	p := h.principalFromRequest(r)
 	contributor := strings.TrimSpace(r.PathValue("contributor"))
 	if contributor == "" {
-		renderComponentStatus(w, r, http.StatusNotFound, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), EmptyState("Contributor Not Found", "No dashboard data exists for that contributor.")))
+		renderComponentStatus(w, r, http.StatusNotFound, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), h.cfg.Version, EmptyState("Contributor Not Found", "No dashboard data exists for that contributor.")))
 		return
 	}
 	if h.cfg.Store == nil {
-		renderComponent(w, r, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), ContributorDetailPage(nil, nil, nil, nil)))
+		renderComponent(w, r, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), h.cfg.Version, ContributorDetailPage(nil, nil, nil, nil)))
 		return
 	}
 	row, sessions, observations, prompts, err := h.cfg.Store.GetContributorDetail(contributor)
@@ -667,7 +661,7 @@ func (h *handlers) handleContributorDetail(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	component := ContributorDetailPage(&row, sessions, observations, prompts)
-	renderComponent(w, r, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), h.cfg.Version, component))
 }
 
 func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
@@ -694,7 +688,7 @@ func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Admin", p.DisplayName(), "admin", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Admin", p.DisplayName(), "admin", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleAdminProjectControls handles GET /dashboard/admin/projects.
@@ -720,7 +714,7 @@ func (h *handlers) handleAdminProjectControls(w http.ResponseWriter, r *http.Req
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Admin Projects", p.DisplayName(), "admin", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Admin Projects", p.DisplayName(), "admin", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // ─── 11 New Handler Implementations (visual parity batch) ────────────────────
@@ -756,19 +750,13 @@ func (h *handlers) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 	// R5-3: add tier-3 fallback — if clamped re-fetch fails AND rows are empty, attempt page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListProjectsPaginated(query, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardProjectRow, int, error) {
+			return h.cfg.Store.ListProjectsPaginated(query, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch projects list page %d: %v (using first-page rows)", pg.Page, err)
-			// R5-3: tier-3 fallback to page 1 when re-fetch fails and rows are empty.
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListProjectsPaginated(query, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback projects list page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback projects list page 1: %v", err)
+		})
 	}
 	renderComponent(w, r, ProjectsListPartial(rows, controlsMap, pg))
 }
@@ -838,7 +826,7 @@ func (h *handlers) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Managed Users", p.DisplayName(), "admin", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Managed Users", p.DisplayName(), "admin", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleAdminUsersList handles GET /dashboard/admin/users/list.
@@ -883,7 +871,7 @@ func (h *handlers) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Admin Health", p.DisplayName(), "admin", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Admin Health", p.DisplayName(), "admin", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleAdminSyncTogglePost handles POST /dashboard/admin/projects/{name}/sync.
@@ -946,9 +934,9 @@ func (h *handlers) handleAdminSyncToggleForm(w http.ResponseWriter, r *http.Requ
 func (h *handlers) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
-	if project == "" || sessionID == "" || len(sessionID) > 128 {
-		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Session Not Found", "Invalid session identifier.")))
+	sessionID := r.PathValue("sessionID")
+	if project == "" || strings.TrimSpace(sessionID) == "" || len(sessionID) > 128 {
+		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Session Not Found", "Invalid session identifier.")))
 		return
 	}
 	var sess *cloudstore.DashboardSessionRow
@@ -965,17 +953,17 @@ func (h *handlers) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		prompts = pr
 	}
 	component := SessionDetailPage(sess, obs, prompts)
-	renderComponent(w, r, Layout("Session Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Session Detail", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleObservationDetail handles GET /dashboard/observations/{project}/{sessionID}/{syncID}.
 func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
+	sessionID := r.PathValue("sessionID")
 	syncID := strings.TrimSpace(r.PathValue("syncID"))
-	if project == "" || sessionID == "" || syncID == "" || len(syncID) > 128 {
-		renderComponentStatus(w, r, http.StatusNotFound, Layout("Observation", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Observation Not Found", "Invalid observation identifier.")))
+	if project == "" || strings.TrimSpace(sessionID) == "" || syncID == "" || len(syncID) > 128 {
+		renderComponentStatus(w, r, http.StatusNotFound, Layout("Observation", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Observation Not Found", "Invalid observation identifier.")))
 		return
 	}
 	var obs *cloudstore.DashboardObservationRow
@@ -992,17 +980,17 @@ func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Reques
 		related = rel
 	}
 	component := ObservationDetailPage(obs, sess, related)
-	renderComponent(w, r, Layout("Observation Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Observation Detail", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handlePromptDetail handles GET /dashboard/prompts/{project}/{sessionID}/{syncID}.
 func (h *handlers) handlePromptDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.PathValue("project"))
-	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
+	sessionID := r.PathValue("sessionID")
 	syncID := strings.TrimSpace(r.PathValue("syncID"))
-	if project == "" || sessionID == "" || syncID == "" || len(syncID) > 128 {
-		renderComponentStatus(w, r, http.StatusNotFound, Layout("Prompt", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Prompt Not Found", "Invalid prompt identifier.")))
+	if project == "" || strings.TrimSpace(sessionID) == "" || syncID == "" || len(syncID) > 128 {
+		renderComponentStatus(w, r, http.StatusNotFound, Layout("Prompt", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, EmptyState("Prompt Not Found", "Invalid prompt identifier.")))
 		return
 	}
 	var prompt *cloudstore.DashboardPromptRow
@@ -1019,7 +1007,7 @@ func (h *handlers) handlePromptDetail(w http.ResponseWriter, r *http.Request) {
 		related = rel
 	}
 	component := PromptDetailPage(prompt, sess, related)
-	renderComponent(w, r, Layout("Prompt Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Prompt Detail", p.DisplayName(), "browser", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // renderObservationsTable removed in Batch 6 REFACTOR — replaced by ObservationsPartial templ component.
@@ -1036,7 +1024,7 @@ func (h *handlers) renderStoreError(w http.ResponseWriter, r *http.Request, acti
 	// are always present regardless of which handler generated the error.
 	p := h.principalFromRequest(r)
 	body := fmt.Sprintf(`<section class="frame-section"><p class="section-kicker">DEGRADED</p><h2>%s</h2>%s</section>`, html.EscapeString(contextLabel), fragment)
-	renderComponentStatus(w, r, status, Layout(contextLabel, p.DisplayName(), activeTab, p.IsAdmin(), templ.Raw(body)))
+	renderComponentStatus(w, r, status, Layout(contextLabel, p.DisplayName(), activeTab, p.IsAdmin(), h.cfg.Version, templ.Raw(body)))
 }
 
 func classifyStoreError(contextLabel string, err error) (int, string, string) {
@@ -1111,7 +1099,7 @@ func (h *handlers) handleAdminAuditLog(w http.ResponseWriter, r *http.Request) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Audit Log", p.DisplayName(), "admin", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Audit Log", p.DisplayName(), "admin", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleAdminAuditLogList handles GET /dashboard/admin/audit-log/list (partial, admin-gated, HTMX).
@@ -1149,18 +1137,13 @@ func (h *handlers) handleAdminAuditLogList(w http.ResponseWriter, r *http.Reques
 	// Tier 3: page-1 fallback when re-fetch fails and rows are empty.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
+		rows = recoverPaginationRows(rows, pg.Offset(), func(offset int) ([]cloudstore.DashboardAuditRow, int, error) {
+			return h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, offset)
+		}, func(err error) {
 			log.Printf("dashboard: re-fetch audit log list page %d: %v (using first-page rows)", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback audit log list page 1: %v", fallbackErr)
-				}
-			}
-		}
+		}, func(err error) {
+			log.Printf("dashboard: fallback audit log list page 1: %v", err)
+		})
 	}
 
 	renderComponent(w, r, AdminAuditLogListPartial(rows, pg, filter))

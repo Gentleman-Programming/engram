@@ -8,12 +8,16 @@ import (
 	"strings"
 
 	"encoding/json"
-	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/v2/internal/setup"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v3/internal/setup"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func cmdDoctor(cfg store.Config) {
+	if len(os.Args) > 2 && os.Args[2] == "discard-empty-prompt" {
+		cmdDoctorDiscardEmptyPrompt(cfg)
+		return
+	}
 	if len(os.Args) > 2 && os.Args[2] == "repair" {
 		cmdDoctorRepair(cfg)
 		return
@@ -118,20 +122,25 @@ func cmdDoctor(cfg store.Config) {
 }
 
 func printDoctorUsage() {
+	_, _ = fmt.Fprintln(os.Stdout, "note: project mismatch evidence includes local aliases; repair rereads aliases to veto contradictory moves.")
+	_, _ = fmt.Fprintln(os.Stdout, discardPromptUsage)
 	fmt.Fprintln(os.Stdout, "usage: engram doctor [--json] [--project PROJECT] [--check CODE]")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")
-	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair, and "+diagnostic.CheckOrphanedPendingRelations+", which spans all projects because both-endpoints-absent relations belong to no project.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: source_unrepairable lists source fields requiring manual investigation; repair cannot reconstruct missing type or content.")
 	fmt.Fprintln(os.Stdout, "checks: "+strings.Join(diagnostic.RegisteredCodes(), ", "))
 	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
 
 func printDoctorRepairUsage() {
+	_, _ = fmt.Fprintln(os.Stdout, "note: project aliases veto contradictory reclassification; aliases never authorize historical moves.")
 	_, _ = fmt.Fprintln(os.Stdout, "usage: engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair [--project PROJECT] --check "+diagnostic.CheckSyncMutationRequiredFields+" [--plan|--dry-run|--apply] (default: --dry-run)")
 	_, _ = fmt.Fprintln(os.Stdout, "       engram doctor repair --project PROJECT --check invalid_session_identity --replacement-id ID [--source-id SOURCE] (--plan|--dry-run|--apply)")
-	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: --project is required for every repair check except "+diagnostic.CheckSyncMutationRequiredFields+", where it optionally scopes title repair, supersession, quarantine, and source-title repair, and "+diagnostic.CheckOrphanedPendingRelations+", which spans all projects because both-endpoints-absent relations belong to no project.")
+	_, _ = fmt.Fprintln(os.Stdout, "note: source_unrepairable lists source fields requiring manual investigation; repair cannot reconstruct missing type or content.")
 	_, _ = fmt.Fprintln(os.Stdout, "repairable checks: "+strings.Join(diagnostic.RepairableCodes(), ", "))
 	_, _ = fmt.Fprintln(os.Stdout, "diagnostic-only checks with no repair: "+strings.Join(diagnosticOnlyCheckCodes(), ", "))
 }
@@ -213,7 +222,7 @@ func cmdDoctorRepair(cfg store.Config) {
 	project, _ = store.NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	check = strings.TrimSpace(check)
-	if project == "" && check != diagnostic.CheckSyncMutationRequiredFields {
+	if project == "" && check != diagnostic.CheckSyncMutationRequiredFields && check != diagnostic.CheckOrphanedPendingRelations {
 		failDoctorRepair("--project is required")
 		return
 	}
@@ -251,52 +260,10 @@ func cmdDoctorRepair(cfg store.Config) {
 	}
 	defer s.Close()
 	if check == diagnostic.CheckSyncMutationRequiredFields {
-		directoryRepairs, err := s.RepairPendingSessionDirectories(project, mode == diagnostic.RepairModeApply)
+		result, err := diagnostic.RepairSyncMutationRequiredFields(s, project, mode)
 		if err != nil {
 			failDoctorRepair(err.Error())
 			return
-		}
-		repairs, err := s.RepairObservationMutationTitles(project, mode == diagnostic.RepairModeApply)
-		if err != nil {
-			failDoctorRepair(err.Error())
-			return
-		}
-		superseded, err := s.SupersedeUnenrolledLegacyMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
-		if err != nil {
-			failDoctorRepair(err.Error())
-			return
-		}
-		report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
-		if err != nil {
-			failDoctorRepair(err.Error())
-			return
-		}
-		if mode != diagnostic.RepairModeApply {
-			handledSeqs := make(map[int64]struct{}, len(repairs.Actions)+len(superseded.Actions)+len(directoryRepairs))
-			for _, action := range directoryRepairs {
-				handledSeqs[action.Seq] = struct{}{}
-			}
-			for _, action := range repairs.Actions {
-				handledSeqs[action.Seq] = struct{}{}
-			}
-			for _, action := range superseded.Actions {
-				handledSeqs[action.Seq] = struct{}{}
-			}
-			remaining := report.Actions[:0]
-			for _, action := range report.Actions {
-				if _, handled := handledSeqs[action.Seq]; !handled {
-					remaining = append(remaining, action)
-				}
-			}
-			report.Actions = remaining
-		}
-		sourceRepairs, err := s.RepairObservationSourceTitles(project, mode == diagnostic.RepairModeApply)
-		if err != nil {
-			failDoctorRepair(err.Error())
-			return
-		}
-		if mode == diagnostic.RepairModeApply {
-			report.Applied = len(directoryRepairs) > 0 || len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(superseded.Actions) > 0 || len(sourceRepairs.Actions) > 0
 		}
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
@@ -305,7 +272,8 @@ func cmdDoctorRepair(cfg store.Config) {
 			Superseded             []store.SyncMutationSupersedeAction        `json:"superseded"`
 			SourceRepairs          []store.ObservationSourceTitleRepairAction `json:"source_repairs"`
 			SourceRepairBackupPath string                                     `json:"source_repair_backup_path,omitempty"`
-		}{report, directoryRepairs, repairs.Actions, superseded.Actions, sourceRepairs.Actions, sourceRepairs.BackupPath})
+			SourceUnrepairable     []store.ObservationSourceUnrepairable      `json:"source_unrepairable"`
+		}{result.Quarantine, result.DirectoryRepairs, result.Repairs, result.Superseded, result.SourceRepairs, result.SourceRepairBackupPath, result.SourceUnrepairable})
 		return
 	}
 
@@ -370,6 +338,26 @@ func cmdDoctorRepair(cfg store.Config) {
 				plan.Counts.SessionsApplied++
 				plan.Counts.ObservationsApplied += action.ObservationCount
 			}
+		}
+		writeDoctorRepairJSON(plan)
+		return
+	}
+	if check == diagnostic.CheckOrphanedPendingRelations {
+		// Orphaned pending relations belong to no project (both endpoints are
+		// absent), so any --project value is accepted but cannot scope them.
+		if mode == diagnostic.RepairModeApply && plan.OrphanedPendingRelations != nil && len(plan.OrphanedPendingRelations.Candidates) > 0 {
+			result, err := s.ReclassifyOrphanedPendingRelations()
+			if err != nil {
+				failDoctorRepair(err.Error())
+				return
+			}
+			if result.Reclassified > 0 {
+				plan.Status = "applied"
+			} else {
+				plan.Status = "noop"
+			}
+			plan.Counts.RelationsApplied = result.Reclassified
+			plan.BackupPath = result.BackupPath
 		}
 		writeDoctorRepairJSON(plan)
 		return

@@ -1,13 +1,15 @@
 package obsidian
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/identityfile"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // ExportConfig holds all CLI flags for the obsidian-export command.
@@ -31,6 +33,10 @@ type StoreReader interface {
 type Exporter struct {
 	store  StoreReader
 	config ExportConfig
+
+	// Optional per-exporter seams for owned temporary creation and publication.
+	createTopicTemp func(string, string) (*os.File, error)
+	publishTopicHub func(string, string) error
 }
 
 // NewExporter constructs an Exporter. Validation happens in Export().
@@ -126,9 +132,10 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 	if e.config.Force {
 		state = SyncState{
-			Files:       make(map[int64]string),
-			SessionHubs: make(map[string]string),
-			TopicHubs:   make(map[string]string),
+			PendingRetirements: make(map[int64][]string),
+			Files:              make(map[int64]string),
+			SessionHubs:        make(map[string]string),
+			TopicHubs:          make(map[string]string),
 		}
 	}
 
@@ -148,34 +155,50 @@ func (e *Exporter) Export() (*ExportResult, error) {
 
 	result := &ExportResult{}
 
+	// present lists every observation the store still returns, soft deleted
+	// rows included. A tracked note whose ID is absent from it belonged to an
+	// observation that was hard deleted: the row is gone from the store, so the
+	// soft-delete loop below can never visit it (issue #1900).
+	present := make(map[int64]bool, len(data.Observations))
+	for _, obs := range data.Observations {
+		if e.config.Project == "" || (obs.Project != nil && *obs.Project == e.config.Project) {
+			present[obs.ID] = true
+		}
+	}
+
+	// A project-scoped export only reads that project's rows, so anything it
+	// does not see is still tracked on purpose and must not be pruned.
+	fullScope := e.config.Project == ""
+
+	// trackedPaths remembers where each note lived before this run so a rename
+	// can retire the old file after state.Files is overwritten.
+	trackedPaths := make(map[int64]string, len(state.Files))
+	for id, relPath := range state.Files {
+		trackedPaths[id] = relPath
+	}
+
 	// ── Handle deleted observations: clean up files ───────────────────────────
 	for _, obs := range data.Observations {
 		if obs.DeletedAt == nil {
 			continue
 		}
-		relPath, tracked := state.Files[obs.ID]
-		if !tracked {
+		if e.config.Project != "" && (obs.Project == nil || *obs.Project != e.config.Project) {
 			continue
 		}
-		absPath := filepath.Join(engRoot, relPath)
-		cleanRoot := filepath.Clean(engRoot)
-		cleanPath := filepath.Clean(absPath)
-		if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
-			result.Errors = append(result.Errors, fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath))
-			continue
-		}
-		root, err := os.OpenRoot(engRoot)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("open export root for delete %s: %w", cleanPath, err))
-			continue
-		}
-		err = root.Remove(relPath)
-		_ = root.Close()
-		if err != nil && !os.IsNotExist(err) {
-			result.Errors = append(result.Errors, fmt.Errorf("delete %s: %w", cleanPath, err))
-		} else {
-			result.Deleted++
+		if relPath, tracked := state.Files[obs.ID]; tracked {
+			state.PendingRetirements[obs.ID] = append(state.PendingRetirements[obs.ID], relPath)
 			delete(state.Files, obs.ID)
+		}
+	}
+
+	// ── Reconcile notes whose observation was hard deleted ───────────────────
+	if fullScope {
+		for id, relPath := range state.Files {
+			if present[id] {
+				continue
+			}
+			state.PendingRetirements[id] = append(state.PendingRetirements[id], relPath)
+			delete(state.Files, id)
 		}
 	}
 
@@ -190,6 +213,18 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	sessionObsRefs := make(map[string][]ObsRef)
 	// topicObsRefs tracks obs per topic prefix for hub generation.
 	topicObsRefs := make(map[string][]ObsRef)
+	// Live counts protect existing hubs even when exporting their notes fails.
+	liveSessionCounts := make(map[string]int)
+	liveTopicCounts := make(map[string]int)
+	addHubRef := func(obs store.Observation) {
+		ref := obsToRef(obs)
+		if obs.SessionID != "" {
+			sessionObsRefs[obs.SessionID] = append(sessionObsRefs[obs.SessionID], ref)
+		}
+		if prefix := obsTopicPrefix(obs); prefix != "" {
+			topicObsRefs[prefix] = append(topicObsRefs[prefix], ref)
+		}
+	}
 
 	for _, obs := range data.Observations {
 		// Skip deleted
@@ -208,21 +243,28 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			}
 		}
 
-		// Incremental filter: skip if updated_at <= cutoff AND already in state
+		project := "unknown"
+		if obs.Project != nil && *obs.Project != "" {
+			project = sanitizePathComponent(*obs.Project)
+		}
+		obsType := sanitizePathComponent(obs.Type)
+		relPath := filepath.Join(project, obsType, Slugify(obs.Title, obs.ID)+".md")
+		// Desired references survive note/hub write failures.
+		if obs.SessionID != "" {
+			liveSessionCounts[obs.SessionID]++
+		}
+		if prefix := obsTopicPrefix(obs); prefix != "" {
+			liveTopicCounts[prefix]++
+		}
+
+		// Incremental filter: a changed path must retry even below the cutoff.
 		if !cutoff.IsZero() {
 			updatedAt, err := time.Parse(time.RFC3339, obs.UpdatedAt)
 			if err == nil && !updatedAt.After(cutoff) {
 				// Only skip if already tracked in state (already exported)
-				if _, tracked := state.Files[obs.ID]; tracked {
+				if old, tracked := state.Files[obs.ID]; tracked && filepath.Clean(old) == relPath {
 					result.Skipped++
-					// Still collect for hub building
-					ref := obsToRef(obs)
-					if obs.SessionID != "" {
-						sessionObsRefs[obs.SessionID] = append(sessionObsRefs[obs.SessionID], ref)
-					}
-					if prefix := obsTopicPrefix(obs); prefix != "" {
-						topicObsRefs[prefix] = append(topicObsRefs[prefix], ref)
-					}
+					addHubRef(obs)
 					continue
 				}
 			}
@@ -231,13 +273,6 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		// Determine target file path — sanitize project and type to prevent
 		// path traversal (issue #180): strip separators and dot-dot sequences,
 		// then verify the resolved absolute path stays inside engRoot.
-		project := "unknown"
-		if obs.Project != nil && *obs.Project != "" {
-			project = sanitizePathComponent(*obs.Project)
-		}
-		obsType := sanitizePathComponent(obs.Type)
-		slug := Slugify(obs.Title, obs.ID)
-		relPath := filepath.Join(project, obsType, slug+".md")
 		absDir := filepath.Join(engRoot, project, obsType)
 		absPath := filepath.Join(engRoot, relPath)
 
@@ -264,13 +299,7 @@ func (e *Exporter) Export() (*ExportResult, error) {
 				result.Skipped++
 				// Track in state in case it wasn't tracked (e.g. after --force)
 				state.Files[obs.ID] = relPath
-				ref := obsToRef(obs)
-				if obs.SessionID != "" {
-					sessionObsRefs[obs.SessionID] = append(sessionObsRefs[obs.SessionID], ref)
-				}
-				if prefix := obsTopicPrefix(obs); prefix != "" {
-					topicObsRefs[prefix] = append(topicObsRefs[prefix], ref)
-				}
+				addHubRef(obs)
 				continue
 			}
 			// Content changed → update
@@ -289,14 +318,94 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 
 		state.Files[obs.ID] = relPath
+		addHubRef(obs)
+	}
 
-		// Collect for hub generation
-		ref := obsToRef(obs)
-		if obs.SessionID != "" {
-			sessionObsRefs[obs.SessionID] = append(sessionObsRefs[obs.SessionID], ref)
+	// ── Retire notes left behind by a rename ─────────────────────────────────
+	// Keep the latest successful note in Files and retain every superseded
+	// path separately until removal succeeds, including across repeated renames.
+	// Never retire a normalized path still owned by any tracked live note.
+	{
+		owned := make(map[string]struct{}, len(state.Files))
+		for _, relPath := range state.Files {
+			owned[filepath.Clean(relPath)] = struct{}{}
 		}
-		if prefix := obsTopicPrefix(obs); prefix != "" {
-			topicObsRefs[prefix] = append(topicObsRefs[prefix], ref)
+		// Snapshot physical identities once: case-only aliases can name a live
+		// file even when their normalized lexical paths differ.
+		root, identityErr := os.OpenRoot(engRoot)
+		var liveFiles []os.FileInfo
+		if identityErr == nil {
+			defer func() { _ = root.Close() }()
+			for path := range owned {
+				info, err := root.Stat(path)
+				if err != nil && !os.IsNotExist(err) {
+					identityErr = err
+					break
+				}
+				if err == nil {
+					liveFiles = append(liveFiles, info)
+				}
+			}
+		}
+		if identityErr != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("stat live export ownership: %w", identityErr))
+		}
+		for id, relPath := range state.Files {
+			if old, tracked := trackedPaths[id]; tracked && filepath.Clean(old) != filepath.Clean(relPath) {
+				state.PendingRetirements[id] = append(state.PendingRetirements[id], old)
+			}
+		}
+		for id, paths := range state.PendingRetirements {
+			if !fullScope && !present[id] {
+				continue // Never infer project ownership from a stored path.
+			}
+			remaining := make([]string, 0, len(paths))
+			seen := make(map[string]bool)
+			for _, path := range paths {
+				clean := filepath.Clean(path)
+				if seen[clean] {
+					continue
+				}
+				seen[clean] = true
+				if _, taken := owned[clean]; taken {
+					remaining = append(remaining, path)
+					continue
+				}
+				if identityErr != nil {
+					remaining = append(remaining, path)
+					continue // Unknown ownership must never permit removal.
+				}
+				info, err := root.Stat(path)
+				if err != nil && !os.IsNotExist(err) {
+					result.Errors = append(result.Errors, fmt.Errorf("delete %s: stat retirement ownership: %w", path, err))
+					remaining = append(remaining, path)
+					continue
+				}
+				taken := false
+				if err == nil {
+					for _, live := range liveFiles {
+						if os.SameFile(info, live) {
+							taken = true
+							break
+						}
+					}
+				}
+				if taken {
+					remaining = append(remaining, path)
+					continue
+				}
+				if err := e.removeExportFile(engRoot, path); err != nil {
+					result.Errors = append(result.Errors, err)
+					remaining = append(remaining, path)
+					continue
+				}
+				result.Deleted++
+			}
+			if len(remaining) == 0 {
+				delete(state.PendingRetirements, id)
+			} else {
+				state.PendingRetirements[id] = remaining
+			}
 		}
 	}
 
@@ -329,12 +438,53 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		safeName := strings.ReplaceAll(prefix, "/", "--")
 		hubPath := filepath.Join(topicsDir, safeName+".md")
 		content := TopicHubMarkdown(prefix, refs)
-		if err := os.WriteFile(hubPath, []byte(content), 0644); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("write topic hub %s: %w", hubPath, err))
+		var writeErr error
+		if fullScope {
+			writeErr = os.WriteFile(hubPath, []byte(content), 0644)
+		} else {
+			var created bool
+			created, writeErr = e.writeScopedTopicHub(hubPath, []byte(content))
+			if writeErr == nil && !created {
+				// Shared hubs, including competing creations, must not be replaced
+				// with references from only the selected project.
+				state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
+				continue
+			}
+		}
+		if writeErr != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("write topic hub %s: %w", hubPath, writeErr))
 			continue
 		}
 		state.TopicHubs[prefix] = filepath.Join("_topics", safeName+".md")
 		result.HubsCreated++
+	}
+
+	// ── Retire hubs that no longer reference a live observation ───────────────
+	// A session or topic whose observations were all deleted is never rewritten
+	// above, so its hub stayed in the vault as an orphan (issue #1900).
+	if fullScope {
+		for sessionID, relPath := range state.SessionHubs {
+			if liveSessionCounts[sessionID] > 0 {
+				continue
+			}
+			if err := e.removeExportFile(engRoot, relPath); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
+			result.Deleted++
+			delete(state.SessionHubs, sessionID)
+		}
+		for prefix, relPath := range state.TopicHubs {
+			if ShouldCreateTopicHub(liveTopicCounts[prefix]) {
+				continue
+			}
+			if err := e.removeExportFile(engRoot, relPath); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
+			result.Deleted++
+			delete(state.TopicHubs, prefix)
+		}
 	}
 
 	// ── Persist updated state ─────────────────────────────────────────────────
@@ -345,6 +495,68 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	return result, nil
+}
+
+// writeScopedTopicHub publishes only a closed, complete owned temporary file.
+// A competing destination is preserved; cleanup never touches the final path.
+func (e *Exporter) writeScopedTopicHub(path string, content []byte) (created bool, err error) {
+	create := e.createTopicTemp
+	if create == nil {
+		create = os.CreateTemp
+	}
+	publish := e.publishTopicHub
+	if publish == nil {
+		publish = identityfile.Publish
+	}
+	file, err := create(filepath.Dir(path), ".topic-hub-*")
+	if err != nil {
+		return false, err
+	}
+	temporary := file.Name()
+	defer func() {
+		// Linux no-replace rename consumes the source; hard-link publication
+		// leaves it behind. In either case only this attempt's temp is ours.
+		if cleanupErr := os.Remove(temporary); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			err = errors.Join(err, fmt.Errorf("clean topic hub temporary %s: %w", temporary, cleanupErr))
+		}
+	}()
+	_, err = file.Write(content)
+	if err == nil {
+		err = file.Chmod(0644)
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return false, err
+	}
+	if err = publish(temporary, path); os.IsExist(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// removeExportFile deletes one note tracked by the sync state from the export
+// root. relPath is resolved against engRoot and rejected when it escapes that
+// root, so a corrupted or hostile state file cannot delete anything outside
+// {vault}/engram. A missing file is not an error: the goal is only that the
+// note is gone.
+func (e *Exporter) removeExportFile(engRoot, relPath string) error {
+	cleanPath := filepath.Clean(filepath.Join(engRoot, relPath))
+	cleanRoot := filepath.Clean(engRoot)
+	if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
+		return fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath)
+	}
+	root, err := os.OpenRoot(engRoot)
+	if err != nil {
+		return fmt.Errorf("open export root for delete %s: %w", cleanPath, err)
+	}
+	err = root.Remove(relPath)
+	_ = root.Close()
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete %s: %w", cleanPath, err)
+	}
+	return nil
 }
 
 func writeSessionHub(sessionsDir, name, content string) error {

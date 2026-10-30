@@ -267,6 +267,8 @@ func (f fakeManagedTokenLookup) FindManagedTokenByHash(_ context.Context, hash s
 	return result.token, result.principal, nil
 }
 
+func (f fakeManagedTokenLookup) MarkManagedTokenUsed(context.Context, string) error { return nil }
+
 type failingManagedTokenLookup struct {
 	err error
 }

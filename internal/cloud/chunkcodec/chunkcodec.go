@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func ChunkID(payload []byte) string {
@@ -57,9 +57,17 @@ func CanonicalizeForProject(payload []byte, project string) ([]byte, error) {
 				return nil, fmt.Errorf("%s[%d] must be an object", key, i)
 			}
 			if key == "sessions" {
+				if mode, _ := row["ownership_mode"].(string); mode == store.SessionOwnershipProjectOwned {
+					raw, err := json.Marshal(row)
+					if err != nil {
+						return nil, err
+					}
+					if err := store.ValidateCloudSessionDirectory(raw); err != nil {
+						return nil, fmt.Errorf("sessions[%d]: %w", i, err)
+					}
+				}
 				sessionID, _ := row["id"].(string)
-				sessionID = strings.TrimSpace(sessionID)
-				if !hasMutationList || sessionID == "" {
+				if !hasMutationList || strings.TrimSpace(sessionID) == "" {
 					row["project"] = project
 				} else if _, owned := sessionMutationKeys[sessionID]; owned {
 					row["project"] = project
@@ -127,8 +135,7 @@ func collectSessionMutationKeys(entries any) (map[string]struct{}, error) {
 			continue
 		}
 		entityKey, _ := row["entity_key"].(string)
-		entityKey = strings.TrimSpace(entityKey)
-		if entityKey != "" {
+		if strings.TrimSpace(entityKey) != "" {
 			keys[entityKey] = struct{}{}
 		}
 		payload, _ := row["payload"].(string)
@@ -136,8 +143,7 @@ func collectSessionMutationKeys(entries any) (map[string]struct{}, error) {
 		if payload != "" {
 			var body mutationSessionPayload
 			if err := DecodeSyncMutationPayload(payload, &body); err == nil {
-				body.ID = strings.TrimSpace(body.ID)
-				if body.ID != "" {
+				if strings.TrimSpace(body.ID) != "" {
 					keys[body.ID] = struct{}{}
 				}
 			}
@@ -163,8 +169,7 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 				return nil, fmt.Errorf("%s[%d] must be an object", entityKey, i)
 			}
 			sessionID, _ := row["session_id"].(string)
-			sessionID = strings.TrimSpace(sessionID)
-			if sessionID != "" {
+			if strings.TrimSpace(sessionID) != "" {
 				keys[sessionID] = struct{}{}
 			}
 		}
@@ -198,16 +203,14 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 		case store.SyncEntityObservation:
 			var body mutationObservationPayload
 			if err := DecodeSyncMutationPayload(payload, &body); err == nil {
-				body.SessionID = strings.TrimSpace(body.SessionID)
-				if body.SessionID != "" {
+				if strings.TrimSpace(body.SessionID) != "" {
 					keys[body.SessionID] = struct{}{}
 				}
 			}
 		case store.SyncEntityPrompt:
 			var body mutationPromptPayload
 			if err := DecodeSyncMutationPayload(payload, &body); err == nil {
-				body.SessionID = strings.TrimSpace(body.SessionID)
-				if body.SessionID != "" {
+				if strings.TrimSpace(body.SessionID) != "" {
 					keys[body.SessionID] = struct{}{}
 				}
 			}
@@ -218,35 +221,38 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 }
 
 type mutationSessionPayload struct {
-	ID         string  `json:"id"`
-	Project    string  `json:"project"`
-	Directory  string  `json:"directory,omitempty"`
-	StartedAt  string  `json:"started_at,omitempty"`
-	EndedAt    *string `json:"ended_at,omitempty"`
-	Summary    *string `json:"summary,omitempty"`
-	Deleted    bool    `json:"deleted,omitempty"`
-	DeletedAt  *string `json:"deleted_at,omitempty"`
-	HardDelete bool    `json:"hard_delete,omitempty"`
+	ID            string  `json:"id"`
+	Project       string  `json:"project"`
+	OwnershipMode string  `json:"ownership_mode,omitempty"`
+	Directory     string  `json:"directory,omitempty"`
+	StartedAt     string  `json:"started_at,omitempty"`
+	EndedAt       *string `json:"ended_at,omitempty"`
+	Summary       *string `json:"summary,omitempty"`
+	Deleted       bool    `json:"deleted,omitempty"`
+	DeletedAt     *string `json:"deleted_at,omitempty"`
+	HardDelete    bool    `json:"hard_delete,omitempty"`
 }
 
 type mutationObservationPayload struct {
-	SyncID         string  `json:"sync_id"`
-	SessionID      string  `json:"session_id"`
-	Type           string  `json:"type"`
-	Title          string  `json:"title"`
-	Content        string  `json:"content"`
-	ToolName       *string `json:"tool_name,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	Scope          string  `json:"scope"`
-	TopicKey       *string `json:"topic_key,omitempty"`
-	RevisionCount  int     `json:"revision_count,omitempty"`
-	DuplicateCount int     `json:"duplicate_count,omitempty"`
-	LastSeenAt     *string `json:"last_seen_at,omitempty"`
-	CreatedAt      string  `json:"created_at,omitempty"`
-	UpdatedAt      string  `json:"updated_at,omitempty"`
-	Deleted        bool    `json:"deleted,omitempty"`
-	DeletedAt      *string `json:"deleted_at,omitempty"`
-	HardDelete     bool    `json:"hard_delete,omitempty"`
+	SupersededBySyncID *string         `json:"superseded_by_sync_id,omitempty"`
+	SyncID             string          `json:"sync_id"`
+	SessionID          string          `json:"session_id"`
+	Type               string          `json:"type"`
+	Title              string          `json:"title"`
+	Content            string          `json:"content"`
+	ToolName           *string         `json:"tool_name,omitempty"`
+	Project            *string         `json:"project,omitempty"`
+	Scope              string          `json:"scope"`
+	TopicKey           *string         `json:"topic_key,omitempty"`
+	RevisionCount      int             `json:"revision_count,omitempty"`
+	DuplicateCount     int             `json:"duplicate_count,omitempty"`
+	LastSeenAt         *string         `json:"last_seen_at,omitempty"`
+	ReviewAfter        json.RawMessage `json:"review_after,omitempty"`
+	CreatedAt          string          `json:"created_at,omitempty"`
+	UpdatedAt          string          `json:"updated_at,omitempty"`
+	Deleted            bool            `json:"deleted,omitempty"`
+	DeletedAt          *string         `json:"deleted_at,omitempty"`
+	HardDelete         bool            `json:"hard_delete,omitempty"`
 }
 
 type mutationPromptPayload struct {
@@ -318,7 +324,10 @@ func normalizeChunkMutation(raw map[string]any, project string) (map[string]any,
 	}
 
 	mutation.Entity = strings.TrimSpace(mutation.Entity)
-	mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
+	// Unlike generated entity keys, session identities are byte-exact.
+	if mutation.Entity != store.SyncEntitySession {
+		mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
+	}
 	mutation.Op = strings.TrimSpace(mutation.Op)
 	mutation.Payload = strings.TrimSpace(mutation.Payload)
 
@@ -384,13 +393,18 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		if err := DecodeSyncMutationPayload(payload, &body); err != nil {
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
-		body.ID = strings.TrimSpace(body.ID)
 		body.Directory = strings.TrimSpace(body.Directory)
-		if body.ID == "" {
+		if strings.TrimSpace(body.ID) == "" {
 			return "", "", fmt.Errorf("session payload id is required")
 		}
-		if op == store.SyncOpUpsert && body.Directory == "" {
-			return "", "", fmt.Errorf("session payload directory is required for upsert")
+		if op == store.SyncOpUpsert {
+			if body.OwnershipMode == store.SessionOwnershipProjectOwned {
+				if err := store.ValidateCloudSessionDirectory([]byte(payload)); err != nil {
+					return "", "", err
+				}
+			} else if body.Directory == "" {
+				return "", "", fmt.Errorf("session payload directory is required for upsert")
+			}
 		}
 		if op == store.SyncOpDelete {
 			body.Directory = ""
@@ -418,11 +432,10 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
 		body.SyncID = strings.TrimSpace(body.SyncID)
-		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SyncID == "" {
 			return "", "", fmt.Errorf("observation payload sync_id is required")
 		}
-		if op == store.SyncOpUpsert && body.SessionID == "" {
+		if op == store.SyncOpUpsert && strings.TrimSpace(body.SessionID) == "" {
 			return "", "", fmt.Errorf("observation payload session_id is required for upsert")
 		}
 		if op == store.SyncOpUpsert {
@@ -456,11 +469,10 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
 		body.SyncID = strings.TrimSpace(body.SyncID)
-		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SyncID == "" {
 			return "", "", fmt.Errorf("prompt payload sync_id is required")
 		}
-		if op == store.SyncOpUpsert && body.SessionID == "" {
+		if op == store.SyncOpUpsert && strings.TrimSpace(body.SessionID) == "" {
 			return "", "", fmt.Errorf("prompt payload session_id is required for upsert")
 		}
 		if op == store.SyncOpUpsert {

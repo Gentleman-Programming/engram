@@ -34,8 +34,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 var (
@@ -104,6 +104,39 @@ type ChunkData struct {
 	Observations []store.Observation  `json:"observations"`
 	Prompts      []store.Prompt       `json:"prompts"`
 	Mutations    []store.SyncMutation `json:"mutations,omitempty"`
+	// Git-only receipts; never populated by cloud export or legacy snapshots.
+	ReviewClears []string `json:"review_clears,omitempty"`
+}
+
+// UnmarshalJSON validates project-owned session directories before plain string
+// decoding could turn JSON null into an apparently valid isolated directory.
+func (c *ChunkData) UnmarshalJSON(raw []byte) error {
+	type plain ChunkData
+	var fields struct {
+		Sessions []json.RawMessage `json:"sessions"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for i, session := range fields.Sessions {
+		var owner struct {
+			Mode string `json:"ownership_mode"`
+		}
+		if err := json.Unmarshal(session, &owner); err != nil {
+			return err
+		}
+		if owner.Mode == store.SessionOwnershipProjectOwned {
+			if err := store.ValidateCloudSessionDirectory(session); err != nil {
+				return fmt.Errorf("sessions[%d]: %w", i, err)
+			}
+		}
+	}
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*c = ChunkData(decoded)
+	return nil
 }
 
 // SyncResult is returned after a sync operation.
@@ -415,6 +448,20 @@ func upgradeStageOrder(stage string) int {
 // It reads the manifest to know what's already exported, then creates
 // a new chunk with only the new data.
 func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) {
+	return sy.ExportWithOptions(createdBy, project, GitExportOptions{})
+}
+
+// GitExportOptions controls intentional prompt sharing in local Git chunks.
+// It does not change standalone snapshots or cloud replication.
+type GitExportOptions struct {
+	IncludePrompts bool
+}
+
+// ExportWithOptions exports local Git data with an explicit sharing policy.
+func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitExportOptions) (*SyncResult, error) {
+	if sy.cloudMode && opts.IncludePrompts {
+		return nil, fmt.Errorf("include-prompts is only supported for local Git export")
+	}
 	project, _ = store.NormalizeProject(project)
 	if err := sy.ensureCloudPreflight(project); err != nil {
 		return nil, err
@@ -495,7 +542,8 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 
 	// Relations are filtered by chunk presence, not timestamp; see the
 	// rationale on filterRelationMutationsForExport and issue #353.
-	exportedRelations, exportedObservations, historicalObservations, exportedDeletes, err := sy.exportedChunkKeys(manifest)
+	historicalPrompts := make(map[string]struct{})
+	exportedRelations, exportedObservations, historicalObservations, exportedDeletes, err := sy.exportedChunkKeys(manifest, historicalPrompts)
 	if err != nil {
 		return nil, fmt.Errorf("scan exported relations: %w", err)
 	}
@@ -503,10 +551,63 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("export local delete tombstones: %w", err)
 	}
+	reviewDates, exportedClears, err := sy.exportedReviewState(manifest)
+	if err != nil {
+		return nil, err
+	}
 	chunk := sy.filterNewData(data, lastChunkTime)
+	// Prompt identity history, including deletes, overrides the watermark.
+	// Omitted prompts remain eligible later; shared or tombstoned identities do not.
+	chunk.Prompts = nil
+	if opts.IncludePrompts {
+		for _, prompt := range data.Prompts {
+			if _, shared := historicalPrompts[prompt.SyncID]; !shared {
+				chunk.Prompts = append(chunk.Prompts, prompt)
+			}
+		}
+	}
 	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
+	selected := make(map[string]bool)
+	for _, observation := range chunk.Observations {
+		selected[observation.SyncID] = true
+	}
+	for _, observation := range data.Observations {
+		prior, authoritative := reviewDates[observation.SyncID]
+		if observation.ReviewAfter != nil && authoritative && !prior.deleted && (prior.date == nil || *prior.date != *observation.ReviewAfter) && !selected[observation.SyncID] {
+			chunk.Observations = append(chunk.Observations, observation)
+		}
+	}
 	includeObservationParentSessions(chunk, data.Sessions)
 	chunk.Mutations = append(filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime), filterUnexportedDeleteMutations(localDeletes, exportedDeletes)...)
+	// Store-owned events prove local clear intent even without cloud enrollment.
+	events, err := sy.store.ExportReviewClearEvents()
+	if err != nil {
+		return nil, fmt.Errorf("export review clears: %w", err)
+	}
+	observations := make(map[string]store.Observation)
+	for _, observation := range data.Observations {
+		observations[observation.SyncID] = observation
+	}
+	for _, event := range events {
+		receipt := fmt.Sprintf("%s:%d:%s", event.SyncID, event.ID, event.Key)
+		observation, present := observations[event.SyncID]
+		if !present || exportedClears[receipt] {
+			continue
+		}
+		chunk.ReviewClears = append(chunk.ReviewClears, receipt)
+		mutations := synthesizeMutationsFromChunk(ChunkData{Observations: []store.Observation{observation}})
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(mutations[0].Payload), &fields); err != nil {
+			return nil, fmt.Errorf("encode review reset: %w", err)
+		}
+		fields["review_after"] = nil
+		payload, err := json.Marshal(fields)
+		if err != nil {
+			return nil, fmt.Errorf("encode review reset: %w", err)
+		}
+		mutations[0].Payload = string(payload)
+		chunk.Mutations = append(chunk.Mutations, mutations[0])
+	}
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
 	}
@@ -525,8 +626,17 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	// Generate chunk ID from content hash
 	chunkID := chunkcodec.ChunkID(chunkJSON)
 
-	// Check if this exact chunk already exists
-	if _, exists := knownChunks[chunkID]; exists {
+	// Tracking and manifest references do not prove the payload is available.
+	// Restore only the current content-addressed chunk when its bytes are missing.
+	payloadAvailable := false
+	if knownChunks[chunkID] {
+		_, payloadErr := sy.transport.ReadChunk(chunkID)
+		if payloadErr != nil && !errors.Is(payloadErr, ErrChunkNotFound) {
+			return nil, fmt.Errorf("read chunk %s: %w", chunkID, payloadErr)
+		}
+		payloadAvailable = payloadErr == nil
+	}
+	if payloadAvailable {
 		if !locallySyncedChunks[chunkID] {
 			if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
 				return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
@@ -545,16 +655,27 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		Prompts:   len(chunk.Prompts),
 	}
 
-	// Write chunk via transport
+	// Retain existing metadata when restoring a referenced payload.
+	inManifest := false
+	for _, existing := range manifest.Chunks {
+		if existing.ID == chunkID {
+			entry = existing
+			inManifest = true
+			break
+		}
+	}
+
+	// Write chunk via transport before acknowledging or reconciling tracking.
 	if err := sy.transport.WriteChunk(chunkID, chunkJSON, entry); err != nil {
 		return nil, fmt.Errorf("write chunk: %w", err)
 	}
 
-	// Update manifest
-	manifest.Chunks = append(manifest.Chunks, entry)
-
-	if err := sy.writeManifest(manifest); err != nil {
-		return nil, fmt.Errorf("write manifest: %w", err)
+	// A restored payload already has a manifest entry; never duplicate it.
+	if !inManifest {
+		manifest.Chunks = append(manifest.Chunks, entry)
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
 	}
 
 	// Record this chunk as synced in the local DB
@@ -967,14 +1088,17 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	if len(pendingEntries) == 0 {
 		return result, nil
 	}
-	legacyChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
+	// decodedChunks holds pending chunks already parsed in this import, so the
+	// apply loop reuses them instead of reading and decoding them again. The
+	// legacy ownership preflight seeds it; local classification adds the rest.
+	decodedChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
 	if err != nil {
 		return nil, err
 	}
 	availableSessionIDs := map[string]struct{}{}
 	if mode == importModeLocal {
 		var err error
-		availableSessionIDs, err = sy.sessionIDsAvailableInChunks(entries, knownChunks)
+		availableSessionIDs, err = sy.sessionIDsAvailableInChunks(entries, knownChunks, decodedChunks)
 		if err != nil {
 			return nil, err
 		}
@@ -986,7 +1110,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	// such edges before apply and surface them as visible warnings instead.
 	var dependencyOracle *importDependencyOracle
 	if mode == importModeCloud {
-		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, legacyChunks, manifestVersion)
+		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, decodedChunks, manifestVersion)
 	}
 
 	lastErrors := map[string]error{}
@@ -995,7 +1119,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 		nextPending := make([]ChunkEntry, 0, len(pendingEntries))
 
 		for _, entry := range pendingEntries {
-			chunk, loaded := legacyChunks[entry.ID]
+			chunk, loaded := decodedChunks[entry.ID]
 			if !loaded && dependencyOracle != nil {
 				if cached, ok := dependencyOracle.cachedChunk(entry.ID); ok {
 					chunk, loaded = cached, true
@@ -1096,6 +1220,10 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			importResult := estimateMutationImportResult(chunk)
 			knownChunks[entry.ID] = true
 			delete(lastErrors, entry.ID)
+			if mode == importModeLocal {
+				// An imported chunk is never applied again; release its decode.
+				delete(decodedChunks, entry.ID)
+			}
 
 			result.ChunksImported++
 			result.SessionsImported += importResult.SessionsImported
@@ -1155,8 +1283,8 @@ func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode impor
 // importMutationChunk applies one decoded chunk through the store's pulled
 // apply path. The import domain rides along explicitly (cloud=true for the
 // cloud mode selected in ImportWithProgress) instead of being inferred from the
-// chunk-tracking target key: cloud chunks must meet the strict cloud directory
-// admission, while local chunks keep the #1287 blank-directory acceptance.
+// chunk-tracking target key: cloud chunks allow directory-less project-owned
+// sessions, while local chunks also keep the #1287 partial-session acceptance.
 func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData, cloud bool) error {
 	mutations := buildImportMutations(chunk)
 	mutations = orderMutationsForApply(mutations)
@@ -1464,30 +1592,40 @@ func importDependencyError(chunk ChunkData, err error) error {
 	return fmt.Errorf("%w; pending session dependencies: %s", err, strings.Join(sessions, ", "))
 }
 
-func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks map[string]bool) (map[string]struct{}, error) {
+// sessionIDsAvailableInChunks collects the session upserts of every manifest
+// entry, already-known entries included. It reuses chunks in decoded and adds
+// each pending chunk it parses there, so the apply loop never decodes it again;
+// already-known chunks are scanned but not retained. Retained chunks skip the
+// apply loop's ownership check safely: it is a no-op for current manifests, and
+// legacy pending chunks were already checked and seeded by the preflight.
+func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks map[string]bool, decoded map[string]ChunkData) (map[string]struct{}, error) {
 	available := make(map[string]struct{})
 	for _, entry := range entries {
-		chunkJSON, err := sy.transport.ReadChunk(entry.ID)
-		if err != nil {
-			if errors.Is(err, ErrChunkNotFound) || knownChunks[entry.ID] {
-				continue
+		chunk, ok := decoded[entry.ID]
+		if !ok {
+			chunkJSON, err := sy.transport.ReadChunk(entry.ID)
+			if err != nil {
+				if errors.Is(err, ErrChunkNotFound) || knownChunks[entry.ID] {
+					continue
+				}
+				return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 			}
-			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
-		}
-
-		var chunk ChunkData
-		if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
-			if knownChunks[entry.ID] {
-				continue
+			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+				if knownChunks[entry.ID] {
+					continue
+				}
+				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
 			}
-			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+			if !knownChunks[entry.ID] {
+				decoded[entry.ID] = chunk
+			}
 		}
 		for _, mutation := range buildImportMutations(chunk) {
 			if mutation.Entity != store.SyncEntitySession || mutation.Op != store.SyncOpUpsert {
 				continue
 			}
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				available[sessionID] = struct{}{}
 			}
 		}
@@ -1566,7 +1704,7 @@ func buildImportMutations(chunk ChunkData) []store.SyncMutation {
 	merged := make([]store.SyncMutation, 0, len(synthesized)+len(explicit))
 	for _, mutation := range retainedSynthesized {
 		if mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
-			if _, required := requiredSessionIDs[strings.TrimSpace(mutation.EntityKey)]; !required {
+			if _, required := requiredSessionIDs[mutation.EntityKey]; !required {
 				continue
 			}
 		}
@@ -1584,8 +1722,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 		}
 		switch mutation.Entity {
 		case store.SyncEntitySession:
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		case store.SyncEntityObservation, store.SyncEntityPrompt:
@@ -1595,8 +1733,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1618,8 +1756,8 @@ func referencedSessionIDsFromNonSessionUpserts(mutations []store.SyncMutation) m
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1642,8 +1780,8 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID == "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) == "" {
 				continue
 			}
 			project, _ := store.NormalizeProject(strings.TrimSpace(mutation.Project))
@@ -1661,7 +1799,11 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 }
 
 func mutationIdentityKey(mutation store.SyncMutation) string {
-	return fmt.Sprintf("%s:%s", mutation.Entity, strings.TrimSpace(mutation.EntityKey))
+	key := mutation.EntityKey
+	if mutation.Entity != store.SyncEntitySession {
+		key = strings.TrimSpace(key)
+	}
+	return fmt.Sprintf("%s:%s", mutation.Entity, key)
 }
 
 func (sy *Syncer) chunkTrackingTargetKey(project string) string {
@@ -1676,37 +1818,130 @@ func (sy *Syncer) chunkTrackingTargetKey(project string) string {
 	return cloudTargetKey(projectName)
 }
 
+// orderMutationsForApply groups one pulled chunk's mutations into the phases
+// the store's foreign keys require: session upserts first (observations and
+// relations reference them), then other upserts, then relation upserts, then
+// non-session deletes, and finally session deletes.
+//
+// A session delete whose entity is upserted again later in the SAME chunk
+// (issue #1494: one chunk carrying create, delete, recreate, attach) cannot
+// wait for the final phase: by then the recreated session owns observations
+// again and the delete fails the foreign key, rolling the chunk back on every
+// import pass. Such a superseded delete instead rides at its original
+// relative position among its entity's upserts, so the chunk replays the
+// source's history in order and converges to the source's final state.
+// Deletes whose entity no later upsert recreates keep the final phase:
+// nothing in the chunk re-owns what they remove.
 func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation {
 	if len(mutations) <= 1 {
 		return mutations
 	}
-	sessionUpserts := make([]store.SyncMutation, 0, len(mutations))
-	otherUpserts := make([]store.SyncMutation, 0, len(mutations))
-	relationUpserts := make([]store.SyncMutation, 0, len(mutations))
-	otherDeletes := make([]store.SyncMutation, 0, len(mutations))
-	sessionDeletes := make([]store.SyncMutation, 0, len(mutations))
+	type indexedMutation struct {
+		mutation store.SyncMutation
+		index    int
+	}
+	sessionUpserts := make([]indexedMutation, 0, len(mutations))
+	otherUpserts := make([]indexedMutation, 0, len(mutations))
+	relationUpserts := make([]indexedMutation, 0, len(mutations))
+	otherDeletes := make([]indexedMutation, 0, len(mutations))
+	sessionDeletes := make([]indexedMutation, 0, len(mutations))
 
-	for _, mutation := range mutations {
+	for index, mutation := range mutations {
+		indexed := indexedMutation{mutation: mutation, index: index}
 		switch {
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert:
-			sessionUpserts = append(sessionUpserts, mutation)
+			sessionUpserts = append(sessionUpserts, indexed)
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpDelete:
-			sessionDeletes = append(sessionDeletes, mutation)
+			sessionDeletes = append(sessionDeletes, indexed)
 		case mutation.Op == store.SyncOpDelete:
-			otherDeletes = append(otherDeletes, mutation)
+			otherDeletes = append(otherDeletes, indexed)
 		case mutation.Entity == store.SyncEntityRelation:
-			relationUpserts = append(relationUpserts, mutation)
+			relationUpserts = append(relationUpserts, indexed)
 		default:
-			otherUpserts = append(otherUpserts, mutation)
+			otherUpserts = append(otherUpserts, indexed)
+		}
+	}
+
+	// relocateAt maps each session delete to the session-upsert slot of the
+	// first upsert of the same entity that FOLLOWS it in the chunk's original
+	// order, or -1 when no later upsert recreates the deleted session. The
+	// sessionUpserts bucket preserves original order, so the first follower
+	// by bucket slot is also the first by arrival.
+	relocateAt := make([]int, len(sessionDeletes))
+	for deletePos, deleted := range sessionDeletes {
+		relocateAt[deletePos] = -1
+		for upsertPos, upsert := range sessionUpserts {
+			if upsert.index > deleted.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(deleted.mutation) {
+				relocateAt[deletePos] = upsertPos
+				break
+			}
 		}
 	}
 
 	ordered := make([]store.SyncMutation, 0, len(mutations))
-	ordered = append(ordered, sessionUpserts...)
-	ordered = append(ordered, otherUpserts...)
-	ordered = append(ordered, relationUpserts...)
-	ordered = append(ordered, otherDeletes...)
-	ordered = append(ordered, sessionDeletes...)
+	// A relocated session delete must not overtake deletes that preceded it
+	// in the chunk's original order: a child that still references the session
+	// (an observation hard delete, a relation delete) has to die first, or the
+	// sessions foreign key rejects the chunk while the child row exists
+	// (PR #1520 review). The drain is a monotonic cursor over the original
+	// order, so every preceding delete rides ahead of the session delete it
+	// protects, and the remaining deletes keep their phase.
+	otherDeleteCursor := 0
+	// A drained delete must not invert against its own entity's history: a
+	// same-identity non-session upsert that preceded the delete in the
+	// chunk's original order rides ahead of it, so the delete still lands on
+	// the upsert's result and the chunk converges to the source's final state
+	// instead of resurrecting the entity in a later phase.
+	otherUpsertEmitted := make([]bool, len(otherUpserts))
+	relationUpsertEmitted := make([]bool, len(relationUpserts))
+	drainPrecedingDeletes := func(limit int) {
+		for otherDeleteCursor < len(otherDeletes) && otherDeletes[otherDeleteCursor].index < limit {
+			drained := otherDeletes[otherDeleteCursor]
+			for upsertSlot, upsert := range otherUpserts {
+				if !otherUpsertEmitted[upsertSlot] && upsert.index < drained.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(drained.mutation) {
+					ordered = append(ordered, upsert.mutation)
+					otherUpsertEmitted[upsertSlot] = true
+				}
+			}
+			for upsertSlot, upsert := range relationUpserts {
+				if !relationUpsertEmitted[upsertSlot] && upsert.index < drained.index && mutationIdentityKey(upsert.mutation) == mutationIdentityKey(drained.mutation) {
+					ordered = append(ordered, upsert.mutation)
+					relationUpsertEmitted[upsertSlot] = true
+				}
+			}
+			ordered = append(ordered, drained.mutation)
+			otherDeleteCursor++
+		}
+	}
+	for upsertPos, upsert := range sessionUpserts {
+		for deletePos, deleted := range sessionDeletes {
+			if relocateAt[deletePos] == upsertPos {
+				drainPrecedingDeletes(deleted.index)
+				ordered = append(ordered, deleted.mutation)
+			}
+		}
+		ordered = append(ordered, upsert.mutation)
+	}
+	for upsertSlot, mutation := range otherUpserts {
+		if otherUpsertEmitted[upsertSlot] {
+			continue
+		}
+		ordered = append(ordered, mutation.mutation)
+	}
+	for upsertSlot, mutation := range relationUpserts {
+		if relationUpsertEmitted[upsertSlot] {
+			continue
+		}
+		ordered = append(ordered, mutation.mutation)
+	}
+	for ; otherDeleteCursor < len(otherDeletes); otherDeleteCursor++ {
+		ordered = append(ordered, otherDeletes[otherDeleteCursor].mutation)
+	}
+	for deletePos, deleted := range sessionDeletes {
+		if relocateAt[deletePos] == -1 {
+			ordered = append(ordered, deleted.mutation)
+		}
+	}
 	return ordered
 }
 
@@ -1727,7 +1962,7 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		}
 		mutations = append(mutations, store.SyncMutation{
 			Entity:    store.SyncEntitySession,
-			EntityKey: strings.TrimSpace(session.ID),
+			EntityKey: session.ID,
 			Op:        store.SyncOpUpsert,
 			Payload:   string(payload),
 		})
@@ -1737,7 +1972,7 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		if obs.DeletedAt != nil {
 			op = store.SyncOpDelete
 		}
-		payload, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"sync_id":         obs.SyncID,
 			"session_id":      obs.SessionID,
 			"type":            obs.Type,
@@ -1755,7 +1990,16 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 			"deleted":         obs.DeletedAt != nil,
 			"deleted_at":      obs.DeletedAt,
 			"hard_delete":     false,
-		})
+		}
+		// Legacy observation arrays omit null lifecycle fields. Preserve that
+		// absence so old chunks cannot clear an existing local review date.
+		if obs.ReviewAfter != nil {
+			fields["review_after"] = *obs.ReviewAfter
+		}
+		if obs.SupersededBySyncID != nil {
+			fields["superseded_by_sync_id"] = *obs.SupersededBySyncID
+		}
+		payload, err := json.Marshal(fields)
 		if err != nil {
 			continue
 		}
@@ -1817,9 +2061,9 @@ func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk C
 				}
 			}
 			if isDelete || payload.Deleted || payload.HardDelete {
-				id := strings.TrimSpace(payload.ID)
-				if id == "" {
-					id = strings.TrimSpace(mutation.EntityKey)
+				id := payload.ID
+				if strings.TrimSpace(id) == "" {
+					id = mutation.EntityKey
 				}
 				session, err := sy.store.GetSession(id)
 				if errors.Is(err, sql.ErrNoRows) {
@@ -2053,7 +2297,7 @@ func filterObservationsForExport(observations []store.Observation, historical ma
 }
 
 func includeObservationParentSessions(chunk *ChunkData, sessions []store.Session) {
-	if len(chunk.Observations) == 0 {
+	if len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 {
 		return
 	}
 
@@ -2065,11 +2309,18 @@ func includeObservationParentSessions(chunk *ChunkData, sessions []store.Session
 	for _, session := range chunk.Sessions {
 		included[session.ID] = struct{}{}
 	}
+	parentIDs := make([]string, 0, len(chunk.Observations)+len(chunk.Prompts))
 	for _, observation := range chunk.Observations {
-		if _, ok := included[observation.SessionID]; ok {
+		parentIDs = append(parentIDs, observation.SessionID)
+	}
+	for _, prompt := range chunk.Prompts {
+		parentIDs = append(parentIDs, prompt.SessionID)
+	}
+	for _, parentID := range parentIDs {
+		if _, ok := included[parentID]; ok {
 			continue
 		}
-		if session, ok := byID[observation.SessionID]; ok {
+		if session, ok := byID[parentID]; ok {
 			chunk.Sessions = append(chunk.Sessions, session)
 			included[session.ID] = struct{}{}
 		}
@@ -2155,16 +2406,65 @@ func filterRelationMutationsForEndpointAvailability(chunk *ChunkData, data *stor
 	return nil
 }
 
-// exportedChunkKeys returns relation keys, direct observation row keys, and all
-// historical observation keys from the chunks recorded by the manifest. The
-// manifest itself does not track those keys, so chunk contents are the source
-// of truth for their availability and historical presence.
-//
-// Cost: this reads every chunk listed in the manifest on each export. A
-// relation may live in any chunk, so the scan cannot stop early. For very long
-// sync histories this is O(total chunks); tracking relation keys in the
-// manifest would remove the rescan if it ever becomes a bottleneck.
-func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
+// Absence from the map is unknown; a present nil date is authoritative null.
+// Tombstones invalidate prior dates without implying a review restoration.
+type historicalReviewState struct {
+	date    *string
+	deleted bool
+}
+
+// exportedReviewState follows replay order. Missing fields preserve earlier
+// knowledge, but cannot establish a date or resurrect tombstoned knowledge.
+func (sy *Syncer) exportedReviewState(m *Manifest) (map[string]historicalReviewState, map[string]bool, error) {
+	dates, clears := make(map[string]historicalReviewState), make(map[string]bool)
+	for _, entry := range m.Chunks {
+		raw, err := sy.transport.ReadChunk(entry.ID)
+		if errors.Is(err, ErrChunkNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(raw, &chunk); err != nil {
+			return nil, nil, err
+		}
+		for _, receipt := range chunk.ReviewClears {
+			clears[receipt] = true
+		}
+		for _, mutation := range buildImportMutations(chunk) {
+			if mutation.Entity != store.SyncEntityObservation {
+				continue
+			}
+			if mutation.Op == store.SyncOpDelete {
+				dates[mutation.EntityKey] = historicalReviewState{deleted: true}
+				continue
+			}
+			var fields struct {
+				SyncID      string          `json:"sync_id"`
+				ReviewAfter json.RawMessage `json:"review_after"`
+			}
+			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &fields); err != nil {
+				return nil, nil, err
+			}
+			if fields.ReviewAfter != nil {
+				var date *string
+				if err := json.Unmarshal(fields.ReviewAfter, &date); err != nil {
+					return nil, nil, err
+				}
+				dates[fields.SyncID] = historicalReviewState{date: date}
+			} else if dates[fields.SyncID].deleted {
+				// An undated recreation has presence, not authoritative review state.
+				delete(dates, fields.SyncID)
+			}
+		}
+	}
+	return dates, clears, nil
+}
+
+// exportedChunkKeys scans manifest chunks for availability and historical
+// presence, independently of whether they contain authoritative review fields.
+func (sy *Syncer) exportedChunkKeys(m *Manifest, promptHistory ...map[string]struct{}) (map[string]struct{}, map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
 	relationKeys := make(map[string]struct{})
 	observationKeys := make(map[string]struct{})
 	historicalObservationKeys := make(map[string]struct{})
@@ -2196,9 +2496,21 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 			observationKeys[observation.SyncID] = struct{}{}
 			historicalObservationKeys[observation.SyncID] = struct{}{}
 		}
-		// Reconcile delete intent in manifest order. A later snapshot or upsert
-		// starts a new identity generation; a later delete restores suppression.
+		// Any historical prompt identity, even a tombstone, prevents
+		// opt-in from duplicating or resurrecting it.
+		for _, prompt := range chunk.Prompts {
+			for _, history := range promptHistory {
+				history[prompt.SyncID] = struct{}{}
+			}
+		}
 		for _, mutation := range effectiveMutationsForImport(chunk) {
+			if mutation.Entity == store.SyncEntityPrompt {
+				for _, history := range promptHistory {
+					history[mutation.EntityKey] = struct{}{}
+				}
+			}
+			// Reconcile delete intent in manifest order. A later snapshot or
+			// upsert starts a generation; a later delete restores suppression.
 			key := mutationIdentityKey(mutation)
 			if mutation.Op == store.SyncOpDelete {
 				deleteKeys[key] = struct{}{}
@@ -2382,6 +2694,11 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 	selectedMutations := make([]store.SyncMutation, 0, len(mutations))
 
 	for _, mutation := range mutations {
+		if mutation.Project == "" && mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
+			if owner, present := sessionProjectByID[mutation.EntityKey]; present && owner == project {
+				return nil, nil, fmt.Errorf("blank-project session mutation seq=%d entity_key=%q requires cloud upgrade diagnosis and repair before export", mutation.Seq, mutation.EntityKey)
+			}
+		}
 		mutationProject := resolveMutationProject(mutation, sessionProjectByID)
 		if mutationProject != project {
 			if mutationProject != "" {
@@ -2403,6 +2720,9 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 			default:
 				continue
 			}
+		}
+		if mutation.Project == "" && mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
+			return nil, nil, fmt.Errorf("blank-project session mutation seq=%d entity_key=%q has no authoritative local session in project %q; run cloud upgrade doctor", mutation.Seq, mutation.EntityKey, project)
 		}
 		seqs = append(seqs, mutation.Seq)
 		selectedMutations = append(selectedMutations, mutation)
@@ -2503,7 +2823,7 @@ func resolveMutationProject(mutation store.SyncMutation, sessionProjectByID map[
 			return strings.TrimSpace(normalized)
 		}
 	}
-	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[strings.TrimSpace(payload.SessionID)])); strings.TrimSpace(normalized) != "" {
+	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[payload.SessionID])); strings.TrimSpace(normalized) != "" {
 		return strings.TrimSpace(normalized)
 	}
 	return ""

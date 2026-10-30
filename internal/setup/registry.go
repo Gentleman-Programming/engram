@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -209,6 +210,11 @@ func StaleMCPCommands() ([]StaleMCPCommand, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		// An empty registration file is equivalent to no registrations. Restrict
+		// trimming to JSON whitespace so malformed nonempty input still fails.
+		if len(bytes.Trim(data, " \t\r\n")) == 0 {
+			continue
 		}
 		var config map[string]json.RawMessage
 		if err := json.Unmarshal(data, &config); err != nil {

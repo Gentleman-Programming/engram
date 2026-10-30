@@ -65,7 +65,7 @@ normalize_benchfmt() {
 	# Package path is intentionally the only normalized configuration. A module
 	# path migration must not create separate benchstat tables, while changes to
 	# architecture, OS, CPU, or any other metadata must remain visible.
-	sed -E 's|^pkg: github.com/Gentleman-Programming/engram(/v2)?/internal/store$|pkg: github.com/Gentleman-Programming/engram/v2/internal/store|' "$1" >"$2"
+	sed -E 's|^pkg: github.com/Gentleman-Programming/engram(/v[23])?/internal/store$|pkg: github.com/Gentleman-Programming/engram/v3/internal/store|' "$1" >"$2"
 }
 
 benchmark_names() {

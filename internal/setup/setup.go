@@ -10,16 +10,14 @@
 //     the resolved absolute binary path.
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
 //   - Codex: injects MCP registration in ~/.codex/config.toml
-//   - Pi: installs gentle-engram/pi-mcp-adapter packages and writes Pi MCP config
+//   - Pi: installs the gentle-engram package; native tools own Engram writes
 package setup
 
 import (
 	"context"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,8 +28,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/command"
-	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v3/internal/command"
+	"github.com/Gentleman-Programming/engram/v3/internal/mcp"
 )
 
 var (
@@ -99,13 +97,15 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
 const (
-	piGentleEngramPackage            = "npm:gentle-engram@0.1.16"
-	piLegacyGentleEngramPackage      = "npm:gentle-engram@0.1.8"
-	piPreviousGentleEngramPackage    = "npm:gentle-engram@0.1.11"
-	piPriorGentleEngramPackage       = "npm:gentle-engram@0.1.12"
-	piPredecessorGentleEngramPackage = "npm:gentle-engram@0.1.14"
-	piFormerGentleEngramPackage      = "npm:gentle-engram@0.1.15"
-	piMCPAdapterPackage              = "npm:pi-mcp-adapter"
+	piGentleEngramPackage             = "npm:gentle-engram@0.5.1"
+	piLegacyGentleEngramPackage       = "npm:gentle-engram@0.1.8"
+	piPreviousGentleEngramPackage     = "npm:gentle-engram@0.1.11"
+	piPriorGentleEngramPackage        = "npm:gentle-engram@0.1.12"
+	piPredecessorGentleEngramPackage  = "npm:gentle-engram@0.1.14"
+	piFormerGentleEngramPackage       = "npm:gentle-engram@0.1.15"
+	piEarlierGentleEngramPackage      = "npm:gentle-engram@0.1.16"
+	piPriorReleaseGentleEngramPackage = "npm:gentle-engram@0.2.0"
+	piLastReleaseGentleEngramPackage  = "npm:gentle-engram@0.3.0"
 )
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -153,92 +153,67 @@ func codexEngramBlockStr(command string) string {
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
+The agent MUST follow this protocol without waiting for activation.
 
-### WHEN TO SAVE (mandatory — not optional)
+## AVAILABLE TOOLS
 
-Call mem_save IMMEDIATELY after any of these:
-- Bug fix completed
-- Architecture or design decision made
-- Non-obvious discovery about the codebase
-- Configuration change or environment setup
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
+Use the Engram tools actually exposed by your host. The names below are logical
+names; use the host-specific registered names for calls. Availability and tool
+discovery depend on the host, not a universal bootstrap or deferred-tool split.
 
-Format for mem_save:
-- **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
-- **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: project (default) | personal | global
-- **topic_key** (optional, recommended for evolving decisions): stable key like architecture/auth-model
-- **content**:
-  **What**: One sentence — what was done
-  **Why**: What motivated it (user request, bug, performance, etc.)
-  **Where**: Files or paths affected
-  **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
+- mem_save, mem_search, mem_context, mem_session_summary
+- mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
+- mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key
+- mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
-### Topic update rules (mandatory)
+**Fallback**: If tools are unexpectedly unavailable, run engram setup <agent>
+with your host's supported agent name and restart that host. Setup repairs its
+Engram registration; use that host's configuration and discovery conventions.
 
-- Different topics must not overwrite each other (e.g. architecture vs bugfix)
-- Reuse the same topic_key to update an evolving topic instead of creating new observations
-- If unsure about the key, call mem_suggest_topic_key first and then reuse it
-- Use mem_update when you have an exact observation ID to correct
+## SELECTIVE MEMORY
 
-### DELIVERY GUARANTEE
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
+
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+For recall: mem_context, then mem_search with distinctive keywords, then mem_get_observation for full content.
+Narrow by project/type after broad recall as needed.
+
+For selected writes, use mem_search on the bounded topic in the intended project and scope before writing.
+Read candidates in full with mem_get_observation; snippets are not identity evidence.
+For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact,
+and record superseded facts as history. For a genuinely new topic use mem_save with a deliberate,
+distinct topic_key. If already covered, write nothing.
+On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save.
+A failed read is not evidence of absence. A suggested topic_key is a hint, not proof of identity.
+Never merge across projects or scopes. Structure content as What, Why, Where, Learned.
+
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
+
+## DELIVERY GUARANTEE
 
 Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
-### WHEN TO SEARCH MEMORY
+## SESSION CLOSE PROTOCOL (REQUIRED)
 
-When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
-1. First call mem_context — checks recent session history (fast, cheap)
-2. If not found, call mem_search with relevant keywords (FTS5 full-text search)
-3. If you find a match, use mem_get_observation for full untruncated content
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
+Summary persistence does not end the session. Follow the host-specific lifecycle
+contract; adapters may own registration and closure independently of summaries.
 
-Also search memory PROACTIVELY when:
-- Starting work on something that might have been done before
-- The user mentions a topic you have no context on — check if past sessions covered it
+### PASSIVE CAPTURE — adapter-specific safety net
 
-### SESSION CLOSE PROTOCOL (mandatory)
-
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
-1. Call mem_session_summary with the structure below.
-2. Call mem_session_end with the active session id and an optional summary of work completed.
-
-mem_session_summary structure:
-
-## Goal
-[What we were working on this session]
-
-## Instructions
-[User preferences or constraints discovered — skip if none]
-
-## Discoveries
-- [Technical findings, gotchas, non-obvious learnings]
-
-## Accomplished
-- [Completed items with key details]
-
-## Next Steps
-- [What remains to be done — for the next session]
-
-## Relevant Files
-- path/to/file — [what it does or what changed]
-
-This is NOT optional. If you skip this, the next session starts blind.
-
-### PASSIVE CAPTURE — automatic learning extraction
-
-When completing a task or subtask, include a "## Key Learnings:" section at the end of your response
-with numbered items. Engram will automatically extract and save these as observations.
-
-Example:
-## Key Learnings:
-
-1. bcrypt cost=12 is the right balance for our server performance
-2. JWT refresh tokens need atomic rotation to prevent race conditions
+Automatic capture is adapter-specific: supported adapters forward
+eligible delegated/subagent tool outputs for extraction. Ordinary responses are
+not universally captured; writing the section alone does not guarantee storage.
+Use mem_save as the primary path for significant, verified knowledge.
 
 You can also call mem_capture_passive(content) directly with any text that contains a learning section.
-This is a safety net — it captures knowledge even if you forget to call mem_save explicitly.
+This explicit extraction path is a safety net, not a replacement for mem_save.
 
 ### AFTER COMPACTION
 
@@ -247,13 +222,13 @@ If you see a message about compaction or context reset, or if you see "FIRST ACT
 2. Then call mem_context to recover any additional context from previous sessions
 3. Only THEN continue working
 
-Do not skip step 1. Without it, everything done before compaction is lost from memory.
-`
+Do not skip step 1. Without it, everything done before compaction is lost from memory.`
 
 const geminiSessionCloseInstruction = `
 
 ### GEMINI CLI SESSION CLOSE (mandatory)
 
+Only at actual session closure (not ordinary task completion):
 After mem_session_summary succeeds, call mem_session_end before closing the session.
 Do not call mem_session_end before mem_session_summary.
 `
@@ -317,9 +292,6 @@ func installPi() (*Result, error) {
 	if _, err := runCommand("pi", "install", piGentleEngramPackage); err != nil {
 		return nil, fmt.Errorf("install %s: %w", piGentleEngramPackage, err)
 	}
-	if _, err := runCommand("pi", "install", piMCPAdapterPackage); err != nil {
-		return nil, fmt.Errorf("install %s: %w", piMCPAdapterPackage, err)
-	}
 
 	agentDir := piAgentDir()
 	settingsPath := filepath.Join(agentDir, "settings.json")
@@ -342,12 +314,8 @@ func installPi() (*Result, error) {
 		files++
 	}
 
-	mcpChanged, err := ensurePiMCPConfig(filepath.Join(agentDir, "mcp.json"))
-	if err != nil {
+	if err := warnPiMCPConfig(filepath.Join(agentDir, "mcp.json")); err != nil {
 		return nil, err
-	}
-	if mcpChanged {
-		files++
 	}
 
 	return &Result{Agent: "pi", Destination: agentDir, Files: files}, nil
@@ -369,7 +337,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage:
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage, piPriorGentleEngramPackage, piPredecessorGentleEngramPackage, piFormerGentleEngramPackage, piEarlierGentleEngramPackage, piPriorReleaseGentleEngramPackage, piLastReleaseGentleEngramPackage, "npm:gentle-engram@0.4.0", "npm:gentle-engram@0.4.1", "npm:gentle-engram@0.4.2", "npm:gentle-engram@0.5.0":
 				changed = true
 				continue
 			case piGentleEngramPackage:
@@ -387,14 +355,6 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		raw, err := jsonMarshalFn(piGentleEngramPackage)
 		if err != nil {
 			return false, fmt.Errorf("marshal Pi package %q: %w", piGentleEngramPackage, err)
-		}
-		packages = append(packages, raw)
-		changed = true
-	}
-	if !rawArrayContainsString(packages, piMCPAdapterPackage) {
-		raw, err := jsonMarshalFn(piMCPAdapterPackage)
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi package %q: %w", piMCPAdapterPackage, err)
 		}
 		packages = append(packages, raw)
 		changed = true
@@ -463,77 +423,23 @@ func resolveMiseNodeVersion() string {
 	return "node@" + version
 }
 
-func ensurePiMCPConfig(mcpPath string) (bool, error) {
+// warnPiMCPConfig detects legacy registrations without rewriting user-owned
+// MCP config. Even a dead command may belong to a deliberate direct client.
+func warnPiMCPConfig(mcpPath string) error {
 	config, err := readJSONConfig(mcpPath)
 	if err != nil {
-		return false, fmt.Errorf("read Pi MCP config: %w", err)
+		return fmt.Errorf("read Pi MCP config: %w", err)
 	}
-	servers := make(map[string]json.RawMessage)
 	if raw, ok := config["mcpServers"]; ok {
+		var servers map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &servers); err != nil {
-			return false, fmt.Errorf("parse Pi mcpServers: %w", err)
+			return fmt.Errorf("parse Pi mcpServers: %w", err)
+		}
+		if _, exists := servers["engram"]; exists {
+			fmt.Fprintf(os.Stderr, "warning: %s contains mcpServers.engram; Pi native-only agent writes are not guaranteed while this MCP path remains. To use native-only writes, manually remove only mcpServers.engram from %s (preserve other servers), then restart/reload Pi.\n", mcpPath, mcpPath)
 		}
 	}
-	if raw, exists := servers["engram"]; exists {
-		// Revalidate instead of blindly preserving: a previously persisted
-		// absolute command can point at a mise install version directory that
-		// `mise up` plus `mise prune` removed, leaving a dead path that fails
-		// to spawn (ENOENT). Only a dead absolute command is repaired, and only
-		// its "command" value is rewritten; missing or relative commands, live
-		// absolute paths, and every other entry key are preserved untouched.
-		// The repair happens only when the recorded path does not exist
-		// (fs.ErrNotExist); any other stat error (EACCES, EIO, ...) leaves the
-		// entry untouched: this is a repair path, so a transient filesystem
-		// error must not rewrite a possibly valid custom command, and it must
-		// not fail the whole `engram setup` run either.
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return false, fmt.Errorf("parse Pi engram MCP server entry: %w", err)
-		}
-		var command string
-		if rawCommand, ok := fields["command"]; ok {
-			if err := json.Unmarshal(rawCommand, &command); err != nil {
-				command = ""
-			}
-		}
-		if command == "" || !filepath.IsAbs(command) {
-			return false, nil
-		}
-		if _, statErr := statFn(command); statErr == nil {
-			return false, nil
-		} else if !errors.Is(statErr, fs.ErrNotExist) {
-			return false, nil
-		}
-		fields["command"], err = jsonMarshalFn(resolveEngramCommand())
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi Engram MCP command: %w", err)
-		}
-		servers["engram"], err = jsonMarshalFn(fields)
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
-		}
-		config["mcpServers"], err = jsonMarshalFn(servers)
-		if err != nil {
-			return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
-		}
-		return true, writeJSONConfig(mcpPath, config)
-	}
-	server := map[string]any{
-		"command":     resolveEngramCommand(),
-		"args":        []string{"mcp", "--tools=agent"},
-		"lifecycle":   "lazy",
-		"directTools": false,
-	}
-	raw, err := jsonMarshalFn(server)
-	if err != nil {
-		return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
-	}
-	servers["engram"] = raw
-	config["mcpServers"], err = jsonMarshalFn(servers)
-	if err != nil {
-		return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
-	}
-	return true, writeJSONConfig(mcpPath, config)
+	return nil
 }
 
 func readJSONConfig(path string) (map[string]json.RawMessage, error) {
@@ -575,16 +481,6 @@ func readRawArrayField(config map[string]json.RawMessage, key, path string) ([]j
 		return nil, fmt.Errorf("parse %s %q: %w", path, key, err)
 	}
 	return values, nil
-}
-
-func rawArrayContainsString(values []json.RawMessage, target string) bool {
-	for _, value := range values {
-		var decoded string
-		if err := json.Unmarshal(value, &decoded); err == nil && decoded == target {
-			return true
-		}
-	}
-	return false
 }
 
 // ─── OpenCode ────────────────────────────────────────────────────────────────
@@ -681,19 +577,9 @@ func installOpenCode() (*Result, error) {
 func injectOpenCodeTUIPlugin() error {
 	configPath := openCodeTUIConfigPath()
 
-	var config map[string]json.RawMessage
-	data, err := readFileFn(configPath)
+	config, err := readOpenCodeJSONCConfig(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			config = make(map[string]json.RawMessage)
-		} else {
-			return fmt.Errorf("read config: %w", err)
-		}
-	} else {
-		cleaned := stripJSONC(data)
-		if err := json.Unmarshal(cleaned, &config); err != nil {
-			return fmt.Errorf("parse config: %w", err)
-		}
+		return err
 	}
 
 	var plugins []string
@@ -716,86 +602,126 @@ func injectOpenCodeTUIPlugin() error {
 	}
 	config["plugin"] = json.RawMessage(pluginsJSON)
 
-	output, err := jsonMarshalIndentFn(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	if err := writeFileFn(configPath, output, 0644); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	return nil
+	return writeOpenCodeJSONCConfig(configPath, config)
 }
 
-// injectOpenCodeMCP adds the engram MCP server entry to opencode.json.
-// It reads the existing config, adds/updates the engram entry under "mcp",
-// and writes it back preserving all other settings.
+// injectOpenCodeMCP reconciles the setup-owned executable in a local Engram
+// server and inserts a missing entry, preserving every other byte of the
+// user's JSON/JSONC configuration. V1 stores servers in mcp, while V2 stores
+// them in mcp.servers. Setup owns only command[0]; user flags and options stay
+// untouched.
 func injectOpenCodeMCP() error {
 	configPath := openCodeConfigPath()
-
-	// Read existing config (or start with empty object)
-	var config map[string]json.RawMessage
 	data, err := readFileFn(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			config = make(map[string]json.RawMessage)
-		} else {
+		if !os.IsNotExist(err) {
 			return fmt.Errorf("read config: %w", err)
 		}
-	} else {
-		cleaned := stripJSONC(data)
-		if err := json.Unmarshal(cleaned, &config); err != nil {
-			return fmt.Errorf("parse config: %w", err)
+		data = []byte("{}")
+	}
+	config, err := parseOpenCodeJSONC(data)
+	if err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if config.members == nil {
+		return fmt.Errorf("parse config: expected object")
+	}
+	mcpBlock, mcpExists := config.members["mcp"]
+	if mcpExists {
+		if mcpBlock.members == nil {
+			return fmt.Errorf("parse mcp block: expected object")
+		}
+		if servers, v2 := mcpBlock.members["servers"]; v2 {
+			if servers.members == nil {
+				return fmt.Errorf("parse mcp servers block: expected object")
+			}
+			if engram, registered := servers.members["engram"]; registered {
+				return reconcileOpenCodeMCPCommand(configPath, data, engram)
+			}
+			return insertOpenCodeMCPEntry(configPath, data, config, servers, false)
+		}
+		if engram, registered := mcpBlock.members["engram"]; registered {
+			return reconcileOpenCodeMCPCommand(configPath, data, engram)
 		}
 	}
+	return insertOpenCodeMCPEntry(configPath, data, config, mcpBlock, !mcpExists)
+}
 
-	// Parse or create the "mcp" block
-	var mcpBlock map[string]json.RawMessage
-	if raw, exists := config["mcp"]; exists {
-		if err := json.Unmarshal(raw, &mcpBlock); err != nil {
-			return fmt.Errorf("parse mcp block: %w", err)
-		}
-	} else {
-		mcpBlock = make(map[string]json.RawMessage)
-	}
-
-	// Check if engram is already registered
-	if _, exists := mcpBlock["engram"]; exists {
-		return nil // already registered, nothing to do
-	}
-
-	// Add engram MCP entry (agent profile — only tools agents need).
-	// Use resolveEngramCommand() so Windows users (and headless Linux setups
-	// where PATH is not inherited) get the absolute binary path.
-	engramEntry := map[string]interface{}{
-		"type":    "local",
-		"command": []string{resolveEngramCommand(), "mcp", "--tools=agent"},
-		"enabled": true,
-	}
-	entryJSON, err := jsonMarshalFn(engramEntry)
+func insertOpenCodeMCPEntry(configPath string, data []byte, config, mcpBlock *jsoncObject, missingMCP bool) error {
+	entryJSON, err := jsonMarshalFn(mcpEntry(opencodeObject))
 	if err != nil {
 		return fmt.Errorf("marshal engram entry: %w", err)
 	}
-	mcpBlock["engram"] = json.RawMessage(entryJSON)
-
-	// Write mcp block back to config
-	mcpJSON, err := jsonMarshalFn(mcpBlock)
-	if err != nil {
-		return fmt.Errorf("marshal mcp block: %w", err)
+	member := append([]byte(`"engram":`), entryJSON...)
+	object := mcpBlock
+	if missingMCP {
+		member = append(append([]byte(`"mcp":{`), member...), '}')
+		object = config
 	}
-	config["mcp"] = json.RawMessage(mcpJSON)
+	output := insertJSONCMember(data, object, member)
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
 
-	// Write config back with indentation
+func reconcileOpenCodeMCPCommand(configPath string, data []byte, engram *jsoncObject) error {
+	if engram.members == nil {
+		return nil
+	}
+	entryType, local := jsoncString(data, engram.members["type"])
+	if !local || entryType != "local" {
+		return nil
+	}
+	command, exists := engram.members["command"]
+	if !exists || len(command.values) == 0 {
+		return nil
+	}
+	current, ok := jsoncString(data, command.values[0])
+	if !ok {
+		return nil
+	}
+	canonical := resolveEngramCommand()
+	if current == canonical {
+		return nil
+	}
+	replacement, err := jsonMarshalFn(canonical)
+	if err != nil {
+		return fmt.Errorf("marshal engram command: %w", err)
+	}
+	output, err := replaceJSONCString(data, command.values[0], replacement)
+	if err != nil {
+		return fmt.Errorf("replace engram command: %w", err)
+	}
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
+
+func readOpenCodeJSONCConfig(path string) (map[string]json.RawMessage, error) {
+	data, err := readFileFn(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]json.RawMessage), nil
+		}
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(stripJSONC(data), &config); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	return config, nil
+}
+
+func writeOpenCodeJSONCConfig(path string, config map[string]json.RawMessage) error {
 	output, err := jsonMarshalIndentFn(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-
-	if err := writeFileFn(configPath, output, 0644); err != nil {
+	if err := writeFileFn(path, output, 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-
 	return nil
 }
 
@@ -1087,6 +1013,19 @@ func installClaudeCode() (*Result, error) {
 		// If plugin is already installed, that's fine
 		if !strings.Contains(installOutputStr, "already") {
 			return nil, fmt.Errorf("plugin install failed: %s", installOutputStr)
+		}
+	}
+
+	// An existing installation is not necessarily current. Refresh the catalog
+	// before updating the cached plugin, regardless of install's exit status.
+	if strings.Contains(installOutputStr, "already") {
+		updateOut, updateErr := runCommand(claudeBin, "plugin", "marketplace", "update", "engram")
+		if updateErr != nil {
+			return nil, fmt.Errorf("marketplace update failed: %s", strings.TrimSpace(string(updateOut)))
+		}
+		updateOut, updateErr = runCommand(claudeBin, "plugin", "update", "engram@engram", "--scope", "user")
+		if updateErr != nil {
+			return nil, fmt.Errorf("plugin update failed: %s", strings.TrimSpace(string(updateOut)))
 		}
 	}
 
@@ -1686,8 +1625,12 @@ func installCodex() (*Result, error) {
 	if path == "" {
 		return nil, fmt.Errorf("resolve Codex config path: no absolute CODEX_HOME or user home")
 	}
-	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
-	if err != nil {
+
+	// Write the informational memory-protocol copies. These are reference
+	// artifacts only: Engram deliberately does NOT wire them into
+	// model_instructions_file / experimental_compact_prompt_file (see
+	// injectCodexMemoryConfig).
+	if _, err := writeCodexMemoryInstructionFilesFn(); err != nil {
 		return nil, err
 	}
 
@@ -1695,41 +1638,30 @@ func installCodex() (*Result, error) {
 		return nil, err
 	}
 
-	compactPromptPath := codexCompactPromptPath()
-	if err := injectCodexMemoryConfigFn(path, instructionsPath, compactPromptPath); err != nil {
+	if err := injectCodexMemoryConfigFn(path); err != nil {
 		return nil, err
 	}
 
-	// Best-effort: install the Codex plugin (hooks) via the Codex CLI.
-	// Failures here are non-fatal — the MCP TOML is already written and works
-	// without the plugin. The plugin adds hooks (compaction recovery, etc.).
+	// The additive memory protocol requires the plugin hooks. Files already
+	// written remain available for manual recovery if activation fails.
+	const pluginRecovery = "MCP config and instruction files were written, but the Engram plugin was not installed. Ensure codex is in PATH, then run:\n  codex plugin marketplace add " + codexMarketplace + " --ref main\n  codex plugin add engram@engram"
 	codexBin, err := lookPathFn("codex")
 	if err != nil {
-		// codex CLI not in PATH — warn and return success with files written so far.
-		fmt.Fprintf(os.Stderr, "warning: codex CLI not found in PATH — MCP config and instruction files were written,\n")
-		fmt.Fprintf(os.Stderr, "  but the Engram plugin (hooks) was not installed.\n")
-		fmt.Fprintf(os.Stderr, "  To install manually, run:\n")
-		fmt.Fprintf(os.Stderr, "    codex plugin marketplace add %s --ref main\n", codexMarketplace)
-		fmt.Fprintf(os.Stderr, "    codex plugin add engram@engram\n")
-		return &Result{
-			Agent:       "codex",
-			Destination: filepath.Dir(path),
-			Files:       3,
-		}, nil
+		return nil, fmt.Errorf("codex CLI not found in PATH: %w; %s", err, pluginRecovery)
 	}
 
 	// Step 1: add the marketplace (idempotent — tolerate "already" in output).
 	addOut, err := runCommand(codexBin, "plugin", "marketplace", "add", codexMarketplace, "--ref", "main")
 	addOutputStr := strings.TrimSpace(string(addOut))
 	if err != nil && !strings.Contains(strings.ToLower(addOutputStr), "already") {
-		fmt.Fprintf(os.Stderr, "warning: codex plugin marketplace add failed (non-fatal): %s\n", addOutputStr)
+		return nil, fmt.Errorf("codex plugin marketplace add failed: %w (output: %s); %s", err, addOutputStr, pluginRecovery)
 	}
 
 	// Step 2: install the plugin (idempotent — tolerate "already" in output).
 	pluginOut, err := runCommand(codexBin, "plugin", "add", "engram@engram")
 	pluginOutputStr := strings.TrimSpace(string(pluginOut))
 	if err != nil && !strings.Contains(strings.ToLower(pluginOutputStr), "already") {
-		fmt.Fprintf(os.Stderr, "warning: codex plugin add failed (non-fatal): %s\n", pluginOutputStr)
+		return nil, fmt.Errorf("codex plugin add failed: %w (output: %s); %s", err, pluginOutputStr, pluginRecovery)
 	}
 
 	return &Result{
@@ -1750,7 +1682,16 @@ func injectCodexMCP(configPath, command string) error {
 	}
 
 	bom, content := splitCodexBOM(string(data))
-	updated := upsertCodexEngramBlock(content, command)
+	for _, key := range []string{"model_instructions_file", "experimental_compact_prompt_file"} {
+		content, err = removeTopLevelTOMLKey(content, key)
+		if err != nil {
+			return fmt.Errorf("prepare Codex config: %w", err)
+		}
+	}
+	updated, err := upsertCodexEngramBlock(content, command)
+	if err != nil {
+		return fmt.Errorf("prepare Codex config: %w", err)
+	}
 	updated = upsertCodexWindowsHookMarker(updated, command, runtimeGOOS == "windows")
 	updated = bom + updated
 	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
@@ -1778,7 +1719,20 @@ func writeCodexMemoryInstructionFiles() (string, error) {
 	return instructionsPath, nil
 }
 
-func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath string) error {
+// injectCodexMemoryConfig removes the Codex instruction-override keys that
+// earlier Engram versions wrote into ~/.codex/config.toml.
+//
+// In Codex, `model_instructions_file` REPLACES the built-in system instructions
+// rather than adding to them, and `experimental_compact_prompt_file` likewise
+// overrides the default compaction prompt. Pointing them at the Engram-only
+// files wiped Codex's base prompt ("You are Codex, ...") and degraded the agent.
+// Engram now delivers the Memory Protocol additively through the plugin hooks
+// (SessionStart / UserPromptSubmit / PostCompact) and the engram-memory skill,
+// so it MUST NOT set these keys.
+//
+// Stripping them here — rather than merely not writing them — heals configs that
+// older versions already broke: the next `engram setup codex` removes them.
+func injectCodexMemoryConfig(configPath string) error {
 	data, err := readFileFn(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1789,9 +1743,15 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 	}
 
 	bom, content := splitCodexBOM(string(data))
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	content = upsertTopLevelTOMLString(content, "model_instructions_file", instructionsPath)
-	content = upsertTopLevelTOMLString(content, "experimental_compact_prompt_file", compactPromptPath)
+	for _, key := range []string{"model_instructions_file", "experimental_compact_prompt_file"} {
+		content, err = removeTopLevelTOMLKey(content, key)
+		if err != nil {
+			return fmt.Errorf("prepare Codex config: %w", err)
+		}
+	}
+	if data != nil && bom+content == string(data) {
+		return nil
+	}
 
 	if err := writeFileFn(configPath, []byte(bom+content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
@@ -1808,48 +1768,19 @@ func splitCodexBOM(content string) (string, string) {
 	return "", content
 }
 
-func upsertCodexEngramBlock(content, command string) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(content, "\n")
-
-	var kept []string
-	for i := 0; i < len(lines); {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "[mcp_servers.engram]" {
-			i++
-			for i < len(lines) {
-				next := strings.TrimSpace(lines[i])
-				if strings.HasPrefix(next, "[") && strings.HasSuffix(next, "]") {
-					break
-				}
-				i++
-			}
-			continue
-		}
-
-		kept = append(kept, lines[i])
-		i++
-	}
-
-	base := strings.TrimSpace(strings.Join(kept, "\n"))
-	block := codexEngramBlockStr(command)
-	if base == "" {
-		return block + "\n"
-	}
-
-	return base + "\n\n" + block + "\n"
-}
-
 // upsertCodexWindowsHookMarker replaces setup-owned markers only while they
 // are the first physical lines in the file. Later lookalikes are opaque TOML or
 // user content: the Windows hook reads only line 1 and must ignore them.
 func upsertCodexWindowsHookMarker(content, command string, enabled bool) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(content, "\n")
-	for len(lines) > 0 && strings.HasPrefix(lines[0], windowsHookCommandMarkerPrefix) {
-		lines = lines[1:]
+	eol := codexLineEnding(content)
+	body := content
+	for strings.HasPrefix(body, windowsHookCommandMarkerPrefix) {
+		if i := strings.IndexByte(body, '\n'); i >= 0 {
+			body = body[i+1:]
+		} else {
+			body = ""
+		}
 	}
-	body := strings.Join(lines, "\n")
 
 	if !enabled {
 		return body
@@ -1863,40 +1794,9 @@ func upsertCodexWindowsHookMarker(content, command string, enabled bool) string 
 	}
 	marker := windowsHookCommandMarkerPrefix + string(encodedCommand)
 	if body == "" {
-		return marker + "\n"
+		return marker + eol
 	}
-	return marker + "\n" + body
-}
-
-func upsertTopLevelTOMLString(content, key, value string) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	lines := strings.Split(content, "\n")
-	lineValue := fmt.Sprintf("%s = %q", key, value)
-
-	var cleaned []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
-			continue
-		}
-		cleaned = append(cleaned, line)
-	}
-
-	insertAt := len(cleaned)
-	for i, line := range cleaned {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			insertAt = i
-			break
-		}
-	}
-
-	var out []string
-	out = append(out, cleaned[:insertAt]...)
-	out = append(out, lineValue)
-	out = append(out, cleaned[insertAt:]...)
-
-	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
+	return marker + eol + body
 }
 
 // ─── Platform paths ──────────────────────────────────────────────────────────

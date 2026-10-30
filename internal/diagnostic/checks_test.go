@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 func TestBuildRepairPlanManualSessionNameKeepsPersistedProjectWhenBasenameCorroboratesIt(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -386,6 +387,23 @@ func assertToolSearchNames(t *testing.T, listed []string) {
 	}
 }
 
+// assertConditionalBootstrapGuidance verifies the emitted instruction contract,
+// not whether a model follows it or whether the hook can inspect model context.
+func assertConditionalBootstrapGuidance(t *testing.T, additionalContext string) {
+	t.Helper()
+	const want = "After loading tools, use usable prior-session context already provided by SessionStart. Only call mem_context before responding if no prior-session context was provided or it is not useful."
+	// Everything after the ToolSearch list is guidance: exact comparison also
+	// rejects an unconditional duplicate mem_context instruction appended to it.
+	_, afterSelect, found := strings.Cut(additionalContext, "select:")
+	if !found {
+		t.Fatalf("bootstrap missing ToolSearch list: %q", additionalContext)
+	}
+	_, guidance, found := strings.Cut(afterSelect, "\n")
+	if !found || strings.TrimSpace(guidance) != want {
+		t.Errorf("post-ToolSearch guidance = %q, want %q", strings.TrimSpace(guidance), want)
+	}
+}
+
 // decodeHookPayload parses hook stdout and fails loudly on malformed JSON: the
 // hook contract requires valid JSON on every path.
 func decodeHookPayload(t *testing.T, stdout string) hookPayload {
@@ -428,6 +446,7 @@ func TestBootstrapEmitsToolSearchPayload(t *testing.T) {
 		t.Error("hookSpecificOutput.additionalContext is empty - the bootstrap delivers nothing")
 	}
 	assertToolSearchNames(t, selectNames(t, payload.HookSpecificOutput.AdditionalContext))
+	assertConditionalBootstrapGuidance(t, payload.HookSpecificOutput.AdditionalContext)
 }
 
 // The marker file makes the bootstrap fire exactly once per session; a repeat
@@ -945,9 +964,6 @@ func healthyServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard verifies session-start.sh's MCP-migration guard honors CLAUDE_CONFIG_DIR (issue #1081).
-// TestSessionStartAlwaysDelegatesClaudeMCPRegistration confirms the hook has no
-// config-file authority: setup owns inspection, conflict detection, and writes.
 func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 	requireHookBinaries(t)
 
@@ -956,6 +972,7 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 		Project       string `json:"project"`
 		Directory     string `json:"directory"`
 		OwnershipMode string `json:"ownership_mode"`
+		Resume        bool   `json:"resume"`
 	}
 	var registrations int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -996,14 +1013,36 @@ func TestSessionStartRegistersProjectOwnedClaudeSession(t *testing.T) {
 	if registered.OwnershipMode != "project_owned" {
 		t.Fatalf("ownership_mode = %q, want project_owned", registered.OwnershipMode)
 	}
+	// Issue #1624: Claude reuses the session ID on --resume; resume lets the
+	// server register a live continuation instead of refusing the ended root.
+	if !registered.Resume {
+		t.Fatal("session registration must request resume")
+	}
 }
 
-func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
+func TestSessionStartSkipsClaudeMCPRegistration(t *testing.T) {
 	requireHookBinaries(t)
 
 	run := func(t *testing.T, setupFails bool) ([]string, string) {
 		t.Helper()
-		srv := healthyServer(t)
+		var registrations, contexts atomic.Int64
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/health":
+				_, _ = io.WriteString(w, `{"instance_id":"00000000000000000000000000000000"}`)
+			case "/project/current":
+				_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+			case "/sessions":
+				registrations.Add(1)
+				w.WriteHeader(http.StatusCreated)
+			case "/context":
+				contexts.Add(1)
+				_, _ = io.WriteString(w, `{"context":"isolated session memory"}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
 		stubDir := t.TempDir()
 		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
 		stub := filepath.Join(stubDir, "engram")
@@ -1028,24 +1067,161 @@ func TestSessionStartAlwaysDelegatesClaudeMCPRegistration(t *testing.T) {
 			"ENGRAM_PORT":            serverPort(t, srv),
 			"ENGRAM_MANAGED_LOCAL":   "0",
 			"CLAUDE_CONFIG_DIR":      configDir,
+			"HOME":                   t.TempDir(),
 			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
 			"ENGRAM_TEST_ENGRAM_LOG": logPath,
 		}
 		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
-		_, stderr := runHookWithStderr(t, "session-start.sh", stdin, env)
+		var stderr string
+		for i := 0; i < 2; i++ {
+			stdout, errOutput := runHookWithStderr(t, "session-start.sh", stdin, env)
+			stderr += errOutput
+			if !strings.Contains(stdout, "isolated session memory") {
+				t.Fatalf("invocation %d missing memory context: %q", i+1, stdout)
+			}
+		}
+		if gotRegistrations, gotContexts := registrations.Load(), contexts.Load(); gotRegistrations != 2 || gotContexts != 2 {
+			t.Fatalf("registrations/context requests = %d/%d, want 2/2", gotRegistrations, gotContexts)
+		}
 		return readEngramInvocations(t, logPath), stderr
 	}
 
-	invocations, stderr := run(t, false)
-	if stderr != "" {
-		t.Fatalf("successful setup stderr = %q", stderr)
+	for _, setupFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("setupFails=%t", setupFails), func(t *testing.T) {
+			invocations, stderr := run(t, setupFails)
+			for _, invocation := range invocations {
+				if strings.HasPrefix(invocation, "setup ") {
+					t.Fatalf("SessionStart must not invoke setup: %v", invocations)
+				}
+			}
+			if stderr != "" {
+				t.Fatalf("SessionStart stderr = %q, want no registration warning", stderr)
+			}
+		})
 	}
-	if got := strings.Count(strings.Join(invocations, "\n"), "setup claude-code --mcp-only"); got != 1 {
-		t.Fatalf("setup invocations = %d, want one despite stale legacy config: %v", got, invocations)
-	}
+}
 
-	_, stderr = run(t, true)
-	if !strings.Contains(stderr, "warning: Engram MCP registration failed") {
-		t.Fatalf("failed setup stderr = %q, want actionable warning", stderr)
+// Issue #1624: roots created before Claude registered project_owned sessions
+// are shared. Resuming one must keep that mode so the continuation stays
+// resolvable; every other case still registers project_owned.
+func TestSessionStartResumeKeepsLegacySharedOwnership(t *testing.T) {
+	requireHookBinaries(t)
+
+	for _, tc := range []struct {
+		name     string
+		lookup   string
+		wantMode string
+	}{
+		{"ended legacy shared root", `{"id":"claude-resumed","ownership_mode":"shared","ended_at":"2026-10-09 12:00:00"}`, "shared"},
+		{"ended project_owned root", `{"id":"claude-resumed","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, "project_owned"},
+		{"live shared root", `{"id":"claude-resumed","ownership_mode":"shared"}`, "project_owned"},
+		{"other session", `{"id":"other","ownership_mode":"shared","ended_at":"2026-10-09 12:00:00"}`, "project_owned"},
+		{"unknown session", "", "project_owned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var registered struct {
+				OwnershipMode string `json:"ownership_mode"`
+				Resume        bool   `json:"resume"`
+			}
+			var registrations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/claude-resumed" && tc.lookup != "":
+					_, _ = io.WriteString(w, tc.lookup)
+				case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+					if err := json.NewDecoder(r.Body).Decode(&registered); err != nil {
+						t.Errorf("decode session registration: %v", err)
+						return
+					}
+					registrations++
+					w.WriteHeader(http.StatusCreated)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			stubDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(stubDir, "engram"), []byte("#!/bin/bash\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("write engram stub: %v", err)
+			}
+			runHook(t, "session-start.sh", `{"session_id":"claude-resumed","cwd":`+strconv.Quote(t.TempDir())+`,"source":"resume"}`,
+				map[string]string{"ENGRAM_URL": srv.URL, "PATH": stubDir + ":" + os.Getenv("PATH")})
+
+			if registrations != 1 || !registered.Resume || registered.OwnershipMode != tc.wantMode {
+				t.Fatalf("registrations = %d, registration = %+v, want resume with %s", registrations, registered, tc.wantMode)
+			}
+		})
+	}
+}
+
+// Compaction fires SessionStart with source "compact", which runs
+// post-compaction.sh instead of session-start.sh. Claude keeps the session ID
+// across compaction too, so when the root (and any continuation) already ended,
+// registering without resume is refused with session_already_ended and every
+// later write is denied by the PreToolUse gate. post-compaction.sh must register
+// exactly like session-start.sh: resume=true, keeping a legacy shared root's
+// ownership mode.
+func TestPostCompactionRegistersResumableClaudeSession(t *testing.T) {
+	requireHookBinaries(t)
+
+	for _, tc := range []struct {
+		name     string
+		lookup   string
+		wantMode string
+	}{
+		{"ended legacy shared root", `{"id":"claude-compacted","ownership_mode":"shared","ended_at":"2026-10-09 12:00:00"}`, "shared"},
+		{"ended project_owned root", `{"id":"claude-compacted","ownership_mode":"project_owned","ended_at":"2026-10-09 12:00:00"}`, "project_owned"},
+		{"live project_owned root", `{"id":"claude-compacted","ownership_mode":"project_owned"}`, "project_owned"},
+		{"unknown session", "", "project_owned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var registered struct {
+				ID            string `json:"id"`
+				Project       string `json:"project"`
+				Directory     string `json:"directory"`
+				OwnershipMode string `json:"ownership_mode"`
+				Resume        bool   `json:"resume"`
+			}
+			var registrations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/sessions/claude-compacted" && tc.lookup != "":
+					_, _ = io.WriteString(w, tc.lookup)
+				case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+					if err := json.NewDecoder(r.Body).Decode(&registered); err != nil {
+						t.Errorf("decode session registration: %v", err)
+						return
+					}
+					registrations++
+					w.WriteHeader(http.StatusCreated)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			stubDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(stubDir, "engram"), []byte("#!/bin/bash\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("write engram stub: %v", err)
+			}
+			cwd := t.TempDir()
+			runHook(t, "post-compaction.sh", `{"session_id":"claude-compacted","cwd":`+strconv.Quote(cwd)+`,"source":"compact"}`,
+				map[string]string{"ENGRAM_URL": srv.URL, "PATH": stubDir + ":" + os.Getenv("PATH")})
+
+			if registrations != 1 {
+				t.Fatalf("session registrations = %d, want 1", registrations)
+			}
+			if registered.ID != "claude-compacted" || registered.Project != "engram" || registered.Directory != cwd {
+				t.Fatalf("session registration = %+v, want the Claude session, resolved project and cwd", registered)
+			}
+			if !registered.Resume || registered.OwnershipMode != tc.wantMode {
+				t.Fatalf("registration = %+v, want resume with %s", registered, tc.wantMode)
+			}
+		})
 	}
 }

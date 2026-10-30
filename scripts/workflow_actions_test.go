@@ -96,11 +96,14 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
 	for _, required := range []string{
 		"pull_request:",
-		"types: [opened, edited, labeled, unlabeled, synchronize]",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
 		"check-issue-reference:",
 		"name: Check Issue Reference",
 		"check-issue-approved:",
 		"name: Check Issue Has status:approved",
+		"permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
+		"issue.assignees.length === 0",
+		"has no assignee. Assign an owner before merge.",
 	} {
 		if !strings.Contains(prCheck, required) {
 			t.Errorf("%s does not contain %q", prCheckPath, required)
@@ -155,7 +158,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	artifactWorkflow := strings.ReplaceAll(string(artifactWorkflowContent), "\r\n", "\n")
 	for _, required := range []string{
 		"pull_request_target:",
-		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
+		"types: [opened, edited, synchronize, reopened]",
 		"permissions:\n  contents: read\n  pull-requests: read",
 		"check-transient-artifacts:",
 		"name: Check PR Has No Transient Artifacts",

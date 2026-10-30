@@ -19,10 +19,18 @@ const expectedGoreleaserJob = `  goreleaser:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25.10"
+          go-version: "1.26.10"
 
       - name: Verify module metadata is tidy
         run: go mod tidy -diff
+
+      - name: Set up Node for companion preflight
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Verify published Pi companion
+        run: node .github/scripts/release-companion.mjs
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
@@ -47,7 +55,26 @@ func TestReleaseChecksModuleMetadataWithoutMutatingTaggedSources(t *testing.T) {
 		t.Fatal("release workflow must contain exactly one top-level goreleaser job")
 	}
 	if job != expectedGoreleaserJob {
-		t.Errorf("unexpected goreleaser job; it must set up Go, run blocking `go mod tidy -diff`, then run GoReleaser without additional release steps\nwant:\n%s\ngot:\n%s", expectedGoreleaserJob, job)
+		t.Errorf("unexpected goreleaser job; it must set up Go, run blocking `go mod tidy -diff`, then run the blocking companion preflight before GoReleaser\nwant:\n%s\ngot:\n%s", expectedGoreleaserJob, job)
+	}
+}
+
+// modulePath must carry the major-version suffix of the release line so that
+// `go install <modulePath>/cmd/engram@latest` resolves the tagged release.
+const modulePath = "github.com/Gentleman-Programming/engram/v3"
+
+func TestModulePathMatchesReleaseMajorVersion(t *testing.T) {
+	root := releaseConfigRepoRoot(t)
+	goMod := strings.ReplaceAll(releaseConfigFile(t, filepath.Join(root, "go.mod")), "\r\n", "\n")
+	firstLine, _, _ := strings.Cut(goMod, "\n")
+	if want := "module " + modulePath; firstLine != want {
+		t.Fatalf("go.mod module line = %q, want %q", firstLine, want)
+	}
+
+	install := "go install " + modulePath + "/cmd/engram@latest"
+	installation := releaseConfigFile(t, filepath.Join(root, "docs", "INSTALLATION.md"))
+	if strings.Count(installation, install) < 2 {
+		t.Fatalf("docs/INSTALLATION.md must document %q for both Windows and macOS/Linux", install)
 	}
 }
 

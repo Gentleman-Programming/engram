@@ -11,8 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 func newE2EServer(t *testing.T) (*store.Store, *httptest.Server) {
@@ -37,6 +38,48 @@ func newE2EServer(t *testing.T) (*store.Store, *httptest.Server) {
 	return s, httpServer
 }
 
+func TestContextHistoryE2E(t *testing.T) {
+	st, ts := newE2EServer(t)
+	if err := st.CreateSession("history", "engram", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 35; i++ {
+		title := "History é " + strconv.Itoa(i)
+		if _, err := st.AddObservation(store.AddObservationParams{SessionID: "history", Project: "engram", Scope: "project", Type: "note", Title: title, Content: title}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(query string) string {
+		t.Helper()
+		resp, err := ts.Client().Get(ts.URL + "/context?project=engram&scope=project" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("context status: %d", resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+	legacy := get("")
+	if disabled := get("&older_history=false"); disabled != legacy {
+		t.Fatal("explicit false changed default output")
+	}
+	if strings.Contains(legacy, "### Older History") {
+		t.Fatal("default context included older history")
+	}
+	enabled := get("&older_history=true&max_bytes=4096")
+	if !strings.Contains(enabled, "### Older History") || len(enabled) > 4096 {
+		t.Fatalf("enabled context: %s", enabled)
+	}
+	for _, n := range []int{1, 32, 128} {
+		text := get("&older_history=true&max_bytes=" + strconv.Itoa(n))
+		if len(text) > n || !utf8.ValidString(text) {
+			t.Fatalf("invalid context at budget %d: %q", n, text)
+		}
+	}
+}
+
 func postJSON(t *testing.T, client *http.Client, url string, body any) *http.Response {
 	t.Helper()
 	payload, err := json.Marshal(body)
@@ -58,6 +101,57 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 		t.Fatalf("decode json: %v", err)
 	}
 	return out
+}
+
+func TestObservationExpectedProjectRouteE2E(t *testing.T) {
+	t.Setenv("ENGRAM_HTTP_TOKEN", "")
+	st, ts := newE2EServer(t)
+	if err := st.CreateSession("owner-route", "owner", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "owner-route", Project: "owner", Scope: "global", Type: "note", Title: "original", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := ts.URL + "/observations/" + strconv.FormatInt(id, 10)
+	for _, tc := range []struct {
+		method, query string
+		status        int
+	}{
+		{http.MethodPatch, "", http.StatusBadRequest},
+		{http.MethodDelete, "", http.StatusBadRequest},
+		{http.MethodPatch, "?expected_project=other", http.StatusConflict},
+		{http.MethodDelete, "?expected_project=other&hard=true", http.StatusConflict},
+		{http.MethodPatch, "?expected_project=%20OWNER%20", http.StatusOK},
+		{http.MethodDelete, "?expected_project=owner", http.StatusOK},
+		{http.MethodPatch, "?expected_project=owner", http.StatusNotFound},
+		{http.MethodDelete, "?expected_project=other&hard=true", http.StatusConflict},
+		{http.MethodDelete, "?expected_project=owner&hard=true", http.StatusOK},
+		{http.MethodDelete, "?expected_project=owner&hard=true", http.StatusNotFound},
+	} {
+		req, err := http.NewRequest(tc.method, path+tc.query, strings.NewReader(`{"content":"changed"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != tc.status {
+			t.Fatalf("%s %s = %d, want %d: %s", tc.method, tc.query, resp.StatusCode, tc.status, body)
+		}
+		if tc.method == http.MethodPatch && tc.status == http.StatusOK {
+			var obs store.Observation
+			if err := json.Unmarshal(body, &obs); err != nil || obs.Content != "changed" || obs.RevisionCount != 2 {
+				t.Fatalf("matching update response = %#v, %v", obs, err)
+			}
+		}
+	}
 }
 
 func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
@@ -140,7 +234,7 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected different topic to create new observation")
 	}
 
-	deleteReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(firstID, 10), nil)
+	deleteReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(firstID, 10)+"?expected_project=engram", nil)
 	if err != nil {
 		t.Fatalf("new delete request: %v", err)
 	}
@@ -865,7 +959,7 @@ func TestValidationAndImportExportErrorsE2E(t *testing.T) {
 	}
 	create.Body.Close()
 
-	updateBadIDReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/not-a-number", strings.NewReader(`{"title":"x"}`))
+	updateBadIDReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/not-a-number?expected_project=engram", strings.NewReader(`{"title":"x"}`))
 	updateBadIDReq.Header.Set("Content-Type", "application/json")
 	updateBadIDResp, err := client.Do(updateBadIDReq)
 	if err != nil {
@@ -1084,7 +1178,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	obsBody := decodeJSON[map[string]any](t, obs)
 	obsID := int64(obsBody["id"].(float64))
 
-	updateReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader(`{"title":"Auth handling updated","topic_key":"architecture/auth"}`))
+	updateReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", strings.NewReader(`{"title":"Auth handling updated","topic_key":"architecture/auth"}`))
 	if err != nil {
 		t.Fatalf("new patch request: %v", err)
 	}
@@ -1101,7 +1195,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 		t.Fatalf("expected updated title, got %v", updated["title"])
 	}
 
-	emptyUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader(`{}`))
+	emptyUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", strings.NewReader(`{}`))
 	emptyUpdateReq.Header.Set("Content-Type", "application/json")
 	emptyUpdateResp, err := client.Do(emptyUpdateReq)
 	if err != nil {
@@ -1112,7 +1206,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	emptyUpdateResp.Body.Close()
 
-	badUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader("{"))
+	badUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", strings.NewReader("{"))
 	badUpdateReq.Header.Set("Content-Type", "application/json")
 	badUpdateResp, err := client.Do(badUpdateReq)
 	if err != nil {
@@ -1123,7 +1217,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	badUpdateResp.Body.Close()
 
-	deleteHardReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?hard=true", nil)
+	deleteHardReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram&hard=true", nil)
 	deleteHardResp, err := client.Do(deleteHardReq)
 	if err != nil {
 		t.Fatalf("delete hard observation: %v", err)
@@ -1133,7 +1227,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	deleteHardResp.Body.Close()
 
-	deleteInvalidBoolReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?hard=not-bool", nil)
+	deleteInvalidBoolReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram&hard=not-bool", nil)
 	deleteInvalidBoolResp, err := client.Do(deleteInvalidBoolReq)
 	if err != nil {
 		t.Fatalf("delete with invalid bool: %v", err)
@@ -1294,7 +1388,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	obsData := decodeJSON[map[string]any](t, obs)
 	obsID := int64(obsData["id"].(float64))
 
-	deleteBadIDReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/not-number", nil)
+	deleteBadIDReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/not-number?expected_project=engram", nil)
 	deleteBadIDResp, err := client.Do(deleteBadIDReq)
 	if err != nil {
 		t.Fatalf("delete bad id: %v", err)
@@ -1304,7 +1398,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	}
 	deleteBadIDResp.Body.Close()
 
-	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), nil)
+	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", nil)
 	deleteResp, err := client.Do(deleteReq)
 	if err != nil {
 		t.Fatalf("delete observation: %v", err)
@@ -1314,7 +1408,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	}
 	deleteResp.Body.Close()
 
-	deleteMissingReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), nil)
+	deleteMissingReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?expected_project=engram", nil)
 	deleteMissingResp, err := client.Do(deleteMissingReq)
 	if err != nil {
 		t.Fatalf("delete missing observation: %v", err)
@@ -1419,7 +1513,7 @@ func TestStoreClosedExtraServerBranchesE2E(t *testing.T) {
 	}
 	getResp.Body.Close()
 
-	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/1", nil)
+	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/1?expected_project=engram", nil)
 	deleteResp, err := client.Do(deleteReq)
 	if err != nil {
 		t.Fatalf("delete observation closed store: %v", err)

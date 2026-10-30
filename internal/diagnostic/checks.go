@@ -2,14 +2,15 @@ package diagnostic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 	CheckSyncTargetClosedSpace            = "sync_target_closed_space"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
 	CheckOrphanedObservationSession       = "orphaned_observation_session"
+	CheckOrphanedPendingRelations         = "orphaned_pending_relations"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
@@ -34,12 +36,20 @@ const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_ident
 // targets.
 const ReasonForeignSyncTarget = "foreign_sync_target"
 
+// orphanedPendingRelationSampleLimit bounds how many candidate relations the
+// store's bounded diagnostic read returns to the aggregate doctor finding, so
+// a large legacy backlog cannot flood diagnostic output. The full candidate
+// set is re-derived by the repair plan and apply path from the same store
+// evidence.
+const orphanedPendingRelationSampleLimit = 10
+
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type SyncTargetClosedSpaceCheck struct{}
 type InvalidSessionIdentityCheck struct{}
 type OrphanedObservationSessionCheck struct{}
+type OrphanedPendingRelationsCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 type AmbiguousActiveRuntimeSessionsCheck struct{}
@@ -54,6 +64,7 @@ func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationR
 func (SyncTargetClosedSpaceCheck) Code() string      { return CheckSyncTargetClosedSpace }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
 func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
+func (OrphanedPendingRelationsCheck) Code() string   { return CheckOrphanedPendingRelations }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
@@ -155,18 +166,40 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 		if !decision.shouldReportDirectoryMismatch() {
 			continue
 		}
+		aliases, err := sessionProjectAliases(scope, session.Directory)
+		if err != nil {
+			return CheckResult{}, err
+		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityWarning,
 			ReasonCode:           "session_project_directory_mismatch",
 			Message:              "Session project does not match the project inferred from its directory.",
 			Why:                  "Project/directory drift can cause agents to retrieve or save memories under the wrong project scope.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_project": session.Project, "directory": session.Directory, "directory_project": directoryProject.Project, "directory_project_source": directoryProject.Source, "directory_project_path": directoryProject.Path}),
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_project": session.Project, "directory": session.Directory, "directory_project": directoryProject.Project, "directory_project_source": directoryProject.Source, "directory_project_path": directoryProject.Path, "project_aliases": aliases}),
 			SafeNextStep:         "Review the session evidence and use explicit `--project`/MCP project overrides until the project naming is consolidated.",
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+// sessionProjectAliases uses the same root-only candidate as alias resolve.
+// Aliases are diagnostic evidence and a veto, never ownership authority.
+func sessionProjectAliases(scope Scope, directory string) (*store.ProjectAliasResolution, error) {
+	if strings.TrimSpace(directory) == "" {
+		return &store.ProjectAliasResolution{}, nil
+	}
+	candidate, err := projectpkg.DeriveRoutingCandidate(projectpkg.RoutingCandidateInput{GitRoot: projectpkg.ObserveGitRoot(directory), Directory: directory})
+	if err != nil {
+		if !errors.Is(err, projectpkg.ErrInvalidProjectName) {
+			return nil, err
+		}
+		// A legal filesystem root need not be a valid project key. It supplies
+		// no key alias evidence, but the exact cwd alias still applies.
+		candidate.Key = ""
+	}
+	return scope.Store.ResolveProjectAlias(candidate.Key, candidate.Directory)
 }
 
 func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject, directory string) (DetectedProject, bool) {
@@ -187,7 +220,7 @@ func detectSessionDirectoryProject(scope Scope, cache map[string]DetectedProject
 	if _, err := os.Stat(directory); err != nil {
 		return DetectedProject{}, false
 	}
-	res := projectpkg.DetectProjectFull(directory)
+	res := projectpkg.DetectProjectFullWithOptions(directory, projectpkg.DetectionOptions{InspectOnly: true})
 	if res.Error != nil {
 		return DetectedProject{}, false
 	}
@@ -221,13 +254,17 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 		if !decision.shouldReportManualNameMismatch() {
 			continue
 		}
+		aliases, err := sessionProjectAliases(scope, session.Directory)
+		if err != nil {
+			return CheckResult{}, err
+		}
 		findings = append(findings, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityWarning,
 			ReasonCode:           "manual_session_name_project_mismatch",
 			Message:              "Manual session name suffix does not match sessions.project.",
 			Why:                  "Manual session naming drift cannot prove project ownership and must not be auto-rescued.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject}),
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject, "project_aliases": aliases}),
 			SafeNextStep:         "Review the persisted project, then use the ownership rescue command deliberately; its SQLite backup is the rollback point.",
 			RequiresConfirmation: true,
 		})
@@ -379,7 +416,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
 			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
 			Evidence:             mustJSON(observation),
-			SafeNextStep:         syncMutationRequiredFieldsRepairHint(scope.Project),
+			SafeNextStep:         observationSourceRepairHint(scope.Project, observation.MissingFields),
 			RequiresConfirmation: true,
 		})
 	}
@@ -465,6 +502,16 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func observationSourceRepairHint(project string, missingFields []string) string {
+	hint := syncMutationRequiredFieldsRepairHint(project)
+	for _, field := range missingFields {
+		if field == "type" || field == "content" {
+			return hint + " Repair cannot reconstruct missing type or content; manual investigation is required. Inspect source_unrepairable in the repair output."
+		}
+	}
+	return hint + " Only titles recoverable from existing content can be repaired; sources without a recoverable title require manual investigation and appear in source_unrepairable."
 }
 
 func syncMutationRequiredFieldsRepairHint(project string) string {
@@ -579,9 +626,13 @@ func (c SyncTargetClosedSpaceCheck) Run(ctx context.Context, scope Scope) (Check
 		if closed[state.TargetKey] {
 			continue
 		}
+		severity := SeverityError
+		if state.UnackedMutations == 0 {
+			severity = SeverityWarning
+		}
 		findings = append(findings, Finding{
 			CheckID:    c.Code(),
-			Severity:   SeverityError,
+			Severity:   severity,
 			ReasonCode: ReasonForeignSyncTarget,
 			Message:    fmt.Sprintf("Sync target %q is outside the closed set of legitimate sync targets.", state.TargetKey),
 			Why:        "A sync_state row for an unknown target records sync progress no configured delivery pipeline can ever advance, so its state can silently rot while appearing live.",
@@ -724,6 +775,45 @@ func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"orphaned_session_references_evaluated": len(evidence)}, findings), nil
+}
+
+// Run reports legacy pending relations whose source AND target observations
+// are absent from the active observation set. Such rows can never show a title
+// in `engram conflicts show` and no verdict can ever be recorded against them,
+// so they only inflate the pending backlog. The listing is deliberately
+// unscoped even when scope.Project is set: a relation with both endpoints
+// absent belongs to no project, so a project-scoped query could never return
+// the rows it exists to surface (the same reasoning as
+// UnownedSessionProjectCheck).
+func (c OrphanedPendingRelationsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListOrphanedPendingRelationEvidenceBounded(orphanedPendingRelationSampleLimit)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, 1)
+	if evidence.CandidateCount > 0 {
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: CheckOrphanedPendingRelations,
+			Message:    fmt.Sprintf("%d pending relation(s) reference missing observations on both endpoints and can never be judged.", evidence.CandidateCount),
+			Why:        "A pending relation without an active source or target observation shows no titles and no verdict can ever be recorded against it, so it only inflates the pending backlog; reclassifying it into the audited `orphaned` disposition preserves the row as history without fabricating a verdict.",
+			Evidence: mustJSON(map[string]any{
+				"candidate_count":      evidence.CandidateCount,
+				"one_endpoint_missing": evidence.OneEndpointMissing,
+				"live_pending":         evidence.LivePending,
+				"sample":               evidence.Sample,
+			}),
+			SafeNextStep:         "Review the sample, then run `engram doctor repair --check orphaned_pending_relations --dry-run`; apply reclassifies only these rows into the audited `orphaned` disposition after creating a SQLite backup.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{
+		"candidate_count":      evidence.CandidateCount,
+		"one_endpoint_missing": evidence.OneEndpointMissing,
+		"live_pending":         evidence.LivePending,
+	}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

@@ -14,6 +14,43 @@ import (
 	"time"
 )
 
+// privateUnixSocketPath avoids t.TempDir's potentially writable hierarchy and
+// keeps the path short enough for Unix sockets. Never repair unsafe permissions.
+func privateUnixSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "engram-uds-")
+	if err != nil {
+		t.Fatalf("create private socket directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove private socket directory: %v", err)
+		}
+	})
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("stat private socket directory: %v", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("private socket directory mode = %v, want directory with permissions 700", info.Mode())
+	}
+	socketPath, err := secureUnixSocketPath(filepath.Join(dir, "engram.sock"))
+	if err != nil {
+		t.Fatalf("private socket fixture does not satisfy directory trust policy: %v", err)
+	}
+	return socketPath
+}
+
+func TestUnixSocketPrivateFixtureTrustCompatibility(t *testing.T) {
+	socketPath := privateUnixSocketPath(t)
+	if err := validateUnixSocketParent(filepath.Dir(socketPath)); err != nil {
+		t.Fatalf("private socket hierarchy is not trusted: %v", err)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture should not create the socket: %v", err)
+	}
+}
+
 func startUnixSocketServer(t *testing.T, srv *Server, socketPath string) <-chan error {
 	t.Helper()
 	done := make(chan error, 1)
@@ -59,7 +96,7 @@ func TestUnixSocketDirectoryTrustPolicy(t *testing.T) {
 }
 
 func TestUnixSocketRejectsActiveSocketWithoutDisturbingListener(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	socketPath := privateUnixSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen on Unix socket: %v", err)
@@ -102,7 +139,7 @@ func unixSocketClient(socketPath string) *http.Client {
 }
 
 func TestUnixSocketServesHTTPWithRestrictivePermissions(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	socketPath := privateUnixSocketPath(t)
 	srv := New(newServerTestStore(t), 0)
 	srv.SetSocketPath(socketPath)
 	done := startUnixSocketServer(t, srv, socketPath)
@@ -147,7 +184,7 @@ func TestUnixSocketServesHTTPWithRestrictivePermissions(t *testing.T) {
 }
 
 func TestUnixSocketReplacesOnlyStaleSockets(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	socketPath := privateUnixSocketPath(t)
 	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatalf("create stale socket: %v", err)
@@ -167,7 +204,7 @@ func TestUnixSocketReplacesOnlyStaleSockets(t *testing.T) {
 		t.Fatalf("replacement server returned %v", err)
 	}
 
-	filePath := filepath.Join(t.TempDir(), "not-a-socket")
+	filePath := filepath.Join(filepath.Dir(socketPath), "not-a-socket")
 	if err := os.WriteFile(filePath, []byte("do not remove"), 0o600); err != nil {
 		t.Fatalf("create ordinary file: %v", err)
 	}
@@ -183,7 +220,7 @@ func TestUnixSocketReplacesOnlyStaleSockets(t *testing.T) {
 }
 
 func TestUnixSocketCloseIsIdempotent(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	socketPath := privateUnixSocketPath(t)
 	srv := New(newServerTestStore(t), 0)
 	srv.SetSocketPath(socketPath)
 	done := startUnixSocketServer(t, srv, socketPath)

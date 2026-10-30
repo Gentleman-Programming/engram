@@ -43,7 +43,11 @@ engram sync --cloud --status --project smoke-project
 ### 5) Verify browser dashboard
 
 Open:
-- `http://127.0.0.1:18080/dashboard`
+- `http://127.0.0.1:18080/` — redirects to `/dashboard/` with HTTP 302.
+- `http://127.0.0.1:18080/dashboard` — direct dashboard entrypoint.
+
+In authenticated deployments, an unauthenticated browser is then redirected to
+`/dashboard/login`. Unknown paths still return HTTP 404.
 
 In compose smoke mode, `/dashboard/login` redirects to `/dashboard/` (no bearer login needed).
 
@@ -165,6 +169,28 @@ ENGRAM_CLOUD_MAX_PUSH_BYTES=8388608
 ENGRAM_PORT=18080
 ```
 
+### PostgreSQL credentials
+
+For a fresh PostgreSQL volume, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+`POSTGRES_DB` initialize the database. `ENGRAM_DATABASE_URL` must connect to that
+same user and database with the same password. Changing the initialization values
+in `.env` does not change credentials in an already-initialized PostgreSQL volume.
+
+Keep the password literal in `POSTGRES_PASSWORD`. In `ENGRAM_DATABASE_URL`,
+percent-encode reserved characters in the password component, not the entire URL.
+For example, the synthetic password `example@pass:word/` becomes
+`example%40pass%3Aword%2F` in the URL (do not use this example password):
+
+```dotenv
+POSTGRES_PASSWORD=example@pass:word/
+ENGRAM_DATABASE_URL=postgres://engram:example%40pass%3Aword%2F@postgres:5432/engram_cloud?sslmode=disable
+```
+
+A successful PostgreSQL `pg_isready` healthcheck does not verify Engram's runtime
+credentials or database target. Engram checks its actual connection during cloud
+startup using `cloudstore.New` and `PingContext`; a readiness check alone does not
+prove that connection will succeed.
+
 Notes:
 - Keep `.env` on the server only. Do not commit it.
 - `ENGRAM_CLOUD_TOKEN` is the bearer token clients use for authenticated sync.
@@ -188,7 +214,9 @@ engram cloud bootstrap admin --username alice \
 - Running bootstrap again once a managed admin exists is refused (no silent duplicate admin), and every attempt — accepted or refused — is recorded as a `bootstrap.cli` audit event.
 - If the one-time bootstrap token output was lost, use `engram cloud bootstrap recover-token` only when no managed token rows exist. To replace the sole unused, active bootstrap token explicitly, use `engram cloud bootstrap recover-token --revoke-existing`; retry it after another lost output only while the current token remains unused. It refuses used, revoked, ambiguous, or multiple-active-token states and preserves the admin and project grants.
 
-**Runtime authentication:** set `ENGRAM_CLOUD_TOKEN_PEPPER` (the same secret used at token-issuance time) on the `engram cloud serve` process to enable managed-token authentication — `engram cloud serve` then resolves managed tokens first, then falls back to the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials, on every `/sync/*`, `/admin/*`, and dashboard-login request. If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, the server still starts normally and continues to authenticate only via the legacy env-token credentials. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap).
+**Managed-token last use:** last use records successful managed bearer-token authentication, including dashboard login, not activity in an existing browser cookie session. Authentication fails closed if usage cannot be persisted. Once a token has authenticated successfully, `recover-token --revoke-existing` cannot replace it; use normal token management instead. Legacy credentials and existing cookie-session behavior are unchanged.
+
+**Runtime authentication:** set `ENGRAM_CLOUD_TOKEN_PEPPER` (the same secret used at token-issuance time) on the `engram cloud serve` process to enable managed-token authentication — `engram cloud serve` then checks the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials first and resolves other bearer tokens through managed storage, on every `/sync/*`, `/admin/*`, and dashboard-login request. If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, the server still starts normally and continues to authenticate only via the legacy env-token credentials. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap).
 
 ---
 
@@ -245,6 +273,16 @@ engram sync --cloud --project my-project
 > `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is for local/dev smoke only. Never use it in production.
 
 ---
+
+## Confirm one prompt source (human-token only)
+
+For an existing local prompt, use its **exact** sync ID and explicitly assert the owner project:
+
+```bash
+engram cloud attest-prompt-source --sync-id <exact-sync-id> --owner-project <owner-project>
+```
+
+Review the observed session, source inbox, prompt project, sync ID, and live/deleted kind alongside the separately labeled human-asserted owner. Type `yes` to send that tuple; `no`, invalid input, or a missing/ambiguous local preview sends nothing. A configured human bearer token is required; the remote service enforces both project grants. Only a successful remote attestation with a positive ID is recorded locally against the effective validated cloud endpoint. This command does not import, pull, or delete data.
 
 ## Common Failure Reasons
 

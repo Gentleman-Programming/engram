@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
 type adminTestStore struct {

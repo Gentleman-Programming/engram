@@ -17,8 +17,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	versioncheck "github.com/Gentleman-Programming/engram/v3/internal/version"
 	_ "modernc.org/sqlite"
 )
 
@@ -901,4 +901,139 @@ func TestG1_DeferredLifecycle(t *testing.T) {
 	if !strings.Contains(stdout, "retried:") {
 		t.Errorf("deferred replay: expected 'retried:' label; got: %q", stdout)
 	}
+}
+
+// TestCmdConflictsStats_PrintsOrphanedLabelInStableOrder verifies the audited
+// `orphaned` disposition gets an explicit stable-order label line — directly
+// after pending, accepted, and rejected, before unknown catch-all statuses —
+// with the same print style and missing-key handling as the other known
+// statuses, so orphaned counts are visible deterministically when > 0 and the
+// label stays absent when no orphaned relation exists.
+func TestCmdConflictsStats_PrintsOrphanedLabelInStableOrder(t *testing.T) {
+	type statusLine struct {
+		status string
+		count  string
+	}
+	parseStatusBlock := func(t *testing.T, stdout string) []statusLine {
+		t.Helper()
+		lines := strings.Split(stdout, "\n")
+		start := -1
+		for i, line := range lines {
+			if strings.TrimSpace(line) == "By judgment_status:" {
+				start = i + 1
+				break
+			}
+		}
+		if start == -1 {
+			t.Fatalf("stats output has no judgment_status block: %q", stdout)
+		}
+		var statuses []statusLine
+		for _, line := range lines[start:] {
+			if strings.TrimSpace(line) == "" {
+				break
+			}
+			fields := strings.Fields(line)
+			if len(fields) != 2 || !strings.HasSuffix(fields[0], ":") {
+				t.Fatalf("unexpected judgment_status line %q in %q", line, stdout)
+			}
+			statuses = append(statuses, statusLine{status: strings.TrimSuffix(fields[0], ":"), count: fields[1]})
+		}
+		return statuses
+	}
+	seedStatuses := func(t *testing.T, cfg store.Config, rows []struct{ syncID, status string }) {
+		t.Helper()
+		db := openTestDB(t, cfg)
+		for _, row := range rows {
+			if _, err := db.Exec(`
+				INSERT INTO memory_relations
+					(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+				VALUES (?, 'missing-src', 'missing-tgt', 'pending', ?, datetime('now'), datetime('now'))
+			`, row.syncID, row.status); err != nil {
+				t.Fatalf("seed %s relation: %v", row.status, err)
+			}
+		}
+	}
+
+	t.Run("known status prefix is pending accepted rejected orphaned", func(t *testing.T) {
+		cfg := testConfig(t)
+		// seedRelation contributes the single pending row with live endpoints.
+		seedRelation(t, cfg, "alpha")
+		// The remaining dispositions: accepted and rejected join the known
+		// prefix; judged and ignored stay unknown catch-all statuses.
+		seedStatuses(t, cfg, []struct{ syncID, status string }{
+			{"rel-orph-1455", "orphaned"},
+			{"rel-accepted-1455", "accepted"},
+			{"rel-rejected-1455", "rejected"},
+			{"rel-judged-1455", "judged"},
+			{"rel-ignored-1455", "ignored"},
+		})
+
+		withArgs(t, "engram", "conflicts", "stats", "--all")
+		stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+		if stderr != "" {
+			t.Fatalf("unexpected stderr: %q", stderr)
+		}
+
+		statuses := parseStatusBlock(t, stdout)
+		wantCounts := map[string]string{
+			"pending": "1", "accepted": "1", "rejected": "1", "orphaned": "1",
+			"judged": "1", "ignored": "1",
+		}
+		got := map[string]string{}
+		for _, item := range statuses {
+			got[item.status] = item.count
+		}
+		for status, want := range wantCounts {
+			if got[status] != want {
+				t.Fatalf("status %q count=%q want %q (lines=%v)", status, got[status], want, statuses)
+			}
+		}
+		// The known dispositions print in stable list order, so orphaned
+		// directly follows rejected and precedes every catch-all status.
+		wantPrefix := []string{"pending", "accepted", "rejected", "orphaned"}
+		if len(statuses) < len(wantPrefix)+2 {
+			t.Fatalf("statuses=%v, want the known prefix plus judged and ignored catch-alls", statuses)
+		}
+		for i, want := range wantPrefix {
+			if statuses[i].status != want {
+				t.Fatalf("statuses=%v, want known-status prefix %v (position %d is %q)", statuses, wantPrefix, i, statuses[i].status)
+			}
+		}
+		// Catch-all statuses print after the prefix in arbitrary map order.
+		for i, item := range statuses[len(wantPrefix):] {
+			if item.status == "pending" || item.status == "accepted" || item.status == "rejected" || item.status == "orphaned" {
+				t.Fatalf("statuses=%v, known status %q must not print from the catch-all loop (position %d)", statuses, item.status, i+len(wantPrefix))
+			}
+		}
+	})
+
+	t.Run("omits orphaned label when no orphaned relation exists", func(t *testing.T) {
+		cfg := testConfig(t)
+		seedRelation(t, cfg, "alpha")
+		seedStatuses(t, cfg, []struct{ syncID, status string }{
+			{"rel-accepted-1455", "accepted"},
+			{"rel-rejected-1455", "rejected"},
+			{"rel-judged-1455", "judged"},
+		})
+
+		withArgs(t, "engram", "conflicts", "stats", "--all")
+		stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+		if stderr != "" {
+			t.Fatalf("unexpected stderr: %q", stderr)
+		}
+
+		if strings.Contains(stdout, "orphaned:") {
+			t.Fatalf("stats output=%q, want the orphaned label omitted when no orphaned relation exists", stdout)
+		}
+		statuses := parseStatusBlock(t, stdout)
+		wantPrefix := []string{"pending", "accepted", "rejected"}
+		if len(statuses) < len(wantPrefix)+1 {
+			t.Fatalf("statuses=%v, want the known prefix plus the judged catch-all", statuses)
+		}
+		for i, want := range wantPrefix {
+			if statuses[i].status != want {
+				t.Fatalf("statuses=%v, want known-status prefix %v (position %d is %q)", statuses, wantPrefix, i, statuses[i].status)
+			}
+		}
+	})
 }

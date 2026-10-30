@@ -21,7 +21,23 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Fixed
+
+- Claude's Windows native write/session hook can recover a refused default managed-local server, verify instance continuity, and retry the owner lookup once without weakening session attribution (#1956). Explicit endpoints, redirects and non-refusal failures remain fail-closed.
+
+### Core release recovery (Engram 3.3.2)
+
+- **chore(deps):** classify the existing `modernc.org/libc v1.70.0` requirement as direct so the unchanged release module-tidy gate passes; dependency versions and runtime behavior are unchanged.
+- The Engram `v3.3.1` binary release stopped at that gate before GoReleaser. Preserve its existing tag and Cloud image; `gentle-engram@0.4.1` is already published and is not republished by this recovery.
+
+### Patch release preparation (Engram 3.3.1 / gentle-engram 0.4.1)
+
+- **chore(release):** align the Pi package and core installer on `gentle-engram@0.4.1`, including idempotent upgrades from `0.4.0` without changing unrelated Pi settings or MCP configuration.
+- **fix(pi):** include the already-merged correction reserving session summaries for explicit closure (#1771) in the new Pi package artifact.
+
 ### Memory core
+
+- **fix(claude):** bind the PreToolUse write gate to the session's registered owner project instead of re-deriving it from the hook cwd (#1717). Writes from a registered session now succeed wherever the shell is — subfolders, sibling or cloned repositories, removed worktrees, and ambiguous directories no longer deny the gate. The cwd names the project only on first registration. Denials now name their actual cause (`already ended`, `session_project_conflict` with owner and requested projects, project-resolution failures with the server's reason) instead of the single generic "registration could not be confirmed" message shared with #1624.
 
 - **feat(mcp):** add an optional validated `project` argument to `mem_get_observation` for response context. Observation lookup remains ID-based and is not filtered by project ownership.
 - **fix(store):** upgrade the embedded SQLite runtime to 3.51.3, which includes SQLite's upstream WAL-reset integrity fix. Engram's WAL and network-filesystem policies are unchanged.
@@ -59,6 +75,7 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 ### Pi package (`pi-engram`)
 
+- **fix(pi):** stop adding `pi-mcp-adapter` in `engram setup pi` and `pi-engram init`. Pi 0.99.0 and later ship built-in MCP that reads `mcp.json`, and an installed `pi-mcp-adapter` replaces it, so setup no longer runs `pi install npm:pi-mcp-adapter` or declares it in `settings.json`; an existing adapter entry is left untouched. The package also drops its optional `pi-mcp-adapter` peer dependency.
 - **fix(plugin):** declare `@earendil-works/pi-tui` as an optional peer dependency instead of a hard `^0.74.0` dependency. The extension only renders `Text` from it while running inside pi, which always ships its own copy; the hard dependency gave npm a legal reason to hoist a `0.74.x` over the `^0.84.x` range declared by the installed pi-coding-agent and crash every pi child spawn with `SyntaxError: ... does not provide an export named 'TuiMainScreen'`. With the peer declaration the host's copy wins, npm never auto-installs a second pi-tui, and the range `>=0.74.0` accepts both pi-tui lines the plugin is verified against ([#853](https://github.com/Gentleman-Programming/engram/issues/853)).
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.
 - **fix(plugin):** fall back to local `.engram/config.json` and surface a clearer version-mismatch diagnostic when the running Engram server lacks `/project/current`.

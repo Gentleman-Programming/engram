@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	versioncheck "github.com/Gentleman-Programming/engram/v3/internal/version"
 )
 
 func TestCmdInit(t *testing.T) {

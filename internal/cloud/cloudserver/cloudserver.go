@@ -11,14 +11,16 @@ import (
 	"strings"
 	"time"
 
-	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
-	engramproject "github.com/Gentleman-Programming/engram/v2/internal/project"
-	"github.com/Gentleman-Programming/engram/v2/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"golang.org/x/mod/semver"
+
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
+	engramproject "github.com/Gentleman-Programming/engram/v3/internal/project"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v3/internal/sync"
 )
 
 type Option func(*CloudServer)
@@ -85,6 +87,10 @@ type CloudServer struct {
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
 	listenAndServe      func(addr string, handler http.Handler) error
+	// version is the optional running build identifier surfaced in the
+	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
+	// displayed as "version unknown" on both surfaces.
+	version string
 }
 
 const defaultHost = "127.0.0.1"
@@ -179,6 +185,33 @@ func WithMaxPushBodyBytes(limit int64) Option {
 	}
 }
 
+// WithVersion sets the build identifier (e.g. ldflags-injected semver) that
+// the dashboard chrome surfaces in the Layout footer and the LoginPage so
+// operators can confirm the running build from the browser alone. The stored
+// value is already display-ready, because MountConfig.Version is rendered
+// verbatim: a semver build carries exactly one leading "v" whichever shape
+// reached us ("v1.20.3" and "1.20.3" both display as "v1.20.3"), while a
+// non-semver build identifier such as "dev" is preserved as-is so a local
+// build is never mislabelled "vdev". Empty and whitespace-only values stay
+// empty; the chrome presents those builds as "version unknown".
+func WithVersion(version string) Option {
+	return func(s *CloudServer) {
+		s.version = displayVersion(version)
+	}
+}
+
+// displayVersion maps a raw build identifier onto its dashboard display form.
+func displayVersion(version string) string {
+	trimmed := strings.TrimSpace(version)
+	if semver.IsValid(trimmed) {
+		return trimmed
+	}
+	if semver.IsValid("v" + trimmed) {
+		return "v" + trimmed
+	}
+	return trimmed
+}
+
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {
 	s := &CloudServer{
 		store:            store,
@@ -235,6 +268,9 @@ func (s *CloudServer) pushBodyLimit() int64 {
 
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
+	s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusFound)
+	})
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	var dashboardStore dashboard.DashboardStore
 	if store, ok := s.store.(dashboard.DashboardStore); ok {
@@ -294,6 +330,7 @@ func (s *CloudServer) routes() {
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
+		Version:           s.version,
 	})
 	s.mux.HandleFunc("GET /dashboard/bootstrap", s.handleDashboardBootstrapPage)
 	s.mux.HandleFunc("POST /dashboard/bootstrap", s.handleDashboardBootstrapSubmit)
@@ -315,6 +352,10 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
+	s.mux.HandleFunc("POST /sync/session-authorities", s.withAuth(s.handleRegisterSessionAuthority))
+	s.mux.HandleFunc("POST /sync/prompt-pair-claims", s.withAuth(s.handlePromptPairClaim))
+	s.mux.HandleFunc("POST /sync/prompt-source-attestations", s.withAuth(s.handlePromptSourceAttestation))
+	s.mux.HandleFunc("POST /sync/prompt-source-attestations/verify", s.withAuth(s.handleVerifyPromptSourceAttestation))
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
 	s.mux.HandleFunc("GET /admin/users", s.withAuth(s.handleAdminListUsers))
@@ -902,7 +943,7 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 		if strings.TrimSpace(session.ID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
-		if strings.TrimSpace(session.Directory) == "" {
+		if strings.TrimSpace(session.Directory) == "" && session.OwnershipMode != store.SessionOwnershipProjectOwned {
 			return fmt.Errorf("sessions[%d].directory is required", i)
 		}
 	}
@@ -946,8 +987,8 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs map[string]struct{}) error {
 	chunkSessionIDs := make(map[string]struct{}, len(chunk.Sessions))
 	for i, session := range chunk.Sessions {
-		sessionID := strings.TrimSpace(session.ID)
-		if sessionID == "" {
+		sessionID := session.ID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
 		chunkSessionIDs[sessionID] = struct{}{}
@@ -962,11 +1003,11 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 		if err := decodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return fmt.Errorf("mutations[%d] invalid payload: %w", i, err)
 		}
-		sessionID := strings.TrimSpace(body.ID)
-		if sessionID == "" {
-			sessionID = strings.TrimSpace(mutation.EntityKey)
+		sessionID := body.ID
+		if strings.TrimSpace(sessionID) == "" {
+			sessionID = mutation.EntityKey
 		}
-		if sessionID == "" {
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("mutations[%d].payload.id is required for session upsert", i)
 		}
 		chunkSessionIDs[sessionID] = struct{}{}
@@ -981,8 +1022,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 	}
 
 	for i, observation := range chunk.Observations {
-		sessionID := strings.TrimSpace(observation.SessionID)
-		if sessionID == "" {
+		sessionID := observation.SessionID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("observations[%d].session_id is required", i)
 		}
 		if !hasSession(sessionID) {
@@ -991,8 +1032,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 	}
 
 	for i, prompt := range chunk.Prompts {
-		sessionID := strings.TrimSpace(prompt.SessionID)
-		if sessionID == "" {
+		sessionID := prompt.SessionID
+		if strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("prompts[%d].session_id is required", i)
 		}
 		if !hasSession(sessionID) {
@@ -1010,8 +1051,8 @@ func validateChunkSessionReferences(chunk engramsync.ChunkData, knownSessionIDs 
 		if err := decodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return fmt.Errorf("mutations[%d] invalid payload: %w", i, err)
 		}
-		sessionID := strings.TrimSpace(body.SessionID)
-		if mutation.Op == store.SyncOpUpsert && sessionID == "" {
+		sessionID := body.SessionID
+		if mutation.Op == store.SyncOpUpsert && strings.TrimSpace(sessionID) == "" {
 			return fmt.Errorf("mutations[%d].payload.session_id is required for upsert", i)
 		}
 		if mutation.Op == store.SyncOpUpsert && !hasSession(sessionID) {
