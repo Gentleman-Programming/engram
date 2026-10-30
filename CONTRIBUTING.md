@@ -199,6 +199,39 @@ current repository; qualified-only links do not expand discovery or rerun routin
 
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
+#### Observational Windows full-module baseline (#1891)
+
+`Windows Full Suite (Observational)` independently runs `go test -json ./...`
+with default tags on native Windows x64 for PRs, merge groups and main pushes.
+It does not replace selective Windows jobs, change the six required contexts,
+App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
+observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
+do not raise it to hide failures.
+
+The job checks Go 1.26.10, Node 24, PowerShell and Git for Windows Bash with
+jq/curl. It selects actual Git `usr/bin/bash.exe` (not the `bin` launcher),
+validates the absolute `jq.exe` selected from PATH, and exports the existing
+`CODEX_TEST_TRUSTED_BASH` / `CODEX_TEST_TRUSTED_JQ` fixture selectors before tests.
+It then installs locked Pi schema dependencies with
+`npm ci --ignore-scripts --legacy-peer-deps`. `ENGRAM_PI_SCHEMA_REQUIRE_REAL=1`
+makes that schema prerequisite mandatory rather than silently skipped.
+Missing mandatory tools fail preparation; no substitute tools are installed.
+Test home/profile, app data, Engram data and temp directories are job-local;
+Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
+provide process isolation, not measured proof of cleanup.
+
+JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
+failure artifacts when available. Cancellation/outer timeout can leave partial
+output without a completed exit/timing record. Wiring and structural tests do
+**not** complete #1891: hosted checked-out SHA, actual toolchain, exit, elapsed
+time and skip review are still missing. Optional-service and foreign-OS skips
+are not mandatory-prerequisite evidence or proof of executed packages; this
+job does not provision PostgreSQL or establish installed-host/distributed
+Pi/OpenCode placement. A finite PR/merge-group/main observation window and
+explicit retain/promote/remove disposition remain pending before stable-baseline
+claims. Diagnose bounded dependencies separately; do not trim packages, mask
+failures or start an automatic patch-the-next-failure loop.
+
 ### Linked Issue Assignment
 
 The independent **Linked Issue Assignment** metadata workflow handles PR opening,
@@ -248,7 +281,43 @@ retain their trusted `pull_request_target` checkout boundaries; neither executes
 PR-head code. Local event-matrix tests do not prove hosted event delivery or
 measured savings; verify actual runs after integration on the trusted branch.
 
-Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
+Non-required PR checks include the Claude plugin version guard, lint, Windows setup and wrapper coverage, transient-artifact validation, **Policy Helper Tests** (the unchanged merge-queue, label-policy, transient-artifacts and PR-size-notice command, plus explicit `.github/scripts/ci-technical-contracts.test.mjs` execution and a separate step discovering available `.github/scripts/issue-*.test.mjs` regressions), and **Obsidian Build** (tests, typecheck, and build after dependency installation). Policy Helper Tests, Obsidian Build, and the Claude plugin version guard also run on merge groups; lint, Windows checks, and transient-artifact validation do not run as merge-group CI jobs. None of these are active `main` required contexts; a maintainer must explicitly add the Claude plugin version guard to the ruleset before it becomes required.
+
+### CI job execution ceilings
+
+The [accepted #2020 execution contract](https://github.com/Gentleman-Programming/engram/issues/2020#issuecomment-6423158281)
+sets these initial job-level `timeout-minutes` ceilings in
+[CI](.github/workflows/ci.yml):
+
+| Job ID | Outer timeout (minutes) |
+|---|---:|
+| `lint` | 15 |
+| `policy-helper-tests` | 10 |
+| `unit-tests` | 20 |
+| `e2e-tests` | 15 |
+| `windows-setup-test` | 20 |
+| `wrapper-tests-windows` | 15 |
+| `obsidian-build` | 10 |
+| `perf-ratchet` | 20 |
+
+Each ceiling includes the entire job, including checkout, tool/dependency setup
+and every existing check. Unit Tests' 20 minutes includes administrative helper
+preparation and the selected proof wait (up to five minutes), setup, tidy,
+generated-output and deadcode checks, the Go suite, build and quick self-test.
+The proof-branch bootstrap's 15-second limit is not a universal administrative
+fetch bound. Go's default 10-minute test timeout applies per test binary, not to
+the whole suite.
+
+These are initial operational ceilings, not validated cold/failure-path SLOs.
+Exhaustion remains a failure; retain original diagnostics without masking errors,
+automatically increasing budgets or weakening coverage. Hosted timeout and
+cleanup behavior is not established by structural tests. Existing bounded jobs,
+inner deadlines, commands, conditions, required contexts and queue stay unchanged,
+including Race's 30-minute outer and 20-minute per-binary limits.
+
+Run `node --test .github/scripts/issue-ci-timeouts.test.mjs` for the ceiling map,
+missing/wrong/step-only negative cases, preserved budgets and documentation checks.
+Existing issue-helper discovery includes this suite; no new required check is added.
 
 ### CI concurrency
 
@@ -267,8 +336,34 @@ This is workflow admission, not the job's parsed controller selection. Controlle
 and their bootstrap remain unchanged and OFF. Fork/rerun variable visibility,
 control transitions and scheduling by commit recency are not hosted-qualified;
 no savings have been measured. See [proof boundaries](docs/ci-proof-controls.md#workflow-admission-concurrency-2096).
-Local routing checks: `node --test .github/scripts/issue-ci-concurrency.test.mjs`.
+Local technical checks (no proof helpers or qualification data):
+`node --test .github/scripts/ci-technical-contracts.test.mjs`.
+This suite owns ordinary PR/main/merge-group routing, race/toolchain/failure
+contracts, existing verification commands and their ordering, permissions,
+events and test discovery. Proof-specific admission remains covered by
+`node --test .github/scripts/issue-ci-concurrency.test.mjs`.
 Hosted experiments require separate authorization.
+
+### Native macOS baseline (initially non-required)
+
+The candidate **Native macOS ARM64 Tests** job runs the existing default-tag
+Go suite on `macos-15` ARM64 with Go 1.26.10 and Node 24. It checks native
+architecture and mandatory prerequisites (including the fixture's actual
+`/usr/bin/jq` path), uses isolated test state, preserves failure exits and
+reports JSON pass/fail/skip scope. The 20-minute job and 10-minute per-binary
+ceilings are provisional, not measured Darwin guarantees.
+See [native scope, prerequisites and finite rollout](docs/ci-macos.md).
+No hosted Darwin result, installed-host/artifact qualification or new required
+context is claimed. Observe one normal PR, merge-group and main execution,
+then explicitly decide promotion, focused fix or defer.
+
+The separate **Native macOS ARM64 Adapter Tests** lane (#2150, Mac portion)
+reuses the serial Pi `npm test` script with CLI-only TAP reporting, locked TypeBox dependencies and the existing
+three-file OpenCode command with fresh Go-backed fixtures. Mandatory prerequisites
+and unexpected skips fail completeness; only the installed-host opt-in exclusion
+is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture
+build and 5 minutes per adapter step. Source/fixture success is not installed-host,
+artifact, Windows or release qualification. See [commands and finite rollout](docs/ci-macos.md#native-adapter-lane-2150-macos-portion-only).
 
 ### Go race detection (initially non-required)
 
@@ -280,7 +375,8 @@ budget follows a corrected local store race run of 14m04s. The successful
 at head `b64205b3` took 19m04s; the separate 30-minute job budget stays provisional.
 No required-check settings change. See [scope, local reproduction and failure
 classification](docs/ci-go-race.md).
-Local structural checks: `node --test .github/scripts/issue-go-race-ci.test.mjs`.
+Local structural checks: `node --test .github/scripts/ci-technical-contracts.test.mjs`.
+These inspect workflow contracts; they do not execute the Go race suite.
 
 ### CI scanners (initially non-required)
 
@@ -658,9 +754,16 @@ relative to the repository root.
 | Pi plugin | `plugin/pi` | Node.js 24, npm, and Go from [go.mod](go.mod) for Go-backed fixtures; run `npm ci --ignore-scripts --legacy-peer-deps` for the locked real-TypeBox test dependency (no Pi SDK peers) | `npm test` | Pi plugin suite from a Go checkout, including fixture-based workflows; not the full installed-host lifecycle. See [scripts](plugin/pi/package.json) and [real HTTP test prerequisites](plugin/pi/README.md#testing-the-real-http-workflows). |
 | Obsidian plugin | `plugin/obsidian` | Node.js 24, npm, and dependencies installed with `npm ci` under the existing [dependency policy](#npm-dependency-hygiene) | `npm test`, `npm run typecheck`, `npm run build` | Plugin tests, TypeScript checking, and bundle generation; not an interactive Obsidian smoke test. See [scripts](plugin/obsidian/package.json). |
 | PR policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/merge-queue.test.mjs .github/scripts/label-policy.test.mjs .github/scripts/transient-artifacts.test.mjs .github/scripts/pr-size-notice.test.mjs` | Merge-queue, label, artifact and PR-size helper logic; not live GitHub permissions or event delivery. |
-| Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy helper suites; not live approval-refresh behavior. |
+| Technical CI contracts | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/ci-technical-contracts.test.mjs` | Proof-independent workflow commands, ordering, race, permissions, events, discovery and ordinary concurrency; not hosted execution/cancellation proof. |
+| Issue policy helpers | Repository root | Node.js 24; no npm install step | `node --test .github/scripts/issue-*.test.mjs` | Issue-policy and proof-specific helper suites; not live approval-refresh behavior. |
 
 The **Unit Tests** job provides Node.js 24 for the Go-owned Core lifecycle tests.
+The `tools/release-candidate` Core lifecycle tests require Node.js >=24 in PATH;
+when Node is missing, cannot run, or is older, only the execution-dependent cases
+skip with a prerequisite message. Non-runtime admission cases still run. With
+Node.js <24, a separate regression verifies that Core is not started. To exercise
+all supported lifecycle paths locally, run `go test ./tools/release-candidate`
+with Node.js 24 in PATH.
 
 The [CI workflow](.github/workflows/ci.yml) is authoritative for hosted commands,
 setup steps and platform coverage; the [Makefile](Makefile) defines the existing

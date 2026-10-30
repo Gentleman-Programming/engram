@@ -26,6 +26,8 @@ function optionalEnvironmentValue(value: string | undefined): string | undefined
 const ENGRAM_PORT = parseInt(optionalEnvironmentValue(process.env.ENGRAM_PORT) ?? "7437")
 const CONFIGURED_ENGRAM_URL = optionalEnvironmentValue(process.env.ENGRAM_URL)
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
+const ENGRAM_BIN_OVERRIDE = optionalEnvironmentValue(process.env.ENGRAM_BIN)
+// Keep this declaration compatible with setup's literal fallback-path patch.
 const ENGRAM_BIN = optionalEnvironmentValue(process.env.ENGRAM_BIN) ?? "engram"
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
@@ -172,6 +174,7 @@ type DegradedReason = "readiness" | "startup" | "import" | "transport" | "HTTP" 
 
 function createEngramClient(warn: (reason: DegradedReason) => void) {
 let localReady = CONFIGURED_ENGRAM_URL !== undefined
+let readinessDiagnostic = ""
 
 async function engramFetch(
   path: string,
@@ -219,7 +222,20 @@ async function engramFetchResult(
 function localInstanceID(): string {
   const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", windowsHide: true })
   const id = (result.stdout ?? "").toString().trim()
-  if (result.status !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
+  const reason = result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT"
+    ? "binary-not-found"
+    : result.error || result.status !== 0 ? "identity-command-failed"
+    : !/^[a-f0-9]{32}$/.test(id) ? "identity-output-invalid" : ""
+  if (reason) {
+    const overridden = ENGRAM_BIN_OVERRIDE !== undefined
+    const recovery = reason === "binary-not-found"
+      ? overridden ? "Correct or unset ENGRAM_BIN, then restart OpenCode."
+        : "Run engram setup opencode from the current Engram installation, then restart OpenCode."
+      : "Verify that the selected binary can run instance-id successfully and returns only 32 lowercase hexadecimal characters."
+    readinessDiagnostic = `${reason} (binary source: ${overridden ? "ENGRAM_BIN override" : "setup-default"}). ${recovery}`
+    throw new Error("gentle-engram could not resolve its local server identity")
+  }
+  readinessDiagnostic = ""
   return id
 }
 
@@ -228,7 +244,12 @@ async function isEngramRunning(expectedID = ""): Promise<boolean> {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     })
-    if (!res.ok || (expectedID && (await res.json())?.instance_id !== expectedID)) return false
+    if (!res.ok) return false
+    if (expectedID && (await res.json())?.instance_id !== expectedID) {
+      readinessDiagnostic = "identity-mismatch. Verify that the selected binary and configured server use the intended Engram installation; do not bypass identity verification."
+      return false
+    }
+    readinessDiagnostic = ""
     return true
   } catch {
     return false
@@ -269,6 +290,7 @@ async function resolveProjectName(directory: string): Promise<{ project: string;
 }
 
 return { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning,
+  get readinessDiagnostic() { return readinessDiagnostic },
   get localReady() { return localReady }, set localReady(value: boolean) { localReady = value } }
 }
 
@@ -353,7 +375,9 @@ export const Engram: Plugin = async (ctx) => {
   const { engramFetch, engramFetchResult, ensureLocalReady, resolveProjectName, localInstanceID, isEngramRunning } = client
   const deliverWarning = (append: (text: string) => boolean): void => {
     if (!pendingWarnings.size) return
-    const text = `Engram degraded (${[...pendingWarnings].join(", ")}); automatic memory operations may be incomplete. Verify Engram availability before relying on persistence.`
+    const diagnostic = (pendingWarnings.has("startup") || pendingWarnings.has("readiness")) && client.readinessDiagnostic
+      ? ` ${client.readinessDiagnostic}` : ""
+    const text = `Engram degraded (${[...pendingWarnings].join(", ")}); automatic memory operations may be incomplete. Verify Engram availability before relying on persistence.${diagnostic}`
     if (append(text)) pendingWarnings.clear()
   }
 	let project = "unknown"
@@ -892,7 +916,7 @@ export const Engram: Plugin = async (ctx) => {
           return
         }
 			if (projectResolutionError) throw new Error(projectResolutionError)
-        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}${registrationErrors.has(authoritativeSessionID) ? `: ${registrationErrors.get(authoritativeSessionID)}` : ""}; verify that the Engram server is available and retry`)
+        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}${!client.localReady && client.readinessDiagnostic ? `: ${client.readinessDiagnostic}` : registrationErrors.has(authoritativeSessionID) ? `: ${registrationErrors.get(authoritativeSessionID)}` : ""}; verify that the Engram server is available and retry`)
       }
       output.args.session_id = effectiveSessions.get(authoritativeSessionID)!.id
     },

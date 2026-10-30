@@ -261,6 +261,9 @@ if (/engram-core-15[56789]-/.test(process.cwd())) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if _, active := runtimeModes[tc.name]; active {
+				requireArtifactNode(t)
+			}
 			helperMutation := topics && strings.Contains(tc.name, " helper ")
 			presenceChange := finalization && strings.HasPrefix(tc.name, "peer ")
 			peerPath := filepath.Join(repo, "plugin", "pi", "node_modules", "typebox")

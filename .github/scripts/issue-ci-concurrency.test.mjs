@@ -27,19 +27,6 @@ function policy(overrides = {}, vars = {}) {
 
 const sameGroup = (a, b) => a.group.toLowerCase() === b.group.toLowerCase();
 
-test('ordinary revisions share only their PR group and enable cancellation', () => {
-  const first = policy();
-  assert.deepEqual(first, { group: 'CI-pr-42', cancel: true });
-  assert.deepEqual(policy({ run_id: 101 }), first);
-  assert.deepEqual(policy({ run_attempt: 2 }), first);
-});
-
-test('independent fork PRs with identical branch names and other workflows stay isolated', () => {
-  const first = policy();
-  assert.equal(sameGroup(first, policy({ event: { pull_request: { number: 43 } } })), false);
-  assert.equal(sameGroup(first, policy({ workflow: 'Other CI' })), false);
-});
-
 test('all reserved proof prefixes have unique run groups, even malformed routing', () => {
   for (const head_ref of ['ci/proof-2096-case', 'ci/proof-', 'ci/proof-0-bad', 'CI/PROOF-2096-case']) {
     const first = policy({ head_ref });
@@ -62,30 +49,15 @@ test('any nonempty raw selector isolates runs without parsing or authorizing it'
   }
 });
 
-test('merge groups and main pushes never share pending slots or cancel each other', () => {
+test('nonempty raw selector cannot enable protected event cancellation', () => {
   for (const event_name of ['merge_group', 'push']) {
-    const github = { event_name, head_ref: '', event: {} };
-    const first = policy(github);
-    assert.deepEqual(first, { group: 'CI-run-100-1', cancel: false });
-    assert.equal(sameGroup(first, policy({ ...github, run_id: 101 })), false);
-    assert.equal(sameGroup(first, policy({ ...github, run_attempt: 2 })), false);
-    assert.equal(sameGroup(first, policy()), false);
-    assert.equal(policy(github, { ISSUE_CI_PROOF_CI: 'not-json' }).cancel, false);
+    assert.equal(policy({ event_name, head_ref: '', event: {} }, { ISSUE_CI_PROOF_CI: 'not-json' }).cancel, false);
   }
-  assert.equal(sameGroup(policy({ event_name: 'merge_group', run_id: 102 }),
-    policy({ event_name: 'push', run_id: 103 })), false);
 });
 
 test('empty selector keeps ordinary PR verification enabled', () => {
   assert.deepEqual(policy({}, { ISSUE_CI_PROOF_CI: '' }), { group: 'CI-pr-42', cancel: true });
 });
 
-test('CI retains event coverage, read-only default and required verification jobs', () => {
-  assert.match(source, /on:\n  pull_request:\n  merge_group:\n    types: \[checks_requested\]\n  push:\n    branches:\n      - main\n/);
-  assert.match(source, /^permissions:\n  contents: read\n/m);
-  for (const name of ['Unit Tests', 'E2E Tests', 'Plugin Tests']) {
-    assert.ok(source.includes(`    name: ${name}\n`));
-  }
-  assert.ok(source.includes('run: node --test .github/scripts/issue-*.test.mjs'),
-    'the existing policy suite must discover these regressions');
-});
+// Ordinary routing, events, default permissions and suite discovery are owned by
+// ci-technical-contracts.test.mjs; exact proof admission stays here.

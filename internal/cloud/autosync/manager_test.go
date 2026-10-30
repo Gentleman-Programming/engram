@@ -1730,7 +1730,8 @@ func TestManagerNotifyDirtyAfterStop(t *testing.T) {
 	mgr := New(ls, tr, DefaultConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go mgr.Run(ctx)
+	// Use the startup handshake so Stop waits for Run registration.
+	mgr.Start(ctx)
 	cancel()
 	mgr.Stop()
 
