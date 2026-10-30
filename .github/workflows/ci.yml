@@ -40,6 +40,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26.10"
+          cache: false
 
       - name: Verify C compiler prerequisite
         run: gcc --version
@@ -49,8 +50,80 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Prepare compatible race cache identity
+        id: race-cache
+        shell: bash
+        env:
+          CACHE_OS: ${{ runner.os }}
+          CACHE_ARCH: ${{ runner.arch }}
+          DEPENDENCY_HASH: ${{ hashFiles('go.mod', 'go.sum') }}
+          TESTED_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          scalar() { [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]; }
+          hash() { sha256sum; }
+          image_os="$ImageOS"
+          image_version="$ImageVersion"
+          for value in "$CACHE_OS" "$CACHE_ARCH" "$image_os" "$image_version" "$DEPENDENCY_HASH" "$TESTED_REVISION" "$CC"; do
+            scalar "$value"
+          done
+          [[ "$DEPENDENCY_HASH" =~ ^[a-f0-9]{64}$ && "$TESTED_REVISION" =~ ^[a-f0-9]{40}$ ]]
+          revision="$TESTED_REVISION"
+          goversion=$(go env GOVERSION)
+          goos=$(go env GOOS)
+          goarch=$(go env GOARCH)
+          cgo=$(go env CGO_ENABLED)
+          [[ "$goversion" == go1.26.10 && "$cgo" == 1 && "$goos" == linux && "$goarch" == amd64 ]]
+          compiler=$(readlink -f "$(command -v "$CC")")
+          [[ "$compiler" == /* && -x "$compiler" ]]
+          compiler_sha=$(hash < "$compiler")
+          compiler_sha=${compiler_sha%% *}
+          compiler_version=$("$compiler" -dumpfullversion)
+          compiler_target=$("$compiler" -dumpmachine)
+          compiler_descriptor=$("$compiler" --version)
+          # Full version text may be multiline; hash it, never emit it as an output.
+          [[ -n "$compiler_descriptor" ]]
+          compiler_descriptor_hash=$(printf '%s' "$compiler_descriptor" | hash)
+          compiler_descriptor_hash=${compiler_descriptor_hash%% *}
+          gomodcache=$(go env GOMODCACHE)
+          gocache=$(go env GOCACHE)
+          for value in "$goversion" "$goos" "$goarch" "$cgo" "$compiler" "$compiler_sha" "$compiler_version" "$compiler_target" "$compiler_descriptor_hash" "$gomodcache" "$gocache"; do
+            scalar "$value"
+          done
+          [[ "$gomodcache" == /* && "$gocache" == /* ]]
+          [[ "$compiler_sha" =~ ^[a-f0-9]{64}$ && "$compiler_descriptor_hash" =~ ^[a-f0-9]{64}$ ]]
+          printf 'Resolved race compiler: %s\nSHA256: %s\nFull version: %s\nTarget: %s\n%s\n' "$compiler" "$compiler_sha" "$compiler_version" "$compiler_target" "$compiler_descriptor"
+          compat=$(printf '%s\0' "$CACHE_OS" "$CACHE_ARCH" "$image_os" "$image_version" "$goversion" "$goos" "$goarch" "$DEPENDENCY_HASH" "$cgo" "$CC" "$compiler" "$compiler_sha" "$compiler_version" "$compiler_target" "$compiler_descriptor_hash" race | hash)
+          compat=${compat%% *}
+          prefix="race-v1-${compat}-"
+          key="${prefix}${revision}"
+          [[ ${#key} -lt 512 ]]
+          printf 'gomodcache=%s\n' "$gomodcache" >> "$GITHUB_OUTPUT"
+          printf 'gocache=%s\n' "$gocache" >> "$GITHUB_OUTPUT"
+          printf 'prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
+          printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compatible race caches
+        id: race-cache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ steps.race-cache.outputs.gomodcache }}
+            ${{ steps.race-cache.outputs.gocache }}
+          key: ${{ steps.race-cache.outputs.key }}
+          restore-keys: ${{ steps.race-cache.outputs.prefix }}
+
       - name: Run full race suite with elapsed time
         run: /usr/bin/time -p go test -race -timeout=20m ./...
+
+      - name: Refresh successful trusted main race caches
+        if: ${{ success() && github.repository == 'Gentleman-Programming/engram' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.race-cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ steps.race-cache.outputs.gomodcache }}
+            ${{ steps.race-cache.outputs.gocache }}
+          key: ${{ steps.race-cache.outputs.key }}
 
   macos-native-tests:
     name: Native macOS ARM64 Tests
