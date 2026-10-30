@@ -20,6 +20,8 @@ Use this skill when:
 
 ## Critical Rules
 
+The [contribution policy transition](../../docs/contribution-policy-transition.md) is **PRE-CUTOVER / NOT ACTIVE**; the active rules below still apply.
+
 1. **Every PR MUST link an approved issue** — no exceptions
 2. **Every PR MUST have exactly one `type:*` label**
 3. **All required automated checks must pass** before merge is possible
@@ -73,9 +75,9 @@ Branch names are validated by a GitHub ruleset. Pushes that don't match **will b
 
 ## PR Body Format
 
-The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain:
+Use the [canonical PR template](../../.github/PULL_REQUEST_TEMPLATE.md) as the source for body shape; do not duplicate its structure here. Describe the problem and result, record honest verification, and include risks and mitigations only when applicable.
 
-### 1. Linked Issue (REQUIRED)
+Every PR body MUST contain a closing reference to an approved, assigned issue:
 
 ```markdown
 Closes #<issue-number>
@@ -86,52 +88,11 @@ Every linked issue MUST have `status:approved` and a real assignee. Approval mea
 
 Existing PRs must comply before merge, without waiting for backlog-wide migration. Re-run native validation after issue approval/assignment changes; do not rely on stale green checks.
 
-### 2. PR Type (REQUIRED)
+Add exactly one canonical `type:*` PR label; no duplicate type checkbox is required in the body. All required automated checks must pass before merge; report other applicable checks honestly as described below.
 
-Check exactly ONE in the template and add the matching label:
+Record actual verification commands/steps and observed outcomes, not assumed passes. For behavior changes, include focused regression and affected package tests. For docs-only changes, mark local Go tests `N/A — documentation-only; no Go behavior changed` and list the documentation checks actually run. Targeted coverage can help find missed branches; no total module coverage or per-PR numeric gate applies. Without a PR (or before pushing), and for high-risk changes, run additional applicable local checks. Identify checks not run and missing CI evidence; GitHub CI full unit/E2E/lint and applicable platform results remain pending until they run. Local success is not a hosted CI pass.
 
-| Checkbox | Label to add |
-|----------|-------------|
-| Bug fix | `type:bug` |
-| New feature | `type:feature` |
-| Documentation only | `type:docs` |
-| Code refactoring | `type:refactor` |
-| Maintenance/tooling | `type:chore` |
-| Breaking change | `type:breaking-change` |
-
-### 3. Summary
-
-1-3 bullet points of what the PR does.
-
-### 4. Changes Table
-
-```markdown
-| File | Change |
-|------|--------|
-| `path/to/file` | What changed |
-```
-
-### 5. Test Plan
-
-```markdown
-- [ ] Focused regression (behavior change): `<actual command>` — `<actual outcome or N/A: documentation-only>`
-- [ ] Affected package (behavior change): `<actual command>` — `<actual outcome or N/A: documentation-only>`
-- [ ] GitHub CI full unit/E2E/lint and applicable platform checks — pending until they run
-```
-
-Replace example commands and outcomes with actual evidence. For docs-only changes, record `N/A — documentation-only; no Go behavior changed` for local Go tests and list the documentation checks actually run. Targeted coverage can help find missed branches; no total module coverage or per-PR numeric gate applies. Without a PR (or before pushing), and for high-risk changes, run additional applicable local checks and identify any missing CI evidence.
-
-### 6. Contributor Checklist
-
-All boxes must be checked:
-- Linked an approved issue
-- Added exactly one `type:*` label
-- Recorded actual focused regression and affected package test commands/outcomes for behavior changes, or N/A for docs-only changes
-- Ran additional applicable local checks without a PR or for high-risk changes; identified missing CI evidence
-- Docs updated if behavior changed
-- Conventional commit format
-- No `Co-Authored-By` trailers
-- Every changed path complies with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
+For high-risk changes, link the approved design, non-goals, and independent review evidence required by [CONTRIBUTING](../../CONTRIBUTING.md). Omit the risk section for low-risk changes.
 
 ---
 

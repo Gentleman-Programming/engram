@@ -793,6 +793,14 @@ Response:
 
 Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--help`, and `-h`. `engram tui` performs its single update check from inside the TUI. Set `ENGRAM_NO_UPDATE_CHECK=1` to disable every update check, including the TUI check.
 
+Only plain release versions (`X.Y.Z`, optionally prefixed with `v`) are compared.
+Development labels such as `main`, Go pseudo-versions, prereleases, and build
+metadata are not comparable: the check reports that the current version does not
+map to a plain release version, without contacting GitHub or recommending an
+update. Invalid release tags returned by GitHub also produce a check failure,
+not an update notice. The existing `dev` and unknown-version diagnostics remain
+unchanged.
+
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_MEM_SAVE_TIMING`        | Set to exactly `1` in the MCP server environment to log one privacy-safe stage timing record per `mem_save` invocation to stderr. See [mem_save timing diagnostics](#mem_save-timing-diagnostics). | (unset — disabled) |
@@ -1430,6 +1438,8 @@ Exact duplicate saves are deduplicated in a rolling time window using a normaliz
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count` and attributing it to the latest writer session.
 Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle. Content is redacted before the configured storage limit is applied; that limit and truncation metadata (`original_bytes`, `limit_bytes`) are UTF-8 bytes. MCP save/update responses include `truncated`, and warn when truncation occurs.
 
+MCP `mem_save` runs conflict candidate detection after saving the observation. If detection or pending-relation persistence fails, the save still succeeds and returns `candidate_detection_status: "incomplete"` with a `CONFLICT DETECTION INCOMPLETE` warning. Any returned `candidates[]` identify confirmed pending judgments and still require review (`judgment_required: true`). With no confirmed candidates, `judgment_required` is omitted rather than falsely reporting `false`. Earlier successful relation inserts remain stored; a failure reading an insert's affected-row count may also leave a stored relation that is not in the confirmed candidate list. Neither an empty list nor an incomplete result means “no conflicts” or rollback. Do not retry the observation save automatically. Healthy save responses are unchanged.
+
 ### mem_update
 
 Update an observation by ID, with mandatory `expected_project` supplied by the caller (for example, `{ "id": 42, "expected_project": "engram", "title": "Corrected" }`). Public schema supports partial updates for `title`, `content`, `find`, `replace`, `type`, `scope`, and `topic_key`. `find` and `replace` are paired literal, case-sensitive global replacement inputs and cannot be combined with `content`; empty finds and replacements with no effective normalized change preserve content.
@@ -1672,7 +1682,14 @@ Behavior:
 
 ## Memory Protocol
 
-The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
+This is the canonical living prose contract for repository-owned memory guidance.
+The source/consumer map above distinguishes manually maintained host instructions from
+OpenCode's source-to-embedded copy. Review these consumers together for semantic alignment,
+not identical formatting. External harness policies are independent and are not changed by
+editing this repository; a host may supply additional obligations.
+
+The protocol teaches agents **when** and **how** to use Engram's tools. Add the appropriate
+host instructions to your prompt file (see [Agent Setup](docs/AGENT-SETUP.md)).
 
 The agent MUST follow this protocol without waiting for activation.
 
@@ -1686,28 +1703,16 @@ If tools are unavailable, use `engram setup <agent>` with the supported host nam
 and restart that host. Setup repairs host-specific registration; do not assume
 Claude MCP names or permission allowlists on every host.
 
-### WHEN TO SAVE (mandatory)
+### SELECTIVE MEMORY
 
-Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+Persist verified knowledge that is durable and costly to reconstruct: decisions with rationale,
+non-obvious root causes, real constraints, and resumption-relevant pending work.
+Group related conclusions deliberately, not every task, response, or event.
+Exclude secrets, private data, speculation, raw dumps, and routine progress.
 
-- Bug fix completed (include root cause)
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Non-obvious discovery about the codebase, gotcha, or edge case found
-- Configuration change or environment setup
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-- User confirms a recommendation ("go with that", "sounds good", "agreed", or the equivalent in the user's language)
-- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
-- User makes a decision after presented tradeoffs or options
-- A discussion concludes with a clear direction chosen, even if the agent proposed it
-
-After every task, ask whether a decision, confirmation, preference, bug fix,
-discovery, or convention needs saving; if so, call `mem_save` now.
+Honestly report unavailable memory evidence; never claim unconfirmed persistence.
+Do not blindly repeat writes. Complete unrelated work even if bookkeeping fails.
+Do not add per-event learning sections or ceremonial delivery blocks.
 
 Format for `mem_save`:
 
@@ -1726,10 +1731,12 @@ Format for `mem_save`:
 
 ### Topic update rules (mandatory)
 
-- Different topics MUST NOT overwrite each other (e.g. architecture vs bugfix)
-- Reuse the same `topic_key` to update an evolving topic instead of creating new observations
-- If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
-- Use `mem_update` when you have an exact observation ID to correct
+- Use mem_search on the bounded topic in the intended project and scope before writing.
+- Read candidates in full with mem_get_observation; snippets are not identity evidence.
+- For the same bounded topic use mem_update by ID: keep topic_key, preserve every still-valid fact, and record superseded facts as history.
+- For a genuinely new topic use mem_save with a deliberate, distinct topic_key. If already covered, write nothing.
+- On ambiguous identity or failed lookup, do not overwrite or fall back to a duplicate save. A failed read is not evidence of absence.
+- A suggested topic_key is a hint, not proof of identity. Never merge across projects or scopes.
 
 ### DELIVERY GUARANTEE
 
@@ -1743,40 +1750,17 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
 
-Also search memory PROACTIVELY when:
-
-- Starting work on something that might have been done before
-- The user mentions a topic you have no context on — check if past sessions covered it
+Search when materially useful for recall or related work; mere project mentions do not require a search.
+Narrow by project/type after broad recall as needed.
 
 ### SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST call `mem_session_summary` with this structure:
-
-```
-## Goal
-[What we were working on this session]
-
-## Instructions
-[User preferences or constraints discovered — skip if none]
-
-## Discoveries
-- [Technical findings, gotchas, non-obvious learnings]
-
-## Accomplished
-- [Completed items with key details]
-
-## Next Steps
-- [What remains to be done — for the next session]
-
-## Relevant Files
-- path/to/file — [what it does or what changed]
-```
-
-This is NOT OPTIONAL. If you skip this, the next session starts blind.
+At significant explicit closure or handoff, call mem_session_summary with Goal, Instructions,
+Discoveries, Accomplished, Next Steps, Relevant Files. Ordinary task completion does not require a summary.
 Summary persistence does not end the session. Follow the host-specific lifecycle
 contract: Claude/Codex SessionEnd hooks and the OpenCode adapter own closure;
 Pi uses its explicit closure contract; Gemini additionally requires
-`mem_session_end` after `mem_session_summary` succeeds.
+`mem_session_end` after `mem_session_summary` succeeds, only at actual session closure.
 
 Codex registers the native PreToolUse command `engram hook codex-pre-tool-use`
 for `mcp__engram__mem_*` and `mcp__plugin_engram_engram__mem_*`. It resolves the
@@ -1793,22 +1777,12 @@ explicit-session contract.
 
 ### PASSIVE CAPTURE
 
-When completing a task or subtask, include a `## Key Learnings:` section with
-numbered items. Automatic capture is adapter-specific: Claude/Codex SubagentStop
+Automatic capture is adapter-specific: Claude/Codex SubagentStop
 hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
 output for server-side extraction. Other adapters may support eligible tool
 outputs through their own contracts. Ordinary responses are not universally
 captured; a learning section alone does not guarantee storage. Use `mem_save`
 as the primary path for significant, verified knowledge.
-
-Example:
-
-```
-## Key Learnings:
-
-1. bcrypt cost=12 is the right balance for our server performance
-2. JWT refresh tokens need atomic rotation to prevent race conditions
-```
 
 You can also call `mem_capture_passive(content)` directly, when available, with
 text containing a learning section. This explicit extraction path is a safety
@@ -2170,7 +2144,7 @@ Register-ScheduledTask `
 
 The SQLite driver is paired with `modernc.org/libc` v1.75.6 in `go.mod`;
 update these together rather than overriding libc independently. The module
-retains Go 1.25.10.
+requires Go 1.26.10.
 
 ### OpenCode Plugin
 

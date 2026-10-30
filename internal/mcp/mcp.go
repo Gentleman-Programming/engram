@@ -333,10 +333,10 @@ type coreToolDesc struct {
 }
 
 var coreTools = []coreToolDesc{
-	{"mem_save", "mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)"},
+	{"mem_save", "mem_save — save verified durable conclusions, grouped by topic"},
 	{"mem_search", "mem_search — find past work, decisions, or context from previous sessions"},
-	{"mem_context", "mem_context — get recent session history (call at session start or after compaction)"},
-	{"mem_session_summary", "mem_session_summary — save end-of-session summary (MANDATORY before saying \"done\")"},
+	{"mem_context", "mem_context — get recent history for useful recall or relevant recovery"},
+	{"mem_session_summary", "mem_session_summary — significant explicit closure or handoff; ordinary completion does not require it"},
 	{"mem_get_observation", "mem_get_observation — get full untruncated content of a search result by ID"},
 	{"mem_save_prompt", "mem_save_prompt — save user prompt for context"},
 	{"mem_current_project", "mem_current_project — detect current project from cwd (recommended first call)"},
@@ -403,7 +403,7 @@ func buildServerInstructions(allowlist map[string]bool) string {
 	}
 
 	if shouldRegister("mem_save", allowlist) {
-		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
+		b.WriteString("PROACTIVE SAVE RULE: Persist verified durable knowledge costly to reconstruct; group related conclusions, not every event.\n\n")
 	}
 	if hasRegisteredMemoryWriter(allowlist) {
 		b.WriteString("## DELIVERY GUARANTEE\n\n" +
@@ -563,6 +563,8 @@ FORMAT for content — use this structured format:
   **Why**: [the reasoning, user request, or problem that drove it]
   **Where**: [files/paths affected, e.g. src/auth/middleware.ts, internal/store/store.go]
   **Learned**: [any gotchas, edge cases, or decisions made — omit if none]
+
+If candidate_detection_status is incomplete, the observation was saved but conflict detection failed or only partially persisted. Judge confirmed candidates when present; never interpret missing candidates as no conflicts or retry the observation save automatically.
 
 TITLE should be short and searchable, like: "JWT auth middleware", "FTS5 query sanitization", "Fixed N+1 in user list"
 
@@ -1741,7 +1743,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 
 		// Post-transaction conflict candidate detection (REQ-001).
-		// Errors are logged and swallowed — detection failure never fails the save.
+		// Detection failure does not fail the committed save, but must remain visible.
 		extra := map[string]any{"truncation": truncation}
 		// Build CandidateOptions, forwarding any MCPConfig overrides.
 		// nil fields mean "use store defaults"; explicit pointer values override.
@@ -1759,8 +1761,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		candidates, candErr := s.FindCandidates(savedID, candOpts)
 		if candErr != nil {
-			// Log only — do not fail the save.
 			fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+			extra["candidate_detection_status"] = "incomplete"
+			msg += "\nCONFLICT DETECTION INCOMPLETE — observation saved; pending relations may be partially persisted. Returned candidates include only confirmed pending judgments."
 		}
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
@@ -1796,7 +1799,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			extra["candidates"] = candList
 
 			msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
-		} else {
+		} else if candErr == nil {
 			extra["judgment_required"] = false
 		}
 

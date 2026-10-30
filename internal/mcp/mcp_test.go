@@ -129,13 +129,19 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 		{
 			name: "mem_save",
 			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
-				res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "UTF-8 save", "content": content, "project": "engram"}}})
+				res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "UTF-8 save", "content": content, "project": "engram", "session_id": "s-truncation"}}})
 				if err != nil {
 					t.Fatalf("mem_save: %v", err)
+				}
+				if res == nil || res.IsError {
+					t.Fatalf("mem_save tool error: %+v", res)
 				}
 				observations, err := s.RecentObservations("engram", "project", 1)
 				if err != nil {
 					t.Fatalf("recent observations: %v", err)
+				}
+				if len(observations) != 1 {
+					t.Fatalf("expected one saved observation, got %d", len(observations))
 				}
 				return res, observations[0].Content
 			},
@@ -154,6 +160,9 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("mem_update: %v", err)
 				}
+				if res == nil || res.IsError {
+					t.Fatalf("mem_update tool error: %+v", res)
+				}
 				observation, err := s.GetObservation(id)
 				if err != nil {
 					t.Fatalf("get observation: %v", err)
@@ -164,13 +173,19 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 		{
 			name: "mem_save_prompt",
 			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
-				res, err := handleSavePrompt(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": content, "project": "engram"}}})
+				res, err := handleSavePrompt(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": content, "project": "engram", "session_id": "s-truncation"}}})
 				if err != nil {
 					t.Fatalf("mem_save_prompt: %v", err)
+				}
+				if res == nil || res.IsError {
+					t.Fatalf("mem_save_prompt tool error: %+v", res)
 				}
 				prompts, err := s.RecentPrompts("engram", 1)
 				if err != nil {
 					t.Fatalf("recent prompts: %v", err)
+				}
+				if len(prompts) != 1 {
+					t.Fatalf("expected one saved prompt, got %d", len(prompts))
 				}
 				return res, prompts[0].Content
 			},
@@ -180,6 +195,9 @@ func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newMCPTestStoreWithMaxContentLength(t, limit)
+			if err := s.CreateSession("s-truncation", "engram", t.TempDir()); err != nil {
+				t.Fatalf("create truncation session: %v", err)
+			}
 			res, persisted := tc.write(t, s)
 			if persisted != want || !utf8.ValidString(persisted) {
 				t.Fatalf("persisted content = %q, want valid UTF-8 %q", persisted, want)
@@ -2026,6 +2044,7 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 	markRes, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"action":         "mark_reviewed",
 		"observation_id": float64(id),
+		"project":        "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("mark reviewed handler error: %v", err)
@@ -2055,8 +2074,9 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 
 	h := handleReview(s, MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"action": "mark_reviewed",
-		"id":     float64(id),
+		"action":  "mark_reviewed",
+		"id":      float64(id),
+		"project": "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("mark reviewed handler error: %v", err)

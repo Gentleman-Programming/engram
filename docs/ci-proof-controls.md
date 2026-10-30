@@ -6,6 +6,46 @@ repository variable or runtime control is activated by this change. Local models
 do not prove native provenance, required-gate selection or queue safety.
 Polling only waits for an explicit release; elapsed time is never a witness.
 
+## Workflow admission concurrency (#2096)
+
+CI coalesces only ordinary `pull_request` runs into a workflow-namespaced
+PR-number group, with cancellation enabled. Admission requires both an empty
+raw `vars.ISSUE_CI_PROOF_CI` and a head branch not starting with `ci/proof-`.
+GitHub's `startsWith` is case-insensitive: malformed reserved names and uppercase
+variants are protected too. No controller JSON is parsed at workflow admission.
+Any nonempty variable, including explicit OFF, malformed JSON or an unmatched
+selector, conservatively isolates all PR runs that observe it. This guard does
+not activate or authorize a controller; job-level parsed selection is unchanged.
+
+All protected runs use a workflow-namespaced `run_id`/`run_attempt` group with
+cancellation disabled, including merge groups and main pushes. Unique groups
+protect pending slots as well as running work: `cancel-in-progress: false` alone
+would still allow replacement of another pending run in a shared group.
+Protected reruns have distinct attempt groups; ordinary PR reruns still share
+the PR group and may cancel other runs for that PR. Different PR numbers and
+workflow names remain isolated, even when fork branch names match.
+
+Local tests check the expression shape and a limited routing model, not hosted
+admission or cancellation. Fork/rerun variable visibility, control transitions
+(including empty/nonempty changes between attempts), and scheduling by commit
+recency are **not hosted-qualified**. GitHub scheduling is not a newest-commit
+ordering guarantee. A workflow-level guard cannot rely on a selector parsed later
+inside a job. Controllers remain unchanged and OFF; there is no measured savings
+claim or hosted gate/queue proof. Controller activation, reruns and other hosted
+experiments require separate authorization.
+
+Run `node --test .github/scripts/ci-technical-contracts.test.mjs` for independently
+owned technical workflow contracts: ordinary PR/main/merge-group isolation,
+race/toolchain/failure behavior, verification commands/order, permissions, events
+and discovery. It needs no proof helpers or qualification data and also validates
+a fixture without the hold step. These source checks are not hosted execution
+or cancellation evidence.
+
+Run `node --test .github/scripts/issue-ci-concurrency.test.mjs` for the exact
+proof admission predicate, reserved prefixes and nonempty raw selectors. Retain
+the producer, bootstrap/security/integrity and proof-control suites below; local
+technical coverage does not replace live hosted cancellation proof.
+
 ## Public API
 
 `.github/scripts/issue-ci-proof-controls.mjs` exports only
@@ -91,15 +131,14 @@ Check IDs are assigned after actual creation elsewhere, never pre-invented here.
 
 The policy implementations, guards, router, publisher, resolver and fixtures
 remain unchanged. The two producer workflows call the adapter only through
-explicit configuration; six required context names/App15368 and permissions are
-preserved. No comments, issues, Checks API results, environments, credentials,
-queue entry or merge are created/configured. Independent existing-job interlock
-#2031 remains a future phase; #2026/#1810 remain open.
+explicit configuration; six required context names/App15368 are preserved.
+The #2031 permission exception is described below. No comments, issues, Checks API results, environments, credentials,
+queue entry or merge are created/configured. #2026/#1810 remain open.
 
 Run `node --test .github/scripts/issue-ci-proof-adapter.test.mjs .github/scripts/issue-ci-proof-workflow.test.mjs .github/scripts/issue-ci-proof-controls.test.mjs`, then
 `node --test .github/scripts/issue-*.test.mjs` locally. Existing Policy Helper
 Tests discovers the new `issue-*.test.mjs` on candidate `github.sha`; no workflow
-edit is needed. Discovery is not evidence that hosted CI has actually run.
+edit is needed for discovery. Discovery is not evidence that hosted CI has actually run.
 Local fake transport/clock tests are foundation-contract evidence only, never
 canonical production proof or authorization for hosted experiments.
 
@@ -154,4 +193,100 @@ Configuration/source failures use static `proof-adapter: configuration|source`;
 transport failures are terminal, redacted foundation errors. Time never releases.
 These controls trust the Actions context/client and immutable checkout; they
 are not independent ancestry, canonical native provenance, hosted adversarial
-evidence or queue protection. #2031 and separate grants/proofs remain necessary.
+evidence or queue protection. Separate grants/proofs remain necessary.
+
+## Independent dormant Unit Tests hold (#2031)
+
+`vars.ISSUE_CI_PROOF_CI` is a separate, **unconfigured** selector. Unset or
+`{"enabled":false}` performs no helper import or API request. Unit Tests alone
+now has job-scoped `contents: read` plus human-authorized `issues: read`, even OFF.
+This is not evidence that issue-comment reads work on hosted fork/queue tokens;
+qualification requires a future separately authorized window.
+
+Before checkout or substantive commands, the existing required job awaits a
+selected hold. No new context, job skip, deployment gate or error-success escape
+is added. Original commands and merge-group identity remain intact.
+The enabled manifest uses the foundation limits plus `issueNumber` and `case`.
+Its required `target` filters are `repo,event,action,job,checkout,prHead`.
+`runId,attempt,workflow,head` are optional preselectors: when present they must
+match, but need not be guessed before run/group creation. All four actual runtime
+values remain validated and mandatory in the fresh release witness binding.
+`head` is actual `github.sha` (synthetic merge for PRs, group SHA for groups);
+`prHead` is original PR head or null for groups. `checkout` is the immutable event
+base, not candidate checkout. Without a head filter, multiple matching groups may
+be held; this is not queue isolation. A future authorized window must establish
+matching scope and group membership before drawing queue conclusions.
+
+The bootstrap reads only the bridge/core blobs at that base, verifies explicit
+SHA256 pins, and loads them from isolated runner scratch. Missing historical
+helpers, corrupt source, malformed/expired controls and failed selected reads
+fail Unit Tests itself. There is no candidate fallback. Pin changes require a
+reviewed workflow change; this is not protection against rewriting the workflow
+itself. Workflow/base source revisions and run/attempt/job/event/head are bound
+into the fresh foundation checkpoint. Authentication and bounded read rules above
+apply unchanged; arbitrary bodies/errors are never logged. Local mocks establish
+neither active transport capability, native required-gate selection nor queue safety.
+
+Focused checks: `node --test .github/scripts/issue-ci-proof-ci.test.mjs .github/scripts/issue-ci-proof-ci-workflow.test.mjs`.
+Controls remain OFF; CI, independent verification and fresh review remain required.
+
+## Fork PR configuration transport (#1810)
+
+This alternative transports configuration without relying on fork `vars` visibility
+or variable refresh on rerun. It remains dormant: the versioned
+`.github/ci-proof-controllers.json` has `version: 1` and empty `controllerIds`.
+No real controller is enrolled; implementation/tests are not hosted qualification.
+
+Only a fork `pull_request` targeting canonical `main` may opt in with a reserved
+source branch `ci/proof-<issue>-<case>` via the standard runner `GITHUB_HEAD_REF`.
+Issue is a canonical positive decimal GraphQL Int (no leading zero); case is
+1–100 lowercase letters/digits/dots/underscores/hyphens, starting alphanumeric.
+The branch is untrusted routing, never authority. Malformed reserved routing,
+missing runtime identity or any nonempty raw variable (including explicit false)
+conflicts fail before helper import/API reads. Without this opt-in, existing raw
+configuration behavior and zero-import/API unset/false OFF remain unchanged.
+Merge groups and push events never activate this alternative.
+
+Executable bridge/core/config helpers are fetched only at the immutable event
+base, with exact byte SHA256 pins. Policy DATA is different: read the fixed
+controller file from current canonical `main` once and snapshot its bytes/hash.
+This avoids historical-base controller authority. Roster removal affects later
+reads, not an already snapshotted hold; it is not automatic GitHub-role revocation.
+Missing/corrupt sources fail selected Unit Tests; no candidate fallback exists.
+The bootstrap and configuration reads share a 15-second absolute preparation
+budget; requests are bounded, not retried, and checked again after responses.
+This budget does not shorten the existing hold deadline or extend its expiry.
+
+The same canonical issue supplies at most its last 20 comments. Envelope fields
+are `schema: "ci-proof-config/v1"`, positive `prNumber`, and the enabled CI
+`manifest` described above. Its case/issue, PR number, original head, mandatory
+selectors and any supplied optional filters must match the actual runtime.
+Only server `User.databaseId` in the policy snapshot with `lastEditedAt: null`
+may authorize a configuration. JSON identity claims grant nothing. Bots, edited,
+unauthorized, oversized (over 8192 UTF-8 bytes) and unrelated records cannot select
+configuration. Authorized, unedited records matching the schema, PR number, case
+and original PR head enter the uniqueness check before the remaining runtime
+selectors or optional filters are validated. Exactly one such record in the
+observed window is required. Records differing only in `runId`, `attempt` or
+other runtime selectors still make selection ambiguous. Retire the earlier
+record (edit or remove it) before adding a replacement; changing selectors alone
+does not disambiguate it. This is neither whole-issue uniqueness nor a global
+replay guarantee. Never pick newest-wins; unrelated release/chat records are ignored. Window eviction remains
+an availability limitation. An unedited observation cannot prevent later editing.
+
+The reader returns a snapshot of the existing manifest to the unchanged bridge.
+A separate `configuration-resolved` receipt exposes only controller ID and
+policy/configuration hashes; it proves delivery, not a checkpoint or release.
+The fresh full runtime nonce/witness authentication and five-minute ceiling remain
+unchanged. Later configuration edits/deletion/expiry never release a held snapshot.
+Explicit proof branches are experimental fixtures: missing/expired/ambiguous
+configuration fails future selected runs, not a green OFF. Normal branches do
+not look up policy/comments. No global variable is written or restored.
+
+Reader failures are static `proof-config: configuration|source|transport|expired`;
+the workflow redacts them to its existing `proof-ci: bootstrap`. No arbitrary
+body/error or producer result is logged. Existing job permissions, required
+contexts/App15368, original commands, native/legacy producers and queue stay intact.
+Run `node --test .github/scripts/issue-ci-proof-config.test.mjs .github/scripts/issue-ci-proof-ci-workflow.test.mjs`.
+Real fork-token API access and live hold/release still need separately authorized
+qualification; no comments, reruns or new experiment are authorized by these docs.

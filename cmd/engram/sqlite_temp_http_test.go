@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	projectpkg "github.com/Gentleman-Programming/engram/v3/internal/project"
 )
 
 // TestSQLiteTempHTTPDeletedInheritedDirectory exercises the released runtime
@@ -199,7 +201,9 @@ func TestSQLiteTempHTTPDeletedInheritedDirectory(t *testing.T) {
 		t.Fatalf("unstable finalization identity: first=%v replay=%v", finalized, replay)
 	}
 	ended := call("GET", "/sessions/"+session, nil, 200)
-	if ended["id"] != session || ended["project"] != project || ended["directory"] != strings.ToLower(cwd) || ended["ended_at"] == nil {
+	// Ordinary HTTP sessions bind to the runtime worktree root, not a nested cwd.
+	wantDirectory := projectpkg.RuntimeWorktreeDirectory(cwd)
+	if ended["id"] != session || ended["project"] != project || ended["directory"] != wantDirectory || ended["ended_at"] == nil {
 		t.Fatalf("session identity/completion changed: %v", ended)
 	}
 	assertCount(1027)

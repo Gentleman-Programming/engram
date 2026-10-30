@@ -1,0 +1,100 @@
+name: Close Stale Issues
+
+# Closes open issues with no activity for more than 21 days (3 weeks),
+# together with the open pull requests linked to them (closing keywords
+# such as "Closes #N" or the Development sidebar).
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # Daily at 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List what would be closed without closing anything'
+        type: boolean
+        default: true
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: close-stale-issues
+  cancel-in-progress: false
+
+jobs:
+  close-stale:
+    name: Close issues inactive for 3 weeks and their linked PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close stale issues and linked pull requests
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        env:
+          STALE_DAYS: '21'
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+          EXEMPT_LABELS: 'status:approved,status:in-progress,priority:high,priority:critical'
+        with:
+          script: |
+            const staleDays = Number(process.env.STALE_DAYS);
+            const dryRun = process.env.DRY_RUN === 'true';
+            const exemptLabels = (process.env.EXEMPT_LABELS || '')
+              .split(',').map(label => label.trim()).filter(Boolean);
+            const cutoff = Date.now() - staleDays * 24 * 60 * 60 * 1000;
+            const { owner, repo } = context.repo;
+
+            const issueMessage =
+              `This issue has had no activity for more than ${staleDays} days, so it is being closed automatically.\n\n` +
+              'If it is still relevant, reopen it with updated context or a fresh reproduction.';
+            const prMessage = (issue) =>
+              `The linked issue #${issue} was closed after more than ${staleDays} days without activity, so this pull request is being closed with it.\n\n` +
+              'Reopen it together with the issue if the work should continue.';
+
+            const linkedOpenPullRequests = async (number) => {
+              const result = await github.graphql(
+                `query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    issue(number: $number) {
+                      closedByPullRequestsReferences(first: 50, includeClosedPrs: false) {
+                        nodes { number state repository { nameWithOwner } }
+                      }
+                    }
+                  }
+                }`,
+                { owner, repo, number },
+              );
+              const nodes = result.repository.issue.closedByPullRequestsReferences.nodes || [];
+              return nodes
+                .filter(pr => pr.state === 'OPEN' && pr.repository.nameWithOwner === `${owner}/${repo}`)
+                .map(pr => pr.number);
+            };
+
+            let closedIssues = 0;
+            let closedPullRequests = 0;
+            const iterator = github.paginate.iterator(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', sort: 'updated', direction: 'asc', per_page: 100,
+            });
+
+            scan:
+            for await (const { data: page } of iterator) {
+              for (const issue of page) {
+                if (new Date(issue.updated_at).getTime() >= cutoff) break scan;
+                if (issue.pull_request) continue;
+                const labels = (issue.labels || []).map(label => typeof label === 'string' ? label : label.name);
+                if (labels.some(label => exemptLabels.includes(label))) continue;
+
+                const pullRequests = await linkedOpenPullRequests(issue.number);
+                console.log(`#${issue.number} last updated ${issue.updated_at}; linked open PRs: ${pullRequests.map(n => `#${n}`).join(', ') || '(none)'}`);
+                if (dryRun) continue;
+
+                for (const pr of pullRequests) {
+                  await github.rest.issues.createComment({ owner, repo, issue_number: pr, body: prMessage(issue.number) });
+                  await github.rest.pulls.update({ owner, repo, pull_number: pr, state: 'closed' });
+                  closedPullRequests++;
+                }
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: issueMessage });
+                await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'not_planned' });
+                closedIssues++;
+              }
+            }
+
+            console.log(`${dryRun ? '[dry run] ' : ''}Closed ${closedIssues} issue(s) and ${closedPullRequests} pull request(s).`);

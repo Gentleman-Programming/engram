@@ -261,6 +261,14 @@ MCP registration adds a missing local Engram entry and refreshes only `command[0
 
 Malformed or ambiguous MCP configuration (including duplicate keys, a non-object root, or a non-object `mcp` or `mcp.servers` block) is refused without changing that file. Setup still installs the plugin and attempts TUI registration, but prints the existing manual-MCP warning. This byte-preservation guarantee applies to MCP registration, not the separate `tui.json(c)` writer.
 
+### Recover after moving the Engram binary
+
+Setup bakes the current executable path into the OpenCode plugin. After a disk migration or binary move, run `engram setup opencode` using the current Engram installation, then restart OpenCode. A nonblank `ENGRAM_BIN` overrides that baked default; correct or unset a stale override before restarting. A missing selected binary does not trigger automatic PATH fallback.
+
+Early local readiness diagnostics distinguish `binary-not-found`, `identity-command-failed` (launch error or nonzero exit), and `identity-output-invalid` (not a 32-character lowercase hexadecimal identity). They identify `ENGRAM_BIN override` versus `setup-default` without exposing paths or command output. `identity-mismatch` separately means the responding server did not match the selected binary's identity; do not bypass that check or replace a running server to silence it. HTTP rejection and acknowledgement diagnostics remain separate.
+
+These diagnostics narrow an early failure; they do not establish or resolve the original cause of attribution failures with an otherwise healthy server.
+
 ### Verify each layer after setup
 
 `engram setup opencode` confirms only that it wrote the plugin and, when no warning was printed, the OpenCode MCP registration. It cannot confirm that OpenCode connected to the server or that an already-running agent session exposes the tools.
@@ -459,7 +467,9 @@ engram setup codex
 - Registers `[mcp_servers.engram]` in the active Codex config (`$CODEX_HOME/config.toml` when `CODEX_HOME` is absolute, otherwise `~/.codex/config.toml`; on Windows the default is `%USERPROFILE%\.codex\config.toml`) and pins the current absolute executable path
 - Writes `engram-instructions.md` and `engram-compact-prompt.md` beside the active config as informational copies of the Memory Protocol
 - Installs the Codex plugin with `codex plugin marketplace add Gentleman-Programming/engram --ref main` and `codex plugin add engram@engram`. The plugin hooks inject the Memory Protocol additively, so this is how Codex actually receives it. If the CLI is missing or either command fails, setup returns an error, not complete success. The MCP config and informational instruction files remain written, but plugin activation is incomplete. Ensure `codex` is in `PATH`, resolve the reported command error, and run both commands above manually (or rerun `engram setup codex`), then restart Codex. Do not wire the informational files into prompt override keys as a workaround.
-- Removes legacy `model_instructions_file` / `experimental_compact_prompt_file` keys if a previous Engram version wrote them
+- Removes complete top-level legacy `model_instructions_file` / `experimental_compact_prompt_file` string assignments, including quoted keys and multiline strings, if a previous Engram version wrote them
+
+Setup prepares legacy-key cleanup and MCP changes before writing `config.toml`. It preserves unrelated text, comments, and line endings. If a string/container is unterminated, an obsolete setting has a non-string value, or MCP is registered through an unsupported dotted/inline form instead of `[mcp_servers.engram]`, setup returns an error without changing the config or invoking the Codex plugin commands. Resolve the reported input manually and rerun setup. This bounded preservation check is not a general TOML validator and adds no parser dependency.
 
 > **Do not set `model_instructions_file` in Codex.** Unlike most instruction mechanisms, that key *replaces* Codex's built-in system instructions instead of adding to them. Pointing it at `engram-instructions.md` wipes Codex's own base prompt (`You are Codex, ...`) and degrades the agent. Earlier Engram versions did this automatically; current versions strip the keys instead. If you set them manually, you are deliberately opting into overriding Codex's base prompt.
 

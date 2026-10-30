@@ -1940,6 +1940,7 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 		Status:             status,
 		Limit:              limit,
 		Offset:             offset,
+		ActionableOnly:     true,
 		ExcludeNotConflict: true,
 	}
 
@@ -1964,6 +1965,7 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 		Project:            project,
 		Status:             status,
 		SinceTime:          opts.SinceTime,
+		ActionableOnly:     true,
 		ExcludeNotConflict: true,
 	}
 	total, err := s.store.CountRelations(countOpts)
@@ -1990,7 +1992,7 @@ func (s *Server) handleConflictsStats(w http.ResponseWriter, r *http.Request) {
 	}
 	project := resolved.Project
 
-	stats, err := s.store.GetRelationStats(project)
+	stats, err := s.store.GetActionableRelationStats(project)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
