@@ -58,7 +58,7 @@ Once the issue is approved:
 
 1. Fork the repo and create a branch from the canonical `main`
 2. Implement your change
-3. Open a PR using the PR template — **link the approved issue** with `Closes #N`
+3. Open a PR using the PR template — **link the approved issue** with `Closes #N` (or `Refs #N` for a partial PR that should not close the issue on merge)
 4. Add exactly **one `type:*` label** to the PR (see label system below)
 
 #### Forks and remotes
@@ -136,7 +136,7 @@ The active required contexts run automatically on every PR and merge queue group
 
 | Check | What it verifies |
 |-------|-----------------|
-| **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
+| **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, `Resolves #N`, or `Refs #N` |
 | **Check Issue Has status:approved** | Every linked issue has `status:approved` and at least one assignee |
 | **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
 | **Unit Tests** | First runs non-mutating `go mod tidy -diff` with the release Go toolchain on PRs, merge groups and main pushes; runs `go test ./...` (except `//go:build e2e`) and `make deadcode-check` |

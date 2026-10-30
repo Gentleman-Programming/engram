@@ -92,6 +92,32 @@ for (const entry of ['legacy-reference', 'legacy-approved']) test(`${entry} acce
     owner: 'Gentleman-Programming', repo: 'engram', issue_number: 9,
   })));
 });
+for (const entry of ['legacy-reference', 'legacy-approved']) {
+  test(`${entry} accepts bare and qualified refs keyword`, async () => {
+    const actual = await run(entry, 'Refs #9; refs owner/repo#10; REFS Gentleman-Programming/engram#11');
+    assert.deepEqual(actual.verdicts, ['success']);
+    assert.deepEqual(actual.calls, entry === 'legacy-reference' ? [] : [
+      { owner: 'owner', repo: 'repo', issue_number: 9 },
+      { owner: 'owner', repo: 'repo', issue_number: 10 },
+      { owner: 'Gentleman-Programming', repo: 'engram', issue_number: 11 },
+    ]);
+  });
+  test(`${entry} rejects untrusted qualified refs keyword`, async () => {
+    const actual = await run(entry, 'Refs #9; refs attacker/other#10');
+    assert.deepEqual(actual.verdicts, ['failure']);
+    assert.deepEqual(actual.calls, []);
+  });
+  test(`${entry} accepts refs keyword in every queued PR`, async () => {
+    const actual = await run(entry, 'Refs #9; refs owner/repo#10', { queue: true });
+    assert.deepEqual(actual.verdicts, ['success']);
+    assert.deepEqual(actual.calls, entry === 'legacy-reference' ? [] : [
+      { owner: 'owner', repo: 'repo', issue_number: 9 },
+      { owner: 'owner', repo: 'repo', issue_number: 9 },
+      { owner: 'owner', repo: 'repo', issue_number: 10 },
+      { owner: 'owner', repo: 'repo', issue_number: 10 },
+    ]);
+  });
+}
 test('discovery alias remains bare-only with unchanged permissive grammar', () => {
   assert.deepEqual(closingIssueNumbers('preCLOSES #9; fixes\n#10; resolves #9; closes#11; closes owner/repo#12'), [9, 10, 9]);
 });
