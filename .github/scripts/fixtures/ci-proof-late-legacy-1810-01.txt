@@ -1,0 +1,2 @@
+ci-proof-case:1810-late-legacy-01 issue:2112
+P1 inert direct-child fixture; runtime evidence recorded locally.
