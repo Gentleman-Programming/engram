@@ -48,7 +48,9 @@ function contract(text) {
     assert.match(body, new RegExp(`(?:^|[ ;])${key} = '(?:home|appdata|localappdata|data|tmp)'`, 'm'), `isolated ${key}`);
   }
   const collection = body.match(/      - name: Collect representative Bash temp diagnostics\n[\s\S]*?(?=      - name:)/)?.[0] ?? '';
-  const strictBody = body.replace(collection, collection.replace('        continue-on-error: true\n', ''));
+  const artifact = body.match(/      - name: Preserve Bash temp diagnostics\n[\s\S]*?(?=      - name:)/)?.[0] ?? '';
+  const strictBody = body.replace(collection, collection.replace('        continue-on-error: true\n', ''))
+    .replace(artifact, artifact.replace('        continue-on-error: true\n', ''));
   assert.doesNotMatch(strictBody, /continue-on-error|needs:|: write|secrets\.|\|\| true| -p | -parallel| -run | -short| -skip| -tags| -timeout|GOFLAGS|GOOS:|GOARCH:/);
   assert.equal((body.match(/\n\s+if:/g) ?? []).length, 3, 'failure evidence plus diagnostic collection/artifact guards');
   assert.equal(body.split('Add-Content $env:GITHUB_ENV "$key=$value"').length - 1, 2,
@@ -65,6 +67,8 @@ function diagnostics(text) {
   const body = job(text);
   const collectionStep = body.match(/      - name: Collect representative Bash temp diagnostics\n[\s\S]*?(?=      - name:)/)?.[0] ?? '';
   assert.match(collectionStep, /^        continue-on-error: true$/m);
+  const artifactStep = body.match(/      - name: Preserve Bash temp diagnostics\n[\s\S]*?(?=      - name:)/)?.[0] ?? '';
+  assert.match(artifactStep, /^        continue-on-error: true$/m);
   const snapshot = body.indexOf('windows-bash-temp-diagnostics.mjs snapshot');
   assert.ok(snapshot > 0 && snapshot < body.indexOf('$paths = @{'), 'snapshot before private exports');
   assert.match(body, /curl --version; printf "BASH_TEMP/);
@@ -79,6 +83,8 @@ test('bounded post-suite temp diagnostics preserve prerequisite ordering', () =>
 test('diagnostics must remain nonfatal while the Go suite still propagates failure', () => {
   const collection = source.match(/      - name: Collect representative Bash temp diagnostics\n[\s\S]*?(?=      - name:)/)[0];
   assert.throws(() => diagnostics(source.replace(collection, collection.replace('        continue-on-error: true\n', ''))));
+  const artifact = source.match(/      - name: Preserve Bash temp diagnostics\n[\s\S]*?(?=      - name:)/)[0];
+  assert.throws(() => diagnostics(source.replace(artifact, artifact.replace('        continue-on-error: true\n', ''))));
   assert.throws(() => contract(source.replace('      - name: Run full default-tags module suite\n', '      - name: Run full default-tags module suite\n        continue-on-error: true\n')));
 });
 test('reject missing diagnostic snapshot, streams and artifact wiring', () => {
