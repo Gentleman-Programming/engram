@@ -10937,11 +10937,6 @@ func TestBackfillSessionSyncMutationsBackfillsProjectOwnedBlankDirectory(t *test
 		t.Fatalf("seed po blank session: %v", err)
 	}
 
-	// 3. Project-owned session with non-blank directory - SHOULD be backfilled.
-	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('po-dir', 'engram', '/tmp/dir', 'project_owned')`); err != nil {
-		t.Fatalf("seed po dir session: %v", err)
-	}
-
 	needs, err := s.projectNeedsBackfill("engram")
 	if err != nil {
 		t.Fatalf("projectNeedsBackfill: %v", err)
@@ -10963,6 +10958,11 @@ func TestBackfillSessionSyncMutationsBackfillsProjectOwnedBlankDirectory(t *test
 	}
 	if !found {
 		t.Fatalf("enrolledProjectsNeedingBackfill didn't include engram: %v", projects)
+	}
+	// A concrete session must not mask exclusion of the blank-directory row
+	// from discovery. Add it only after checking discovery with po-blank alone.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('po-dir', 'engram', '/tmp/dir', 'project_owned')`); err != nil {
+		t.Fatalf("seed po dir session: %v", err)
 	}
 
 	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
