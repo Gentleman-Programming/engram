@@ -140,7 +140,9 @@ test("owned child authenticates every path and reload closes transport without e
   assert.ok(before.some(e=>e.path?.startsWith('/observations/save-result')));
   assert.ok(before.filter(e=>e.path).every(e=>e.authorized));
   assert.equal(tools.size,23);
-  assert.ok(before.findIndex(e=>e.method==='POST')>before.findIndex(e=>e.path==='/runtime-contract'));
+  const contractIndex = before.findIndex(e=>e.path==='/runtime-contract');
+  assert.ok(contractIndex >= 0, 'owned startup must request runtime qualification');
+  assert.ok(before.findIndex(e=>e.method==='POST') > contractIndex);
   await hooks.get('session_shutdown')({reason:'reload'},ctx);
   const after=await events();assert.ok(after.some(e=>e.eof));assert.ok(!after.some(e=>e.path?.endsWith('/end')));
  });
@@ -377,7 +379,9 @@ for (const mismatch of [false, true]) {
         assert.equal(after.filter(record => record.args?.[0] === "serve").length, 2, "concurrent refused probes authorize one restart");
         const restart = after.findLastIndex(record => record.args?.[0] === "serve");
         const recoveredRecords = after.slice(restart);
-        assert.ok(recoveredRecords.findIndex(record => record.path === "/context") > recoveredRecords.findIndex(record => record.path === "/runtime-contract"));
+        const contractIndex = recoveredRecords.findIndex(record => record.path === "/runtime-contract");
+        assert.ok(contractIndex >= 0, "recovery must request runtime qualification");
+        assert.ok(recoveredRecords.findIndex(record => record.path === "/context") > contractIndex);
       }
     } finally {
       try { if (plugin) await plugin.hooks.get("session_shutdown")?.({ reason: "reload" }, plugin.ctx); await stop(); }
