@@ -711,6 +711,11 @@ if command -v engram.exe >/dev/null || command -v curl.exe >/dev/null; then
   exit 93
 fi
 `
+	if f.cygpath != "" {
+		// Runtime initialization used the parent-lived native temp. Only after
+		// all trusted startup checks restore private temps for hook children.
+		startup += "export TMP=\"$root/tmp\" TEMP=\"$root/tmp\"\n"
+	}
 	if err := os.WriteFile(gate, []byte(startup), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +737,11 @@ fi
 			t.Fatal(err)
 		}
 		for _, key := range keys {
-			env = append(env, key+"="+filepath.Join(cwd, subdir))
+			value := filepath.Join(cwd, subdir)
+			if key == "TMP" || key == "TEMP" {
+				value = codexBashStartupTemp(value)
+			}
+			env = append(env, key+"="+value)
 		}
 	}
 	if f.cygpath != "" {
