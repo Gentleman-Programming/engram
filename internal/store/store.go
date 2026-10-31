@@ -13872,10 +13872,10 @@ func (s *Store) PassiveCapture(p PassiveCaptureParams) (*PassiveCaptureResult, e
 			continue
 		}
 
-		// Truncate for title: first 60 chars
+		// Keep the 60-byte title prefix on a complete UTF-8 boundary.
 		title := learning
 		if len(title) > 60 {
-			title = title[:60] + "..."
+			title = truncateUTF8Prefix(title, 60) + "..."
 		}
 
 		_, err = s.AddObservation(AddObservationParams{
