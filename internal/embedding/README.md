@@ -1,7 +1,8 @@
 # Local embedding provider
 
-This package implements explicit Ollama operations only. It is not yet wired to
-search, indexing, configuration environment variables, or any adapter.
+This package implements explicit Ollama operations only and reads no environment
+variables. CLI adapters own configuration and inject this provider into the
+store for explicit indexing and semantic search through CLI, HTTP and MCP.
 
 - `New(Config{BaseURL, Model}) (*Client, error)` validates configuration without
   network I/O. The URL defaults to `http://127.0.0.1:11434`; the model is required
@@ -20,8 +21,11 @@ search, indexing, configuration environment variables, or any adapter.
 Only root HTTP loopback endpoints are accepted. Credentials, non-loopback hosts,
 queries, fragments, invalid ports, proxies and redirects are prohibited. A private
 stdlib transport resolves and checks every address before dialing a numeric
-loopback address. `localhost` must resolve exclusively to loopback. Configured
-ports are preserved. Requests have a 120-second timeout; caller contexts may set
+loopback address. `localhost` must resolve exclusively to loopback. When a numeric
+address refuses connection, the transport tries the remaining validated loopback
+addresses within one shared 10-second connection budget. It never retries HTTP
+work after connecting. Configured ports are preserved. Requests have a
+120-second timeout; caller contexts may set
 shorter limits. Responses are limited to 4 MiB and one valid JSON value. No raw
 provider bodies or input texts are included in errors. Unknown JSON fields are
 allowed for native API forward compatibility.

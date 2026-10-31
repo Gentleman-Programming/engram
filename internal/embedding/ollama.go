@@ -235,6 +235,46 @@ func (c *Client) request(ctx context.Context, path string, payload []byte, outpu
 
 var ErrConfig = errors.New("embedding: require a model and a root HTTP loopback URL without credentials")
 
+func dialLoopback(ctx context.Context, network, address string,
+	lookup func(context.Context, string) ([]net.IPAddr, error),
+	dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	hostname, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, ErrConfig
+	}
+	ips, err := lookup(ctx, hostname)
+	if err != nil {
+		return nil, errors.New("embedding: loopback resolution failed")
+	}
+	if len(ips) == 0 {
+		return nil, ErrConfig
+	}
+	for _, ip := range ips {
+		if !ip.IP.IsLoopback() {
+			return nil, ErrConfig
+		}
+	}
+	// Validate the complete resolution before trying any numeric address. Share
+	// the original connection budget across fallbacks; do not replay HTTP work.
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var lastErr error
+	for _, ip := range ips {
+		if err := dialCtx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := dial(dialCtx, network, net.JoinHostPort(ip.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if err := dialCtx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, lastErr
+}
+
 func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, ErrConfig
@@ -265,23 +305,8 @@ func New(cfg Config) (*Client, error) {
 		// Disabling connection reuse also prevents transparent retries on stale connections.
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			hostname, port, err := net.SplitHostPort(address)
-			if err != nil {
-				return nil, ErrConfig
-			}
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
-			if err != nil {
-				return nil, errors.New("embedding: loopback resolution failed")
-			}
-			if len(ips) == 0 {
-				return nil, ErrConfig
-			}
-			for _, ip := range ips {
-				if !ip.IP.IsLoopback() {
-					return nil, ErrConfig
-				}
-			}
-			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+			return dialLoopback(ctx, network, address, net.DefaultResolver.LookupIPAddr,
+				(&net.Dialer{}).DialContext)
 		},
 	}
 	return &Client{base: strings.TrimSuffix(u.String(), "/"), model: cfg.Model, http: &http.Client{
