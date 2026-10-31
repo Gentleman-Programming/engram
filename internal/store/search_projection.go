@@ -34,6 +34,12 @@ func CompactSearchProjection(results []SearchPreviewResult, relations map[string
 	entries := make([]map[string]any, 0, len(results))
 	for _, r := range results {
 		entry := map[string]any{"id": r.ID, "sync_id": r.SyncID, "title": r.Title, "type": r.Type, "state": r.State(), "scope": r.Scope, "pinned": r.Pinned, "preview": r.Preview, "truncated": r.Truncated}
+		if r.RetrievalMode == "semantic" {
+			entry["retrieval_mode"] = r.RetrievalMode
+			if r.Similarity != nil {
+				entry["similarity"] = *r.Similarity
+			}
+		}
 		if r.Project != nil {
 			entry["project"] = *r.Project
 		}

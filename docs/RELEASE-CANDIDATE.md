@@ -174,7 +174,9 @@ registry authenticity, reproducible-build proof, artifact execution nor eligibil
 ## Separate real-schema diagnostic
 
 `node tools/pi-schema-diagnostic.mjs` captures real serialized TypeBox schemas
-against the existing committed Go contract without regenerating it. First run
+against the existing committed Go contract without regenerating it. Known numeric
+Agent contract revisions `1` and `2` are supported; unknown revisions and nonnumeric
+revision values fail closed. This does not establish semantic parity. First run
 `npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi` (Node.js 24).
 See [diagnostic output/exit semantics](PI-TOOL-PROJECTIONS.md#real-schema-diagnostic).
 Differences are expected, not an added strict parity/release gate. Even zero

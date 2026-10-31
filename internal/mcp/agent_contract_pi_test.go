@@ -63,6 +63,33 @@ func TestPiInputSourceDrift(t *testing.T) {
 		{"omitted-field-drift", "mem_save", func(s map[string]any) {
 			s["properties"].(map[string]any)["session_id"].(map[string]any)["minLength"] = json.Number("2")
 		}},
+		{"search-mode-missing", "mem_search", func(s map[string]any) {
+			delete(s["properties"].(map[string]any), "search_mode")
+		}},
+		{"search-mode-type", "mem_search", func(s map[string]any) {
+			s["properties"].(map[string]any)["search_mode"].(map[string]any)["type"] = "number"
+		}},
+		{"search-mode-missing-enum", "mem_search", func(s map[string]any) {
+			delete(s["properties"].(map[string]any)["search_mode"].(map[string]any), "enum")
+		}},
+		{"search-mode-enum", "mem_search", func(s map[string]any) {
+			s["properties"].(map[string]any)["search_mode"].(map[string]any)["enum"] = []any{"semantic"}
+		}},
+		{"search-mode-extra-enum", "mem_search", func(s map[string]any) {
+			s["properties"].(map[string]any)["search_mode"].(map[string]any)["enum"] = []any{"lexical", "semantic", "hybrid"}
+		}},
+		{"search-mode-enum-order", "mem_search", func(s map[string]any) {
+			s["properties"].(map[string]any)["search_mode"].(map[string]any)["enum"] = []any{"semantic", "lexical"}
+		}},
+		{"search-mode-required", "mem_search", func(s map[string]any) {
+			s["required"] = append(s["required"].([]any), "search_mode")
+		}},
+		{"search-mode-bound", "mem_search", func(s map[string]any) {
+			s["properties"].(map[string]any)["search_mode"].(map[string]any)["minLength"] = json.Number("1")
+		}},
+		{"search-mode-null-bound", "mem_search", func(s map[string]any) {
+			s["properties"].(map[string]any)["search_mode"].(map[string]any)["minLength"] = nil
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := piSource(t, tc.tool)

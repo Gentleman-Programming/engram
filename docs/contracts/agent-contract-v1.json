@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "6bc86a93f10ffbcbfc03070ba45a5eba1b8bab213f71768d82c310b95310c1a8",
+  "digest": "2884875746b925aa8d331b8b83f99bb69fb6cb7094c3bcaf0a4684b616aca2f6",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -780,6 +780,14 @@
             "description": "Filter by scope: project, personal, or global. Omit to apply no scope filter.",
             "type": "string"
           },
+          "search_mode": {
+            "description": "Retrieval mode: lexical (default) or explicit semantic. Semantic returns potentially related memories, not answer confidence; requires a configured local model and manual engram embed index. Do not combine with match_mode.",
+            "enum": [
+              "lexical",
+              "semantic"
+            ],
+            "type": "string"
+          },
           "type": {
             "description": "Filter by type: tool_use, file_change, command, file_read, search, manual, decision, architecture, bugfix, pattern",
             "type": "string"
@@ -792,10 +800,13 @@
       },
       "semantics": {
         "effect": "read",
-        "error_effects": "no observation mutation; invalid MCP match_mode/response_format is rejected before project resolution",
+        "error_effects": "no observation mutation or document indexing; invalid MCP search_mode/match_mode/response_format and blank semantic queries are rejected before project resolution",
         "guarantees": [
           "all_projects=true ignores project selection",
-          "match_mode is all by default or any; other values are rejected",
+          "search_mode defaults to lexical; explicit semantic mode requires a configured local provider and a manually built fresh index",
+          "lexical match_mode defaults to all or may be any; semantic mode rejects every nonempty match_mode",
+          "semantic results are potentially related memories; similarity is not answer confidence",
+          "semantic failures remain explicit errors without lexical fallback or automatic indexing",
           "personal scope without explicit project searches across projects",
           "default limit is 10"
         ],
@@ -1203,6 +1214,6 @@
     }
   },
   "profile": "agent",
-  "revision": 1,
+  "revision": 2,
   "status": "mcp-foundation"
 }

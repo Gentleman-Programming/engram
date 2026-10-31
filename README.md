@@ -337,6 +337,11 @@ For parameters and the complete, current tool reference, see [the full documenta
 
 ## Documentation
 
+Optional [explicit local semantic search](docs/semantic-search.md) uses an
+already-installed local Ollama model, manual `engram embed`, and explicit
+`--search-mode semantic` / `search_mode: "semantic"`. Lexical search stays the
+default; similarity means potential relatedness, not answer confidence.
+
 | Where to go | What you'll find |
 | :--- | :--- |
 | **[Intended Usage](docs/intended-usage.md)** | The human mental model for using Engram |

@@ -67,6 +67,7 @@ test("existing CLI verifies real Pi registration without writing", async (t) => 
       ["extra-description-property", "mem_search", (s) => { s.properties.description = { type: "string" }; }],
       ["type", "mem_search", (s) => { s.properties.query.type = "number"; }],
       ["required", "mem_search", (s) => { delete s.required; }],
+      ["semantic-selector-injection", "mem_search", (s) => { s.properties.search_mode = { type: "string", enum: ["lexical", "semantic"] }; }],
       ["max-bytes", "mem_context", (s) => { s.properties.max_bytes.minimum = 0; }],
       ["batch-bound", "mem_judge_many", (s) => { s.properties.judgments.maxItems = 33; }],
       ["consolidation-constraint", "mem_consolidate", (s) => { delete s.properties.ids_to_delete.uniqueItems; }],

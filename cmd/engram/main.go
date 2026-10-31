@@ -803,6 +803,14 @@ func main() {
 		cfg.DataDir = dir
 	}
 
+	cfg = configureSemantic(cfg)
+	if os.Args[1] == "embed" {
+		if _, _, err := parseEmbedArgs(os.Args[2:]); err != nil {
+			fatal(err)
+			return
+		}
+	}
+
 	if os.Args[1] == "instance-id" {
 		id, err := store.EnsureInstanceID(cfg.DataDir)
 		if err != nil {
@@ -838,6 +846,8 @@ func main() {
 		cmdTUI(cfg)
 	case "search":
 		cmdSearch(cfg)
+	case "embed":
+		cmdEmbed(cfg)
 	case "save":
 		cmdSave(cfg)
 	case "delete":
@@ -1389,6 +1399,7 @@ func cmdSearch(cfg store.Config) {
 	var queryParts []string
 	opts := store.SearchOptions{Limit: 10}
 	allProjects := false
+	matchExplicit := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -1416,7 +1427,15 @@ func cmdSearch(cfg store.Config) {
 				opts.Scope = os.Args[i+1]
 				i++
 			}
+		case "--search-mode":
+			if i+1 >= len(os.Args) || (os.Args[i+1] != "lexical" && os.Args[i+1] != "semantic") {
+				fatal(fmt.Errorf("--search-mode requires lexical or semantic"))
+				return
+			}
+			i++
+			opts.SearchMode = os.Args[i]
 		case "--match":
+			matchExplicit = true
 			if i+1 < len(os.Args) {
 				opts.MatchMode = os.Args[i+1]
 				i++
@@ -1426,6 +1445,10 @@ func cmdSearch(cfg store.Config) {
 		}
 	}
 
+	if opts.SearchMode == "semantic" && matchExplicit {
+		fatal(fmt.Errorf("semantic search cannot be combined with --match"))
+		return
+	}
 	query := strings.Join(queryParts, " ")
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "error: search query is required")
@@ -1445,19 +1468,38 @@ func cmdSearch(cfg store.Config) {
 	}
 	opts.Project = resolved
 
-	results, err := storeSearch(s, query, opts)
+	var results []store.SearchResult
+	if opts.SearchMode == "semantic" {
+		results, err = s.SearchContext(context.Background(), query, opts)
+	} else {
+		results, err = storeSearch(s, query, opts)
+	}
 	if err != nil {
+		if opts.SearchMode == "semantic" {
+			err = fmt.Errorf("%w; configure ENGRAM_EMBEDDING_MODEL and rebuild via engram embed with the same filters", err)
+		}
 		fatal(err)
 		return
 	}
 
 	if len(results) == 0 {
-		fmt.Printf("No memories found for: %q\n", query)
+		if opts.SearchMode == "semantic" {
+			fmt.Printf("No potentially related memories found for: %q\n", query)
+		} else {
+			fmt.Printf("No memories found for: %q\n", query)
+		}
 		return
 	}
 
-	fmt.Printf("Found %d memories:\n\n", len(results))
+	if opts.SearchMode == "semantic" {
+		fmt.Printf("Found %d potentially related memories (similarity is not confidence):\n\n", len(results))
+	} else {
+		fmt.Printf("Found %d memories:\n\n", len(results))
+	}
 	for i, r := range results {
+		if r.Similarity != nil {
+			fmt.Printf("Similarity: %g | retrieval_mode: semantic\n", *r.Similarity)
+		}
 		project := ""
 		if r.Project != nil {
 			project = fmt.Sprintf(" | project: %s", *r.Project)
@@ -3938,6 +3980,12 @@ Commands:
                      Read-only offline store observation (JSON). It never opens, migrates or repairs
                      the store, and never authorizes automatic opening; see README
   search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
+  embed [--project PROJECT|--all] [--scope SCOPE] [--type TYPE]
+                     Manually build local semantic index (ENGRAM_EMBEDDING_MODEL required).
+                     Optional ENGRAM_EMBEDDING_URL: root HTTP loopback Ollama URL.
+                     Requires an already-installed local model; no automatic pull or fallback.
+  search --search-mode lexical|semantic
+                     Explicit semantic results are potentially related, not answer confidence.
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>

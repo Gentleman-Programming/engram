@@ -18,7 +18,7 @@ func usesLocalSQLite(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "serve", "mcp", "tui", "search", "save", "delete", "timeline", "conflicts", "doctor", "context", "stats", "export", "import", "sync", "obsidian-export", "projects":
+	case "embed", "serve", "mcp", "tui", "search", "save", "delete", "timeline", "conflicts", "doctor", "context", "stats", "export", "import", "sync", "obsidian-export", "projects":
 		return true
 	case "cloud":
 		if len(args) < 2 {

@@ -144,6 +144,21 @@ func piInputProjection(name string, source map[string]any) (map[string]any, erro
 		}
 	}
 	switch name {
+	case "mem_search":
+		// MCP exposes this selector; the current Pi model surface does not.
+		// Admit only the exact optional source shape, not arbitrary omissions.
+		f := field(p, "search_mode", "string")
+		if !reflect.DeepEqual(piInputShape(f, true), map[string]any{
+			"type": "string", "enum": []any{"lexical", "semantic"},
+		}) {
+			bad = true
+		}
+		for _, r := range required {
+			if r == "search_mode" {
+				bad = true
+			}
+		}
+		delete(p, "search_mode")
 	case "mem_save", "mem_save_prompt", "mem_session_summary", "mem_session_finalize":
 		// agent_contract.go:199-230; session_finalize.go:24-28,44-46: host-owned
 		// identity and cwd selection, never MCP recovery tokens/model session overrides.
