@@ -54,14 +54,16 @@ func main(){
 		t.Fatalf("build controlled mapping converter: %v: %s", err, output)
 	}
 	for _, tc := range []struct {
-		name, limiter, hang, mapping string
-		called, success, realLimiter bool
+		name, limiter, hang, mapping, mapExit string
+		called, success, realLimiter          bool
+		missingConverter                      bool
 	}{
 		// The controlled limiter allows a slow successful conversion. Only the
 		// timeout case depends on real scheduling under the diagnostic budget.
-		{name: "successful mapping", limiter: converter, hang: "1", mapping: "C:/native/tmp", called: true, success: true},
-		{name: "stalled converter", limiter: limiter, hang: "1", realLimiter: true},
-		{name: "missing limiter skips conversion"},
+		{name: "successful mapping", limiter: converter, hang: "1", mapping: "C:/native/tmp", mapExit: "0", called: true, success: true},
+		{name: "stalled converter", limiter: limiter, hang: "1", mapExit: "137", realLimiter: true},
+		{name: "converter launch failure", limiter: limiter, mapExit: "127", realLimiter: true, missingConverter: true},
+		{name: "missing limiter skips conversion", mapExit: "125"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.realLimiter {
@@ -73,8 +75,12 @@ func main(){
 			called := filepath.Join(t.TempDir(), "called")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			mappingConverter := converter
+			if tc.missingConverter {
+				mappingConverter = filepath.Join(root, "missing converter.exe")
+			}
 			cmd := exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-p", "-c",
-				string(codexChildTraceLogger("gate", converter, tc.limiter, filepath.ToSlash(trace)))+"printf '{}\\n'")
+				string(codexChildTraceLogger("gate", mappingConverter, tc.limiter, filepath.ToSlash(trace)))+"printf '{}\\n'")
 			cmd.WaitDelay = time.Second
 			cmd.Env = []string{"PATH=", "LC_ALL=C", "MSYS_NO_PATHCONV=1", "SystemRoot=" + os.Getenv("SystemRoot"),
 				"TEMP=" + root, "TMP=" + root, "CODEX_TRACE_HANG=" + tc.hang, "CODEX_TRACE_CALLED=" + called}
@@ -95,8 +101,11 @@ func main(){
 			if fields["stage"] != "gate" || fields["native_tmp"] != tc.mapping || (fields["map_exit"] == "0") != tc.success {
 				t.Fatalf("unexpected mapping evidence: %q", data)
 			}
-			if tc.limiter == "" && fields["map_exit"] != "125" {
-				t.Fatalf("missing limiter must record unavailable mapping: %q", data)
+			// GNU timeout reports 128+SIGKILL for --signal=KILL expiry, while
+			// a missing executable reports 127. A generic nonzero is not proof
+			// that the converter actually timed out.
+			if fields["map_exit"] != tc.mapExit {
+				t.Fatalf("mapping exit=%q, want %s: %q", fields["map_exit"], tc.mapExit, data)
 			}
 			_, err = os.Stat(called)
 			if tc.called && err != nil || !tc.called && !os.IsNotExist(err) {
