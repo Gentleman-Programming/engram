@@ -629,6 +629,10 @@ for (const [reason, classification] of [
   ['set ENGRAM_PAUSE_BENCH_DSN to the owned measurement fixture', 'excluded-postgres'],
   ['requires Windows external commands', 'foreign-os'],
   ['requires native Windows and Git Bash', 'foreign-os'],
+  ...['codex_child_trace_behavior_test.go', 'codex_child_trace_recording_test.go', 'codex_child_trace_logger_test.go'].map(file => {
+    const text = readFileSync(new URL('../../plugin/' + file, import.meta.url), 'utf8');
+    return [text.match(/t\.Skip\("([^"]+)"\)/)[1], 'foreign-os'];
+  }),
 ]) {
   test('native summary classifies observed exclusion: ' + reason, () => {
     const events = [...passed, event('output', 'TestExcluded', reason + '\n'), event('skip', 'TestExcluded')];
@@ -637,6 +641,8 @@ for (const [reason, classification] of [
     const report = JSON.parse(result.stdout);
     assert.equal(report.skips[0].classification, classification);
     assert.equal(report.skips[0].reason, reason + '\n');
+    assert.equal(result.stderr, '');
+    assert.equal(result.markdown, '## Native macOS scope\n\n```json\n' + result.stdout.trim() + '\n```\n');
     assert.deepEqual(report.tests, { pass: 1, fail: 0, skip: 1 });
     const failed = summarize([...events, event('fail', 'TestOriginalFailure'), event('fail')]);
     assert.equal(failed.status, 1, failed.stdout);
