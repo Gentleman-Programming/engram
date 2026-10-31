@@ -17,6 +17,21 @@ import (
 
 const codexChildTraceEnv = "ENGRAM_CODEX_CHILD_TRACE"
 
+func codexChildTraceLogger(stage, converter, limiter, posix string) []byte {
+	return []byte(fmt.Sprintf(`
+__engram_child_trace() {
+ local present=no mapping= code=125
+ [ ! -d /tmp ] || present=yes
+ if [ -n %s ]; then
+   mapping=$(%s --signal=KILL 0.2s %s -w -- /tmp); code=$?
+ fi
+ builtin printf 'stage=%%s\tpid=%%s\tppid=%%s\tbash=%%s\tversion=%%s\ttmpdir=%%s\ttmp=%%s\ttemp=%%s\tpwd=%%s\ttmp_exists=%%s\tnative_tmp=%%s\tmap_exit=%%s\n' %s "$BASHPID" "$PPID" "$BASH" "$BASH_VERSION" "${TMPDIR-<unset>}" "${TMP-<unset>}" "${TEMP-<unset>}" "$PWD" "$present" "$mapping" "$code" >> %s
+}
+__engram_child_trace 2>> %s
+unset -f __engram_child_trace
+`, codexIntentQuote(filepath.ToSlash(limiter)), codexIntentQuote(filepath.ToSlash(limiter)), codexIntentQuote(filepath.ToSlash(converter)), codexIntentQuote(stage), codexIntentQuote(posix), codexIntentQuote(posix+".observer-errors")))
+}
+
 type codexTracePatch struct {
 	path          string
 	before, after []byte
@@ -91,6 +106,12 @@ func startCodexChildTrace(t *testing.T, name, root string, cmd *exec.Cmd, stdout
 		if !info.Mode().IsRegular() {
 			return errors.New("converter must be regular")
 		}
+		// Resolve only the trusted Git distribution's optional limiter. Never
+		// search the fixture's private PATH or run an unbounded mapping fallback.
+		limiter := filepath.Join(filepath.Dir(fixtureBash), "timeout.exe")
+		if info, err := os.Stat(limiter); err != nil || !info.Mode().IsRegular() {
+			limiter = ""
+		}
 		env := map[string]string{}
 		for _, e := range cmd.Env {
 			key, value, _ := strings.Cut(e, "=")
@@ -129,16 +150,7 @@ func startCodexChildTrace(t *testing.T, name, root string, cmd *exec.Cmd, stdout
 			return errors.New("invalid observer trace path")
 		}
 		logger := func(stage string) []byte {
-			return []byte(fmt.Sprintf(`
-__engram_child_trace() {
- local present=no mapping code
- [ ! -d /tmp ] || present=yes
- mapping=$(%s -w -- /tmp); code=$?
- builtin printf 'stage=%%s\tpid=%%s\tppid=%%s\tbash=%%s\tversion=%%s\ttmpdir=%%s\ttmp=%%s\ttemp=%%s\tpwd=%%s\ttmp_exists=%%s\tnative_tmp=%%s\tmap_exit=%%s\n' %s "$BASHPID" "$PPID" "$BASH" "$BASH_VERSION" "${TMPDIR-<unset>}" "${TMP-<unset>}" "${TEMP-<unset>}" "$PWD" "$present" "$mapping" "$code" >> %s
-}
-__engram_child_trace 2>> %s
-unset -f __engram_child_trace
-`, codexIntentQuote(filepath.ToSlash(converter)), codexIntentQuote(stage), codexIntentQuote(posix), codexIntentQuote(posix+".observer-errors")))
+			return codexChildTraceLogger(stage, converter, limiter, posix)
 		}
 		gate := filepath.Join(root, "private-startup.sh")
 		if !strings.EqualFold(filepath.Clean(filepath.FromSlash(env["BASH_ENV"])), filepath.Clean(gate)) {

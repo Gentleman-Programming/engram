@@ -41,4 +41,8 @@ func TestCodexChildTraceRecordingFailureKeepsOracle(t *testing.T) {
 	if err != nil || stdout.String() != "{}\n" || stderr.Len() != 0 {
 		t.Fatalf("original oracle changed: %v stdout=%q stderr=%q", err, &stdout, &stderr)
 	}
+	trace, readErr := os.ReadFile(filepath.Join(root, "codex-child.trace"))
+	if readErr != nil || !bytes.Contains(trace, []byte("stage=gate\t")) {
+		t.Fatalf("observer did not record the startup gate: %q %v", trace, readErr)
+	}
 }

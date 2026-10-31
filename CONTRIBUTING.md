@@ -223,6 +223,10 @@ provide process isolation, not measured proof of cleanup.
 The Windows job also opts into `ENGRAM_CODEX_CHILD_TRACE` for only the Codex
 `empty confirmation` fixture case. Its test-only observer records allowlisted
 child temp metadata without replacing the launcher, command, guards or assertions.
+Each injected mapping query uses the trusted Git distribution's `timeout.exe`
+with a 200 ms limit and forced child termination. If that optional limiter is
+unavailable, mapping is skipped and recorded with an empty value and exit 125;
+the observer never falls back to an unbounded converter call.
 A separate best-effort artifact retains traces and observer status even when the
 original test passes. Missing/failed diagnostics are not a root-cause verdict;
 extra observation can perturb timing. This does not investigate session-end POSTs.
