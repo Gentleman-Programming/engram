@@ -629,7 +629,7 @@ for (const [reason, classification] of [
   ['set ENGRAM_PAUSE_BENCH_DSN to the owned measurement fixture', 'excluded-postgres'],
   ['requires Windows external commands', 'foreign-os'],
   ['requires native Windows and Git Bash', 'foreign-os'],
-  ...['codex_child_trace_behavior_test.go', 'codex_child_trace_recording_test.go'].map(file => {
+  ...['codex_child_trace_behavior_test.go', 'codex_child_trace_recording_test.go', 'codex_child_trace_logger_test.go'].map(file => {
     const text = readFileSync(new URL('../../plugin/' + file, import.meta.url), 'utf8');
     return [text.match(/t\.Skip\("([^"]+)"\)/)[1], 'foreign-os'];
   }),

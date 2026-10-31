@@ -13,20 +13,36 @@ import (
 )
 
 func TestCodexChildTraceLoggerMapping(t *testing.T) {
+	testCodexChildTraceLoggerMapping(t, false)
+}
+
+func TestCodexChildTraceLoggerWithoutLimiter(t *testing.T) {
+	testCodexChildTraceLoggerMapping(t, true)
+}
+
+func testCodexChildTraceLoggerMapping(t *testing.T, withoutLimiter bool) {
+	t.Helper()
 	if runtime.GOOS != "windows" {
-		t.Skip("requires native Windows Git Bash")
+		t.Skip("requires native Windows and Git Bash")
 	}
 	bash := codexIntentTool(t, "bash", "/usr/bin")
 	limiter := filepath.Join(filepath.Dir(bash), "timeout.exe")
-	if info, err := os.Stat(limiter); err != nil || !info.Mode().IsRegular() {
-		t.Fatal("Git Bash timeout prerequisite unavailable")
+	if withoutLimiter {
+		limiter = ""
 	}
 	root := t.TempDir()
 	source := filepath.Join(root, "converter.go")
 	converter := filepath.Join(root, "converter with spaces.exe")
 	program := `package main
-import("fmt";"os";"time")
+import("fmt";"os";"os/exec";"time")
 func main(){
+ if len(os.Args)>3 && os.Args[1]=="--signal=KILL" {
+  if os.Args[2]!="0.2s" { os.Exit(4) }
+  cmd:=exec.Command(os.Args[3],os.Args[4:]...)
+  cmd.Stdout,cmd.Stderr=os.Stdout,os.Stderr
+  if cmd.Run()!=nil { os.Exit(5) }
+  return
+ }
  if os.Getenv("CODEX_TRACE_HANG")=="1" { time.Sleep(2*time.Second) }
  if err:=os.WriteFile(os.Getenv("CODEX_TRACE_CALLED"),nil,0600);err!=nil { os.Exit(3) }
  fmt.Print("C:/native/tmp")
@@ -39,13 +55,20 @@ func main(){
 	}
 	for _, tc := range []struct {
 		name, limiter, hang, mapping string
-		called, success              bool
+		called, success, realLimiter bool
 	}{
-		{name: "successful mapping", limiter: limiter, mapping: "C:/native/tmp", called: true, success: true},
-		{name: "stalled converter", limiter: limiter, hang: "1"},
+		// The controlled limiter allows a slow successful conversion. Only the
+		// timeout case depends on real scheduling under the diagnostic budget.
+		{name: "successful mapping", limiter: converter, hang: "1", mapping: "C:/native/tmp", called: true, success: true},
+		{name: "stalled converter", limiter: limiter, hang: "1", realLimiter: true},
 		{name: "missing limiter skips conversion"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.realLimiter {
+				if info, err := os.Stat(tc.limiter); err != nil || !info.Mode().IsRegular() {
+					t.Skip("optional Git Bash timeout.exe unavailable")
+				}
+			}
 			trace := filepath.Join(t.TempDir(), "trace")
 			called := filepath.Join(t.TempDir(), "called")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
