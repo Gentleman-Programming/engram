@@ -388,6 +388,8 @@ function adapters(text) {
     'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download',
     'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server',
     'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
+    'export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"',
     piScript.replace('node --test ', 'node --test --test-reporter=tap ') + ' | tee "$RUNNER_TEMP/pi.tap"',
     'node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"',
     'PI_OUTCOME: ${{ steps.pi.outcome }}', 'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}',
@@ -409,6 +411,8 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
     'Darwin arm64', 'go1.26.10', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
+    'export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"',
     '--test-concurrency=1', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
     assert.ok(original.includes(before), before);
     assert.throws(() => adapters(source.replace(original, () => original.replace(before, '__REMOVED__'))), undefined, before);
