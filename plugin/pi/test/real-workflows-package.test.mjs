@@ -60,7 +60,7 @@ syncBuiltinESMExports();
 }
 
 function summary(result, { pass, fail, skipped }) {
-  assert.match(result.stdout, /^# tests 8$/m);
+  assert.match(result.stdout, /^# tests 9$/m);
   for (const [name, count] of Object.entries({ pass, fail, skipped, cancelled: 0 })) {
     assert.match(result.stdout, new RegExp(`^# ${name} ${count}$`, "m"));
   }
@@ -70,8 +70,8 @@ test("packaged real workflows skip before building Go or creating a sandbox", ()
   scenario(({ pkg, temp, execute }) => {
     const result = execute(pkg);
     assert.equal(result.status, 0, result.stdout);
-    summary(result, { pass: 0, fail: 0, skipped: 8 });
-    assert.equal(result.stdout.split(`# SKIP ${reason}`).length - 1, 8);
+    summary(result, { pass: 0, fail: 0, skipped: 9 });
+    assert.equal(result.stdout.split(`# SKIP ${reason}`).length - 1, 9);
     assert.deepEqual(result.builds, []);
     assert.deepEqual(readdirSync(temp), []);
   });
@@ -82,7 +82,7 @@ test("a configured but invalid binary fails all real workflows instead of skippi
     // A real executable that cannot serve the fixture must not be treated as unavailable.
     const result = execute(pkg, process.execPath);
     assert.equal(result.status, 1, result.stdout);
-    summary(result, { pass: 0, fail: 8, skipped: 0 });
+    summary(result, { pass: 0, fail: 9, skipped: 0 });
     assert.match(result.stdout, /server exited 1/);
     assert.deepEqual(result.builds, []);
   });
@@ -94,20 +94,20 @@ test("checkout real workflows preserve Go build failures instead of skipping", {
   scenario(({ execute }) => {
     const result = execute(PLUGIN_ROOT);
     assert.equal(result.status, 1, result.stdout);
-    summary(result, { pass: 0, fail: 8, skipped: 0 });
+    summary(result, { pass: 0, fail: 9, skipped: 0 });
     assert.match(result.stdout, /fixture Go build failure sentinel/);
-    assert.equal(result.builds.length, 8);
+    assert.equal(result.builds.length, 9);
     for (const build of result.builds) assert.equal(build.args.at(-1), "./plugin/pi/test/support/real-server");
   });
 });
 
-test("packaged real workflows run all eight tests with the prebuilt fixture binary", {
+test("packaged real workflows run all nine tests with the prebuilt fixture binary", {
   skip: !process.env.ENGRAM_PI_TEST_SERVER_BINARY,
 }, () => {
   scenario(({ pkg, execute }) => {
     const result = execute(pkg, process.env.ENGRAM_PI_TEST_SERVER_BINARY);
     assert.equal(result.status, 0, result.stdout);
-    summary(result, { pass: 8, fail: 0, skipped: 0 });
+    summary(result, { pass: 9, fail: 0, skipped: 0 });
     assert.deepEqual(result.builds, []);
   });
 });
