@@ -383,9 +383,12 @@ No Bash/jq/curl, installed Pi SDK, Codex fixture change or full Go job is added.
 
 The shared [evidence checker](.github/scripts/adapter-ci-evidence.mjs) takes
 `macos` or `windows`; the existing Mac output/exit contract is unchanged.
-Mandatory missing resources, unexpected skips or incomplete evidence fail.
-Only the installed-host opt-in journey is excluded. Windows-shaped spawn mocks
-and forceful Windows SIGTERM are not real host/graceful-shutdown qualification.
+Missing required test names, malformed TAP, inconsistent counters and unexpected
+skips fail. The only accepted skip is the installed-host opt-in journey; the
+checker does not inventory every expected test or detect removal of an otherwise
+unlisted test when the TAP plan and counters remain consistent. Windows-shaped
+spawn mocks and forceful Windows SIGTERM are not real host/graceful-shutdown
+qualification.
 
 Initial ceilings are 20 minutes outer, 2 minutes fixture build and 5 minutes
 per adapter suite, not measured Windows guarantees. Existing fixture deadlines,
