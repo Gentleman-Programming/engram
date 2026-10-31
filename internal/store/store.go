@@ -2694,19 +2694,34 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory conflicts with local session directory"), nil
 			}
 		}
-		effectiveMode := strings.TrimSpace(body.OwnershipMode)
-		if effectiveMode == "" {
-			var dbMode string
-			if err := tx.QueryRow(`SELECT ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, body.ID).Scan(&dbMode); err == nil {
-				effectiveMode = strings.TrimSpace(dbMode)
+		if op == SyncOpUpsert && body.OwnershipMode == "" {
+			var fields map[string]json.RawMessage
+			if err := decodeSyncPayload([]byte(payload), &fields); err != nil {
+				return cloudUpgradeLegacyMutationEvaluation{}, err
+			}
+			if _, explicit := fields["ownership_mode"]; !explicit {
+				var dbMode, dbProject string
+				err := tx.QueryRow(`SELECT ifnull(ownership_mode, ''), ifnull(project, '') FROM sessions WHERE id = ?`, body.ID).Scan(&dbMode, &dbProject)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return cloudUpgradeLegacyMutationEvaluation{}, err
+				}
+				if dbMode == SessionOwnershipProjectOwned {
+					localProject, _ := NormalizeProject(dbProject)
+					if localProject != ownerProject || (body.Project != "" && body.Project != ownerProject) {
+						return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload project conflicts with local session project"), nil
+					}
+					body.OwnershipMode = dbMode
+					changed = true
+				}
 			}
 		}
 		if op == SyncOpUpsert && body.OwnershipMode == SessionOwnershipProjectOwned {
-			if err := ValidateCloudSessionDirectory([]byte(payload)); err != nil {
+			// Validate the raw directory so inferred ownership cannot turn null into blank.
+			if err := validatePulledSessionDirectoryLocal([]byte(payload)); err != nil {
 				return blocked(UpgradeReasonBlockedLegacyMutationManual, err.Error()), nil
 			}
 		}
-		if op == SyncOpUpsert && body.Directory == "" && effectiveMode != SessionOwnershipProjectOwned {
+		if op == SyncOpUpsert && body.Directory == "" && body.OwnershipMode != SessionOwnershipProjectOwned {
 			var directory string
 			err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, body.ID).Scan(&directory)
 			if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(directory) == "" {

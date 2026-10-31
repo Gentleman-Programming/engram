@@ -303,6 +303,10 @@ func TestRegisterIsolatedSessionSyncMutationLifecycle(t *testing.T) {
 	}
 
 	// 2. Renewing the lease does not enqueue duplicate mutations.
+	beforeRenew, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil || len(beforeRenew) != 1 {
+		t.Fatalf("before renewal = %+v, %v", beforeRenew, err)
+	}
 	if _, err := s.RegisterIsolatedSession(id, "target", true); err != nil {
 		t.Fatalf("renew lease: %v", err)
 	}
@@ -314,6 +318,10 @@ func TestRegisterIsolatedSessionSyncMutationLifecycle(t *testing.T) {
 	}
 	if countAfterRenew != 1 {
 		t.Fatalf("expected still 1 session upsert mutation after lease renewal, got %d", countAfterRenew)
+	}
+	afterRenew, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil || len(afterRenew) != 1 || afterRenew[0].Seq != beforeRenew[0].Seq {
+		t.Fatalf("renewal replaced the pending generation: %+v -> %+v, %v", beforeRenew, afterRenew, err)
 	}
 
 	// 3. Ordinary local sessions with blank directory and shared mode still do NOT enqueue.
@@ -330,4 +338,3 @@ func TestRegisterIsolatedSessionSyncMutationLifecycle(t *testing.T) {
 		t.Fatalf("expected 0 session upsert mutations for shared blank-directory session, got %d", countShared)
 	}
 }
-

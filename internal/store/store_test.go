@@ -10983,6 +10983,54 @@ func TestBackfillSessionSyncMutationsBackfillsProjectOwnedBlankDirectory(t *test
 	if poBlankCount != 1 || poDirCount != 1 || sharedBlankCount != 0 {
 		t.Fatalf("poBlank=%d (want 1), poDir=%d (want 1), sharedBlank=%d (want 0)", poBlankCount, poDirCount, sharedBlankCount)
 	}
+	for _, key := range []string{"po-blank", "po-dir"} {
+		var op, source, raw string
+		if err := s.db.QueryRow(`SELECT op, source, payload FROM sync_mutations WHERE entity_key = ?`, key).Scan(&op, &source, &raw); err != nil {
+			t.Fatal(err)
+		}
+		var payload Session
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			t.Fatal(err)
+		}
+		wantDirectory := ""
+		if key == "po-dir" {
+			wantDirectory = "/tmp/dir"
+		}
+		if op != SyncOpUpsert || source != SyncSourceLocal || payload.ID != key || payload.Project != "engram" || payload.OwnershipMode != SessionOwnershipProjectOwned || payload.Directory != wantDirectory {
+			t.Fatalf("backfill mutation %s/%s = %+v", op, source, payload)
+		}
+	}
+	before := isolatedSnapshot(t, s)
+	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, isolatedSnapshot(t, s)) {
+		t.Fatal("backfill replay changed sessions or journal")
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity_key IN ('po-blank', 'po-dir')`); err != nil {
+		t.Fatal(err)
+	}
+	before = isolatedSnapshot(t, s)
+	originalExec := s.hooks.exec
+	injected := errors.New("injected session backfill failure")
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO sync_mutations") && len(args) > 2 && args[2] == "po-dir" {
+			return nil, injected
+		}
+		return originalExec(db, query, args...)
+	}
+	err = s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") })
+	s.hooks.exec = originalExec
+	if !errors.Is(err, injected) || !reflect.DeepEqual(before, isolatedSnapshot(t, s)) {
+		t.Fatalf("failed backfill did not roll back: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
+		t.Fatalf("retry backfill: %v", err)
+	}
+	var retried int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity_key IN ('po-blank', 'po-dir')`).Scan(&retried); err != nil || retried != 2 {
+		t.Fatalf("retry journal count=%d, error=%v", retried, err)
+	}
 }
 
 // TestSessionIdentityPreservesWhitespacePaddedIdentities guards the other

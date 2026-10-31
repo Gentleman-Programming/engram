@@ -326,51 +326,56 @@ func TestValidatePulledSessionDirectoryStrictRejectsBlankAndMissing(t *testing.T
 			t.Fatalf("concrete directory rejected: %v", err)
 		}
 	})
-	t.Run("project_owned admits empty and omitted directory", func(t *testing.T) {
-		payloadOmitted := `{"id":"proj-owned-1","project":"engram","ownership_mode":"project_owned"}`
-		if err := validatePulledSessionDirectory([]byte(payloadOmitted)); err != nil {
-			t.Fatalf("project_owned with omitted directory rejected: %v", err)
-		}
+}
 
-		payloadEmpty := `{"id":"proj-owned-2","project":"engram","ownership_mode":"project_owned","directory":""}`
-		if err := validatePulledSessionDirectory([]byte(payloadEmpty)); err != nil {
-			t.Fatalf("project_owned with empty directory string rejected: %v", err)
-		}
-
-		payloadWhitespace := `{"id":"proj-owned-3","project":"engram","ownership_mode":"project_owned","directory":"   "}`
-		if err := validatePulledSessionDirectory([]byte(payloadWhitespace)); err != nil {
-			t.Fatalf("project_owned with whitespace directory string rejected: %v", err)
-		}
-
-		payloadConcrete := `{"id":"proj-owned-4","project":"engram","ownership_mode":"project_owned","directory":"/real/dir"}`
-		if err := validatePulledSessionDirectory([]byte(payloadConcrete)); err != nil {
-			t.Fatalf("project_owned with concrete directory rejected: %v", err)
-		}
-	})
-	t.Run("project_owned rejects non-string types", func(t *testing.T) {
-		for _, badDir := range []string{`null`, `123`, `true`, `["foo"]`, `{"sub":"obj"}`} {
-			payload := fmt.Sprintf(`{"id":"proj-owned-bad","project":"engram","ownership_mode":"project_owned","directory":%s}`, badDir)
-			err := validatePulledSessionDirectory([]byte(payload))
-			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-				t.Fatalf("bad directory %s: error = %v, want ErrPulledSessionDirectoryInvalid", badDir, err)
+func TestCloudChunkIsolatedSessionDirectoryAdmission(t *testing.T) {
+	for _, directory := range []string{"", `,"directory":""`, `,"directory":null`, `,"directory":123`} {
+		t.Run(directory, func(t *testing.T) {
+			s := newTestStore(t)
+			before, err := s.GetSyncState("cloud:target")
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-	})
-	t.Run("non-project_owned continues to reject empty and omitted directory", func(t *testing.T) {
-		for _, mode := range []string{`"shared"`, `""`, `"legacy"`} {
-			payloadOmitted := fmt.Sprintf(`{"id":"non-po-1","project":"engram","ownership_mode":%s}`, mode)
-			err := validatePulledSessionDirectory([]byte(payloadOmitted))
-			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-				t.Fatalf("mode %s with omitted directory: error = %v, want ErrPulledSessionDirectoryInvalid", mode, err)
+			mutations := []SyncMutation{
+				{Entity: SyncEntitySession, EntityKey: "satellite", Op: SyncOpUpsert, Project: "target", Payload: `{"id":"satellite","project":"target","ownership_mode":"project_owned"` + directory + `}`},
+				{Entity: SyncEntityObservation, EntityKey: "learning", Op: SyncOpUpsert, Project: "target", Payload: `{"sync_id":"learning","session_id":"satellite","project":"target","scope":"project","type":"discovery","title":"isolated learning","content":"shared learning"}`},
 			}
-
-			payloadEmpty := fmt.Sprintf(`{"id":"non-po-2","project":"engram","ownership_mode":%s,"directory":""}`, mode)
-			err = validatePulledSessionDirectory([]byte(payloadEmpty))
-			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-				t.Fatalf("mode %s with empty directory: error = %v, want ErrPulledSessionDirectoryInvalid", mode, err)
+			err = s.ApplyPulledChunkForDomain("cloud:target", "isolated-chunk", mutations, true)
+			invalid := strings.Contains(directory, "null") || strings.Contains(directory, "123")
+			if invalid && err == nil || !invalid && err != nil {
+				t.Fatalf("chunk admission = %v", err)
 			}
-		}
-	})
+			if strings.Contains(directory, "null") && !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("null directory error = %v", err)
+			}
+			if !invalid {
+				if err := s.ApplyPulledChunkForDomain("cloud:target", "isolated-chunk", mutations, true); err != nil {
+					t.Fatalf("replay: %v", err)
+				}
+			}
+			after, err := s.GetSyncState("cloud:target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sessions, observations, chunks int
+			if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM sessions), (SELECT count(*) FROM observations), (SELECT count(*) FROM sync_chunks)`).Scan(&sessions, &observations, &chunks); err != nil {
+				t.Fatal(err)
+			}
+			if invalid {
+				if sessions != 0 || observations != 0 || chunks != 0 || !reflect.DeepEqual(before, after) {
+					t.Fatalf("rejected chunk changed state: %d/%d/%d, %+v -> %+v", sessions, observations, chunks, before, after)
+				}
+				return
+			}
+			if sessions != 1 || observations != 1 || chunks != 1 || after.LastPulledSeq != before.LastPulledSeq+2 {
+				t.Fatalf("chunk/replay state = %d/%d/%d, cursor %d -> %d", sessions, observations, chunks, before.LastPulledSeq, after.LastPulledSeq)
+			}
+			session, err := s.GetSession("satellite")
+			if err != nil || session.Directory != "" || session.OwnershipMode != SessionOwnershipProjectOwned {
+				t.Fatalf("imported isolated session = %+v, %v", session, err)
+			}
+		})
+	}
 }
 
 // Matrix item 7 (validation retained): JSON import with an invalid session ID
