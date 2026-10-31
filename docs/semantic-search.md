@@ -41,6 +41,19 @@ for all projects. There is no force flag, model pull, background indexing or
 indexing side effect of save/search. Index only data you intend to send to your
 local daemon. Rebuild with the same visibility filters used by the query.
 
+This draft intentionally requires valid caches for the **entire selected corpus**.
+Its freshness fingerprint covers every observation column except the three
+embedding cache fields, including timestamps, revision/duplicate counters,
+`review_after` and `pinned`. A new eligible save, dedupe metadata update or pin
+toggle can therefore invalidate semantic queries for that selection even when
+the embedded title and content did not change. Those queries fail until a manual
+rebuild; they do not return a partially indexed subset.
+
+Every `engram embed` run regenerates vectors for all matching observations,
+including otherwise unchanged rows. Frequent writes can require frequent full
+rebuilds, whose cost grows with the selected corpus. Use lexical search between
+rebuilds. Incremental cache reuse and partial-index ranking are not implemented.
+
 HTTP, with the same environment on `engram serve`:
 
 ```sh
