@@ -173,7 +173,10 @@ func TestReleaseCandidateHelpAndArguments(t *testing.T) {
 		if code != 0 || diagnostic != "" {
 			t.Fatalf("help exit=%d stderr=%q", code, diagnostic)
 		}
-		for _, text := range []string{"-core-ref", "-pi-ref", "-root", "metadata directory", "not Pi parity or release approval"} {
+		for _, text := range []string{
+			"-core-ref", "-pi-ref", "-root", "metadata directory", "not Pi parity or release approval",
+			"Admission alone never executes Core/Pi.", "synthetic tests are not artifact execution proof.",
+		} {
 			if !strings.Contains(out, text) {
 				t.Fatalf("help missing %q: %s", text, out)
 			}
