@@ -366,62 +366,107 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const fs = require('node:fs');
-          const report = { scope: 'Darwin ARM64 Pi/OpenCode source adapters', suites: {}, coverage: 'incomplete' };
-          const required = {
-            pi: ['Pi native saves persist under separate host sessions and stop on failed registration',
-              'existing CLI verifies real Pi registration without writing',
-              'packaged real workflows run all eight tests with the prebuilt fixture binary'],
-            opencode: ['V2 inbox prompts stay idempotent and deleted across real server restarts'],
-          };
-          for (const [suite, names] of Object.entries(required)) {
-            const result = report.suites[suite] = { outcome: process.env[suite.toUpperCase() + '_OUTCOME'], counts: {}, skips: [], complete: false };
-            try {
-              const raw = fs.readFileSync(process.env.RUNNER_TEMP + '/' + suite + '.tap', 'utf8');
-              const lines = raw.trimEnd().split(/\r?\n/), seen = new Set();
-              let header = 0, plan, number = 0, records = 0;
-              for (const line of lines) {
-                if (line === 'TAP version 13') header++;
-                const record = line.match(/^\s*(ok|not ok) \d+ - /);
-                if (record) {
-                  records++;
-                  if (record[1] !== 'ok') throw Error('failed test record');
-                }
-                const entry = line.match(/^(ok|not ok) (\d+) - (.*?)(?: # SKIP (.*))?$/);
-                if (entry) {
-                  if (!header || entry[1] !== 'ok' || Number(entry[2]) !== ++number) throw Error('invalid top-level result');
-                  seen.add(entry[3]);
-                  if (entry[4] !== undefined) result.skips.push({ name: entry[3], reason: entry[4] });
-                }
-                if (/^1\.\./.test(line)) {
-                  if (plan !== undefined || !/^1\.\.\d+$/.test(line)) throw Error('invalid plan');
-                  plan = Number(line.slice(3));
-                }
-                const count = line.match(/^# (tests|suites|pass|fail|cancelled|skipped|todo) (\d+)$/);
-                if (count) {
-                  if (Object.hasOwn(result.counts, count[1])) throw Error('duplicate counter');
-                  result.counts[count[1]] = Number(count[2]);
-                }
-              }
-              const c = result.counts;
-              if (header !== 1 || !number || plan !== number || Object.keys(c).length !== 7
-                || !/^# duration_ms \d+(\.\d+)?$/.test(lines.at(-1))
-                || c.tests !== records || c.tests !== c.pass + c.fail + c.cancelled + c.skipped + c.todo
-                || !c.pass || c.suites || c.fail || c.cancelled || c.todo || c.skipped !== result.skips.length
-                || !names.every(name => seen.has(name))) throw Error('incomplete test execution');
-              if (!result.skips.every(s => suite === 'pi'
-                && s.name === 'actual Pi hosts retain attribution through compaction, resume and refusal'
-                && s.reason === 'opt-in: set ENGRAM_PI_LIFECYCLE_CLI to the installed Pi CLI entry point')) throw Error('unexpected skip');
-              result.complete = result.outcome === 'success';
-            } catch (error) { result.error = error.message; }
+          node .github/scripts/adapter-ci-evidence.mjs macos
+
+  windows-adapter-tests:
+    name: Native Windows x64 Adapter Tests
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          architecture: x64
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          architecture: x64
+      - name: Verify native prerequisites and isolate profile
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture
+          $PSVersionTable.PSVersion
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'Native x64 OS required' }
+          node -e 'if (process.platform !== "win32" || process.arch !== "x64" || process.versions.node.split(".")[0] !== "24") process.exit(1); console.log(process.version, process.platform, process.arch)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $go = go env -json GOVERSION GOOS GOARCH GOHOSTOS GOHOSTARCH GOMODCACHE GOCACHE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $go = $go | ConvertFrom-Json
+          $go | ConvertTo-Json
+          if ($go.GOVERSION -ne 'go1.26.10' -or "$($go.GOOS)/$($go.GOARCH)" -ne 'windows/amd64' -or "$($go.GOHOSTOS)/$($go.GOHOSTARCH)" -ne 'windows/amd64') { throw 'Native repository Go required' }
+          foreach ($file in @('docs/contracts/agent-contract-v1.json', 'plugin/pi/test/support/real-server/main.go', 'plugin/opencode/test/support/real-server/main.go')) {
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing mandatory fixture: $file" }
           }
-          if (Object.values(report.suites).every(s => s.complete)) report.coverage = 'complete-with-listed-exclusions';
-          const json = JSON.stringify(report);
-          console.log(json);
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Native macOS adapters\n\n```json\n' + json.replaceAll('`', '\\u0060') + '\n```\n');
-          if (report.coverage === 'incomplete') process.exitCode = 1;
-          NODE
+          $state = Join-Path $env:RUNNER_TEMP ("eg-adapter-" + [guid]::NewGuid().ToString('N'))
+          "Private adapter root=$([IO.Path]::GetFullPath($state))"
+          "GOMODCACHE=$($go.GOMODCACHE)", "GOCACHE=$($go.GOCACHE)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          @{ HOME = 'home'; USERPROFILE = 'home'; APPDATA = 'appdata'; LOCALAPPDATA = 'localappdata'; TEMP = 'tmp'; TMP = 'tmp'; TMPDIR = 'tmp'; ENGRAM_DATA_DIR = 'store' }.GetEnumerator() | ForEach-Object {
+            $path = Join-Path $state $_.Value
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            "$($_.Key)=$path" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          }
+      - name: Install locked Pi test dependency
+        working-directory: plugin/pi
+        run: npm ci --ignore-scripts --legacy-peer-deps
+      - name: Prepare repository Go dependencies
+        run: go mod download
+      - name: Build existing Pi fixture
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node -e 'const p = require("./plugin/pi/node_modules/typebox/package.json"); if (p.name !== "typebox" || p.version !== "1.3.34") process.exit(1)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:RUNNER_TEMP 'pi-test-server.exe'
+          go build -mod=readonly -o $binary ./plugin/pi/test/support/real-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Missing mandatory prebuilt fixture' }
+      - name: Run Pi adapters
+        id: pi
+        timeout-minutes: 5
+        working-directory: plugin/pi
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Get-ChildItem Env: | Where-Object Name -Match '^(ENGRAM_|GENTLE_|CLOUDSTORE_TEST_DSN$|NODE_OPTIONS$|GOFLAGS$)' |
+            ForEach-Object { Remove-Item "Env:$($_.Name)" }
+          $env:ENGRAM_DATA_DIR = Join-Path (Split-Path $env:HOME) 'store'
+          $env:ENGRAM_PI_TEST_SERVER_BINARY = Join-Path $env:RUNNER_TEMP 'pi-test-server.exe'
+          node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'pi.tap')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run OpenCode adapters
+        id: opencode
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Get-ChildItem Env: | Where-Object Name -Match '^(ENGRAM_|GENTLE_|CLOUDSTORE_TEST_DSN$|NODE_OPTIONS$|GOFLAGS$)' |
+            ForEach-Object { Remove-Item "Env:$($_.Name)" }
+          $env:ENGRAM_DATA_DIR = Join-Path (Split-Path $env:HOME) 'store'
+          node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'opencode.tap')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Summarize adapter execution
+        if: ${{ !cancelled() }}
+        env:
+          PI_OUTCOME: ${{ steps.pi.outcome }}
+          OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}
+        run: node .github/scripts/adapter-ci-evidence.mjs windows
 
   govulncheck:
     name: Go Vulnerability Check

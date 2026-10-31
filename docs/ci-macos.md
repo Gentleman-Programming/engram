@@ -42,7 +42,8 @@ test/build/setup failure or cancellation is not successful coverage; no automati
 budget increase, blanket skip or continue-on-error is permitted.
 
 TAP reporting is selected only through CLI flags, never inherited NODE_OPTIONS.
-The inline reporter retains pass/fail/skip counts and exact top-level skip
+The shared [reporter](../.github/scripts/adapter-ci-evidence.mjs), invoked with
+`macos`, retains the same pass/fail/skip counts and exact top-level skip
 identities/reasons, reconciles counters with all nested execution records,
 checks completed plans and required fixture cases,
 and also requires both actual test-step outcomes to be success. Missing,
