@@ -16,8 +16,8 @@ func TestLoopbackDialFallback(t *testing.T) {
 	ips := []net.IPAddr{{IP: net.ParseIP("::1")}, {IP: net.ParseIP("127.0.0.1")}}
 	lookup := func(context.Context, string) ([]net.IPAddr, error) { return ips, nil }
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 	refused := errors.New("controlled connection refusal")
 	var attempts []string
 	var deadlines []time.Time
