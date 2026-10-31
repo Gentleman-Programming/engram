@@ -233,8 +233,10 @@ behavior. No startup files or fixture gate run in the representative matrix.
 The quoted sibling `cygpath.exe` path uses forward slashes, including with spaces
 and an empty `PATH`, rather than depending on implicit Windows-path handling.
 For local collection, run `node .github/scripts/windows-bash-temp-diagnostics.mjs --help` for snapshot/collect arguments; `CODEX_TEST_TRUSTED_BASH` must identify the
-reviewed absolute Bash executable. Diagnostic errors never replace the recorded
-suite exit or repair a missing temp directory. Cancellation/outer timeout can leave partial
+reviewed absolute Bash executable. Diagnostic failures remain visible on their
+step and in the artifact; that step continues on error so the diagnostic cannot
+change the job conclusion. It never replaces the recorded suite exit or repairs
+a missing temp directory. Cancellation/outer timeout can leave partial
 output without a completed exit/timing record. Wiring and structural tests do
 **not** complete #1891: hosted checked-out SHA, actual toolchain, exit, elapsed
 time and skip review are still missing. Optional-service and foreign-OS skips

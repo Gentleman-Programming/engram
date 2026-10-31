@@ -902,6 +902,7 @@ jobs:
 
       - name: Collect representative Bash temp diagnostics
         if: ${{ !cancelled() }}
+        continue-on-error: true
         timeout-minutes: 2
         run: node .github/scripts/windows-bash-temp-diagnostics.mjs collect "$env:RUNNER_TEMP/windows-suite/diagnostics/baseline.json" "$env:RUNNER_TEMP/windows-suite/diagnostics/result.json"
 
