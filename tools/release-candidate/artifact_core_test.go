@@ -340,6 +340,7 @@ process.exit = finish;
 }
 
 func TestArtifactPiLifetime(t *testing.T) {
+	requireArtifactNode(t)
 	core, _, _ := stagedProgramFixture(t, artifactCoreFixture)
 	for _, mode := range []string{"parent EOF", "early clean Core exit"} {
 		t.Run(mode, func(t *testing.T) {
