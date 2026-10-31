@@ -2427,13 +2427,19 @@ func (s *Store) RepairPendingSessionDirectories(project string, apply bool) ([]S
 				if decodeSyncPayload([]byte(mutation.Payload), &body) != nil || strings.TrimSpace(body.Directory) != "" || strings.TrimSpace(body.ID) == "" || body.ID != mutation.EntityKey {
 					continue
 				}
-				var localProject string
-				err := tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, body.ID).Scan(&localProject)
+				if strings.TrimSpace(body.OwnershipMode) == SessionOwnershipProjectOwned {
+					continue
+				}
+				var localProject, localMode string
+				err := tx.QueryRow(`SELECT project, ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, body.ID).Scan(&localProject, &localMode)
 				if errors.Is(err, sql.ErrNoRows) {
 					continue
 				}
 				if err != nil {
 					return err
+				}
+				if strings.TrimSpace(localMode) == SessionOwnershipProjectOwned {
+					continue
 				}
 				normalizedLocalProject, _ := NormalizeProject(localProject)
 				normalizedMutationProject, _ := NormalizeProject(mutation.Project)
@@ -2688,12 +2694,19 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory conflicts with local session directory"), nil
 			}
 		}
+		effectiveMode := strings.TrimSpace(body.OwnershipMode)
+		if effectiveMode == "" {
+			var dbMode string
+			if err := tx.QueryRow(`SELECT ifnull(ownership_mode, '') FROM sessions WHERE id = ?`, body.ID).Scan(&dbMode); err == nil {
+				effectiveMode = strings.TrimSpace(dbMode)
+			}
+		}
 		if op == SyncOpUpsert && body.OwnershipMode == SessionOwnershipProjectOwned {
 			if err := ValidateCloudSessionDirectory([]byte(payload)); err != nil {
 				return blocked(UpgradeReasonBlockedLegacyMutationManual, err.Error()), nil
 			}
 		}
-		if op == SyncOpUpsert && body.Directory == "" && body.OwnershipMode != SessionOwnershipProjectOwned {
+		if op == SyncOpUpsert && body.Directory == "" && effectiveMode != SessionOwnershipProjectOwned {
 			var directory string
 			err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, body.ID).Scan(&directory)
 			if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(directory) == "" {
@@ -3702,7 +3715,7 @@ func (s *Store) startSessionRegistration(id, project, directory, mode string, re
 			if err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, id).Scan(&existingDirectory); err != nil {
 				return err
 			}
-			identityRepaired = existingProject == "" || existingMode == "" || strings.TrimSpace(existingDirectory) == ""
+			identityRepaired = existingProject == "" || existingMode == "" || (existingMode != SessionOwnershipProjectOwned && strings.TrimSpace(existingDirectory) == "") || (strings.TrimSpace(existingDirectory) == "" && strings.TrimSpace(directory) != "")
 		}
 		// Never rewrite or skip an already-selected continuation. Resolve/end
 		// still reject any existing scope mismatch rather than repairing data.
@@ -10832,11 +10845,12 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			q: `SELECT COUNT(*) FROM sessions
 			    WHERE project = ?
 			      AND ` + sqlSessionIDNotBlank("id") + `
+			      AND (trim(sessions.directory, ?) != '' OR sessions.ownership_mode = 'project_owned')
 			      AND NOT EXISTS (
 			        SELECT 1 FROM sync_mutations sm
 			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = sessions.id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
 			      )`,
-			args: []any{project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal},
+			args: []any{project, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal},
 		},
 		{
 			q: `SELECT COUNT(*) FROM observations o
@@ -10934,6 +10948,7 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 			SELECT x.project
 			FROM sessions x
 			WHERE trim(x.id, ?) != ''
+			  AND (trim(x.directory, ?) != '' OR x.ownership_mode = 'project_owned')
 			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 			UNION
 			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
@@ -10969,7 +10984,7 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined'))
 		) candidates ON candidates.project = ep.project
 		ORDER BY ep.project ASC`,
-		sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
+		sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
 		DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal,
 		DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal,
 		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal,
@@ -11067,6 +11082,7 @@ func (s *Store) backfillSessionSyncMutationsBatchTx(tx *sql.Tx, project string, 
 		FROM sessions
 		WHERE project = ?
 		  AND `+sqlSessionIDNotBlank("id")+`
+		  AND (trim(sessions.directory, ?) != '' OR sessions.ownership_mode = 'project_owned')
 		  AND NOT EXISTS (
 			SELECT 1
 			FROM sync_mutations sm
@@ -11077,7 +11093,7 @@ func (s *Store) backfillSessionSyncMutationsBatchTx(tx *sql.Tx, project string, 
 			  AND sm.disposition IN ('pending', 'quarantined')
 		  )
 		`+batch.page("sessions", "id", " ORDER BY started_at ASC, id ASC"),
-		append([]any{project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, mutationSource}, batch.args("sessions")...)...,
+		append([]any{project, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, mutationSource}, batch.args("sessions")...)...,
 	)
 	if err != nil {
 		return err
@@ -11524,7 +11540,7 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 		source = SyncSourceLocal
 	}
 	if source == SyncSourceLocal && entity == SyncEntitySession && op == SyncOpUpsert {
-		if session, ok := payload.(syncSessionPayload); ok && strings.TrimSpace(session.Directory) == "" {
+		if session, ok := payload.(syncSessionPayload); ok && strings.TrimSpace(session.Directory) == "" && session.OwnershipMode != SessionOwnershipProjectOwned {
 			return nil
 		}
 	}

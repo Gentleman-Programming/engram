@@ -326,6 +326,51 @@ func TestValidatePulledSessionDirectoryStrictRejectsBlankAndMissing(t *testing.T
 			t.Fatalf("concrete directory rejected: %v", err)
 		}
 	})
+	t.Run("project_owned admits empty and omitted directory", func(t *testing.T) {
+		payloadOmitted := `{"id":"proj-owned-1","project":"engram","ownership_mode":"project_owned"}`
+		if err := validatePulledSessionDirectory([]byte(payloadOmitted)); err != nil {
+			t.Fatalf("project_owned with omitted directory rejected: %v", err)
+		}
+
+		payloadEmpty := `{"id":"proj-owned-2","project":"engram","ownership_mode":"project_owned","directory":""}`
+		if err := validatePulledSessionDirectory([]byte(payloadEmpty)); err != nil {
+			t.Fatalf("project_owned with empty directory string rejected: %v", err)
+		}
+
+		payloadWhitespace := `{"id":"proj-owned-3","project":"engram","ownership_mode":"project_owned","directory":"   "}`
+		if err := validatePulledSessionDirectory([]byte(payloadWhitespace)); err != nil {
+			t.Fatalf("project_owned with whitespace directory string rejected: %v", err)
+		}
+
+		payloadConcrete := `{"id":"proj-owned-4","project":"engram","ownership_mode":"project_owned","directory":"/real/dir"}`
+		if err := validatePulledSessionDirectory([]byte(payloadConcrete)); err != nil {
+			t.Fatalf("project_owned with concrete directory rejected: %v", err)
+		}
+	})
+	t.Run("project_owned rejects non-string types", func(t *testing.T) {
+		for _, badDir := range []string{`null`, `123`, `true`, `["foo"]`, `{"sub":"obj"}`} {
+			payload := fmt.Sprintf(`{"id":"proj-owned-bad","project":"engram","ownership_mode":"project_owned","directory":%s}`, badDir)
+			err := validatePulledSessionDirectory([]byte(payload))
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("bad directory %s: error = %v, want ErrPulledSessionDirectoryInvalid", badDir, err)
+			}
+		}
+	})
+	t.Run("non-project_owned continues to reject empty and omitted directory", func(t *testing.T) {
+		for _, mode := range []string{`"shared"`, `""`, `"legacy"`} {
+			payloadOmitted := fmt.Sprintf(`{"id":"non-po-1","project":"engram","ownership_mode":%s}`, mode)
+			err := validatePulledSessionDirectory([]byte(payloadOmitted))
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("mode %s with omitted directory: error = %v, want ErrPulledSessionDirectoryInvalid", mode, err)
+			}
+
+			payloadEmpty := fmt.Sprintf(`{"id":"non-po-2","project":"engram","ownership_mode":%s,"directory":""}`, mode)
+			err = validatePulledSessionDirectory([]byte(payloadEmpty))
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("mode %s with empty directory: error = %v, want ErrPulledSessionDirectoryInvalid", mode, err)
+			}
+		}
+	})
 }
 
 // Matrix item 7 (validation retained): JSON import with an invalid session ID

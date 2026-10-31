@@ -10923,6 +10923,68 @@ func TestListInvalidSessionIdentityEvidenceDetectsEveryBlankSourceRow(t *testing
 	}
 }
 
+func TestBackfillSessionSyncMutationsBackfillsProjectOwnedBlankDirectory(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
+
+	// 1. Shared session with blank directory - should NOT be backfilled.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('shared-blank', 'engram', '', 'shared')`); err != nil {
+		t.Fatalf("seed shared blank session: %v", err)
+	}
+
+	// 2. Project-owned session with blank directory - SHOULD be backfilled.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('po-blank', 'engram', '', 'project_owned')`); err != nil {
+		t.Fatalf("seed po blank session: %v", err)
+	}
+
+	// 3. Project-owned session with non-blank directory - SHOULD be backfilled.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('po-dir', 'engram', '/tmp/dir', 'project_owned')`); err != nil {
+		t.Fatalf("seed po dir session: %v", err)
+	}
+
+	needs, err := s.projectNeedsBackfill("engram")
+	if err != nil {
+		t.Fatalf("projectNeedsBackfill: %v", err)
+	}
+	if !needs {
+		t.Fatal("expected projectNeedsBackfill = true")
+	}
+
+	projects, err := s.enrolledProjectsNeedingBackfill()
+	if err != nil {
+		t.Fatalf("enrolledProjectsNeedingBackfill: %v", err)
+	}
+	found := false
+	for _, p := range projects {
+		if p == "engram" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("enrolledProjectsNeedingBackfill didn't include engram: %v", projects)
+	}
+
+	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	var poBlankCount, poDirCount, sharedBlankCount int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = 'po-blank'`, SyncEntitySession).Scan(&poBlankCount); err != nil {
+		t.Fatalf("count po-blank: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = 'po-dir'`, SyncEntitySession).Scan(&poDirCount); err != nil {
+		t.Fatalf("count po-dir: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = 'shared-blank'`, SyncEntitySession).Scan(&sharedBlankCount); err != nil {
+		t.Fatalf("count shared-blank: %v", err)
+	}
+
+	if poBlankCount != 1 || poDirCount != 1 || sharedBlankCount != 0 {
+		t.Fatalf("poBlank=%d (want 1), poDir=%d (want 1), sharedBlank=%d (want 0)", poBlankCount, poDirCount, sharedBlankCount)
+	}
+}
+
 // TestSessionIdentityPreservesWhitespacePaddedIdentities guards the other
 // direction: identities that merely contain whitespace are not blank, stay
 // byte-exact, and are never reported as corrupt.
