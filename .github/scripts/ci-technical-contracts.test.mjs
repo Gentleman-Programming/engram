@@ -388,6 +388,8 @@ function adapters(text) {
     'npm ci --ignore-scripts --legacy-peer-deps', 'go mod download',
     'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server',
     'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
+    'export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"',
     piScript.replace('node --test ', 'node --test --test-reporter=tap ') + ' | tee "$RUNNER_TEMP/pi.tap"',
     'node --test --test-reporter=tap plugin/opencode/engram.test.mjs plugin/opencode/engram.v2.test.mjs plugin/opencode/engram.v2.real-server.test.mjs | tee "$RUNNER_TEMP/opencode.tap"',
     'PI_OUTCOME: ${{ steps.pi.outcome }}', 'OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}',
@@ -409,6 +411,8 @@ test('native adapter contract rejects weakened placement, prerequisites and exit
     'Darwin arm64', 'go1.26.10', 'darwin/arm64', 'state=$(cd "$state" && pwd -P)',
     'node_modules/typebox/package.json', 'docs/contracts/agent-contract-v1.json',
     'npm ci --ignore-scripts --legacy-peer-deps', 'ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server',
+    'go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary',
+    'export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"',
     '--test-concurrency=1', 'plugin/opencode/engram.v2.real-server.test.mjs', 'if: ${{ !cancelled() }}']) {
     assert.ok(original.includes(before), before);
     assert.throws(() => adapters(source.replace(original, () => original.replace(before, '__REMOVED__'))), undefined, before);
@@ -455,7 +459,7 @@ for (const suite of ['Pi', 'OpenCode']) {
 
 const piRequired = ['Pi native saves persist under separate host sessions and stop on failed registration',
   'existing CLI verifies real Pi registration without writing',
-  'packaged real workflows run all eight tests with the prebuilt fixture binary'];
+  'packaged real workflows run all nine tests with the prebuilt fixture binary'];
 const ocRequired = ['V2 inbox prompts stay idempotent and deleted across real server restarts'];
 const host = 'actual Pi hosts retain attribution through compaction, resume and refusal';
 const hostReason = 'opt-in: set ENGRAM_PI_LIFECYCLE_CLI to the installed Pi CLI entry point';
@@ -487,6 +491,16 @@ test('adapter evidence preserves counts, repeated parameterized names and instal
   assert.deepEqual(result.report.suites.pi.skips, [{ name: host, reason: hostReason }]);
   assert.deepEqual(result.report.suites.pi.counts, { tests: 4, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 1, todo: 0 });
   assert.deepEqual(result.report.suites.opencode.counts, { tests: 3, suites: 0, pass: 3, fail: 0, cancelled: 0, skipped: 0, todo: 0 });
+});
+
+test('adapter evidence requires the packaged workflow name declared by the Pi suite', () => {
+  const suite = readFileSync(new URL('../../plugin/pi/test/real-workflows-package.test.mjs', import.meta.url), 'utf8');
+  const declared = suite.match(/test\("(packaged real workflows run all [^"]+ with the prebuilt fixture binary)"/)[1];
+  const actualNames = piRequired.map(name => name.startsWith('packaged real workflows run all ') ? declared : name);
+  const result = adapterSummary(tap(actualNames));
+  assert.equal(result.status, 0, result.stdout);
+  const staleNames = actualNames.map(name => name === declared ? 'packaged real workflows run all eight tests with the prebuilt fixture binary' : name);
+  assert.equal(adapterSummary(tap(staleNames)).status, 1, 'stale test-name requirement must not qualify execution');
 });
 test('adapter evidence consumes actual Node24 TAP including nested tests', () => {
   const dir = mkdtempSync(join(tmpdir(), 'adapter-tap-'));

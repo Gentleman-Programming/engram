@@ -359,7 +359,9 @@ then explicitly decide promotion, focused fix or defer.
 
 The separate **Native macOS ARM64 Adapter Tests** lane (#2150, Mac portion)
 reuses the serial Pi `npm test` script with CLI-only TAP reporting, locked TypeBox dependencies and the existing
-three-file OpenCode command with fresh Go-backed fixtures. Mandatory prerequisites
+three-file OpenCode command with fresh Go-backed fixtures. The Pi server and
+synthetic PATH runtime fixtures are prebuilt; the PATH selector is exported again
+after environment isolation so both runtime-negotiation tests execute. Mandatory prerequisites
 and unexpected skips fail completeness; only the installed-host opt-in exclusion
 is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture
 build and 5 minutes per adapter step. Source/fixture success is not installed-host,

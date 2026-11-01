@@ -91,3 +91,18 @@ qualification error does not expose the configured URL or credentials.
 Uncertain observation saves retain frozen destinations and cannot replay
 onto a new binding. These source changes do not prove installed SDK execution,
 semantic parity, hosted CI acceptance or publication readiness.
+
+## Focused integration evidence
+
+`plugin/pi/test/real-agent-workflows.test.mjs` includes an actual-handler metadata
+case alongside its workflow cases. `ENGRAM_PI_TEST_SERVER_BINARY` selects the
+prebuilt production-handler helper, avoiding the checkout suite's build path.
+The package-only availability tests require nine explicit skips without a Go
+checkout or override; an invalid supplied binary fails rather than skips.
+
+The separate `public PATH runtime negotiation` cases require the test-only
+`ENGRAM_PI_TEST_PATH_BINARY` prebuilt override and never compile implicitly. The
+stdlib fixture consumes the complete generated projection supplied by the test.
+This is synthetic PATH/startup/recovery evidence, not real-handler or SDK proof.
+Owned-mode preload and authenticated instance-mismatch checks remain separate.
+Source preparation and successful builds do not establish that these tests passed.

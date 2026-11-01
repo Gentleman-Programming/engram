@@ -334,6 +334,7 @@ jobs:
           set -euo pipefail
           node -e 'const p = require("./plugin/pi/node_modules/typebox/package.json"); if (p.name !== "typebox" || p.version !== "1.3.34") process.exit(1)'
           go build -mod=readonly -o "$RUNNER_TEMP/pi-test-server" ./plugin/pi/test/support/real-server
+          go build -mod=readonly -o "$RUNNER_TEMP/pi-test-path" ./plugin/pi/test/support/runtime-path-binary
           echo "ENGRAM_PI_TEST_SERVER_BINARY=$RUNNER_TEMP/pi-test-server" >> "$GITHUB_ENV"
       - name: Run Pi adapters
         id: pi
@@ -346,6 +347,7 @@ jobs:
             case "$key" in ENGRAM_*|GENTLE_*|CLOUDSTORE_TEST_DSN|NODE_OPTIONS|GOFLAGS) unset "$key" ;; esac
           done < <(env)
           export ENGRAM_DATA_DIR="$HOME/../store" ENGRAM_PI_TEST_SERVER_BINARY="$RUNNER_TEMP/pi-test-server"
+          export ENGRAM_PI_TEST_PATH_BINARY="$RUNNER_TEMP/pi-test-path"
           node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs | tee "$RUNNER_TEMP/pi.tap"
       - name: Run OpenCode adapters
         id: opencode
@@ -372,7 +374,7 @@ jobs:
           const required = {
             pi: ['Pi native saves persist under separate host sessions and stop on failed registration',
               'existing CLI verifies real Pi registration without writing',
-              'packaged real workflows run all eight tests with the prebuilt fixture binary'],
+              'packaged real workflows run all nine tests with the prebuilt fixture binary'],
             opencode: ['V2 inbox prompts stay idempotent and deleted across real server restarts'],
           };
           for (const [suite, names] of Object.entries(required)) {
