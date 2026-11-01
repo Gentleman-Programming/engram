@@ -24,10 +24,11 @@ BODY=$(printf '%s' "$INPUT" | jq -c --arg project "$PROJECT" '
 [ -z "$BODY" ] && exit 0
 
 # Fire and forget — server handles extraction, dedup, and storage
-engram_curl -sf "${ENGRAM_URL}/observations/passive" \
+# Stream the JSON bytes: native Windows curl may transcode non-ASCII argv.
+printf '%s' "$BODY" | engram_curl -sf "${ENGRAM_URL}/observations/passive" \
   -X POST \
   -H "Content-Type: application/json" \
-  -d "$BODY" \
+  --data-binary @- \
   > /dev/null
 
 exit 0
