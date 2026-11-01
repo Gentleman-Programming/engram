@@ -10620,6 +10620,28 @@ func (s *Store) localUpsertBlockedByTombstoneTx(tx *sql.Tx, entity, entityKey, g
 	return generation != "" && deletedAt != "" && generation <= deletedAt, nil
 }
 
+// A local snapshot may restore a soft-deleted row only when its generation
+// proves it is newer than the deletion. Cloud replication orders by sequence
+// instead and does not use this timestamp admission rule.
+func (s *Store) localObservationRestoreBlockedTx(tx *sql.Tx, syncID, generation string) (bool, error) {
+	var deletedAt sql.NullString
+	// Match the latest-row identity used by getObservationBySyncIDTx, including
+	// legacy databases where sync_id is indexed but not unique.
+	err := tx.QueryRow(`SELECT deleted_at FROM observations WHERE sync_id = ? ORDER BY id DESC LIMIT 1`, syncID).Scan(&deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !deletedAt.Valid {
+		return false, nil
+	}
+	generation = normalizeComparableTimestamp(generation)
+	deletion := normalizeComparableTimestamp(deletedAt.String)
+	return generation == "" || deletion == "" || generation <= deletion, nil
+}
+
 func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
 	if targetKey == DefaultSyncTargetKey {
 		var active int
@@ -12088,6 +12110,10 @@ func (s *Store) applyPulledMutationWithSessionContextTx(tx *sql.Tx, mutation Syn
 				generation = payload.CreatedAt
 			}
 			blocked, err := s.localUpsertBlockedByTombstoneTx(tx, SyncEntityObservation, payload.SyncID, generation)
+			if err != nil || blocked {
+				return err
+			}
+			blocked, err = s.localObservationRestoreBlockedTx(tx, payload.SyncID, generation)
 			if err != nil || blocked {
 				return err
 			}
