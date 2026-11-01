@@ -199,6 +199,17 @@ current repository; qualified-only links do not expand discovery or rerun routin
 
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
+#### Unsupported runtime rejection
+
+`Unsupported Node Runtime Rejection` runs only the existing
+`TestArtifactCoreUnsupportedNode` under Node22 with Go1.26.10. Node24 remains the
+ordinary supported test runtime. The separate ten-minute lane verifies the
+actual major versions and requires a named executed pass and successful package
+completion via `prerequisite-coverage.mjs unsupported-node EVENTS.json GO_EXIT`.
+A skip or nonzero Go exit cannot satisfy it; the original no-spawn/cleanup and
+20-second test-context assertions are unchanged. Local wiring checks are not
+proof that the hosted Node22 case executed.
+
 #### Observational Windows full-module baseline (#1891)
 
 `Windows Full Suite (Observational)` independently runs `go test -json ./...`
@@ -219,6 +230,14 @@ Missing mandatory tools fail preparation; no substitute tools are installed.
 Test home/profile, app data, Engram data and temp directories are job-local;
 Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
 provide process isolation, not measured proof of cleanup.
+
+The job builds a fresh `cmd/engram` executable into runner-owned temp and exports
+`ENGRAM_RECOVERY_PUBLIC_BINARY` before the unchanged full-suite invocation.
+`prerequisite-coverage.mjs windows-recovery EVENTS.json GO_EXIT` requires
+`TestHookManagedLocalPublicRecovery` to execute and pass, not skip. A nonzero Go
+exit remains authoritative; successful JSON cannot mask it. The original native
+identity, job-object ownership and cleanup assertions remain unchanged. Wiring
+checks alone do not establish the new binary-backed native execution.
 
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
 failure artifacts when available. Cancellation/outer timeout can leave partial
@@ -775,6 +794,8 @@ The command is a dry run: it prints the canonical label list as JSON and never w
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits
 - Do not include paths prohibited by the [Transient Artifact Policy](#transient-artifact-policy)
+
+The symlink cases in `TestCompatibilityOfflineNeverAuthorizes` and `TestMigrateCopyRejects` skip only when Windows returns `ERROR_PRIVILEGE_NOT_HELD` (1314). Other fixture errors still fail; hosts that support symlinks execute the original rejection assertions.
 
 ### Focused Verification Map
 

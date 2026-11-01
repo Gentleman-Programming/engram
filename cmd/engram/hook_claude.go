@@ -173,6 +173,16 @@ func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform s
 		}
 		cancel()
 	}()
+	if strings.TrimSpace(os.Getenv("ENGRAM_URL")) == "" {
+		identityErr := confirmHookLocalIdentity(ctx, client, base)
+		if identityErr != nil && hookLocalRecoveryEligible(platform, base, base+"/health", identityErr) {
+			if recovered := recoverHookLocalServer(ctx, client, base); recovered != nil {
+				return "", identityErr
+			}
+		} else if identityErr != nil {
+			return "", identityErr
+		}
+	}
 	// A registered session owns its project: confirm the write against that
 	// owner instead of re-deriving a project from the shell's current cwd
 	// (#1717). The cwd names the project only on first registration, and rows
@@ -180,11 +190,6 @@ func confirmHookSessionForPlatform(id, cwd string, projectOwned bool, platform s
 	// lookup that fails outright denies the write: a degraded answer is not a
 	// first registration.
 	session, known, lookupErr := hookSessionOwnerProject(ctx, client, base, id)
-	if lookupErr != nil && hookLocalRecoveryEligible(platform, base, base+"/sessions/"+url.PathEscape(id), lookupErr) {
-		if recoverHookLocalServer(ctx, client, base) == nil && ctx.Err() == nil {
-			session, known, lookupErr = hookSessionOwnerProject(ctx, client, base, id)
-		}
-	}
 	if lookupErr != nil {
 		return "", lookupErr
 	}

@@ -10923,6 +10923,116 @@ func TestListInvalidSessionIdentityEvidenceDetectsEveryBlankSourceRow(t *testing
 	}
 }
 
+func TestBackfillSessionSyncMutationsBackfillsProjectOwnedBlankDirectory(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
+
+	// 1. Shared session with blank directory - should NOT be backfilled.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('shared-blank', 'engram', '', 'shared')`); err != nil {
+		t.Fatalf("seed shared blank session: %v", err)
+	}
+
+	// 2. Project-owned session with blank directory - SHOULD be backfilled.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('po-blank', 'engram', '', 'project_owned')`); err != nil {
+		t.Fatalf("seed po blank session: %v", err)
+	}
+
+	needs, err := s.projectNeedsBackfill("engram")
+	if err != nil {
+		t.Fatalf("projectNeedsBackfill: %v", err)
+	}
+	if !needs {
+		t.Fatal("expected projectNeedsBackfill = true")
+	}
+
+	projects, err := s.enrolledProjectsNeedingBackfill()
+	if err != nil {
+		t.Fatalf("enrolledProjectsNeedingBackfill: %v", err)
+	}
+	found := false
+	for _, p := range projects {
+		if p == "engram" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("enrolledProjectsNeedingBackfill didn't include engram: %v", projects)
+	}
+	// A concrete session must not mask exclusion of the blank-directory row
+	// from discovery. Add it only after checking discovery with po-blank alone.
+	if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES ('po-dir', 'engram', '/tmp/dir', 'project_owned')`); err != nil {
+		t.Fatalf("seed po dir session: %v", err)
+	}
+
+	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	var poBlankCount, poDirCount, sharedBlankCount int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = 'po-blank'`, SyncEntitySession).Scan(&poBlankCount); err != nil {
+		t.Fatalf("count po-blank: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = 'po-dir'`, SyncEntitySession).Scan(&poDirCount); err != nil {
+		t.Fatalf("count po-dir: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = 'shared-blank'`, SyncEntitySession).Scan(&sharedBlankCount); err != nil {
+		t.Fatalf("count shared-blank: %v", err)
+	}
+
+	if poBlankCount != 1 || poDirCount != 1 || sharedBlankCount != 0 {
+		t.Fatalf("poBlank=%d (want 1), poDir=%d (want 1), sharedBlank=%d (want 0)", poBlankCount, poDirCount, sharedBlankCount)
+	}
+	for _, key := range []string{"po-blank", "po-dir"} {
+		var op, source, raw string
+		if err := s.db.QueryRow(`SELECT op, source, payload FROM sync_mutations WHERE entity_key = ?`, key).Scan(&op, &source, &raw); err != nil {
+			t.Fatal(err)
+		}
+		var payload Session
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			t.Fatal(err)
+		}
+		wantDirectory := ""
+		if key == "po-dir" {
+			wantDirectory = "/tmp/dir"
+		}
+		if op != SyncOpUpsert || source != SyncSourceLocal || payload.ID != key || payload.Project != "engram" || payload.OwnershipMode != SessionOwnershipProjectOwned || payload.Directory != wantDirectory {
+			t.Fatalf("backfill mutation %s/%s = %+v", op, source, payload)
+		}
+	}
+	before := isolatedSnapshot(t, s)
+	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, isolatedSnapshot(t, s)) {
+		t.Fatal("backfill replay changed sessions or journal")
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity_key IN ('po-blank', 'po-dir')`); err != nil {
+		t.Fatal(err)
+	}
+	before = isolatedSnapshot(t, s)
+	originalExec := s.hooks.exec
+	injected := errors.New("injected session backfill failure")
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "INSERT INTO sync_mutations") && len(args) > 2 && args[2] == "po-dir" {
+			return nil, injected
+		}
+		return originalExec(db, query, args...)
+	}
+	err = s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") })
+	s.hooks.exec = originalExec
+	if !errors.Is(err, injected) || !reflect.DeepEqual(before, isolatedSnapshot(t, s)) {
+		t.Fatalf("failed backfill did not roll back: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSessionSyncMutationsTx(tx, "engram") }); err != nil {
+		t.Fatalf("retry backfill: %v", err)
+	}
+	var retried int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity_key IN ('po-blank', 'po-dir')`).Scan(&retried); err != nil || retried != 2 {
+		t.Fatalf("retry journal count=%d, error=%v", retried, err)
+	}
+}
+
 // TestSessionIdentityPreservesWhitespacePaddedIdentities guards the other
 // direction: identities that merely contain whitespace are not blank, stay
 // byte-exact, and are never reported as corrupt.
@@ -16578,6 +16688,82 @@ func TestRepairBackfillDoesNotRecreateQuarantinedMutation(t *testing.T) {
 	}
 	if pending != 0 {
 		t.Fatalf("recreated pending mutations = %d, want 0", pending)
+	}
+}
+
+func TestHardDeleteTombstonesNotRejournaledAfterAcknowledgement(t *testing.T) {
+	s := newTestStore(t)
+	const project = "rejournal-ack-test"
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	sessionID := "session-ack-tombstone"
+	if err := s.CreateSession(sessionID, project, "/tmp/rejournal"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Project:   project,
+		Type:      "fact",
+		Title:     "title",
+		Content:   "content",
+	})
+	if err != nil {
+		t.Fatalf("save observation: %v", err)
+	}
+
+	// Hard delete observation and session.
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("delete observation: %v", err)
+	}
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+
+	// Read pending mutations and acknowledge all of them.
+	var maxSeq int64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM sync_mutations WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&maxSeq); err != nil {
+		t.Fatalf("read max seq: %v", err)
+	}
+	if maxSeq == 0 {
+		t.Fatalf("expected pending mutations, got maxSeq = 0")
+	}
+	if err := s.AckSyncMutations(DefaultSyncTargetKey, maxSeq); err != nil {
+		t.Fatalf("ack mutations: %v", err)
+	}
+
+	// Verify all mutations are acknowledged.
+	var pendingCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL`, DefaultSyncTargetKey).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending before repair = %d, want 0", pendingCount)
+	}
+
+	mutationCountBefore := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE target_key = ?`, DefaultSyncTargetKey)
+
+	// Run repair multiple times (simulating subsequent sync runs).
+	for i := 0; i < 3; i++ {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			t.Fatalf("repair run %d: %v", i, err)
+		}
+	}
+
+	// Verify no new mutations were generated.
+	mutationCountAfter := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE target_key = ?`, DefaultSyncTargetKey)
+	if mutationCountAfter != mutationCountBefore {
+		t.Fatalf("mutations after repair = %d, want %d (re-journaling occurred)", mutationCountAfter, mutationCountBefore)
+	}
+
+	// Verify backfill required reports false.
+	needed, err := s.projectSyncBackfillRequired(project)
+	if err != nil {
+		t.Fatalf("check backfill required: %v", err)
+	}
+	if needed {
+		t.Fatalf("projectSyncBackfillRequired = true, want false")
 	}
 }
 

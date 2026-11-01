@@ -608,6 +608,9 @@ jobs:
       - name: Run PostgreSQL CI policy tests
         run: node --test .github/scripts/postgres-ci.test.mjs
 
+      - name: Run prerequisite coverage evidence tests
+        run: node --test .github/scripts/prerequisite-coverage.test.mjs
+
       - name: Run scanner policy tests
         run: node --test .github/scripts/ci-scanners.test.mjs
 
@@ -823,6 +826,54 @@ jobs:
           go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud/cloudserver ./cmd/engram | tee "$RUNNER_TEMP/postgres-tests.json"
           node .github/scripts/postgres-ci-evidence.mjs "$RUNNER_TEMP/postgres-tests.json"
 
+      - name: Run owned PostgreSQL measurement regressions
+        shell: bash
+        run: bash .github/scripts/postgres-measurements.sh
+
+  unsupported-node:
+    name: Unsupported Node Runtime Rejection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+          cache: false
+
+      - name: Set up unsupported Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - name: Require unsupported-runtime rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          go version
+          node --version
+          test "$(go env GOVERSION)" = go1.26.10
+          test "$(node -p 'process.versions.node.split(".")[0]')" = 22
+          set +e
+          go test -json -count=1 -timeout=10m ./tools/release-candidate -run '^TestArtifactCoreUnsupportedNode$' | tee "$RUNNER_TEMP/node22.json"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf 'unsupported_node_go_exit=%s tee_exit=%s\n' "${statuses[0]}" "${statuses[1]}"
+          if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+          if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+          node .github/scripts/prerequisite-coverage.mjs unsupported-node "$RUNNER_TEMP/node22.json" "${statuses[0]}"
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -929,6 +980,16 @@ jobs:
         working-directory: plugin/pi
         run: npm ci --ignore-scripts --legacy-peer-deps
 
+      - name: Build real Windows recovery binary
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $binary = Join-Path $env:RUNNER_TEMP 'windows-suite/recovery-engram.exe'
+          & go build -o $binary ./cmd/engram
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) { exit $buildExit }
+          Add-Content $env:GITHUB_ENV "ENGRAM_RECOVERY_PUBLIC_BINARY=$binary"
+
       - name: Run full default-tags module suite
         run: |
           $ErrorActionPreference = 'Stop'
@@ -942,6 +1003,11 @@ jobs:
             Tee-Object "$evidence/result.txt"
           Get-Content "$evidence/suite.json"
           Get-Content "$evidence/stderr.txt"
+          if ($suiteExit -eq 0) {
+            & node .github/scripts/prerequisite-coverage.mjs windows-recovery "$evidence/suite.json" $suiteExit
+            $coverageExit = $LASTEXITCODE
+            if ($coverageExit -ne 0) { exit $coverageExit }
+          }
           exit $suiteExit
 
       - name: Preserve failure evidence

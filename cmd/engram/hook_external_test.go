@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
 )
 
 // These are public CLI probes. The foreign filesystem answer below is a model,
@@ -39,6 +41,8 @@ func TestHookExternalProjectRouting(t *testing.T) {
 					cwd = filepath.Join(root, "absent", "feature-x")
 				}
 				external := strings.HasPrefix(mode, "external")
+				env := hookProjectFixtureEnvironment(t, root, "")
+				var instanceID string
 				project := "feature-x"
 				if external {
 					project = "myproj"
@@ -49,6 +53,13 @@ func TestHookExternalProjectRouting(t *testing.T) {
 				}
 				var mu sync.Mutex
 				var got []request
+				if !external {
+					var err error
+					instanceID, err = store.EnsureInstanceID(filepath.Join(root, "engram_data_dir"))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					body, _ := io.ReadAll(r.Body)
 					var fields map[string]any
@@ -67,7 +78,7 @@ func TestHookExternalProjectRouting(t *testing.T) {
 						w.WriteHeader(http.StatusNotFound)
 						_, _ = io.WriteString(w, `{}`)
 					case "/health":
-						_, _ = io.WriteString(w, `{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`)
+						_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "service": "engram", "instance_id": instanceID, "capabilities": map[string]bool{"runtime_session_resolution": true}})
 					case "/sessions":
 						w.WriteHeader(http.StatusCreated)
 						_, _ = io.WriteString(w, `{"id":"host","status":"created"}`)
@@ -84,8 +95,10 @@ func TestHookExternalProjectRouting(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				env := hookProjectFixtureEnvironment(t, root, server.URL)
 				for i, v := range env {
+					if strings.HasPrefix(v, "ENGRAM_URL=") {
+						env[i] = "ENGRAM_URL=" + server.URL
+					}
 					if strings.HasPrefix(v, "TEMP=") || strings.HasPrefix(v, "TMP=") || strings.HasPrefix(v, "TMPDIR=") {
 						env[i] = strings.SplitN(v, "=", 2)[0] + "=" + filepath.Join(root, "temp")
 					}
@@ -118,6 +131,9 @@ func TestHookExternalProjectRouting(t *testing.T) {
 				invalid := mode == "external-invalid"
 				var want []request
 				add := func(method, path string, body map[string]any) { want = append(want, request{method, path, body}) }
+				if action == "claude-pre-tool-use" && !external {
+					add("GET", "/health", nil)
+				}
 				// Explicit external Codex selection must distinguish persisted owners
 				// from unknown/shared sessions before deciding whether inspection is needed.
 				if action == "claude-pre-tool-use" || external {

@@ -27,10 +27,26 @@ the exact checkout SHA, tool versions and JSON test events. The evidence checker
 requires successful package completion and an existing database sentinel test
 in each package, and rejects DSN-related skip output or failed tests.
 
-Unrelated environment/platform skips remain allowed. The separate opt-in
-`ENGRAM_DASHBOARD_BENCH_DSN` and `ENGRAM_PAUSE_BENCH_DSN` fixtures are excluded;
-they require a different owned PostgreSQL 18.6 fixture. This job is neither a
-benchmark baseline nor proof of a PostgreSQL support matrix. PostgreSQL 16 is
+Unrelated environment/platform skips remain allowed. After the ordinary PG16
+suite, `bash .github/scripts/postgres-measurements.sh` provisions two separate,
+disposable PostgreSQL 18.6 containers, pinned by image digest and published only
+on loopback ports 15432/15431. The existing exact DSN/version/extension guards
+remain unchanged. Database-wide statistics are exclusive to each fixture, and
+cleanup removes only container IDs created by this invocation, including volumes.
+Go failures and cleanup failures fail the job; the existing 20-minute job ceiling
+and ten-minute package budgets are unchanged.
+
+The eleven measurement leaf cases assert state, query/build counts, concurrency,
+pagination and rejection snapshots—not wall-clock performance. The checker
+`node .github/scripts/prerequisite-coverage.mjs postgres-measurements EVENTS.json GO_EXIT`
+requires each named case to run and pass once, its package to finish, and Go exit
+zero. Missing/skipped/duplicate/failed/unfinished/malformed evidence is rejected.
+Diagnostics start with `Coverage evidence rejected:`; malformed input reports
+`malformed Go JSON` consistently across Node versions. Use `--help` on either
+helper for usage. The bootstrap is GitHub-Actions-only;
+local owned measurement reproduction remains in the two benchmark documents.
+Hosted fixture execution is pending until the candidate's actual job passes.
+This job is neither a benchmark baseline nor proof of a PostgreSQL support matrix. PostgreSQL 16 is
 aligned with the repository's cloud Compose examples; its floating image tag
 means exact server versions must be taken from each run's logs.
 

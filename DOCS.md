@@ -143,7 +143,8 @@ The live schema is created and incrementally migrated by `Store.migrate` in [`in
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
 - **sync_state** — one row per `target_key`, with lifecycle, sequence, retry/backoff, lease, error, success, and update metadata; **sync_mutations** — ordered mutation queue with target, project, entity, operation, payload, source, acknowledgement, and disposition metadata
-- **sync_delete_tombstones** — one row per deleted entity (PK `entity`, `entity_key`) with `session_id`, `project`, `deleted_at`, `hard_delete`, `active`, `last_mutation_seq`, and `last_remote_mutation_seq` metadata. `last_mutation_seq` retains the highest historical local delete-mutation sequence; backfill emits missing delete intent for active tombstones without a recorded remote delete sequence or matching unacknowledged delete mutation, without advancing that field. `last_remote_mutation_seq` records the default cloud target's remote delete floor. Pulled session and observation upserts first pass a tombstone guard: local sync compares a known payload generation with the hard-delete time, while cloud sync checks the applicable remote delete sequence floor. Without its own floor, an active tombstone blocks the default target; for non-default targets, it blocks only when no non-default target has a remote floor. Only permitted upserts can deactivate the tombstone.
+- **sync_delete_tombstones** — one row per deleted entity (PK `entity`, `entity_key`) with `session_id`, `project`, `deleted_at`, `hard_delete`, `active`, `last_mutation_seq`, and `last_remote_mutation_seq` metadata. `last_mutation_seq` retains the highest historical local delete-mutation sequence; backfill emits missing delete intent for active tombstones without a recorded default-target remote delete floor or a matching journaled local delete mutation greater than `last_mutation_seq` (including acknowledged deletes), without advancing that field. `last_remote_mutation_seq` records the default cloud target's remote delete floor. Pulled session and observation upserts first pass a tombstone guard: local sync compares a known payload generation with the hard-delete time, while cloud sync checks the applicable remote delete sequence floor. Without its own floor, an active tombstone blocks the default target; for non-default targets, it blocks only when no non-default target has a remote floor. Only permitted upserts can deactivate the tombstone.
+- **Local soft-delete restoration** — local chunk upserts restore an existing soft-deleted observation only when `updated_at` (or legacy `created_at` when `updated_at` is blank) is parseable and strictly newer than its `deleted_at`. Older, equal, missing, or malformed generations preserve the deleted row while allowing chunk accounting to advance. An unparseable deletion time also preserves the row. Local observation updates and soft deletes retain fractional seconds so later edits within the same second remain distinguishable. Cloud replication continues to use remote sequence ordering.
 - **sync_delete_tombstone_remote_floors** — per-non-default-cloud-target delete floors, keyed by (`target_key`, `entity`, `entity_key`), with `last_mutation_seq` storing the highest recorded remote delete sequence for that target and entity.
 - **project_aliases** — local-only future-derivation mappings: `kind` (`key` or `cwd`), `alias_key`, `project`; composite primary key (`kind`, `alias_key`). Aliases are not exported, do not enroll projects, and do not transfer historical ownership.
 - **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
@@ -364,6 +365,8 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+
+The Claude native PreToolUse gate verifies the local `/health` instance ID against its configured data directory before sending session or cwd data. Directory resolution uses the same home fallback as `engram serve`. An unrelated, unidentified, redirected, or unhealthy local listener denies the write with an identity error. Explicit `ENGRAM_URL` selects an intentional remote endpoint and retains its existing connection contract. Local instance comparison prevents accidental cross-store routing; it does not authenticate a malicious server. Windows connection-refused recovery remains bounded by the hook confirmation deadline.
 - When a local HTTP request observes permanent database generation invalidation, its existing error response is preserved. After the handler returns, `engram serve` logs one restart diagnostic, stops autosync, drains HTTP requests for up to five seconds (then force-closes remaining connections), releases its listener, and exits nonzero after cleanup. Ordinary transient health failures remain generic `500` responses and do not stop the server. Detection is request-triggered, not a background watchdog; the database is not reopened automatically.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
@@ -380,7 +383,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
   - A newly created continuation of a non-isolated ended root with a complete persisted binding inherits that root's project, directory, and ownership mode, after validating the caller's requested project/mode. `shared` roots retain cross-project registration permissions; `project_owned` roots still reject foreign-project requests. Existing continuations are not rewritten or skipped, and incomplete legacy or directory-less isolated registrations retain their existing behavior. Runtime resolve/end still require the root and continuation to match the supplied scope.
   - Success remains `201` with `{id, status:"created"}`. A continuation response also includes `resumed_from: <root id>` and returns the effective ID in `id`. Use that acknowledged ID for subsequent session-bound operations. MCP session registration does not opt into resume mode.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
-  - Session IDs are opaque non-blank strings. The Pi adapter derives cross-project satellite IDs as `<runtimeID>@<project>` (registered `project_owned` with `resume: true`, `isolated: true`, and no directory). Capability preflight protects against old servers without a guessed version floor. Newly created satellites are never implicit directory-matched runtime candidates; Pi's explicit `cwd` only resolves the target project. This ensures an explicitly targeted write to another project never re-registers the runtime session under a second owner. See [plugin/pi/README.md](plugin/pi/README.md#cross-project-saves).
+  - Session IDs are opaque non-blank strings. The Pi adapter derives cross-project satellite IDs as `<runtimeID>@<project>` (registered `project_owned` with `resume: true`, `isolated: true`, and no directory). Capability preflight protects against old servers without a guessed version floor. Newly created satellites are never implicit directory-matched runtime candidates; Pi's explicit `cwd` only resolves the target project. This ensures an explicitly targeted write to another project never re-registers the runtime session under a second owner. These sessions replicate for enrolled projects, including later enrollment and missing-journal repair; lease renewal alone does not enqueue a new mutation. Incomplete shared sessions still wait for a directory. See [plugin/pi/README.md](plugin/pi/README.md#cross-project-saves).
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `POST /runtime-sessions/resolve` — Read the existing live identity for a runtime root. Body: `{id, project, directory, ownership_mode?}`; default ownership is `shared`.
 - `POST /runtime-sessions/end` — Atomically resolve and end that live identity without registration. Same body, plus optional `summary`.
@@ -1131,6 +1134,7 @@ This path requires exactly one enabled managed human admin and exactly one activ
 - Managed principals are deny-by-default for project sync: a managed token only reaches projects explicitly granted via `--grant-project` (or the dashboard/`/admin/*` grant routes). Legacy `ENGRAM_CLOUD_TOKEN` keeps its existing `ENGRAM_CLOUD_ALLOWED_PROJECTS` allowlist behavior, unaffected by managed grants.
 - Managed dashboard inventory, details, statistics, browser views, and project sync controls use the principal's grants, not `ENGRAM_CLOUD_ALLOWED_PROJECTS`. Zero grants expose no projects; wildcard access must be explicitly granted. Legacy dashboard credentials remain env-allowlist restricted.
 - Explicit `cloud_project_controls` rows register projects, including empty projects shown with zero counts. Existing projects with synced content remain visible for compatibility, subject to the same credential scope. Updating project sync controls refreshes dashboard inventory.
+- After a warm dashboard load, sync writes refold only the changed projects when the complete cached history is project-local; unchanged project snapshots are reused. Reads still wait for fresh data. Cold loads, policy/registry changes, mixed-project payloads, or noncanonical historical project envelopes use a full rebuild. Global statistics and current credential filtering are recomputed over the combined inventory. This reduces unrelated history decoding; a single large project can still need a costly refold.
 - Disabled managed users, revoked managed tokens, and revoked project grants stop authenticating/authorizing on the very next request — no server restart required.
 - No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` continues to use its existing sync allowlist, and `ENGRAM_CLOUD_ADMIN` continues to provide dashboard read access, project sync controls, audit logs, and the first-admin dashboard bootstrap entry point whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured. The CLI recovery command remains limited to its documented stranded-admin state. Use a managed admin token for managed-user administration.
 
@@ -1481,6 +1485,10 @@ Delete an observation by ID with mandatory caller-supplied `expected_project`, f
 ### mem_save_prompt
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
+When a shared MCP server starts outside the workspace, pass an absolute existing `directory` (or `cwd` alias) on **each** `mem_save_prompt` call, for example `{ "content": "Investigate the failing tests", "directory": "/work/my-project" }`. `directory` wins over `cwd`; blank values retain the existing process-cwd fallback. Invalid types, relative/missing paths and files return a tool error without saving a prompt. Nonblank paths retain their meaningful bytes.
+
+The workspace narrows fallback session selection and is preserved in prompt provenance. An explicit registered session or verified host binding remains authoritative; a trusted process project override wins over directory-based detection. Existing ambiguity/recovery-token rules apply to the supplied path. `mem_current_project(directory=...)` is discovery only and never binds a later content-only write. Calls without workspace context retain legacy behavior and cannot infer an unseen IDE workspace. Other tools' directory support is unchanged.
+
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
 ### mem_context
@@ -1492,6 +1500,8 @@ When `project` is omitted, context is scoped to the resolved current project (pr
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
 MCP `mem_context` uses a 16 KiB default budget for the complete tool result and caps `max_bytes` at 64 KiB. `max_bytes` must be a positive integral number; absent, mistyped, non-positive, `NaN`, and fractional values fall back to the 16 KiB default. It includes at most 20 pinned observations by default. When the complete result exceeds its budget, truncation is UTF-8-safe and appends a visible `[truncated]` marker when the marker fits. `compact=true` removes inline content previews from pinned and recent-observation bullets, retaining their type and title. These MCP rules are distinct from the HTTP `GET /context` behavior documented above.
+
+The `mem_context` statistics footer uses the same effective project filter as its context. Cross-project personal context (no explicit project argument) retains global totals. Project-scoped calls do not enumerate unrelated projects for their footer.
 
 Use MCP `mem_context` with `older_history: true`, HTTP `GET /context?project=X&older_history=true`, or `engram context --project X --older-history` to opt into `### Older History`. Omitted or false options preserve existing output. This is a calendar overview of observations outside the SQL recent window, excluding pinned and deleted observations and respecting project/scope filters—not a summary of byte-truncated recent output.
 
@@ -1770,6 +1780,17 @@ explicit-session contract.
 
 ### PASSIVE CAPTURE
 
+Claude's SubagentStop hook streams its JSON request body to curl through stdin
+to preserve UTF-8 content when Git for Windows curl converts command-line
+arguments using a legacy code page. Existing corrupted captures are not repaired.
+
+Claude also captures successful `SubagentHandback` reports through an exact-match
+asynchronous `PostToolUse` hook, reading `tool_input.message` instead of the
+subagent's closing text. Both Claude events share the existing `subagent-stop`
+passive source and UTF-8 transport; extraction and project-scoped deduplication
+remain server-side. Empty/non-string handbacks and unrelated/failed tool events
+are ignored. The adapter does not read transcript files or recover older reports.
+
 Automatic capture is adapter-specific: Claude/Codex SubagentStop
 hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
 output for server-side extraction. Other adapters may support eligible tool
@@ -1780,6 +1801,11 @@ as the primary path for significant, verified knowledge.
 You can also call `mem_capture_passive(content)` directly, when available, with
 text containing a learning section. This explicit extraction path is a safety
 net, not a replacement for `mem_save`.
+
+Passive observation titles use up to the first 60 UTF-8 bytes of the extracted
+learning, ending at a complete character boundary, with `...` appended when the
+learning exceeds that limit. This title shortening does not shorten the stored
+learning content or repair titles already stored by older versions.
 
 ### AFTER COMPACTION
 
@@ -1852,6 +1878,8 @@ Use `engram projects rescue-ownership --project <name> [--session <id>] [--obser
 ### Full-Text Search (FTS5)
 
 - Searches across title, content, tool_name, type, and project
+- Indexed searches of observations and prompts ignore accents (`video` matches `vídeo`, and vice versa) while preserving substring matching. Original stored text is unchanged. Existing stores rebuild both derived FTS indexes transactionally on first open after upgrading; large stores may take longer to open once.
+- Trigram matching requires at least three characters; existing short-query fallback behavior is unchanged.
 - Query sanitization: wraps each word in quotes to avoid FTS5 syntax errors
 - Supports type and project filters
 
@@ -2238,7 +2266,7 @@ For a step-by-step recovery guide covering `chunk_id does not match payload cont
 
 **Autosync not starting**: Check that `ENGRAM_CLOUD_AUTOSYNC` is exactly `"1"` (not `"true"` or `"yes"`), and that both `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` are non-empty. The process logs an `[autosync] ERROR` line explaining which variable is missing.
 
-**Local writes still blocked**: Autosync runs in its own goroutine and never holds locks shared with the local write path. If local writes appear blocked, investigate the SQLite store layer, not the autosync manager.
+**Local writes still blocked**: Autosync shares the SQLite store and its write transactions with local requests. Automatic legacy-mutation quarantine examines at most 100 pending rows per push cycle, continuing from an in-memory sequence cursor on later cycles. A completed sweep restarts on a later cycle; restarting the process resets the cursor. Valid unenrolled mutations remain pending, and the explicit doctor/manual quarantine operation still examines its complete selected scope. The page bound limits automatic validation work per transaction; individual payloads, other store work, and database contention can still delay local requests.
 
 ---
 

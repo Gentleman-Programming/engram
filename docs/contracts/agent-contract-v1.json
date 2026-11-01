@@ -1,6 +1,6 @@
 {
   "contract_id": "engram.agent-contract/v1",
-  "digest": "6bc86a93f10ffbcbfc03070ba45a5eba1b8bab213f71768d82c310b95310c1a8",
+  "digest": "be55f9fd531d9b42ea33c0f2491d75658a4887afcdf00238e68c65b048ca3602",
   "operations": {
     "mem_capture_passive": {
       "annotations": {
@@ -698,6 +698,14 @@
         "properties": {
           "content": {
             "description": "The user's prompt text",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Alias for directory; directory takes precedence.",
+            "type": "string"
+          },
+          "directory": {
+            "description": "Absolute workspace directory for this call when the server starts elsewhere. Does not replace session or process project authority. Discovery does not bind later writes.",
             "type": "string"
           },
           "project": {

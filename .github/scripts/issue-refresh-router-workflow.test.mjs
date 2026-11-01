@@ -74,12 +74,13 @@ test('workflow baselines retain readiness guards and pin original-event identity
   // Git/bin root resolution and its native Windows path contract step.
   // #2150 adds the independent Windows adapter lane and extracts the unchanged Mac TAP checker.
   // #2192 adds only compatible Race cache restore/refresh; other jobs and guards stay exact.
+  // #2224 adds owned PG18.6, native recovery and Node22 coverage; protected issue guards stay exact.
   // Normalize to LF for Windows and archives; retain strict full-file hash comparisons.
   const baseline = {
     '.github/workflows/pr-check.yml': '33259c75e4f7dfdfca3143fc5efa0521a8ca289f06eca0d3efb429fbad7565bf',
     '.github/workflows/issue-validation.yml': 'd996ffae8e1341390b818e294a1a34a70f1b06f5eabda03cb96c0f065f7115b8',
     '.github/workflows/issue-policy.yml': '5f8bfbd9ab354f6b60d3ef35d30d5f4ee43a97eb83f61d8e0a955da37947adfd',
-    '.github/workflows/ci.yml': 'eea34af8e3c49c4e7680ba066e7954aba68ad9fdab47c6c26685037e806f4da0',
+    '.github/workflows/ci.yml': 'c0a58b06397e137e01b21f6449a2c6050ada740678c24177d5de32216afe057b',
   };
   for (const [path, expected] of Object.entries(baseline)) {
     const source = path.endsWith('/pr-check.yml') ? read(path).replace(/^                  if \(!Array\.isArray\(issue\.labels\).+\n                    throw new Error\('issue labels are malformed'\);\n                  }\n/m, '').replace(/^                  if \(!Array\.isArray\(issue\.assignees\).+\n                    throw new Error\('issue assignees are malformed'\);\n                  }\n                  if \(issue\.assignees\.length === 0\) \{\n                    errors\.push\(.+\);\n                  }\n/m, '') : read(path);

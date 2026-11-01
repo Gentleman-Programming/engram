@@ -196,12 +196,17 @@ func codexTestBash(t *testing.T) string {
 
 func codexTestBashCandidate(gitPath string) (string, error) {
 	gitDir := filepath.Dir(gitPath)
-	// git.exe can live in cmd, bin, or mingw64/bin depending on installation.
+	// Use the actual shell, not Git's bin launcher: the launcher adds a process
+	// outside the adapter's HTTP deadline. Match the trusted fixture/CI shell.
+	// git.exe can live in cmd, bin, usr/bin, or mingw64/bin.
 	for _, candidate := range []string{
 		filepath.Join(gitDir, "bash.exe"),
-		filepath.Join(gitDir, "..", "bin", "bash.exe"),
-		filepath.Join(gitDir, "..", "..", "bin", "bash.exe"),
+		filepath.Join(gitDir, "..", "usr", "bin", "bash.exe"),
+		filepath.Join(gitDir, "..", "..", "usr", "bin", "bash.exe"),
 	} {
+		if !strings.HasSuffix(strings.ToLower(filepath.ToSlash(filepath.Clean(candidate))), "/usr/bin/bash.exe") {
+			continue
+		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return filepath.Clean(candidate), nil
 		}
@@ -214,10 +219,12 @@ func TestCodexTestBashCandidates(t *testing.T) {
 		name, gitDir, bashPath string
 		directory, missing     bool
 	}{
-		{name: "cmd sibling bin", gitDir: "cmd", bashPath: "bin/bash.exe"},
-		{name: "bin colocated", gitDir: "bin", bashPath: "bin/bash.exe"},
-		{name: "mingw64 sibling bin", gitDir: "mingw64/bin", bashPath: "bin/bash.exe"},
-		{name: "reject directory", gitDir: "cmd", bashPath: "bin/bash.exe", directory: true, missing: true},
+		{name: "cmd sibling usr bin", gitDir: "cmd", bashPath: "usr/bin/bash.exe"},
+		{name: "bin sibling usr bin", gitDir: "bin", bashPath: "usr/bin/bash.exe"},
+		{name: "mingw64 sibling usr bin", gitDir: "mingw64/bin", bashPath: "usr/bin/bash.exe"},
+		{name: "usr bin colocated", gitDir: "usr/bin", bashPath: "usr/bin/bash.exe"},
+		{name: "reject bin launcher", gitDir: "cmd", bashPath: "bin/bash.exe", missing: true},
+		{name: "reject directory", gitDir: "cmd", bashPath: "usr/bin/bash.exe", directory: true, missing: true},
 		{name: "no candidate", gitDir: "cmd", missing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
