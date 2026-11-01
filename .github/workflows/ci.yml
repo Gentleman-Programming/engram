@@ -785,6 +785,50 @@ jobs:
         shell: bash
         run: bash .github/scripts/postgres-measurements.sh
 
+  unsupported-node:
+    name: Unsupported Node Runtime Rejection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+          cache: false
+
+      - name: Set up unsupported Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - name: Require unsupported-runtime rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          go version
+          node --version
+          test "$(go env GOVERSION)" = go1.26.10
+          test "$(node -p 'process.versions.node.split(".")[0]')" = 22
+          set +e
+          go test -json -count=1 -timeout=10m ./tools/release-candidate -run '^TestArtifactCoreUnsupportedNode$' | tee "$RUNNER_TEMP/node22.json"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf 'unsupported_node_go_exit=%s tee_exit=%s\n' "${statuses[0]}" "${statuses[1]}"
+          if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+          if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+          node .github/scripts/prerequisite-coverage.mjs unsupported-node "$RUNNER_TEMP/node22.json" "${statuses[0]}"
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest

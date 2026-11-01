@@ -24,7 +24,9 @@ if (process.argv.length === 3 && process.argv[2] === '--help') {
     const actions = new Set(['start', 'run', 'pause', 'cont', 'pass', 'skip', 'fail', 'output', 'bench', 'build-output', 'build-fail']);
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
-      const e = JSON.parse(line);
+      let e;
+      try { e = JSON.parse(line); }
+      catch { throw new Error('malformed Go JSON'); }
       if (!e || Array.isArray(e) || !actions.has(e.Action)) throw new Error('invalid Go event');
       if (e.Action === 'fail' || e.Action === 'build-fail') throw new Error('Go failure');
       if (e.Action === 'build-output') continue;

@@ -41,7 +41,9 @@ pagination and rejection snapshots—not wall-clock performance. The checker
 `node .github/scripts/prerequisite-coverage.mjs postgres-measurements EVENTS.json GO_EXIT`
 requires each named case to run and pass once, its package to finish, and Go exit
 zero. Missing/skipped/duplicate/failed/unfinished/malformed evidence is rejected.
-Use `--help` on either helper for usage. The bootstrap is GitHub-Actions-only;
+Diagnostics start with `Coverage evidence rejected:`; malformed input reports
+`malformed Go JSON` consistently across Node versions. Use `--help` on either
+helper for usage. The bootstrap is GitHub-Actions-only;
 local owned measurement reproduction remains in the two benchmark documents.
 Hosted fixture execution is pending until the candidate's actual job passes.
 This job is neither a benchmark baseline nor proof of a PostgreSQL support matrix. PostgreSQL 16 is

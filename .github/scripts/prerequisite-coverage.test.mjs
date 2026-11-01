@@ -50,7 +50,7 @@ for (const [profile, cases] of Object.entries(profiles)) {
       const result = check(profile, passing(profile).filter(e => !(e.Package === prefix + pkg && e.Test === name)));
       assert.equal(result.status, 1);
       assert.equal(result.stdout, '');
-      assert.match(result.stderr, /^Coverage evidence rejected:/);
+      assert.equal(result.stderr, `Coverage evidence rejected: missing required pass: ${pkg}/${name}\n`);
     });
   }
   for (const kind of ['skip', 'fail', 'missing-run', 'duplicate', 'unfinished', 'malformed', 'nonzero']) {
@@ -65,7 +65,11 @@ for (const [profile, cases] of Object.entries(profiles)) {
       const result = check(profile, events, kind === 'nonzero' ? '1' : '0');
       assert.equal(result.status, 1);
       assert.equal(result.stdout, '');
-      assert.match(result.stderr, /^Coverage evidence rejected:/);
+      const reason = { skip: `missing required pass: ${cases[0][0]}/${cases[0][1]}`,
+        fail: 'Go failure', 'missing-run': 'test completion without unique run',
+        duplicate: 'test completion without unique run', unfinished: 'unfinished Go execution',
+        malformed: 'malformed Go JSON', nonzero: 'Go exited with 1' }[kind];
+      assert.equal(result.stderr, `Coverage evidence rejected: ${reason}\n`);
     });
   }
 }
@@ -142,3 +146,16 @@ cat "$EVENTS"
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
+
+test('unsupported-runtime lane uses Node22 without changing the Node24 unit lane', () => {
+  const ci = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8');
+  const job = ci.match(/^  unsupported-node:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  assert.ok(job, 'dedicated unsupported-runtime lane');
+  for (const token of ['node-version: "22"', 'go-version: "1.26.10"', 'cache: false',
+    'persist-credentials: false', 'contents: read', 'timeout-minutes: 10',
+    "-run '^TestArtifactCoreUnsupportedNode$'", 'prerequisite-coverage.mjs unsupported-node',
+    'git rev-parse HEAD', 'go version', 'node --version']) assert.ok(job.includes(token), token);
+  assert.doesNotMatch(job, /continue-on-error|: write|secrets\./);
+  const unit = ci.match(/^  unit-tests:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  assert.ok(unit.includes('node-version: "24"') && unit.includes('run: go test ./...'));
+});

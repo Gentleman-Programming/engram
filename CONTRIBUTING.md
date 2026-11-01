@@ -199,6 +199,17 @@ current repository; qualified-only links do not expand discovery or rerun routin
 
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
+#### Unsupported runtime rejection
+
+`Unsupported Node Runtime Rejection` runs only the existing
+`TestArtifactCoreUnsupportedNode` under Node22 with Go1.26.10. Node24 remains the
+ordinary supported test runtime. The separate ten-minute lane verifies the
+actual major versions and requires a named executed pass and successful package
+completion via `prerequisite-coverage.mjs unsupported-node EVENTS.json GO_EXIT`.
+A skip or nonzero Go exit cannot satisfy it; the original no-spawn/cleanup and
+20-second test-context assertions are unchanged. Local wiring checks are not
+proof that the hosted Node22 case executed.
+
 #### Observational Windows full-module baseline (#1891)
 
 `Windows Full Suite (Observational)` independently runs `go test -json ./...`
