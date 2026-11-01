@@ -1770,6 +1770,10 @@ explicit-session contract.
 
 ### PASSIVE CAPTURE
 
+Claude's SubagentStop hook streams its JSON request body to curl through stdin
+to preserve UTF-8 content when Git for Windows curl converts command-line
+arguments using a legacy code page. Existing corrupted captures are not repaired.
+
 Automatic capture is adapter-specific: Claude/Codex SubagentStop
 hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
 output for server-side extraction. Other adapters may support eligible tool
