@@ -49,11 +49,50 @@ func hookLocalRecoveryEligible(platform, base, endpoint string, err error) bool 
 // Test seam for launch admission; production always uses the existing launcher.
 var hookLocalServerLaunch = launchServeBackgroundContext
 
+// Match serve's home fallback without changing best-effort host binding policy.
+func hookLocalDataDir() string {
+	if dir := hostBindingDataDirFromEnvOrConfig(); dir != "" {
+		return dir
+	}
+	if home := resolveHomeFallback(); home != "" {
+		return filepath.Join(home, ".engram")
+	}
+	return ""
+}
+
+// A reachable loopback listener may belong to another data directory or OS
+// account. Confirm identity before disclosing any session or cwd to it.
+func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base string) error {
+	dir := hookLocalDataDir()
+	if dir == "" {
+		return &hookDenialError{message: "managed local server identity unconfirmed"}
+	}
+	expected, err := store.EnsureInstanceIDContext(ctx, dir)
+	if err != nil {
+		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
+	if err != nil {
+		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	healthClient := *client
+	healthClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := healthClient.Do(request)
+	if err != nil {
+		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
+	}
+	defer func() { _ = response.Body.Close() }()
+	if !hookLocalHealthMatches(response, expected) {
+		return &hookDenialError{message: "managed local server identity unconfirmed: expected current data directory instance"}
+	}
+	return nil
+}
+
 func recoverHookLocalServer(ctx context.Context, client *http.Client, base string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	dir := hostBindingDataDirFromEnvOrConfig()
+	dir := hookLocalDataDir()
 	if dir == "" {
 		return errHookSessionUnconfirmed
 	}
@@ -96,14 +135,9 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 			// never permission to launch again or accept an unknown identity.
 			_ = response.Body.Close()
 		} else if err == nil {
-			var health struct {
-				Status     string `json:"status"`
-				Service    string `json:"service"`
-				InstanceID string `json:"instance_id"`
-			}
-			decodeErr := json.NewDecoder(io.LimitReader(response.Body, hookDenialBodyLimit)).Decode(&health)
+			matches := hookLocalHealthMatches(response, expected)
 			_ = response.Body.Close()
-			if response.StatusCode != http.StatusOK || decodeErr != nil || health.Status != "ok" || health.Service != "engram" || health.InstanceID != expected {
+			if !matches {
 				return errors.New("managed local server identity unconfirmed")
 			}
 			return ctx.Err()
@@ -116,4 +150,22 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 		case <-timer.C:
 		}
 	}
+}
+
+// Validate the complete bounded response, not just a valid JSON prefix. Both
+// initial admission and managed recovery enforce the same identity contract.
+func hookLocalHealthMatches(response *http.Response, expected string) bool {
+	if response.StatusCode != http.StatusOK || expected == "" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit+1))
+	if err != nil || len(body) > hookDenialBodyLimit {
+		return false
+	}
+	var health struct {
+		Status     string `json:"status"`
+		Service    string `json:"service"`
+		InstanceID string `json:"instance_id"`
+	}
+	return json.Unmarshal(body, &health) == nil && health.Status == "ok" && health.Service == "engram" && health.InstanceID == expected
 }
