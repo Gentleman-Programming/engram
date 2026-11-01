@@ -47,7 +47,11 @@ func TestQuarantinePagesBoundLegacyBacklogAndReleaseWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.Close()
+	t.Cleanup(func() {
+		if err := other.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	started := time.Now()
 	var cursor int64
 	actions := 0
