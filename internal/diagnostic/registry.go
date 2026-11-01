@@ -45,6 +45,7 @@ func DefaultRegistry() Registry {
 		SyncMutationRequiredFieldsCheck{},
 		SyncTargetClosedSpaceCheck{},
 		SQLiteLockContentionCheck{},
+		EndedSessionPostEndActivityCheck{},
 	)
 }
 
