@@ -41,6 +41,7 @@ func TestHookExternalProjectRouting(t *testing.T) {
 					cwd = filepath.Join(root, "absent", "feature-x")
 				}
 				external := strings.HasPrefix(mode, "external")
+				env := hookProjectFixtureEnvironment(t, root, "")
 				var instanceID string
 				project := "feature-x"
 				if external {
@@ -52,6 +53,13 @@ func TestHookExternalProjectRouting(t *testing.T) {
 				}
 				var mu sync.Mutex
 				var got []request
+				if !external {
+					var err error
+					instanceID, err = store.EnsureInstanceID(filepath.Join(root, "engram_data_dir"))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					body, _ := io.ReadAll(r.Body)
 					var fields map[string]any
@@ -87,15 +95,10 @@ func TestHookExternalProjectRouting(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				env := hookProjectFixtureEnvironment(t, root, server.URL)
-				if !external {
-					var err error
-					instanceID, err = store.EnsureInstanceID(filepath.Join(root, "engram_data_dir"))
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
 				for i, v := range env {
+					if strings.HasPrefix(v, "ENGRAM_URL=") {
+						env[i] = "ENGRAM_URL=" + server.URL
+					}
 					if strings.HasPrefix(v, "TEMP=") || strings.HasPrefix(v, "TMP=") || strings.HasPrefix(v, "TMPDIR=") {
 						env[i] = strings.SplitN(v, "=", 2)[0] + "=" + filepath.Join(root, "temp")
 					}

@@ -11,7 +11,7 @@ import (
 )
 
 func TestHookRejectsForeignLocalIdentityBeforeSessionTraffic(t *testing.T) {
-	for _, identity := range []string{"foreign", "", "matching", "redirect", "malformed", "unhealthy"} {
+	for _, identity := range []string{"foreign", "", "matching", "redirect", "malformed", "unhealthy", "trailing", "oversized", "whitespace"} {
 		t.Run(identity, func(t *testing.T) {
 			dir := t.TempDir()
 			t.Setenv("ENGRAM_DATA_DIR", dir)
@@ -22,7 +22,7 @@ func TestHookRejectsForeignLocalIdentityBeforeSessionTraffic(t *testing.T) {
 				t.Fatal(err)
 			}
 			served := identity
-			if identity == "matching" {
+			if identity == "matching" || identity == "trailing" || identity == "oversized" || identity == "whitespace" {
 				served = expected
 			}
 			var paths []string
@@ -42,6 +42,14 @@ func TestHookRejectsForeignLocalIdentityBeforeSessionTraffic(t *testing.T) {
 						w.WriteHeader(http.StatusInternalServerError)
 					}
 					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "engram", "instance_id": served})
+					switch identity {
+					case "trailing":
+						_, _ = w.Write([]byte("not json"))
+					case "oversized":
+						_, _ = w.Write([]byte(strings.Repeat(" ", hookDenialBodyLimit)))
+					case "whitespace":
+						_, _ = w.Write([]byte(" \t\r\n"))
+					}
 				case "/sessions/private-session":
 					_ = json.NewEncoder(w).Encode(map[string]string{"id": "private-session", "project": "owner"})
 				case "/sessions":
@@ -55,7 +63,10 @@ func TestHookRejectsForeignLocalIdentityBeforeSessionTraffic(t *testing.T) {
 			defer server.Close()
 			t.Setenv("ENGRAM_PORT", strings.TrimPrefix(server.URL, "http://127.0.0.1:"))
 			id, err := confirmHookSessionForPlatform("private-session", "private-cwd", true, "linux")
-			if identity == "matching" {
+			// Close waits for all handlers, synchronizing their path writes before
+			// assertions read the capture, including on a failed confirmation.
+			server.Close()
+			if identity == "matching" || identity == "whitespace" {
 				if err != nil || id != "private-session" {
 					t.Fatalf("matching instance: %q %v", id, err)
 				}

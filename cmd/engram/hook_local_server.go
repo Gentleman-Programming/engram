@@ -71,13 +71,7 @@ func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base str
 		return &hookDenialError{message: "managed local server identity unconfirmed", cause: err}
 	}
 	defer func() { _ = response.Body.Close() }()
-	var health struct {
-		Status     string `json:"status"`
-		Service    string `json:"service"`
-		InstanceID string `json:"instance_id"`
-	}
-	err = json.NewDecoder(io.LimitReader(response.Body, hookDenialBodyLimit)).Decode(&health)
-	if response.StatusCode != http.StatusOK || err != nil || health.Status != "ok" || health.Service != "engram" || health.InstanceID != expected {
+	if !hookLocalHealthMatches(response, expected) {
 		return &hookDenialError{message: "managed local server identity unconfirmed: expected current data directory instance"}
 	}
 	return nil
@@ -130,14 +124,9 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 			// never permission to launch again or accept an unknown identity.
 			_ = response.Body.Close()
 		} else if err == nil {
-			var health struct {
-				Status     string `json:"status"`
-				Service    string `json:"service"`
-				InstanceID string `json:"instance_id"`
-			}
-			decodeErr := json.NewDecoder(io.LimitReader(response.Body, hookDenialBodyLimit)).Decode(&health)
+			matches := hookLocalHealthMatches(response, expected)
 			_ = response.Body.Close()
-			if response.StatusCode != http.StatusOK || decodeErr != nil || health.Status != "ok" || health.Service != "engram" || health.InstanceID != expected {
+			if !matches {
 				return errors.New("managed local server identity unconfirmed")
 			}
 			return ctx.Err()
@@ -150,4 +139,22 @@ func hookLocalServerReady(ctx context.Context, client *http.Client, base, expect
 		case <-timer.C:
 		}
 	}
+}
+
+// Validate the complete bounded response, not just a valid JSON prefix. Both
+// initial admission and managed recovery enforce the same identity contract.
+func hookLocalHealthMatches(response *http.Response, expected string) bool {
+	if response.StatusCode != http.StatusOK || expected == "" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, hookDenialBodyLimit+1))
+	if err != nil || len(body) > hookDenialBodyLimit {
+		return false
+	}
+	var health struct {
+		Status     string `json:"status"`
+		Service    string `json:"service"`
+		InstanceID string `json:"instance_id"`
+	}
+	return json.Unmarshal(body, &health) == nil && health.Status == "ok" && health.Service == "engram" && health.InstanceID == expected
 }
