@@ -364,6 +364,8 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+
+The Claude native PreToolUse gate verifies the local `/health` instance ID against its configured data directory before sending session or cwd data. An unrelated, unidentified, redirected, or unhealthy local listener denies the write with an identity error. Explicit `ENGRAM_URL` selects an intentional remote endpoint and retains its existing connection contract. Local instance comparison prevents accidental cross-store routing; it does not authenticate a malicious server. Windows connection-refused recovery remains bounded by the hook confirmation deadline.
 - When a local HTTP request observes permanent database generation invalidation, its existing error response is preserved. After the handler returns, `engram serve` logs one restart diagnostic, stops autosync, drains HTTP requests for up to five seconds (then force-closes remaining connections), releases its listener, and exits nonzero after cleanup. Ordinary transient health failures remain generic `500` responses and do not stop the server. Detection is request-triggered, not a background watchdog; the database is not reopened automatically.
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 

@@ -39,6 +39,9 @@ func useLegacyLocalHookEndpoint(t *testing.T, endpoint string) {
 	t.Setenv("USERPROFILE", root)
 	t.Setenv("XDG_CONFIG_HOME", root)
 	t.Setenv("ENGRAM_DATA_DIR", root)
+	if _, err := store.EnsureInstanceID(root); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "engram.db"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +449,7 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/health" {
-					codexMockHealth(w)
+					hookLocalMockHealth(t, w)
 					return
 				}
 				if r.URL.Path != "/runtime-sessions/resolve" || r.Method != http.MethodPost {
@@ -565,7 +568,7 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					delay := tc.project
 					if r.URL.Path == "/health" {
-						codexMockHealth(w)
+						hookLocalMockHealth(t, w)
 						return
 					}
 					switch r.URL.Path {
@@ -691,7 +694,7 @@ func TestHookSessionConfirmationSharedDeadline(t *testing.T) {
 						return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 					}
 					if r.URL.Path == "/health" {
-						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`))}, nil
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(hookLocalMockHealthBody(t)))}, nil
 					}
 					switch r.URL.Path {
 					case "/project/current":
@@ -846,6 +849,7 @@ func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
 	endpoint := httptest.NewServer(production)
 	defer endpoint.Close()
 	useLegacyLocalHookEndpoint(t, endpoint.URL)
+	t.Setenv("ENGRAM_DATA_DIR", filepath.Join(root, "store"))
 
 	gate := func(t *testing.T, session, cwd string) (decision, reason string, updatedInput map[string]any) {
 		t.Helper()
@@ -1017,6 +1021,8 @@ func TestClaudeConflictDenialNamesSessionProjects(t *testing.T) {
 	// carries the server's session_project_conflict fields instead of the generic text.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/health":
+			hookLocalMockHealth(t, w)
 		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 			_, _ = io.WriteString(w, `{"id":"s9","project":"client","directory":"/w","started_at":"2026-10-10 00:00:00"}`)
 		case r.URL.Path == "/project/current":
@@ -1054,6 +1060,8 @@ func TestClaudeDegradedSessionLookupFailsClosed(t *testing.T) {
 	var derived bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/health":
+			hookLocalMockHealth(t, w)
 		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = io.WriteString(w, `{"error":"boom"}`)
@@ -1118,6 +1126,8 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 			var derived, posted bool
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.URL.Path == "/health":
+					hookLocalMockHealth(t, w)
 				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 					tc.sessionGet(w)
 				case r.URL.Path == "/project/current":
@@ -1159,7 +1169,7 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 			if bound.PermissionDecision != "deny" || bound.UpdatedInput != nil || derived || posted {
 				t.Fatalf("%s must deny without cwd resolution or registration: decision=%q derived=%v posted=%v (%s)", tc.name, bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
 			}
-			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") {
+			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") && !(tc.sessionGet == nil && strings.Contains(bound.PermissionDecisionReason, "identity unconfirmed")) {
 				t.Fatalf("%s must name the lookup cause, got %q", tc.name, bound.PermissionDecisionReason)
 			}
 		})
@@ -1196,6 +1206,8 @@ func TestClaudeLargeSessionLookupStillConfirms(t *testing.T) {
 			var derived bool
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.URL.Path == "/health":
+					hookLocalMockHealth(t, w)
 				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 					_, _ = io.WriteString(w, tc.session)
 				case r.URL.Path == "/project/current":
@@ -1764,7 +1776,7 @@ func TestCodexPreToolUseReadsDoNotRequireSessionOrInput(t *testing.T) {
 func TestCodexPreToolUseCommandWritesAllowAndBoundInput(t *testing.T) {
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
-			codexMockHealth(w)
+			hookLocalMockHealth(t, w)
 			return
 		}
 		if r.URL.Path == "/project/current" {
@@ -2042,4 +2054,21 @@ type claudeGateVerdict struct {
 	PermissionDecision       string         `json:"permissionDecision"`
 	PermissionDecisionReason string         `json:"permissionDecisionReason"`
 	UpdatedInput             map[string]any `json:"updatedInput"`
+}
+
+func hookLocalMockHealthBody(t *testing.T) string {
+	t.Helper()
+	id, err := store.EnsureInstanceID(hostBindingDataDirFromEnvOrConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"status": "ok", "service": "engram", "instance_id": id, "capabilities": map[string]bool{"runtime_session_resolution": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+func hookLocalMockHealth(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	_, _ = io.WriteString(w, hookLocalMockHealthBody(t))
 }

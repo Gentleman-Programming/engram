@@ -131,6 +131,9 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 			if tc.initialFailure || platform != "windows" {
 				wantLaunches, wantHealth = 0, 0
 			}
+			if tc.initialFailure {
+				wantHealth = 1 // Reachable local listeners are checked before session lookup.
+			}
 			if platform != "windows" {
 				wantOwners = 0
 			}
