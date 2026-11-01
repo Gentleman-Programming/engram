@@ -10518,7 +10518,8 @@ func syncDeleteTombstoneNeedsBackfill(alias string) string {
 	// backfill work.
 	return fmt.Sprintf(`%[1]s.active = 1 AND %[1]s.entity IN ('observation', 'session') AND %[1]s.last_remote_mutation_seq IS NULL AND NOT EXISTS (
 		SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = %[1]s.entity
-		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.acked_at IS NULL AND sm.disposition IN ('pending', 'quarantined')
+		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ? AND sm.disposition IN ('pending', 'quarantined')
+		AND sm.seq > %[1]s.last_mutation_seq
 	)`, alias)
 }
 

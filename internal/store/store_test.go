@@ -16691,6 +16691,82 @@ func TestRepairBackfillDoesNotRecreateQuarantinedMutation(t *testing.T) {
 	}
 }
 
+func TestHardDeleteTombstonesNotRejournaledAfterAcknowledgement(t *testing.T) {
+	s := newTestStore(t)
+	const project = "rejournal-ack-test"
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	sessionID := "session-ack-tombstone"
+	if err := s.CreateSession(sessionID, project, "/tmp/rejournal"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Project:   project,
+		Type:      "fact",
+		Title:     "title",
+		Content:   "content",
+	})
+	if err != nil {
+		t.Fatalf("save observation: %v", err)
+	}
+
+	// Hard delete observation and session.
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("delete observation: %v", err)
+	}
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+
+	// Read pending mutations and acknowledge all of them.
+	var maxSeq int64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM sync_mutations WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&maxSeq); err != nil {
+		t.Fatalf("read max seq: %v", err)
+	}
+	if maxSeq == 0 {
+		t.Fatalf("expected pending mutations, got maxSeq = 0")
+	}
+	if err := s.AckSyncMutations(DefaultSyncTargetKey, maxSeq); err != nil {
+		t.Fatalf("ack mutations: %v", err)
+	}
+
+	// Verify all mutations are acknowledged.
+	var pendingCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL`, DefaultSyncTargetKey).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending before repair = %d, want 0", pendingCount)
+	}
+
+	mutationCountBefore := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE target_key = ?`, DefaultSyncTargetKey)
+
+	// Run repair multiple times (simulating subsequent sync runs).
+	for i := 0; i < 3; i++ {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			t.Fatalf("repair run %d: %v", i, err)
+		}
+	}
+
+	// Verify no new mutations were generated.
+	mutationCountAfter := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE target_key = ?`, DefaultSyncTargetKey)
+	if mutationCountAfter != mutationCountBefore {
+		t.Fatalf("mutations after repair = %d, want %d (re-journaling occurred)", mutationCountAfter, mutationCountBefore)
+	}
+
+	// Verify backfill required reports false.
+	needed, err := s.projectSyncBackfillRequired(project)
+	if err != nil {
+		t.Fatalf("check backfill required: %v", err)
+	}
+	if needed {
+		t.Fatalf("projectSyncBackfillRequired = true, want false")
+	}
+}
+
 // TestRepairDoesNotDeadlockWithCursorAndInsert verifies that repair handles
 // 100 sessions without mutations correctly — no deadlock, cursor-insert interference,
 // or busy loop.
