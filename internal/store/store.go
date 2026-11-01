@@ -1470,7 +1470,7 @@ func (s *Store) migrate() error {
 			type,
 			project,
 			topic_key,
-			tokenize='trigram',
+			tokenize='trigram remove_diacritics 1',
 			content='observations',
 			content_rowid='id'
 		);
@@ -1552,7 +1552,7 @@ func (s *Store) migrate() error {
 		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
 			content,
 			project,
-			tokenize='trigram',
+			tokenize='trigram remove_diacritics 1',
 			content='user_prompts',
 			content_rowid='id'
 		);
@@ -3160,7 +3160,7 @@ const observationsFTSDefinition = `
 		type,
 		project,
 		topic_key,
-		tokenize='trigram',
+		tokenize='trigram remove_diacritics 1',
 		content='observations',
 		content_rowid='id'
 	);
@@ -3170,7 +3170,7 @@ const promptsFTSDefinition = `
 	CREATE VIRTUAL TABLE prompts_fts USING fts5(
 		content,
 		project,
-		tokenize='trigram',
+		tokenize='trigram remove_diacritics 1',
 		content='user_prompts',
 		content_rowid='id'
 	);
@@ -3315,7 +3315,7 @@ func ftsTableMatches(tx *sql.Tx, table string, expectedColumns []string, content
 
 	normalized := normalizeFTSSQL(ddl)
 	return strings.Contains(normalized, "createvirtualtable"+table+"usingfts5(") &&
-		strings.Contains(normalized, "tokenize='trigram'") &&
+		strings.Contains(normalized, "tokenize='trigramremove_diacritics1'") &&
 		strings.Contains(normalized, "content='"+contentTable+"'") &&
 		strings.Contains(normalized, "content_rowid='id'"), nil
 }

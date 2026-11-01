@@ -1876,6 +1876,8 @@ Use `engram projects rescue-ownership --project <name> [--session <id>] [--obser
 ### Full-Text Search (FTS5)
 
 - Searches across title, content, tool_name, type, and project
+- Indexed searches of observations and prompts ignore accents (`video` matches `vídeo`, and vice versa) while preserving substring matching. Original stored text is unchanged. Existing stores rebuild both derived FTS indexes transactionally on first open after upgrading; large stores may take longer to open once.
+- Trigram matching requires at least three characters; existing short-query fallback behavior is unchanged.
 - Query sanitization: wraps each word in quotes to avoid FTS5 syntax errors
 - Supports type and project filters
 
