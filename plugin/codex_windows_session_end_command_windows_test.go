@@ -24,6 +24,9 @@ func runCodexWindowsManifestCommand(t *testing.T, command, input, port string) (
 	run.Stdout = &stdout
 	run.Stderr = &stderr
 	err := run.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("run manifest command canceled: %v (process error: %v), stdout=%q stderr=%q", ctx.Err(), err, stdout.String(), stderr.String())
+	}
 	if err == nil {
 		return stdout.String(), stderr.String(), 0
 	}
