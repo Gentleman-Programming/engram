@@ -23,6 +23,9 @@ func TestWriteMCPToolContractFixture(t *testing.T) {
 	if err := removeApprovedCurrentProjectDelta(live); err != nil {
 		t.Fatal(err)
 	}
+	if err := removeApprovedPromptWorkspaceDelta(live); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeMCPToolContractFixture(os.Getenv("ENGRAM_MCP_CONTRACT_WRITE"), filepath.Join("testdata", "tool-contract-v1.json"), live, os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != ""); err != nil {
 		t.Fatal(err)
 	}
