@@ -788,6 +788,9 @@ func codexHandoffConvertPaths(t *testing.T, f codexIntentFixture, paths []string
 	cmd.Env = []string{"PATH=", "MSYS_NO_PATHCONV=1", "SystemRoot=" + os.Getenv("SystemRoot"), "WINDIR=" + os.Getenv("SystemRoot"), "TMP=" + codexBashProcessTemp, "TEMP=" + codexBashProcessTemp}
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w: %v", ctx.Err(), err)
+		}
 		t.Fatalf("convert pinned fixture paths: %v", err)
 	}
 	converted := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n"), "\n")
