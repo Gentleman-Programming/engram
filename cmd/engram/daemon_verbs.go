@@ -61,23 +61,23 @@ func cmdPs(cfg store.Config, args []string) error {
 	record, err := daemon.ReadPidfile(pidPath)
 	switch {
 	case errors.Is(err, daemon.ErrNoPidfile):
-		stdoutPrinter("not running\n")
+		_, _ = stdoutPrinter("not running\n")
 		return fmt.Errorf("daemon is not running")
 	case err != nil:
 		return err
 	}
 	if !daemon.ProcessAlive(record.Pid) {
-		stdoutPrinter("not running\n")
+		_, _ = stdoutPrinter("not running\n")
 		if err := daemon.RemovePidfile(pidPath); err != nil {
 			return err
 		}
 		return fmt.Errorf("daemon is not running")
 	}
 	if res := daemonStatusProbe(record.Port); res.Status == daemon.StatusRunning {
-		stdoutPrinter("running (pid %d) on port %d\n", record.Pid, record.Port)
+		_, _ = stdoutPrinter("running (pid %d) on port %d\n", record.Pid, record.Port)
 		return nil
 	}
-	stdoutPrinter("unreachable (pid %d) on port %d\n", record.Pid, record.Port)
+	_, _ = stdoutPrinter("unreachable (pid %d) on port %d\n", record.Pid, record.Port)
 	return fmt.Errorf("daemon is not answering on port %d", record.Port)
 }
 
@@ -106,7 +106,7 @@ func stopDaemon(cfg store.Config) (int, error) {
 		if err := daemon.RemovePidfile(pidPath); err != nil {
 			return record.Pid, err
 		}
-		stdoutPrinter("Removed stale pidfile (pid %d was not running)\n", record.Pid)
+		_, _ = stdoutPrinter("Removed stale pidfile (pid %d was not running)\n", record.Pid)
 		return record.Pid, nil
 	}
 	if err := stopDaemonProcess(record.Pid); err != nil {
@@ -116,7 +116,7 @@ func stopDaemon(cfg store.Config) (int, error) {
 	if err := daemon.RemovePidfile(pidPath); err != nil {
 		return record.Pid, err
 	}
-	stdoutPrinter("Stopped engram daemon (pid %d)\n", record.Pid)
+	_, _ = stdoutPrinter("Stopped engram daemon (pid %d)\n", record.Pid)
 	return record.Pid, nil
 }
 

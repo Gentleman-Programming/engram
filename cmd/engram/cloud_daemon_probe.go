@@ -11,9 +11,6 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/daemon"
 )
 
-// daemonProbeStatus describes the outcome of probing the local engram daemon.
-type daemonProbeStatus = daemon.Status
-
 const (
 	daemonProbeRunning     = daemon.StatusRunning
 	daemonProbeNotRunning  = daemon.StatusNotRunning
