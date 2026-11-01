@@ -1123,12 +1123,24 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var derived, posted bool
+			var derived, posted, lookedUp bool
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/health":
 					hookLocalMockHealth(t, w)
 				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+					lookedUp = true
+					if tc.sessionGet == nil {
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						if err := conn.Close(); err != nil {
+							t.Error(err)
+						}
+						return
+					}
 					tc.sessionGet(w)
 				case r.URL.Path == "/project/current":
 					derived = true
@@ -1143,11 +1155,7 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 				}
 			}))
 			useLegacyLocalHookEndpoint(t, endpoint.URL)
-			if tc.sessionGet == nil {
-				endpoint.Close() // transport failure: connection refused
-			} else {
-				defer endpoint.Close()
-			}
+			defer endpoint.Close()
 			input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
 			var hook struct {
 				HookSpecificOutput struct {
@@ -1156,7 +1164,12 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 					UpdatedInput             map[string]any `json:"updatedInput"`
 				} `json:"hookSpecificOutput"`
 			}
-			if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+			result := guardClaudePreToolUse(input)
+			endpoint.Close() // Wait for capture writes before checking fixture state.
+			if !lookedUp {
+				t.Fatal("session lookup was not exercised")
+			}
+			if err := json.Unmarshal(result, &hook); err != nil {
 				t.Fatal(err)
 			}
 			bound := hook.HookSpecificOutput
@@ -1169,11 +1182,7 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 			if bound.PermissionDecision != "deny" || bound.UpdatedInput != nil || derived || posted {
 				t.Fatalf("%s must deny without cwd resolution or registration: decision=%q derived=%v posted=%v (%s)", tc.name, bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
 			}
-			wantCause := "session lookup failed"
-			if tc.sessionGet == nil {
-				wantCause = "identity unconfirmed"
-			}
-			if !strings.Contains(bound.PermissionDecisionReason, wantCause) {
+			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") {
 				t.Fatalf("%s must name the lookup cause, got %q", tc.name, bound.PermissionDecisionReason)
 			}
 		})
