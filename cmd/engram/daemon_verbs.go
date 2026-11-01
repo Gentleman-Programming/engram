@@ -80,11 +80,27 @@ func defaultDaemonStatusProbe(port int) daemon.ProbeResult {
 // daemon is up, docker `ps` style. A missing or stale pidfile, or a recorded
 // process that no longer answers, all surface as an error after printing the
 // status line.
+// cmdPs implements `engram ps` (spec S4): report whether the pidfile-tracked
+// daemon is up, docker `ps` style. A missing or stale pidfile, or a recorded
+// process that no longer answers, all surface as an error after printing the
+// status line. The read, liveness check, and stale-record removal run under
+// the per-data-dir start lock, and the record is revalidated before any
+// removal, so a replacement pidfile published by a concurrent `run -d` is
+// never deleted by this cleanup.
 func cmdPs(cfg store.Config, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("unknown ps argument: %s", args[0])
 	}
 	pidPath := daemon.PidfilePath(cfg.DataDir)
+	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+		_, _ = stdoutPrinter("not running\n")
+		return fmt.Errorf("daemon is not running")
+	}
+	startLock, err := daemon.AcquireStartLock(cfg.DataDir, runStartLockWait)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = startLock.Release() }()
 	record, err := daemon.ReadPidfile(pidPath)
 	switch {
 	case errors.Is(err, daemon.ErrNoPidfile):
@@ -95,7 +111,7 @@ func cmdPs(cfg store.Config, args []string) error {
 	}
 	if !daemon.ProcessAlive(record.Pid) {
 		_, _ = stdoutPrinter("not running\n")
-		if err := daemon.RemovePidfile(pidPath); err != nil {
+		if err := removePidfileIfUnchanged(pidPath, record); err != nil {
 			return err
 		}
 		return fmt.Errorf("daemon is not running")
@@ -127,8 +143,24 @@ func cmdStop(cfg store.Config, args []string) error {
 // alive but not confirmed (the OS reused it after the daemon died) is
 // reported, never signaled. It returns the pid from the pidfile record (0 only
 // when the pidfile could not be read at all).
+// stopDaemon is the shared stop logic behind `engram stop` and
+// `engram restart`: a missing pidfile is nothing to stop, a stale one is
+// cleaned up, and a live daemon is confirmed as ours through its health
+// identity before stopDaemonProcess is allowed to signal it — a pid that is
+// alive but not confirmed (the OS reused it after the daemon died) is
+// reported, never signaled. Termination and record cleanup hold the
+// per-data-dir start lock (the same lock `run -d` admission holds) and
+// revalidate the record immediately before removal, so a replacement pidfile
+// published by a concurrent start is never untracked. It returns the pid
+// from the pidfile record (0 only when the pidfile could not be read at
+// all).
 func stopDaemon(cfg store.Config) (int, error) {
 	pidPath := daemon.PidfilePath(cfg.DataDir)
+	startLock, err := daemon.AcquireStartLock(cfg.DataDir, runStartLockWait)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = startLock.Release() }()
 	record, err := daemon.ReadPidfile(pidPath)
 	if errors.Is(err, daemon.ErrNoPidfile) {
 		return 0, fmt.Errorf("no daemon pidfile; nothing to stop")
@@ -137,7 +169,7 @@ func stopDaemon(cfg store.Config) (int, error) {
 		return 0, err
 	}
 	if !daemon.ProcessAlive(record.Pid) {
-		if err := daemon.RemovePidfile(pidPath); err != nil {
+		if err := removePidfileIfUnchanged(pidPath, record); err != nil {
 			return record.Pid, err
 		}
 		_, _ = stdoutPrinter("Removed stale pidfile (pid %d was not running)\n", record.Pid)
@@ -151,11 +183,33 @@ func stopDaemon(cfg store.Config) (int, error) {
 		// Keep the pidfile: the daemon may still be alive.
 		return record.Pid, err
 	}
-	if err := daemon.RemovePidfile(pidPath); err != nil {
+	if err := removePidfileIfUnchanged(pidPath, record); err != nil {
 		return record.Pid, err
 	}
 	_, _ = stdoutPrinter("Stopped engram daemon (pid %d)\n", record.Pid)
 	return record.Pid, nil
+}
+
+// removePidfileIfUnchanged removes the pidfile only when it still carries
+// the exact record that was acted on (same pid and token). Between a stop
+// decision and its cleanup a concurrent `run -d` may publish a replacement
+// record for a fresh daemon; deleting that record would untrack the new
+// daemon, so a changed record is left for its owner. Callers hold the
+// per-data-dir start lock; this revalidation is the guard behind it for the
+// window no lock can close (a late orphan publishing under it). A pidfile
+// that is already gone is success.
+func removePidfileIfUnchanged(pidPath string, acted daemon.PidRecord) error {
+	current, err := daemon.ReadPidfile(pidPath)
+	if errors.Is(err, daemon.ErrNoPidfile) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.Pid != acted.Pid || current.Token != acted.Token {
+		return nil
+	}
+	return daemon.RemovePidfile(pidPath)
 }
 
 // cmdLogs implements `engram logs [-f|--follow]` (spec S7): replay the
@@ -249,8 +303,10 @@ func cmdRestart(cfg store.Config, args []string) error {
 
 // resolveRestartPort parses `engram restart [-p PORT]` and resolves the port
 // for the new daemon: an explicit -p wins, then the stopped daemon's
-// recorded port when usable, then the 7437 default. Port parsing follows the
-// `engram run -p` rules (both spellings, 1..65535).
+// recorded port when usable, then ENGRAM_PORT, then the 7437 default — the
+// same precedence `engram run` applies when it starts a daemon with no
+// recorded port. Port parsing follows the `engram run -p` rules (both
+// spellings, 1..65535).
 func resolveRestartPort(args []string, record daemon.PidRecord) (int, error) {
 	port := 0
 	explicit := false
@@ -283,6 +339,11 @@ func resolveRestartPort(args []string, record daemon.PidRecord) (int, error) {
 	}
 	if record.Port > 0 {
 		return record.Port, nil
+	}
+	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil && n > 0 {
+			return int(n), nil
+		}
 	}
 	return 7437, nil
 }

@@ -16,6 +16,13 @@ import (
 // exists and TerminateProcess via Kill is the only way to stop it. The error
 // wording stays aligned with the unix path (Kill there means SIGKILL).
 func stopDaemonProcess(pid int) error {
+	if pid == os.Getpid() {
+		// A daemon record can never describe this CLI process itself: the
+		// daemon is a detached child. Refuse before terminating so a corrupt
+		// or test-written pidfile can never make engram kill itself; the
+		// caller keeps the record and reports it as unmanaged.
+		return fmt.Errorf("refusing to signal own process (pid %d)", pid)
+	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("find daemon process: %w", err)

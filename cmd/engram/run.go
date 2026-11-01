@@ -28,9 +28,9 @@ var runReadyTimeout = 15 * time.Second
 // runReadyPollInterval is the readiness file poll cadence.
 var runReadyPollInterval = 100 * time.Millisecond
 
-// runStartLockWait bounds how long a second `engram run -d` on the same data
-// directory waits for the per-dir start lock — held by another starter
-// across admission, readiness publication, and cleanup — before failing
+// runStartLockWait bounds how long a second lifecycle command on the same
+// data directory — another `engram run -d` start, or the `engram stop`/`ps`
+// cleanup racing it — waits for the per-dir start lock before failing
 // cleanly with a held-lock error.
 var runStartLockWait = 20 * time.Second
 
@@ -104,9 +104,12 @@ func cmdRun(cfg store.Config, args []string) error {
 
 // assertDaemonStartable rejects a second daemon start while a live one holds
 // the pidfile, mirroring docker's refusal to double-start one container. A
-// live pid only blocks the start when the daemon identity answers; an
-// unconfirmed record (the OS reused the pid after the daemon died, or the
-// daemon no longer answers) is stale and cleared instead of blocking.
+// live pid only blocks the start when the daemon identity answers; a record
+// answered as not-running or as a foreign daemon is stale and cleared
+// instead of blocking. A record whose port is bound but does not answer
+// /health (StatusUnreachable) is preserved and the start rejected: the
+// daemon may be alive and merely not answering, and an unreachable probe is
+// not evidence the record is stale.
 func assertDaemonStartable(dataDir string, port int) error {
 	pidPath := daemon.PidfilePath(dataDir)
 	record, err := daemon.ReadPidfile(pidPath)
@@ -124,13 +127,24 @@ func assertDaemonStartable(dataDir string, port int) error {
 	if probePort == 0 {
 		probePort = port
 	}
-	if daemonIdentityConfirmed(record, daemonStatusProbe(probePort)) {
+	res := daemonStatusProbe(probePort)
+	if daemonIdentityConfirmed(record, res) {
 		return fmt.Errorf("already running (pid %d) on port %d; use `engram stop` before starting again", record.Pid, probePort)
 	}
-	// The pid is alive but the daemon identity does not answer, so it is not
-	// confirmed as ours — the same rule `engram stop` applies before any
-	// signal. The record is stale: clear it and start fresh rather than
-	// reporting a phantom "already running".
+	if res.Status == daemon.StatusUnreachable {
+		// The port is bound but /health did not answer with the daemon
+		// identity: the daemon may be alive and merely unhealthy (a busy
+		// store, a timed-out probe). That is not evidence the record is
+		// stale, so preserve it and reject the start — clearing it could
+		// unmanage a live daemon. Retry once it answers, or stop it
+		// explicitly.
+		return fmt.Errorf("port %d is bound but /health did not confirm the daemon (pid %d may still be alive); record kept at %s; retry when it answers or run `engram stop`", probePort, record.Pid, pidPath)
+	}
+	// The pid is alive but the daemon identity does not answer: nothing owns
+	// the recorded port (not running) or a foreign daemon answered the
+	// identity probe (token mismatch). The record is stale — the same rule
+	// `engram stop` applies before any signal — so clear it and start fresh
+	// rather than reporting a phantom "already running".
 	_, _ = stdoutPrinter("Clearing unmanaged pidfile (pid %d not confirmed as the daemon on port %d)\n", record.Pid, probePort)
 	return daemon.RemovePidfile(pidPath)
 }

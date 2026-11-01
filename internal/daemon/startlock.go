@@ -57,7 +57,11 @@ func AcquireStartLock(dataDir string, wait time.Duration) (*StartLock, error) {
 		}
 		if !time.Now().Before(deadline) {
 			_ = file.Close()
-			return nil, fmt.Errorf("%w (lock file %s); wait for the other start to finish or remove the file if it is stale", ErrStartLockHeld, path)
+			// Never advise deleting the lock file: a starter holding it could
+			// be bypassed by another starter locking a different inode. The
+			// kernel releases the lock when its holder dies, so a leftover
+			// file never blocks a later start.
+			return nil, fmt.Errorf("%w (lock file %s); wait for or inspect the active starter: the kernel releases the lock when its holder dies, so a leftover lock file never needs removal", ErrStartLockHeld, path)
 		}
 		time.Sleep(startLockRetryInterval)
 	}

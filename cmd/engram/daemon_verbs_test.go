@@ -97,7 +97,10 @@ func cleanupPidfileDaemon(t *testing.T, dataDir string) {
 		if err != nil {
 			return
 		}
-		if daemon.ProcessAlive(record.Pid) {
+		// Never kill this test binary itself: a failed case can leave a
+		// pidfile recording os.Getpid() behind (the product stop path refuses
+		// the same pid).
+		if record.Pid != os.Getpid() && daemon.ProcessAlive(record.Pid) {
 			if process, perr := os.FindProcess(record.Pid); perr == nil {
 				_ = process.Kill()
 				_, _ = process.Wait()
@@ -317,6 +320,7 @@ func TestCmdRestartPortResolution(t *testing.T) {
 		}
 	})
 	t.Run("default is 7437 without a usable record", func(t *testing.T) {
+		clearRunEnv(t)
 		for _, record := range []daemon.PidRecord{{}, {Pid: 4242}, {Pid: 4242, Port: 0}} {
 			port, err := resolveRestartPort(nil, record)
 			if err != nil {
@@ -324,6 +328,52 @@ func TestCmdRestartPortResolution(t *testing.T) {
 			}
 			if port != 7437 {
 				t.Fatalf("default port for %+v = %d, want 7437", record, port)
+			}
+		}
+	})
+	t.Run("ENGRAM_PORT is honored without a recorded port", func(t *testing.T) {
+		clearRunEnv(t)
+		t.Setenv("ENGRAM_PORT", "9100")
+		port, err := resolveRestartPort(nil, daemon.PidRecord{})
+		if err != nil {
+			t.Fatalf("resolve with ENGRAM_PORT: %v", err)
+		}
+		if port != 9100 {
+			t.Fatalf("ENGRAM_PORT port = %d, want 9100", port)
+		}
+	})
+	t.Run("recorded port wins over ENGRAM_PORT", func(t *testing.T) {
+		clearRunEnv(t)
+		t.Setenv("ENGRAM_PORT", "9100")
+		port, err := resolveRestartPort(nil, daemon.PidRecord{Pid: 4242, Port: 1234})
+		if err != nil {
+			t.Fatalf("resolve with a recorded port: %v", err)
+		}
+		if port != 1234 {
+			t.Fatalf("recorded port = %d, want 1234 over ENGRAM_PORT", port)
+		}
+	})
+	t.Run("explicit -p wins over ENGRAM_PORT", func(t *testing.T) {
+		clearRunEnv(t)
+		t.Setenv("ENGRAM_PORT", "9100")
+		port, err := resolveRestartPort([]string{"-p", "9999"}, daemon.PidRecord{})
+		if err != nil {
+			t.Fatalf("resolve with -p over ENGRAM_PORT: %v", err)
+		}
+		if port != 9999 {
+			t.Fatalf("explicit port = %d, want 9999 over ENGRAM_PORT", port)
+		}
+	})
+	t.Run("invalid ENGRAM_PORT falls back to 7437", func(t *testing.T) {
+		clearRunEnv(t)
+		for _, value := range []string{"abc", "0", "70000", " "} {
+			t.Setenv("ENGRAM_PORT", value)
+			port, err := resolveRestartPort(nil, daemon.PidRecord{})
+			if err != nil {
+				t.Fatalf("resolve with ENGRAM_PORT %q: %v", value, err)
+			}
+			if port != 7437 {
+				t.Fatalf("invalid ENGRAM_PORT %q port = %d, want the 7437 fallback", value, port)
 			}
 		}
 	})
@@ -431,6 +481,106 @@ func TestStopDaemonIdentityGate(t *testing.T) {
 		}
 		if len(*signaled) != 1 || (*signaled)[0] != livePid {
 			t.Fatalf("legacy stop signaled %v, want pid %d once", *signaled, livePid)
+		}
+	})
+}
+
+// TestStopDaemonPreservesReplacementPidfile pins the stop/restart cleanup
+// race behind the revalidation gate: when the pidfile record is replaced
+// between the stop decision and the record cleanup (a concurrent `run -d`
+// publishing a fresh daemon after the old one exits), the replacement
+// record is never removed.
+func TestStopDaemonPreservesReplacementPidfile(t *testing.T) {
+	cfg := store.Config{DataDir: t.TempDir()}
+	if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7609, Token: "ours"}); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7609, Token: "ours"})
+	replacement := daemon.PidRecord{Pid: 424242, Port: 7610, Token: "replacement"}
+	saved := stopDaemonProcessNow
+	stopDaemonProcessNow = func(pid int) error {
+		// Simulate the concurrent start publishing its record after the stop
+		// decision but before the cleanup runs.
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), replacement); err != nil {
+			t.Errorf("write replacement pidfile: %v", err)
+		}
+		return nil
+	}
+	t.Cleanup(func() { stopDaemonProcessNow = saved })
+	out := swapStdoutPrinter(t)
+	if _, err := stopDaemon(cfg); err != nil {
+		t.Fatalf("stop with a replacement record: %v", err)
+	}
+	if !strings.Contains(out.String(), "Stopped engram daemon") {
+		t.Fatalf("stop output = %q, want Stopped engram daemon", out.String())
+	}
+	current, err := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir))
+	if err != nil {
+		t.Fatalf("replacement pidfile was removed by the stop cleanup: %v", err)
+	}
+	if current != replacement {
+		t.Fatalf("pidfile record = %+v, want the replacement %+v", current, replacement)
+	}
+}
+
+// TestRemovePidfileIfUnchanged pins the revalidation gate behind the stop
+// and ps cleanups: only the exact record that was acted on (same pid and
+// token) is removed; a changed record and an already-missing pidfile are
+// left alone as success.
+func TestRemovePidfileIfUnchanged(t *testing.T) {
+	path := daemon.PidfilePath(t.TempDir())
+	acted := daemon.PidRecord{Pid: 4242, Port: 7437, Token: "ours"}
+	if err := daemon.WritePidfile(path, acted); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	for _, changed := range []daemon.PidRecord{
+		{Pid: 5353, Port: 7437, Token: "ours"},
+		{Pid: 4242, Port: 7437, Token: "theirs"},
+	} {
+		if err := removePidfileIfUnchanged(path, changed); err != nil {
+			t.Fatalf("remove with %+v acted on: %v", changed, err)
+		}
+		if _, rerr := daemon.ReadPidfile(path); rerr != nil {
+			t.Fatalf("changed record %+v was removed: %v", changed, rerr)
+		}
+	}
+	if err := removePidfileIfUnchanged(path, acted); err != nil {
+		t.Fatalf("remove the acted-on record: %v", err)
+	}
+	if _, rerr := daemon.ReadPidfile(path); !errors.Is(rerr, daemon.ErrNoPidfile) {
+		t.Fatalf("acted-on record survived: %v", rerr)
+	}
+	if err := removePidfileIfUnchanged(path, acted); err != nil {
+		t.Fatalf("remove an already-missing pidfile: %v", err)
+	}
+}
+
+// TestStopDaemonProcessRefusesOwnProcess pins the self-kill guard in the
+// platform stop path: a pidfile recording the CLI's own pid can never make
+// engram signal itself, and stopDaemon keeps such a record (unmanaged)
+// instead of removing it.
+func TestStopDaemonProcessRefusesOwnProcess(t *testing.T) {
+	t.Run("platform stop refuses the own pid", func(t *testing.T) {
+		err := stopDaemonProcess(os.Getpid())
+		if err == nil || !strings.Contains(err.Error(), "refusing to signal own process") {
+			t.Fatalf("own-pid stop error = %v, want refusing to signal own process", err)
+		}
+	})
+	t.Run("stopDaemon keeps the own-pid record unmanaged", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7608, Token: "ours"}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7608, Token: "ours"})
+		swapStdoutPrinter(t)
+		// No signal-seam swap: the real platform stop must refuse the own
+		// pid before any signaling, and the record must stay tracked.
+		_, err := stopDaemon(cfg)
+		if err == nil || !strings.Contains(err.Error(), "refusing to signal own process") {
+			t.Fatalf("own-pid record stop error = %v, want the own-process refusal", err)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); rerr != nil {
+			t.Fatalf("own-pid record was removed: %v", rerr)
 		}
 	})
 }

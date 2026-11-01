@@ -15,6 +15,13 @@ import (
 // semantics, spec S5): SIGTERM with a grace period, then SIGKILL with a
 // shorter one. Only the pidfile pid is ever signaled.
 func stopDaemonProcess(pid int) error {
+	if pid == os.Getpid() {
+		// A daemon record can never describe this CLI process itself: the
+		// daemon is a detached child. Refuse before signaling so a corrupt
+		// or test-written pidfile can never make engram kill itself; the
+		// caller keeps the record and reports it as unmanaged.
+		return fmt.Errorf("refusing to signal own process (pid %d)", pid)
+	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("find daemon process: %w", err)

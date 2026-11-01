@@ -495,6 +495,37 @@ func TestAssertDaemonStartableIdentity(t *testing.T) {
 			t.Fatalf("legacy confirmed record was cleared: %v", rerr)
 		}
 	})
+	t.Run("unreachable probe preserves the record and rejects the start", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7606, Token: "ours"}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusUnreachable, Port: 7606})
+		out := swapStdoutPrinter(t)
+		err := assertDaemonStartable(dataDir, 7606)
+		if err == nil || !strings.Contains(err.Error(), "did not confirm the daemon") {
+			t.Fatalf("unreachable admission error = %v, want the not-confirmed rejection", err)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); rerr != nil {
+			t.Fatalf("unreachable admission cleared the record: %v", rerr)
+		}
+		if out.String() != "" {
+			t.Fatalf("unreachable admission output = %q, want no clearing note", out.String())
+		}
+	})
+	t.Run("not-running probe clears the unmanaged pidfile", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7606, Token: "ours"}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning, Port: 7606})
+		if err := assertDaemonStartable(dataDir, 7606); err != nil {
+			t.Fatalf("not-running admission: %v", err)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+			t.Fatalf("not-running admission kept the record: %v", rerr)
+		}
+	})
 }
 
 // TestRunCleanupFailedStartRemovesOnlyOwnRecords pins the failed-start
@@ -567,6 +598,9 @@ func TestRunDetachedWaitsForStartLock(t *testing.T) {
 	err = runDetached(cfg, serveOptions{port: 7607})
 	if err == nil || !strings.Contains(err.Error(), "another start is in progress") {
 		t.Fatalf("locked start error = %v, want the held-lock failure", err)
+	}
+	if strings.Contains(err.Error(), "remove the file") {
+		t.Fatalf("held-lock error still advises removing the lock file: %v", err)
 	}
 	if spawned {
 		t.Fatal("locked start spawned a child")
