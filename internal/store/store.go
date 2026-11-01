@@ -4377,7 +4377,7 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 					     normalized_hash = ?,
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
-					     updated_at = datetime('now')
+					     updated_at = ?
 					 WHERE id = ?`,
 					p.SessionID,
 					p.Type,
@@ -4386,6 +4386,7 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 					nullableString(p.ToolName),
 					nullableString(topicKey),
 					normHash,
+					Now(),
 					existingID,
 				); err != nil {
 					return err
@@ -4422,8 +4423,9 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 				`UPDATE observations
 				 SET duplicate_count = duplicate_count + 1,
 				     last_seen_at = datetime('now'),
-				     updated_at = datetime('now')
+				     updated_at = ?
 				 WHERE id = ?`,
+				Now(),
 				existingID,
 			); err != nil {
 				return err
@@ -5453,7 +5455,7 @@ func (s *Store) updateObservation(id int64, p UpdateObservationParams, expected 
 			     topic_key = ?,
 			     normalized_hash = ?,
 			     revision_count = revision_count + 1,
-			     updated_at = datetime('now')
+			     updated_at = ?
 			 WHERE id = ? AND deleted_at IS NULL`,
 			typ,
 			title,
@@ -5462,6 +5464,7 @@ func (s *Store) updateObservation(id int64, p UpdateObservationParams, expected 
 			scope,
 			nullableString(topicKey),
 			hashNormalized(content),
+			Now(),
 			id,
 		); err != nil {
 			return err
@@ -5593,9 +5596,11 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, expected *string) e
 		} else {
 			if _, err := s.execHook(tx,
 				`UPDATE observations
-				 SET deleted_at = datetime('now'),
-				     updated_at = datetime('now')
+				 SET deleted_at = ?,
+				     updated_at = ?
 				 WHERE id = ? AND deleted_at IS NULL`,
+				deletedAt,
+				deletedAt,
 				id,
 			); err != nil {
 				return err
@@ -10129,12 +10134,13 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 			}
 			result.ObservationsDeleted, _ = res.RowsAffected()
 		} else {
+			deletedAt := Now()
 			res, err := s.execHook(tx, `
 				UPDATE observations
-				SET deleted_at = datetime('now'),
-				    updated_at = datetime('now')
+				SET deleted_at = ?,
+				    updated_at = ?
 				WHERE project = ? AND deleted_at IS NULL
-			`, project)
+			`, deletedAt, deletedAt, project)
 			if err != nil {
 				return fmt.Errorf("delete project: soft-delete observations: %w", err)
 			}
@@ -10618,6 +10624,28 @@ func (s *Store) localUpsertBlockedByTombstoneTx(tx *sql.Tx, entity, entityKey, g
 	generation = normalizeComparableTimestamp(generation)
 	deletedAt = normalizeComparableTimestamp(deletedAt)
 	return generation != "" && deletedAt != "" && generation <= deletedAt, nil
+}
+
+// A local snapshot may restore a soft-deleted row only when its generation
+// proves it is newer than the deletion. Cloud replication orders by sequence
+// instead and does not use this timestamp admission rule.
+func (s *Store) localObservationRestoreBlockedTx(tx *sql.Tx, syncID, generation string) (bool, error) {
+	var deletedAt sql.NullString
+	// Match the latest-row identity used by getObservationBySyncIDTx, including
+	// legacy databases where sync_id is indexed but not unique.
+	err := tx.QueryRow(`SELECT deleted_at FROM observations WHERE sync_id = ? ORDER BY id DESC LIMIT 1`, syncID).Scan(&deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !deletedAt.Valid {
+		return false, nil
+	}
+	generation = normalizeComparableTimestamp(generation)
+	deletion := normalizeComparableTimestamp(deletedAt.String)
+	return generation == "" || deletion == "" || generation <= deletion, nil
 }
 
 func (s *Store) cloudUpsertBlockedByTombstoneTx(tx *sql.Tx, targetKey, entity, entityKey string, seq int64) (bool, error) {
@@ -12088,6 +12116,10 @@ func (s *Store) applyPulledMutationWithSessionContextTx(tx *sql.Tx, mutation Syn
 				generation = payload.CreatedAt
 			}
 			blocked, err := s.localUpsertBlockedByTombstoneTx(tx, SyncEntityObservation, payload.SyncID, generation)
+			if err != nil || blocked {
+				return err
+			}
+			blocked, err = s.localObservationRestoreBlockedTx(tx, payload.SyncID, generation)
 			if err != nil || blocked {
 				return err
 			}
