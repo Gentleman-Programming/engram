@@ -1169,7 +1169,11 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 			if bound.PermissionDecision != "deny" || bound.UpdatedInput != nil || derived || posted {
 				t.Fatalf("%s must deny without cwd resolution or registration: decision=%q derived=%v posted=%v (%s)", tc.name, bound.PermissionDecision, derived, posted, bound.PermissionDecisionReason)
 			}
-			if !strings.Contains(bound.PermissionDecisionReason, "session lookup failed") && !(tc.sessionGet == nil && strings.Contains(bound.PermissionDecisionReason, "identity unconfirmed")) {
+			wantCause := "session lookup failed"
+			if tc.sessionGet == nil {
+				wantCause = "identity unconfirmed"
+			}
+			if !strings.Contains(bound.PermissionDecisionReason, wantCause) {
 				t.Fatalf("%s must name the lookup cause, got %q", tc.name, bound.PermissionDecisionReason)
 			}
 		})
