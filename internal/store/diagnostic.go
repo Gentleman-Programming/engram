@@ -685,7 +685,7 @@ func (s *Store) RepairObservationSourceTitles(project string, apply bool) (Obser
 		actions = observationSourceTitleRepairActions(currentRows)
 		report.Unrepairable = observationSourceUnrepairable(currentRows, actions)
 		for _, action := range actions {
-			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = datetime('now') WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, action.ID, action.SyncID)
+			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = ? WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, Now(), action.ID, action.SyncID)
 			if err != nil {
 				return fmt.Errorf("repair source observation title %d: %w", action.ID, err)
 			}

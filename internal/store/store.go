@@ -4423,8 +4423,9 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 				`UPDATE observations
 				 SET duplicate_count = duplicate_count + 1,
 				     last_seen_at = datetime('now'),
-				     updated_at = datetime('now')
+				     updated_at = ?
 				 WHERE id = ?`,
+				Now(),
 				existingID,
 			); err != nil {
 				return err
@@ -10133,12 +10134,13 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 			}
 			result.ObservationsDeleted, _ = res.RowsAffected()
 		} else {
+			deletedAt := Now()
 			res, err := s.execHook(tx, `
 				UPDATE observations
-				SET deleted_at = datetime('now'),
-				    updated_at = datetime('now')
+				SET deleted_at = ?,
+				    updated_at = ?
 				WHERE project = ? AND deleted_at IS NULL
-			`, project)
+			`, deletedAt, deletedAt, project)
 			if err != nil {
 				return fmt.Errorf("delete project: soft-delete observations: %w", err)
 			}

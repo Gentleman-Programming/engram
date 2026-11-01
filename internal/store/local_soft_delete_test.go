@@ -113,6 +113,18 @@ func TestLocalObservationWritesRetainGenerationPrecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPrecision(topic.UpdatedAt)
+	duplicateID, err := s.AddObservation(AddObservationParams{SessionID: "S", Project: "p", Type: "note", Title: "topic edit", Content: "topic edit"})
+	if err != nil || duplicateID != id {
+		t.Fatalf("duplicate id=%d want=%d err=%v", duplicateID, id, err)
+	}
+	duplicate, err := s.GetObservation(duplicateID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.DuplicateCount != topic.DuplicateCount+1 {
+		t.Fatal("save did not exercise deduplication")
+	}
+	assertPrecision(duplicate.UpdatedAt)
 	if err := s.DeleteObservation(id, false); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +168,61 @@ func TestCloudSoftDeleteRestoreKeepsSequenceOrdering(t *testing.T) {
 	after, err := s.GetObservation(id)
 	if err != nil || after.Title != "restored" {
 		t.Fatalf("cloud restore=%+v %v", after, err)
+	}
+}
+
+func TestAdditionalLocalObservationGenerationWriters(t *testing.T) {
+	assertGeneration := func(t *testing.T, s *Store, id int64, deleted bool) {
+		t.Helper()
+		var updated string
+		var deletion *string
+		if err := s.db.QueryRow(`SELECT updated_at, deleted_at FROM observations WHERE id = ?`, id).Scan(&updated, &deletion); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := time.Parse("2006-01-02 15:04:05.000000000", updated); err != nil {
+			t.Fatalf("generation=%q: %v", updated, err)
+		}
+		if deleted && (deletion == nil || *deletion != updated) {
+			t.Fatalf("deletion and generation differ: %v/%s", deletion, updated)
+		}
+	}
+	t.Run("consolidation deletion", func(t *testing.T) {
+		s, ids, _ := consolidateTestStore(t)
+		plan, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ConsolidateObservations(ConsolidateParams{IDs: ids, Confirm: true, Fingerprint: plan.Plan.Fingerprint}); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range ids {
+			assertGeneration(t, s, id, true)
+		}
+	})
+	for _, mode := range []string{"project deletion", "source title repair"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("S", "p", "/p"); err != nil {
+				t.Fatal(err)
+			}
+			id, err := s.AddObservation(AddObservationParams{SessionID: "S", Project: "p", Type: "note", Title: "original", Content: "Recoverable source title."})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "project deletion" {
+				if _, err := s.DeleteProject("p", false); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.RepairObservationSourceTitles("p", true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertGeneration(t, s, id, mode == "project deletion")
+		})
 	}
 }
 
