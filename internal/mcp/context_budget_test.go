@@ -363,6 +363,7 @@ func TestMemContextBudgetCompactMistypedIsFalse(t *testing.T) {
 // personal context and the activity nudge. A store with many long project names must
 // never push the tool result past the requested budget.
 func TestMemContextBudgetTotalResultBound(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "engram")
 	s := newMCPTestStore(t)
 	// Small memory dataset so the context block itself stays tiny; the bulk of
 	// the result is the projects join in the stats suffix (~150 x ~120 chars).
