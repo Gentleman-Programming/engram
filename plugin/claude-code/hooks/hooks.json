@@ -67,8 +67,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.sh\"",
-            "timeout": 10,
-            "async": true
+            "timeout": 10
           }
         ]
       }

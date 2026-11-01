@@ -35,12 +35,12 @@ func TestClaudeSubagentHandbackHookRegistration(t *testing.T) {
 			continue
 		}
 		for _, hook := range group.Hooks {
-			if hook.Type == "command" && hook.Command == `"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.sh"` && hook.Async && hook.Timeout == 10 {
+			if hook.Type == "command" && hook.Command == `"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.sh"` && !hook.Async && hook.Timeout == 10 {
 				return
 			}
 		}
 	}
-	t.Fatal("missing asynchronous exact-match SubagentHandback capture hook")
+	t.Fatal("missing synchronous exact-match SubagentHandback capture hook")
 }
 
 func TestSubagentHandbackPersistsAndDeduplicatesThroughCore(t *testing.T) {
