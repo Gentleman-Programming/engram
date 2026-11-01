@@ -832,6 +832,10 @@ func main() {
 		if err := cmdServe(cfg); err != nil {
 			fatal(err)
 		}
+	case "run":
+		if err := cmdRun(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
 	case "mcp":
 		cmdMCP(cfg)
 	case "tui":
@@ -887,7 +891,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
+	case "mcp", "serve", "run", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -938,6 +942,13 @@ func cmdServe(cfg store.Config) error {
 	if err != nil {
 		return err
 	}
+	return serveWith(cfg, options)
+}
+
+// serveWith is the shared serving body behind `engram serve` and `engram run`
+// (foreground mode). It owns the store, server, autosync, and signal loop.
+func serveWith(cfg store.Config, options serveOptions) error {
+	var err error
 
 	// Owned EOF cancels startup lock waits as well as serving. Construction
 	// stays synchronous so cleanup cannot race abandoned live store work.
@@ -972,6 +983,15 @@ func cmdServe(cfg store.Config) error {
 			default:
 			}
 			return emitOwnedReadiness(addr, s.InstanceID())
+		})
+	}
+	// Daemon child mode (`engram run -d`): publish the pidfile and the parent
+	// handshake record once the listener is bound; errors abort serving so a
+	// half-started daemon never reports success.
+	if readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN"); readyFile != "" && readyToken != "" && !options.sessionOwned {
+		dataDir := cfg.DataDir
+		srv.SetOnReady(func(addr net.Addr) error {
+			return writeRunReadiness(dataDir, readyFile, readyToken, addr)
 		})
 	}
 	srv.SetSocketPath(options.socketPath)
@@ -3920,6 +3940,9 @@ Usage:
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
   serve --session-owned  Private ephemeral HTTP server; requires ENGRAM_TOKEN, stops on stdin EOF
+  run [-d] [-p PORT]  Start the HTTP API daemon; -d detaches to the background, records
+                     the pidfile under the data dir and prints PID and port; without -d it
+                     serves in the foreground exactly like serve
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
                         Profiles: agent (%d tools), admin (%d tools), all (default, %d)
