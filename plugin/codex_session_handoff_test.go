@@ -635,6 +635,26 @@ func codexHandoffEnv(t *testing.T, cwd, serverURL string, binary ...string) []st
 		t.Fatal(err)
 	}
 	quote := codexIntentQuote
+	toolPaths := make(map[string]string)
+	paths := []string{f.bash, cwd, bin, filepath.ToSlash(filepath.Join(cwd, "guard-rejected"))}
+	for _, name := range []string{"cat", "dirname", "jq", "date", "touch", "bash", "curl"} {
+		toolPaths[name] = codexIntentTool(t, name, filepath.Dir(f.bash))
+		paths = append(paths, toolPaths[name])
+	}
+	if len(binary) >= 1 {
+		if _, owned := codexFixtureBinaries.Load(binary[0]); !owned || !filepath.IsAbs(binary[0]) {
+			t.Fatal("fixture CLI must be an absolute candidate-built executable")
+		}
+		binary[0] = codexIntentExecutable(t, binary[0])
+		paths = append(paths, binary[0])
+	}
+	converted := codexHandoffConvertPaths(t, f, paths)
+	posix := make(map[string]string, len(paths))
+	for i, path := range paths {
+		posix[path] = converted[i]
+	}
+	// Callers may convert dynamic command arguments through BASH_ENV. Keep
+	// that contract while preconverting the fixture's static paths above.
 	conversion := "converter=" + quote(f.cygpath) + "\n" + `convert() {
   if [ -n "$converter" ]; then
     "$converter" -u -- "$1"
@@ -645,32 +665,27 @@ func codexHandoffEnv(t *testing.T, cwd, serverURL string, binary ...string) []st
 `
 	writeTool := func(name, body string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!"+f.alias+" -p\n"+conversion+body+"\n"), 0o700); err != nil {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!"+f.alias+" -p\n"+body+"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	resolve := func(name string) string {
 		t.Helper()
-		path := codexIntentTool(t, name, filepath.Dir(f.bash))
-		return "\"$(convert " + quote(path) + ")\""
+		return quote(posix[toolPaths[name]])
 	}
 	for _, name := range []string{"cat", "dirname", "jq", "date", "touch", "bash"} {
 		writeTool(name, "exec "+resolve(name)+` "$@"`)
 	}
-	reject := "printf '%s\\n' rejected >> \"$(convert " + quote(filepath.ToSlash(filepath.Join(cwd, "guard-rejected"))) + ")\"; exit 97"
+	reject := "printf '%s\\n' rejected >> " + quote(posix[filepath.ToSlash(filepath.Join(cwd, "guard-rejected"))]) + "; exit 97"
 	writeTool("engram", reject)
 	if len(binary) >= 1 {
-		if _, owned := codexFixtureBinaries.Load(binary[0]); !owned || !filepath.IsAbs(binary[0]) {
-			t.Fatal("fixture CLI must be an absolute candidate-built executable")
-		}
-		binary[0] = codexIntentExecutable(t, binary[0])
 		writeTool("engram", `if [ "${FIXTURE_LOCAL:-}" = 1 ] && [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$#" = 1 ] && [ "$1" = instance-id ]; then
   printf 'fixture-instance\n'
   exit 0
 fi
 if [ "${FIXTURE_LOCAL:-}" = 1 ] && [ "$#" = 2 ] && [ "$1" = protocol-mode ] && [ "$2" = claude-code ]; then
   [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$ENGRAM_URL" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
-  exec "$(convert `+quote(binary[0])+`)" "$@"
+  exec `+quote(posix[binary[0]])+` "$@"
 fi
 [ "$ENGRAM_PORT" = `+quote(target.Port())+` ] && [ "$#" -eq 2 ] && [ "$1" = hook ] && [ "${ENGRAM_URL:-http://127.0.0.1:$ENGRAM_PORT}" = `+quote(strings.TrimSpace(serverURL))+` ] || { `+reject+`; }
 case "$2" in
@@ -678,7 +693,7 @@ case "$2" in
   codex-session-end) ;;
   *) `+reject+` ;;
 esac
-exec "$(convert `+quote(binary[0])+`)" "$@"`)
+exec `+quote(posix[binary[0]])+` "$@"`)
 	}
 	writeTool("curl", "origin="+quote(target.Scheme+"://"+target.Host)+"\n"+`validate_request() {
   urls=0
@@ -711,10 +726,7 @@ exec "$(convert `+quote(binary[0])+`)" "$@"`)
 validate_request "$@" || { `+reject+`; }
 exec `+resolve("curl")+` --disable --noproxy '*' --proxy '' --proto '=http' --globoff --max-time 3 "$@"`)
 	gate := filepath.Join(cwd, "private-startup.sh")
-	startup := "unset BASH_ENV\ntrusted_bash=" + quote(f.bash) + "\nbash_alias=" + quote(f.alias) + "\nroot=" + quote(filepath.ToSlash(cwd)) + "\nbin=" + quote(filepath.ToSlash(bin)) + "\n" + conversion + `
-trusted_bash=$(convert "$trusted_bash") || exit 91
-root=$(convert "$root") || exit 91
-bin=$(convert "$bin") || exit 91
+	startup := "unset BASH_ENV\ntrusted_bash=" + quote(posix[f.bash]) + "\nbash_alias=" + quote(f.alias) + "\nroot=" + quote(posix[cwd]) + "\nbin=" + quote(posix[bin]) + "\n" + conversion + `
 [ "$bash_alias" -ef "$trusted_bash" ] && [ /bin/bash -ef "$trusted_bash" ] || exit 91
 [ -d "$root" ] || exit 91
 cd "$root" || exit 91
@@ -762,6 +774,35 @@ fi
 		env = append(env, "SystemRoot="+os.Getenv("SystemRoot"), "WINDIR="+os.Getenv("SystemRoot"), "OS=Windows_NT")
 	}
 	return env
+}
+
+func codexHandoffConvertPaths(t *testing.T, f codexIntentFixture, paths []string) []string {
+	t.Helper()
+	if f.cygpath == "" {
+		return paths
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, f.cygpath, append([]string{"-u", "--"}, paths...)...)
+	cmd.WaitDelay = time.Second
+	cmd.Env = []string{"PATH=", "MSYS_NO_PATHCONV=1", "SystemRoot=" + os.Getenv("SystemRoot"), "WINDIR=" + os.Getenv("SystemRoot"), "TMP=" + codexBashProcessTemp, "TEMP=" + codexBashProcessTemp}
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w: %v", ctx.Err(), err)
+		}
+		t.Fatalf("convert pinned fixture paths: %v", err)
+	}
+	converted := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n"), "\n")
+	if len(converted) != len(paths) {
+		t.Fatal("fixture path conversion count mismatch")
+	}
+	for _, path := range converted {
+		if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\r\n") {
+			t.Fatal("invalid converted fixture path")
+		}
+	}
+	return converted
 }
 
 func TestCodexHandoffTransportBoundary(t *testing.T) {
