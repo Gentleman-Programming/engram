@@ -19,7 +19,7 @@ Implements issue #2228 (still `status:needs-review`; user authorized start by di
 
 | ID | Spec | Route | Commit |
 | --- | --- | --- | --- |
-| T1 | S1 | internal/server typed error for same-instance port ownership + cmdServe maps to non-zero exit; fix DOCS.md exit-0 text; RED→GREEN tests (seam: newHTTPServer/startHTTP, listen seam in server) | — |
+| T1 | S1 | internal/server typed error for same-instance port ownership + cmdServe maps to non-zero exit; fix DOCS.md exit-0 text; RED→GREEN tests (seam: newHTTPServer/startHTTP, listen seam in server) | f24bb0a |
 | T2 | S9 | internal/daemon package: pidfile (atomic write, stale-pid liveness), health probe (extract/reuse cloud_daemon_probe logic), log-sink path helper; unit tests | — |
 | T3 | S2, S3, S6 | `engram run [-d] [-p PORT]` verb: already-running guard, detach (Unix double-fork/setsid; Windows exec-detach per serve_background.go), stdio→log sink, readiness handshake, pidfile write, print PID+port; tests (child env-marker) | — |
 | T4 | S4, S5, S7, S8 | `engram ps` / `stop` / `logs [-f]` / `restart` verbs; graceful-then-force stop (SIGTERM/SIGKILL unix; CTRL_BREAK/TerminateProcess windows); pidfile-owned daemon only; tests | — |
@@ -32,3 +32,4 @@ Implements issue #2228 (still `status:needs-review`; user authorized start by di
 - L3 (request, verbatim): "create a new branch called 'as-daemon', checkout to it and start with plan" — go-ahead. Branch created then renamed `feat/as-daemon` (commit-hygiene ruleset rejects bare names on push). Decisions adopted: `run` without `-d` = foreground serve; daemon verbs manage only the pidfile-tracked daemon (never session-owned MCP serves); log sink `<dataDir>/serve.log`; `service install` deferred to follow-up issue.
 - L4 (requirement, verbatim): "code for mac, linux debian and windows 11" — platform split via `*_unix.go`/`*_windows.go` file pattern (prior art: job_windows.go/job_other.go).
 - L5: Issue #2228 remains `status:needs-review` upstream; user instruction authorizes local implementation anyway.
+- L6: T1 done (commit f24bb0a). RED observed: `same-instance bind loser: <nil>, want ErrPortOwned`; GREEN + full internal/server suite green; go build ./cmd/engram clean. Existing test TestStartAcceptsOnlySameInstanceBindLoser rewritten to TestStartRejectsSameInstanceBindLoser (pinned old exit-0 semantics); `log` import removed from server_test.go (only user). cmd-level exit-code test skipped as over-proportional: cmdServe pass-through (`return serveErr`) is unchanged generic code; the exit-0 origin was server.Start returning nil, now pinned. Risk: item 3 — serve port-owned exit code changes 0→non-zero (requested by S1, pinned by test).

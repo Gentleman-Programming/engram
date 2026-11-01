@@ -2,32 +2,26 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/daemon"
 )
 
 // daemonProbeStatus describes the outcome of probing the local engram daemon.
-type daemonProbeStatus string
+type daemonProbeStatus = daemon.Status
 
 const (
-	daemonProbeRunning     daemonProbeStatus = "running"
-	daemonProbeNotRunning  daemonProbeStatus = "not_running"
-	daemonProbeUnreachable daemonProbeStatus = "unreachable"
+	daemonProbeRunning     = daemon.StatusRunning
+	daemonProbeNotRunning  = daemon.StatusNotRunning
+	daemonProbeUnreachable = daemon.StatusUnreachable
 )
 
 // daemonProbeResult captures the outcome of a single probe.
-type daemonProbeResult struct {
-	Status daemonProbeStatus
-	Port   int
-	Err    error
-}
+type daemonProbeResult = daemon.ProbeResult
 
 const defaultDaemonProbePort = 7437
 
@@ -39,31 +33,11 @@ var daemonProbeTimeout = time.Second
 // HTTP server. Exposed as a variable so tests can stub it.
 var cloudDaemonProbe = defaultCloudDaemonProbe
 
-// defaultCloudDaemonProbe performs a real HTTP GET against the local daemon.
-// A dial error to 127.0.0.1 is interpreted as "not running"; any other error
-// (timeout, non-2xx response, malformed reply) maps to "unreachable" so the
-// user can distinguish "the daemon is gone" from "the daemon is misbehaving".
+// defaultCloudDaemonProbe performs a real HTTP GET against the local daemon
+// through the shared implementation in internal/daemon, which also backs the
+// daemon control verbs (`engram ps`).
 func defaultCloudDaemonProbe(ctx context.Context, port int) daemonProbeResult {
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
-	client := &http.Client{Timeout: daemonProbeTimeout}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: err}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		var opErr *net.OpError
-		if errors.As(err, &opErr) && opErr.Op == "dial" {
-			return daemonProbeResult{Status: daemonProbeNotRunning, Port: port, Err: err}
-		}
-		return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: err}
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
-	}
-	return daemonProbeResult{Status: daemonProbeUnreachable, Port: port}
+	return daemon.Probe(ctx, port, daemonProbeTimeout)
 }
 
 // resolveDaemonProbePort mirrors the port resolution used by cmdServe so the
