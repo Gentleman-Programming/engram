@@ -1695,6 +1695,8 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_scope ON observations(scope);
 		CREATE INDEX IF NOT EXISTS idx_obs_sync_id ON observations(sync_id);
 		CREATE INDEX IF NOT EXISTS idx_obs_project_lower ON observations(LOWER(project));
+		CREATE INDEX IF NOT EXISTS idx_sessions_project_lower ON sessions(LOWER(project));
+		CREATE INDEX IF NOT EXISTS idx_prompts_project_lower ON user_prompts(LOWER(project));
 		CREATE INDEX IF NOT EXISTS idx_obs_topic ON observations(topic_key, project, scope, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_obs_deleted ON observations(deleted_at);
 		CREATE INDEX IF NOT EXISTS idx_obs_dedupe ON observations(normalized_hash, project, scope, type, title, created_at DESC);
