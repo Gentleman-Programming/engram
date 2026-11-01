@@ -65,7 +65,7 @@ func printCloudStatusDaemonProbe() {
 		fmt.Printf("Local daemon: running on port %d\n", res.Port)
 	case daemonProbeNotRunning:
 		fmt.Printf("Local daemon: not running on port %d\n", res.Port)
-		fmt.Println("Hint: run `engram serve` to resume autosync; on macOS see DOCS.md launchd template to keep it alive across upgrades")
+		fmt.Println("Hint: run `engram run -d` to start the daemon (or `engram serve` in the foreground); on macOS see DOCS.md launchd template to keep it alive across upgrades")
 	default:
 		if res.Err != nil {
 			fmt.Printf("Local daemon: unreachable on port %d (probe error: %v)\n", res.Port, res.Err)

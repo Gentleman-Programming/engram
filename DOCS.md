@@ -2016,6 +2016,25 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 Use a service supervisor to start `engram serve` after reboot and restart it after failures. Replacing the binary alone does not guarantee that an existing process exits. In this version, permanent database generation invalidation observed by an HTTP request triggers autosync cancellation, up to five seconds of HTTP draining, listener release, and a nonzero exit after cleanup. Restart belongs to the supervisor or operator, not Engram itself; already-running older binaries do not gain this behavior. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
 
+### CLI daemon verbs (docker-style)
+
+Engram ships docker-style verbs for the common daemon lifecycle. They manage only the daemon started by `engram run -d` — the one tracked by the pidfile — and never touch session-owned serves that MCP clients spawn per session.
+
+| Concern | Docker equivalent | Engram command |
+| --- | --- | --- |
+| Run in background | `docker run -d` | `engram run -d` — detaches, prints PID and port |
+| Custom port | `docker run -d -p 1234` | `engram run -d -p 1234` — fails loudly if the port is taken |
+| Status | `docker ps` | `engram ps` — running (pid N) on port P / not running / unreachable |
+| Stop | `docker stop` | `engram stop` — graceful stop, then force if needed |
+| Logs | `docker logs` | `engram logs` — `engram logs -f` follows |
+| Restart | `docker restart` | `engram restart [-p PORT]` — stop, then start detached again |
+
+- The daemon records `<dataDir>/serve.pid` (JSON `{"pid": N, "port": P}`) and writes its stdout/stderr to `<dataDir>/serve.log` (default data dir `~/.engram`).
+- A second `engram run -d` against a live daemon reports `already running (pid N)` and exits non-zero.
+- A port conflict is a startup error with a non-zero exit code, so `KeepAlive`/`Restart` supervisors never hot-loop on a silent exit-0 bind failure.
+- `engram stop` escalates from graceful to forced termination; on Windows, detached children cannot receive console events, so stop terminates the process directly.
+- The verbs complement the supervisor templates below: use a unit for boot persistence and the verbs for day-to-day control.
+
 ### Using systemd (Linux)
 
 1. Move binary to `~/.local/bin` (ensure it's in your `$PATH`)
