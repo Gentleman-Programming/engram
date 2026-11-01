@@ -891,6 +891,16 @@ jobs:
         working-directory: plugin/pi
         run: npm ci --ignore-scripts --legacy-peer-deps
 
+      - name: Build real Windows recovery binary
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $binary = Join-Path $env:RUNNER_TEMP 'windows-suite/recovery-engram.exe'
+          & go build -o $binary ./cmd/engram
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) { exit $buildExit }
+          Add-Content $env:GITHUB_ENV "ENGRAM_RECOVERY_PUBLIC_BINARY=$binary"
+
       - name: Run full default-tags module suite
         run: |
           $ErrorActionPreference = 'Stop'
@@ -904,6 +914,11 @@ jobs:
             Tee-Object "$evidence/result.txt"
           Get-Content "$evidence/suite.json"
           Get-Content "$evidence/stderr.txt"
+          if ($suiteExit -eq 0) {
+            & node .github/scripts/prerequisite-coverage.mjs windows-recovery "$evidence/suite.json" $suiteExit
+            $coverageExit = $LASTEXITCODE
+            if ($coverageExit -ne 0) { exit $coverageExit }
+          }
           exit $suiteExit
 
       - name: Preserve failure evidence

@@ -220,6 +220,14 @@ Test home/profile, app data, Engram data and temp directories are job-local;
 Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
 provide process isolation, not measured proof of cleanup.
 
+The job builds a fresh `cmd/engram` executable into runner-owned temp and exports
+`ENGRAM_RECOVERY_PUBLIC_BINARY` before the unchanged full-suite invocation.
+`prerequisite-coverage.mjs windows-recovery EVENTS.json GO_EXIT` requires
+`TestHookManagedLocalPublicRecovery` to execute and pass, not skip. A nonzero Go
+exit remains authoritative; successful JSON cannot mask it. The original native
+identity, job-object ownership and cleanup assertions remain unchanged. Wiring
+checks alone do not establish the new binary-backed native execution.
+
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
 failure artifacts when available. Cancellation/outer timeout can leave partial
 output without a completed exit/timing record. Wiring and structural tests do
