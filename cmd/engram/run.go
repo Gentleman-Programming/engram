@@ -136,9 +136,10 @@ func assertDaemonStartable(dataDir string, port int) error {
 		// identity: the daemon may be alive and merely unhealthy (a busy
 		// store, a timed-out probe). That is not evidence the record is
 		// stale, so preserve it and reject the start — clearing it could
-		// unmanage a live daemon. Retry once it answers, or stop it
-		// explicitly.
-		return fmt.Errorf("port %d is bound but /health did not confirm the daemon (pid %d may still be alive); record kept at %s; retry when it answers or run `engram stop`", probePort, record.Pid, pidPath)
+		// unmanage a live daemon. `engram stop` cannot recover this state
+		// either (it refuses to signal an unconfirmed pid), so the error
+		// names the manual resolution instead of pointing at it.
+		return fmt.Errorf("port %d is bound but /health did not confirm the daemon (pid %d may still be alive); record kept at %s; retry when it answers, or verify pid %d and stop it manually, or remove %s if the record is stale", probePort, record.Pid, pidPath, record.Pid, pidPath)
 	}
 	// The pid is alive but the daemon identity does not answer: nothing owns
 	// the recorded port (not running) or a foreign daemon answered the
