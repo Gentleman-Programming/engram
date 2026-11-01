@@ -5453,7 +5453,7 @@ func (s *Store) updateObservation(id int64, p UpdateObservationParams, expected 
 			     topic_key = ?,
 			     normalized_hash = ?,
 			     revision_count = revision_count + 1,
-			     updated_at = datetime('now')
+			     updated_at = ?
 			 WHERE id = ? AND deleted_at IS NULL`,
 			typ,
 			title,
@@ -5462,6 +5462,7 @@ func (s *Store) updateObservation(id int64, p UpdateObservationParams, expected 
 			scope,
 			nullableString(topicKey),
 			hashNormalized(content),
+			Now(),
 			id,
 		); err != nil {
 			return err
@@ -5593,9 +5594,11 @@ func (s *Store) deleteObservation(id int64, hardDelete bool, expected *string) e
 		} else {
 			if _, err := s.execHook(tx,
 				`UPDATE observations
-				 SET deleted_at = datetime('now'),
-				     updated_at = datetime('now')
+				 SET deleted_at = ?,
+				     updated_at = ?
 				 WHERE id = ? AND deleted_at IS NULL`,
+				deletedAt,
+				deletedAt,
 				id,
 			); err != nil {
 				return err

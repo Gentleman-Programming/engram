@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLocalSoftDeleteRestoreAdmission(t *testing.T) {
@@ -79,6 +80,38 @@ func TestLocalSoftDeleteRestoreAdmission(t *testing.T) {
 				t.Fatalf("cursor: %+v %v", state, err)
 			}
 		})
+	}
+}
+
+func TestLocalObservationWritesRetainGenerationPrecision(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("S", "p", "/p"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "S", Project: "p", Type: "note", Title: "original", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeUpdate := time.Now().UTC()
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Title: func() *string { v := "edited"; return &v }()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAt, err := parseObservationTime(updated.UpdatedAt)
+	if err != nil || updatedAt.Before(beforeUpdate) {
+		t.Fatalf("update generation predates operation: %s, start=%s, err=%v", updated.UpdatedAt, beforeUpdate, err)
+	}
+	beforeDelete := time.Now().UTC()
+	if err := s.DeleteObservation(id, false); err != nil {
+		t.Fatal(err)
+	}
+	var deletedAt, deletedUpdatedAt string
+	if err := s.db.QueryRow(`SELECT deleted_at, updated_at FROM observations WHERE id = ?`, id).Scan(&deletedAt, &deletedUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := parseObservationTime(deletedAt)
+	if err != nil || deleted.Before(beforeDelete) || deletedAt != deletedUpdatedAt {
+		t.Fatalf("delete generations=%s/%s start=%s err=%v", deletedAt, deletedUpdatedAt, beforeDelete, err)
 	}
 }
 
