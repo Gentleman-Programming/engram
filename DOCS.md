@@ -2243,7 +2243,7 @@ For a step-by-step recovery guide covering `chunk_id does not match payload cont
 
 **Autosync not starting**: Check that `ENGRAM_CLOUD_AUTOSYNC` is exactly `"1"` (not `"true"` or `"yes"`), and that both `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` are non-empty. The process logs an `[autosync] ERROR` line explaining which variable is missing.
 
-**Local writes still blocked**: Autosync runs in its own goroutine and never holds locks shared with the local write path. If local writes appear blocked, investigate the SQLite store layer, not the autosync manager.
+**Local writes still blocked**: Autosync shares the SQLite store and its write transactions with local requests. Automatic legacy-mutation quarantine examines at most 100 pending rows per push cycle, continuing from an in-memory sequence cursor on later cycles. A completed sweep restarts on a later cycle; restarting the process resets the cursor. Valid unenrolled mutations remain pending, and the explicit doctor/manual quarantine operation still examines its complete selected scope. The page bound limits automatic validation work per transaction; individual payloads, other store work, and database contention can still delay local requests.
 
 ---
 
