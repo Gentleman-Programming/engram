@@ -742,6 +742,8 @@ The command is a dry run: it prints the canonical label list as JSON and never w
 - Do not include `Co-Authored-By` trailers in commits
 - Do not include paths prohibited by the [Transient Artifact Policy](#transient-artifact-policy)
 
+The symlink cases in `TestCompatibilityOfflineNeverAuthorizes` and `TestMigrateCopyRejects` skip only when Windows returns `ERROR_PRIVILEGE_NOT_HELD` (1314). Other fixture errors still fail; hosts that support symlinks execute the original rejection assertions.
+
 ### Focused Verification Map
 
 Use the row that matches the change, not every row. These are existing entry points,
