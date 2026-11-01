@@ -328,6 +328,56 @@ func TestValidatePulledSessionDirectoryStrictRejectsBlankAndMissing(t *testing.T
 	})
 }
 
+func TestCloudChunkIsolatedSessionDirectoryAdmission(t *testing.T) {
+	for _, directory := range []string{"", `,"directory":""`, `,"directory":null`, `,"directory":123`} {
+		t.Run(directory, func(t *testing.T) {
+			s := newTestStore(t)
+			before, err := s.GetSyncState("cloud:target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutations := []SyncMutation{
+				{Entity: SyncEntitySession, EntityKey: "satellite", Op: SyncOpUpsert, Project: "target", Payload: `{"id":"satellite","project":"target","ownership_mode":"project_owned"` + directory + `}`},
+				{Entity: SyncEntityObservation, EntityKey: "learning", Op: SyncOpUpsert, Project: "target", Payload: `{"sync_id":"learning","session_id":"satellite","project":"target","scope":"project","type":"discovery","title":"isolated learning","content":"shared learning"}`},
+			}
+			err = s.ApplyPulledChunkForDomain("cloud:target", "isolated-chunk", mutations, true)
+			invalid := strings.Contains(directory, "null") || strings.Contains(directory, "123")
+			if invalid && err == nil || !invalid && err != nil {
+				t.Fatalf("chunk admission = %v", err)
+			}
+			if strings.Contains(directory, "null") && !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("null directory error = %v", err)
+			}
+			if !invalid {
+				if err := s.ApplyPulledChunkForDomain("cloud:target", "isolated-chunk", mutations, true); err != nil {
+					t.Fatalf("replay: %v", err)
+				}
+			}
+			after, err := s.GetSyncState("cloud:target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sessions, observations, chunks int
+			if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM sessions), (SELECT count(*) FROM observations), (SELECT count(*) FROM sync_chunks)`).Scan(&sessions, &observations, &chunks); err != nil {
+				t.Fatal(err)
+			}
+			if invalid {
+				if sessions != 0 || observations != 0 || chunks != 0 || !reflect.DeepEqual(before, after) {
+					t.Fatalf("rejected chunk changed state: %d/%d/%d, %+v -> %+v", sessions, observations, chunks, before, after)
+				}
+				return
+			}
+			if sessions != 1 || observations != 1 || chunks != 1 || after.LastPulledSeq != before.LastPulledSeq+2 {
+				t.Fatalf("chunk/replay state = %d/%d/%d, cursor %d -> %d", sessions, observations, chunks, before.LastPulledSeq, after.LastPulledSeq)
+			}
+			session, err := s.GetSession("satellite")
+			if err != nil || session.Directory != "" || session.OwnershipMode != SessionOwnershipProjectOwned {
+				t.Fatalf("imported isolated session = %+v, %v", session, err)
+			}
+		})
+	}
+}
+
 // Matrix item 7 (validation retained): JSON import with an invalid session ID
 // and with an invalid ownership mode still fails exactly as today.
 func TestImportValidationRetainsIdentityAndOwnershipChecks(t *testing.T) {
