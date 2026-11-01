@@ -20,13 +20,14 @@ import (
 )
 
 type CloudStore struct {
-	db                     *sql.DB
-	dashboardAllowedScopes map[string]struct{}
-	dashboardAllowedAll    bool
-	dashboardReadModelMu   sync.RWMutex
-	dashboardReadModel     dashboardReadModel
-	dashboardReadModelOK   bool
-	dashboardReadModelLoad func() (dashboardReadModel, error)
+	db                      *sql.DB
+	dashboardAllowedScopes  map[string]struct{}
+	dashboardAllowedAll     bool
+	dashboardReadModelMu    sync.RWMutex
+	dashboardReadModel      dashboardReadModel
+	dashboardReadModelOK    bool
+	dashboardReadModelDirty map[string]struct{}
+	dashboardReadModelLoad  func() (dashboardReadModel, error)
 	// dashboardReadModelGen is bumped by every invalidation; a build only
 	// publishes its result when the generation it started under is current.
 	dashboardReadModelGen   uint64
@@ -239,7 +240,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		if err := cs.indexChunkSessions(ctx, project, payload); err != nil {
 			return err
 		}
-		cs.invalidateDashboardReadModel()
+		cs.invalidateDashboardProjects(project)
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -276,7 +277,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 			if conflictErr != nil {
 				return conflictErr
 			}
-			cs.invalidateDashboardReadModel()
+			cs.invalidateDashboardProjects(project)
 			return nil
 		}
 		return fmt.Errorf("cloudstore: write chunk: %w", err)
@@ -291,7 +292,7 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		return fmt.Errorf("cloudstore: commit write chunk: %w", err)
 	}
 	tx = nil
-	cs.invalidateDashboardReadModel()
+	cs.invalidateDashboardProjects(project)
 	return nil
 }
 
@@ -303,6 +304,7 @@ func (cs *CloudStore) invalidateDashboardReadModel() {
 	defer cs.dashboardReadModelMu.Unlock()
 	cs.dashboardReadModel = dashboardReadModel{}
 	cs.dashboardReadModelOK = false
+	cs.dashboardReadModelDirty = nil
 	cs.dashboardReadModelGen++
 	// Detach the in-flight build so later callers start a fresh one; its
 	// existing waiters still receive its (unpublished) result.
@@ -1032,7 +1034,11 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	}
 	tx = nil // mark committed so deferred Rollback is a no-op
 	if len(chunks) > 0 {
-		cs.invalidateDashboardReadModel()
+		projects := make([]string, 0, len(chunks))
+		for _, chunk := range chunks {
+			projects = append(projects, chunk.project)
+		}
+		cs.invalidateDashboardProjects(projects...)
 	}
 	return seqs, nil
 }
