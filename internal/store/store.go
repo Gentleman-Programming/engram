@@ -7519,13 +7519,30 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 // the existing legacy validator proves cannot be repaired from local state.
 // It never acknowledges, rewrites, or deletes a mutation.
 func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (SyncMutationQuarantineReport, error) {
+	report, _, err := s.quarantineIrreparableSyncMutations(targetKey, project, apply, 0, 0)
+	return report, err
+}
+
+// QuarantineIrreparableSyncMutationsPage bounds automatic validation to at most
+// 100 rows per transaction. nextSeq is zero when this scan reached its end.
+// Manual/doctor callers retain the complete operation above.
+func (s *Store) QuarantineIrreparableSyncMutationsPage(targetKey string, afterSeq int64, limit int) (SyncMutationQuarantineReport, int64, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	return s.quarantineIrreparableSyncMutations(targetKey, "", true, afterSeq, limit)
+}
+
+func (s *Store) quarantineIrreparableSyncMutations(targetKey, project string, apply bool, afterSeq int64, limit int) (SyncMutationQuarantineReport, int64, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	report := SyncMutationQuarantineReport{Project: project, Applied: apply, Actions: []SyncMutationQuarantineAction{}}
 	if isSyncInboxTarget(targetKey) {
-		return report, nil
+		return report, 0, nil
 	}
+	var nextSeq int64
+	var scanned int
 	runTx := s.withTx
 	if !apply {
 		runTx = s.withReadTx
@@ -7536,11 +7553,19 @@ func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, ap
 		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 			FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL AND disposition = 'pending'`
 		args := []any{targetKey}
+		if limit > 0 {
+			query += ` AND seq > ?`
+			args = append(args, afterSeq)
+		}
 		if project != "" {
 			query += ` AND project = ?`
 			args = append(args, project)
 		}
 		query += ` ORDER BY seq ASC`
+		if limit > 0 {
+			query += ` LIMIT ?`
+			args = append(args, limit)
+		}
 		rows, err := s.queryItHook(tx, query, args...)
 		if err != nil {
 			return err
@@ -7551,6 +7576,8 @@ func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, ap
 			if err := rows.Scan(&mutation.Seq, &mutation.TargetKey, &mutation.Entity, &mutation.EntityKey, &mutation.Op, &mutation.Payload, &mutation.Source, &mutation.Project, &mutation.OccurredAt, &mutation.AckedAt); err != nil {
 				return err
 			}
+			nextSeq = mutation.Seq
+			scanned++
 			evaluation, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
 			if err != nil {
 				return err
@@ -7606,9 +7633,12 @@ func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, ap
 		return nil
 	})
 	if err != nil {
-		return SyncMutationQuarantineReport{}, fmt.Errorf("quarantine irreparable sync mutations: %w", err)
+		return SyncMutationQuarantineReport{}, 0, fmt.Errorf("quarantine irreparable sync mutations: %w", err)
 	}
-	return report, nil
+	if scanned < limit || limit == 0 {
+		nextSeq = 0
+	}
+	return report, nextSeq, nil
 }
 
 // SupersedeUnenrolledLegacyMutations retires pending local upserts only when
