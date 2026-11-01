@@ -148,6 +148,10 @@ func piInputProjection(name string, source map[string]any) (map[string]any, erro
 		// agent_contract.go:199-230; session_finalize.go:24-28,44-46: host-owned
 		// identity and cwd selection, never MCP recovery tokens/model session overrides.
 		omit("session_id", "project_choice_reason", "recovery_token")
+		if name == "mem_save_prompt" {
+			// Pi keeps its existing cwd-only native input contract.
+			omit("directory", "cwd")
+		}
 		add(p, "cwd", map[string]any{"type": "string"})
 		if name == "mem_save" {
 			omit("observation")

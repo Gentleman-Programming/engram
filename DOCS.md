@@ -1483,6 +1483,10 @@ Delete an observation by ID with mandatory caller-supplied `expected_project`, f
 ### mem_save_prompt
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
+When a shared MCP server starts outside the workspace, pass an absolute existing `directory` (or `cwd` alias) on **each** `mem_save_prompt` call, for example `{ "content": "Investigate the failing tests", "directory": "/work/my-project" }`. `directory` wins over `cwd`; blank values retain the existing process-cwd fallback. Invalid types, relative/missing paths and files return a tool error without saving a prompt. Nonblank paths retain their meaningful bytes.
+
+The workspace narrows fallback session selection and is preserved in prompt provenance. An explicit registered session or verified host binding remains authoritative; a trusted process project override wins over directory-based detection. Existing ambiguity/recovery-token rules apply to the supplied path. `mem_current_project(directory=...)` is discovery only and never binds a later content-only write. Calls without workspace context retain legacy behavior and cannot infer an unseen IDE workspace. Other tools' directory support is unchanged.
+
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
 ### mem_context
