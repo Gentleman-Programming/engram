@@ -98,6 +98,36 @@ func TestTransientHealthFailureDoesNotRequestShutdown(t *testing.T) {
 	}
 }
 
+// TestHealthReportsDaemonToken pins the daemon identity surface: a server
+// configured with a daemon start token reports it on GET /health, and a
+// non-daemon server omits the field entirely.
+func TestHealthReportsDaemonToken(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	srv.SetDaemonToken("tok-123")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		DaemonToken string `json:"daemon_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode health body: %v", err)
+	}
+	if body.DaemonToken != "tok-123" {
+		t.Fatalf("daemon_token = %q, want tok-123", body.DaemonToken)
+	}
+
+	plain := New(st, 0)
+	plainRec := httptest.NewRecorder()
+	plain.Handler().ServeHTTP(plainRec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if strings.Contains(plainRec.Body.String(), "daemon_token") {
+		t.Fatalf("non-daemon health body reports daemon_token: %s", plainRec.Body.String())
+	}
+}
+
 func TestShutdownDrainsInflightRequestAndReleasesListener(t *testing.T) {
 	srv := New(nil, 0)
 	shutdown, ok := any(srv).(interface{ Shutdown(context.Context) error })

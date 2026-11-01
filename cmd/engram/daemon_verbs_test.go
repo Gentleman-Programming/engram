@@ -218,6 +218,31 @@ func TestCmdStopCases(t *testing.T) {
 	})
 }
 
+// TestCmdStopRejectsUnknownArgs pins that `engram stop` rejects unknown
+// arguments (a mistyped option or `stop --help`) before doing anything
+// destructive: the pidfile is left in place and nothing is signaled, mirroring
+// `engram ps` argument handling.
+func TestCmdStopRejectsUnknownArgs(t *testing.T) {
+	cfg := store.Config{DataDir: t.TempDir()}
+	deadPid := exitedChildPid(t)
+	if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: deadPid, Port: 7437}); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	out := swapStdoutPrinter(t)
+	for _, arg := range []string{"--help", "-h", "--bogus"} {
+		err := cmdStop(cfg, []string{arg})
+		if err == nil || !strings.Contains(err.Error(), "unknown stop argument: "+arg) {
+			t.Fatalf("stop %s error = %v, want unknown stop argument: %s", arg, err, arg)
+		}
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stop with arguments printed %q, want silence", out.String())
+	}
+	if _, err := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); err != nil {
+		t.Fatalf("argument rejection must not touch the pidfile: %v", err)
+	}
+}
+
 // TestCmdLogsBasics pins `engram logs` (spec S7): replay of the daemon log
 // sink, the missing-log error, follow-flag parsing, and argument rejection.
 func TestCmdLogsBasics(t *testing.T) {
@@ -316,6 +341,144 @@ func TestCmdRestartPortResolution(t *testing.T) {
 	})
 }
 
+// swapStopDaemonProcess swaps the signal seam with a recorder so tests can
+// prove whether the signal path was (or was not) exercised without
+// signaling a real process.
+func swapStopDaemonProcess(t *testing.T) *[]int {
+	t.Helper()
+	signaled := &[]int{}
+	saved := stopDaemonProcessNow
+	stopDaemonProcessNow = func(pid int) error {
+		*signaled = append(*signaled, pid)
+		return nil
+	}
+	t.Cleanup(func() { stopDaemonProcessNow = saved })
+	return signaled
+}
+
+// TestStopDaemonIdentityGate pins the pid-reuse guard behind `engram stop`
+// and `engram restart`: a live pidfile pid is only signaled when the daemon
+// identity answers — the recorded start token for token-bearing records, a
+// plain running probe for legacy records. Anything else is reported as
+// unconfirmed and never signaled.
+func TestStopDaemonIdentityGate(t *testing.T) {
+	livePid := os.Getpid()
+	writeGatePidfile := func(t *testing.T, dataDir, token string) {
+		t.Helper()
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: livePid, Port: 7603, Token: token}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+	}
+	t.Run("token mismatch never signals", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		writeGatePidfile(t, cfg.DataDir, "ours")
+		signaled := swapStopDaemonProcess(t)
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7603, Token: "foreign"})
+		_, err := stopDaemon(cfg)
+		if !errors.Is(err, errDaemonUnconfirmed) {
+			t.Fatalf("mismatch stop error = %v, want errDaemonUnconfirmed", err)
+		}
+		if len(*signaled) != 0 {
+			t.Fatalf("mismatch signaled pids %v, want none", *signaled)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); rerr != nil {
+			t.Fatalf("mismatch removed the pidfile: %v", rerr)
+		}
+	})
+	t.Run("no answer never signals", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		writeGatePidfile(t, cfg.DataDir, "ours")
+		signaled := swapStopDaemonProcess(t)
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning, Port: 7603})
+		_, err := stopDaemon(cfg)
+		if !errors.Is(err, errDaemonUnconfirmed) {
+			t.Fatalf("no-answer stop error = %v, want errDaemonUnconfirmed", err)
+		}
+		if len(*signaled) != 0 {
+			t.Fatalf("no-answer signaled pids %v, want none", *signaled)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); rerr != nil {
+			t.Fatalf("no-answer removed the pidfile: %v", rerr)
+		}
+	})
+	t.Run("matching token exercises the signal path", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		writeGatePidfile(t, cfg.DataDir, "ours")
+		signaled := swapStopDaemonProcess(t)
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7603, Token: "ours"})
+		out := swapStdoutPrinter(t)
+		pid, err := stopDaemon(cfg)
+		if err != nil {
+			t.Fatalf("confirmed stop: %v", err)
+		}
+		if pid != livePid || len(*signaled) != 1 || (*signaled)[0] != livePid {
+			t.Fatalf("confirmed stop pid/signals = %d/%v, want %d once", pid, *signaled, livePid)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+			t.Fatalf("pidfile survived confirmed stop: %v", rerr)
+		}
+		if !strings.Contains(out.String(), "Stopped engram daemon") {
+			t.Fatalf("confirmed stop output = %q, want Stopped engram daemon", out.String())
+		}
+	})
+	t.Run("legacy record with answering probe still signals", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		writeGatePidfile(t, cfg.DataDir, "")
+		signaled := swapStopDaemonProcess(t)
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7603})
+		if _, err := stopDaemon(cfg); err != nil {
+			t.Fatalf("legacy confirmed stop: %v", err)
+		}
+		if len(*signaled) != 1 || (*signaled)[0] != livePid {
+			t.Fatalf("legacy stop signaled %v, want pid %d once", *signaled, livePid)
+		}
+	})
+}
+
+// TestCmdPsUnconfirmedDaemonReportsUnreachable pins `engram ps` on a live pid
+// whose daemon identity does not answer: ps never vouches for a foreign
+// process as the running daemon.
+func TestCmdPsUnconfirmedDaemonReportsUnreachable(t *testing.T) {
+	cfg := store.Config{DataDir: t.TempDir()}
+	if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7605, Token: "ours"}); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7605, Token: "foreign"})
+	out := swapStdoutPrinter(t)
+	err := cmdPs(cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "daemon is not answering on port 7605") {
+		t.Fatalf("unconfirmed ps error = %v, want not answering", err)
+	}
+	want := fmt.Sprintf("unreachable (pid %d) on port 7605", os.Getpid())
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("unconfirmed ps output = %q, want %q", out.String(), want)
+	}
+}
+
+// TestCmdRestartRefusesSocketBeforeStop pins that `engram restart` rejects
+// ENGRAM_SOCKET before stopping anything: a configuration error must never
+// take a healthy daemon down (mirrors the `run -d` guard in parseRunArgs).
+func TestCmdRestartRefusesSocketBeforeStop(t *testing.T) {
+	clearRunEnv(t)
+	t.Setenv("ENGRAM_SOCKET", "/tmp/engram.sock")
+	cfg := store.Config{DataDir: t.TempDir()}
+	if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7604, Token: "ours"}); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	signaled := swapStopDaemonProcess(t)
+	swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7604, Token: "ours"})
+	err := cmdRestart(cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "unset ENGRAM_SOCKET") {
+		t.Fatalf("restart with socket error = %v, want unset ENGRAM_SOCKET guidance", err)
+	}
+	if len(*signaled) != 0 {
+		t.Fatalf("restart with socket stopped the daemon first: signaled %v", *signaled)
+	}
+	if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); rerr != nil {
+		t.Fatalf("restart with socket removed the pidfile: %v", rerr)
+	}
+}
+
 // ─── Integration tests (real detached daemon child) ─────────────────────────
 
 // TestDaemonVerbLifecycle exercises the full docker-style loop (specs S4 and
@@ -411,6 +574,45 @@ func TestCmdRestartLifecycle(t *testing.T) {
 	}
 	if err := cmdPs(cfg, nil); err != nil {
 		t.Fatalf("ps after restart: %v", err)
+	}
+}
+
+// TestCmdRestartProceedsWhenStopUnconfirmed pins restart's stale-record
+// behavior: a live pid that is not confirmed as the daemon is never
+// signaled; restart tolerates the unconfirmed stop and starts fresh through
+// runDetached's admission, which clears the unmanaged pidfile.
+func TestCmdRestartProceedsWhenStopUnconfirmed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a child process")
+	}
+	clearRunEnv(t)
+	port := freeRunPort(t)
+	cfg, dataDir := newRunTestConfig(t)
+	swapRunDaemonSeams(t, port)
+	cleanupPidfileDaemon(t, dataDir)
+	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: port, Token: "stale"}); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	signaled := swapStopDaemonProcess(t)
+	swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: port, Token: "foreign"})
+
+	var restartErr error
+	output := captureStdoutPipe(t, func() { restartErr = cmdRestart(cfg, nil) })
+	if restartErr != nil {
+		t.Fatalf("restart over unconfirmed pid: %v", restartErr)
+	}
+	if len(*signaled) != 0 {
+		t.Fatalf("restart signaled the unconfirmed pid: %v", *signaled)
+	}
+	if !strings.Contains(output, "Started engram daemon") {
+		t.Fatalf("restart output = %q, want Started engram daemon", output)
+	}
+	record, err := daemon.ReadPidfile(daemon.PidfilePath(dataDir))
+	if err != nil {
+		t.Fatalf("read pidfile after restart: %v", err)
+	}
+	if record.Pid == os.Getpid() || !daemon.ProcessAlive(record.Pid) {
+		t.Fatalf("restarted daemon record = %+v, want a fresh live daemon pid", record)
 	}
 }
 

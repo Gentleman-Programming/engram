@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +27,12 @@ var runReadyTimeout = 15 * time.Second
 
 // runReadyPollInterval is the readiness file poll cadence.
 var runReadyPollInterval = 100 * time.Millisecond
+
+// runStartLockWait bounds how long a second `engram run -d` on the same data
+// directory waits for the per-dir start lock — held by another starter
+// across admission, readiness publication, and cleanup — before failing
+// cleanly with a held-lock error.
+var runStartLockWait = 20 * time.Second
 
 // runOptions are the parsed arguments of `engram run` (docker-style verbs, issue #2228).
 type runOptions struct {
@@ -98,7 +103,10 @@ func cmdRun(cfg store.Config, args []string) error {
 }
 
 // assertDaemonStartable rejects a second daemon start while a live one holds
-// the pidfile, mirroring docker's refusal to double-start one container.
+// the pidfile, mirroring docker's refusal to double-start one container. A
+// live pid only blocks the start when the daemon identity answers; an
+// unconfirmed record (the OS reused the pid after the daemon died, or the
+// daemon no longer answers) is stale and cleared instead of blocking.
 func assertDaemonStartable(dataDir string, port int) error {
 	pidPath := daemon.PidfilePath(dataDir)
 	record, err := daemon.ReadPidfile(pidPath)
@@ -116,13 +124,15 @@ func assertDaemonStartable(dataDir string, port int) error {
 	if probePort == 0 {
 		probePort = port
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), daemonProbeTimeout)
-	defer cancel()
-	res := daemon.Probe(ctx, probePort, daemonProbeTimeout)
-	if res.Status == daemon.StatusRunning {
+	if daemonIdentityConfirmed(record, daemonStatusProbe(probePort)) {
 		return fmt.Errorf("already running (pid %d) on port %d; use `engram stop` before starting again", record.Pid, probePort)
 	}
-	return fmt.Errorf("already running (pid %d) but not answering on port %d; inspect `engram logs` or stop it", record.Pid, probePort)
+	// The pid is alive but the daemon identity does not answer, so it is not
+	// confirmed as ours — the same rule `engram stop` applies before any
+	// signal. The record is stale: clear it and start fresh rather than
+	// reporting a phantom "already running".
+	_, _ = stdoutPrinter("Clearing unmanaged pidfile (pid %d not confirmed as the daemon on port %d)\n", record.Pid, probePort)
+	return daemon.RemovePidfile(pidPath)
 }
 
 // runDetached spawns the daemon child, waits for its readiness handshake, and
@@ -132,6 +142,16 @@ func runDetached(cfg store.Config, serve serveOptions) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
+	// Serialize concurrent starts per data directory: two `run -d` parents
+	// could otherwise both pass admission and overwrite each other's pidfile
+	// and readiness records. The lock spans admission, readiness publication,
+	// and failed-start cleanup; it releases at return, and the daemon itself
+	// outlives it without holding anything.
+	startLock, err := daemon.AcquireStartLock(dataDir, runStartLockWait)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = startLock.Release() }()
 	if err := assertDaemonStartable(dataDir, serve.port); err != nil {
 		return err
 	}
@@ -170,6 +190,10 @@ func runDetached(cfg store.Config, serve serveOptions) error {
 		}
 		time.Sleep(runReadyPollInterval)
 	}
+	// The start failed: own the aftermath (terminate and reap the child, then
+	// remove only this start's records) so a timed-out child can never
+	// survive as an orphan that later publishes itself as the daemon.
+	cleanupFailedStart(childPid, dataDir, readyPath, token)
 	return fmt.Errorf("daemon did not start; recent log lines from %s:\n%s", logPath, tailFile(logPath, 15))
 }
 
@@ -233,7 +257,7 @@ func writeRunReadiness(dataDir, readyPath, token string, addr net.Addr) error {
 	if port <= 0 {
 		return fmt.Errorf("daemon listener is not TCP: %s", addr)
 	}
-	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: port}); err != nil {
+	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: port, Token: token}); err != nil {
 		return err
 	}
 	data, err := json.Marshal(runReadiness{Token: token, PID: os.Getpid(), Port: port})
@@ -244,6 +268,28 @@ func writeRunReadiness(dataDir, readyPath, token string, addr net.Addr) error {
 		return fmt.Errorf("write readiness record: %w", err)
 	}
 	return nil
+}
+
+// cleanupFailedStart owns the aftermath of a failed `engram run -d`: the
+// spawned child is terminated and reaped so a timed-out start can never
+// leave an orphan that later publishes itself as the daemon (a store
+// migration can legitimately outlast the readiness deadline), and this
+// start's records are removed. The pidfile is only removed when it carries
+// this start's token, so a record owned by another start is never deleted.
+func cleanupFailedStart(childPid int, dataDir, readyPath, token string) {
+	if childPid > 0 && !childExited(childPid) && daemon.ProcessAlive(childPid) {
+		// Graceful-then-force termination, the same lever `engram stop`
+		// uses; on unix awaitDaemonExit also reaps the child.
+		_ = stopDaemonProcess(childPid)
+	}
+	if _, err := readRunReadiness(readyPath, token); err == nil {
+		// The readiness record answers to this start's token: ours to remove.
+		_ = os.Remove(readyPath)
+	}
+	pidPath := daemon.PidfilePath(dataDir)
+	if record, err := daemon.ReadPidfile(pidPath); err == nil && token != "" && record.Token == token {
+		_ = daemon.RemovePidfile(pidPath)
+	}
 }
 
 // tailFile returns the last n lines of a file for failure diagnostics.

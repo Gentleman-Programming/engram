@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,10 +24,15 @@ const (
 	StatusUnreachable Status = "unreachable"
 )
 
-// ProbeResult captures the outcome of a single daemon health probe.
+// ProbeResult captures the outcome of a single daemon health probe. Token
+// is the daemon identity the server reported on /health ("daemon_token"):
+// set only when the probed server is a token-carrying daemon, empty for a
+// foreground serve or any non-engram listener, so callers can compare it
+// with the pidfile record before trusting the pid.
 type ProbeResult struct {
 	Status Status
 	Port   int
+	Token  string
 	Err    error
 }
 
@@ -50,9 +56,15 @@ func Probe(ctx context.Context, port int, timeout time.Duration) ProbeResult {
 		return ProbeResult{Status: StatusUnreachable, Port: port, Err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	var health struct {
+		DaemonToken string `json:"daemon_token"`
+	}
+	// A body that is not the expected JSON still classifies by status code:
+	// the token simply stays empty, which token-checking callers treat as
+	// "identity did not answer".
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return ProbeResult{Status: StatusRunning, Port: port}
+		return ProbeResult{Status: StatusRunning, Port: port, Token: health.DaemonToken}
 	}
 	return ProbeResult{Status: StatusUnreachable, Port: port}
 }

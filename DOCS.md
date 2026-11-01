@@ -2029,8 +2029,9 @@ Engram ships docker-style verbs for the common daemon lifecycle. They manage onl
 | Logs | `docker logs` | `engram logs` — `engram logs -f` follows |
 | Restart | `docker restart` | `engram restart [-p PORT]` — stop, then start detached again |
 
-- The daemon records `<dataDir>/serve.pid` (JSON `{"pid": N, "port": P}`) and writes its stdout/stderr to `<dataDir>/serve.log` (default data dir `~/.engram`).
+- The daemon records `<dataDir>/serve.pid` (JSON `{"pid": N, "port": P, "token": T}` — the token identifies one daemon start) and writes its stdout/stderr to `<dataDir>/serve.log` (default data dir `~/.engram`). Concurrent starts on one data directory are serialized through `<dataDir>/serve.lock`, so two parents can never overwrite each other's records.
 - A second `engram run -d` against a live daemon reports `already running (pid N)` and exits non-zero.
+- A pidfile pid is only signaled after `/health` confirms it is the recorded daemon (the pidfile token answers). A pid that is alive but not confirmed — the OS reused it after a crash or reboot — is reported as stale/unmanaged and never signaled; `run -d` clears such a record and starts fresh. Pidfiles from older binaries (no token) keep the running-probe check.
 - A port conflict is a startup error with a non-zero exit code, so `KeepAlive`/`Restart` supervisors never hot-loop on a silent exit-0 bind failure.
 - `engram stop` escalates from graceful to forced termination; on Windows, detached children cannot receive console events, so stop terminates the process directly.
 - The verbs complement the supervisor templates below: use a unit for boot persistence and the verbs for day-to-day control.

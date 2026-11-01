@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,12 +20,22 @@ const PidfileName = "serve.pid"
 // ErrNoPidfile reports that no pidfile exists: no daemon start is recorded.
 var ErrNoPidfile = errors.New("no pidfile")
 
-// PidRecord is the pidfile payload: the daemon process id and the TCP port it
-// serves. Port is what `engram ps` and `engram stop` need when the daemon was
-// started with a custom `-p` port.
+// maxPid bounds a pidfile pid: Unix pid_t is a signed 32-bit integer, and a
+// larger value would truncate in kernel calls (a pid of 2^32 would signal
+// process group 0). The bound is applied on both write and read so a
+// corrupt or hand-edited record can never smuggle such a pid through.
+const maxPid = math.MaxInt32
+
+// PidRecord is the pidfile payload: the daemon process id, the TCP port it
+// serves, and the start token tying the record to one daemon start. Port is
+// what `engram ps` and `engram stop` need when the daemon was started with a
+// custom `-p` port; Token is what lets them confirm the pid still belongs to
+// that daemon (the pidfile pid is never signaled without it, see the daemon
+// verbs). Legacy records without a token stay readable.
 type PidRecord struct {
-	Pid  int `json:"pid"`
-	Port int `json:"port"`
+	Pid   int    `json:"pid"`
+	Port  int    `json:"port"`
+	Token string `json:"token,omitempty"`
 }
 
 // PidfilePath returns the pidfile location for an engram data dir.
@@ -36,7 +47,7 @@ func PidfilePath(dataDir string) string {
 // pidfile left behind by a previous daemon. The write lands via a temporary
 // file and rename so readers never observe a torn record.
 func WritePidfile(path string, record PidRecord) error {
-	if record.Pid <= 0 {
+	if record.Pid <= 0 || record.Pid > maxPid {
 		return fmt.Errorf("daemon: invalid pid %d", record.Pid)
 	}
 	if record.Port < 0 {
@@ -82,7 +93,7 @@ func ReadPidfile(path string) (PidRecord, error) {
 		return PidRecord{}, fmt.Errorf("daemon: read pidfile: %w", err)
 	}
 	var record PidRecord
-	if err := json.Unmarshal(data, &record); err != nil || record.Pid <= 0 || record.Port < 0 {
+	if err := json.Unmarshal(data, &record); err != nil || record.Pid <= 0 || record.Pid > maxPid || record.Port < 0 {
 		return PidRecord{}, fmt.Errorf("daemon: parse pidfile %s: invalid record %q", path, strings.TrimSpace(string(data)))
 	}
 	return record, nil

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -43,5 +44,39 @@ func TestProbeReportsNotRunningOnRefusedDial(t *testing.T) {
 	}
 	if res.Err == nil {
 		t.Fatal("probe err = nil, want dial error")
+	}
+}
+
+func TestProbeReadsDaemonTokenFromHealth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"ok","service":"engram","instance_id":"x","daemon_token":"tok-123"}`)
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	res := Probe(context.Background(), port, time.Second)
+	if res.Status != StatusRunning || res.Token != "tok-123" {
+		t.Fatalf("probe = status %q token %q, want running with token tok-123", res.Status, res.Token)
+	}
+}
+
+func TestProbeTokenEmptyWithoutDaemonIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"ok","service":"engram","instance_id":"x"}`)
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	res := Probe(context.Background(), port, time.Second)
+	if res.Status != StatusRunning || res.Token != "" {
+		t.Fatalf("probe = status %q token %q, want running with an empty token", res.Status, res.Token)
 	}
 }

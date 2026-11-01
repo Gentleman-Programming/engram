@@ -98,7 +98,12 @@ type Server struct {
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
 	// version is reported by GET /health and defaults to "dev" for local builds.
-	version           string
+	version string
+	// daemonToken is the daemon start token reported by GET /health when this
+	// server is a `engram run -d` daemon, so pidfile owners can confirm the
+	// pid still belongs to that daemon before signaling it. Empty on
+	// non-daemon servers.
+	daemonToken       string
 	instanceID        string
 	sessionOwnedToken string
 	onReady           func(net.Addr) error
@@ -134,6 +139,13 @@ func (s *Server) SetOnWrite(fn func()) {
 // SetVersion sets the release version reported by GET /health.
 func (s *Server) SetVersion(v string) {
 	s.version = v
+}
+
+// SetDaemonToken publishes the daemon start token reported by GET /health
+// as "daemon_token". Configure before Start; empty keeps the field absent
+// for non-daemon servers.
+func (s *Server) SetDaemonToken(token string) {
+	s.daemonToken = token
 }
 
 // SetSyncStatus configures the sync status provider for the /sync/status endpoint.
@@ -554,13 +566,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, "health check failed")
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"status":       "ok",
 		"service":      "engram",
 		"version":      s.version,
 		"instance_id":  s.instanceID,
 		"capabilities": map[string]bool{"isolated_session_registration": true, "root_session_resume": true, "runtime_session_resolution": true},
-	})
+	}
+	if s.daemonToken != "" {
+		body["daemon_token"] = s.daemonToken
+	}
+	jsonResponse(w, http.StatusOK, body)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {

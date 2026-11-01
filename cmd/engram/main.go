@@ -1003,9 +1003,12 @@ func serveWith(cfg store.Config, options serveOptions) error {
 	}
 	// Daemon child mode (`engram run -d`): publish the pidfile and the parent
 	// handshake record once the listener is bound; errors abort serving so a
-	// half-started daemon never reports success.
+	// half-started daemon never reports success. The start token is also
+	// reported on /health so pidfile owners can confirm this daemon's
+	// identity before signaling its pid.
 	if readyFile, readyToken := os.Getenv("ENGRAM_RUN_READY_FILE"), os.Getenv("ENGRAM_RUN_READY_TOKEN"); readyFile != "" && readyToken != "" && !options.sessionOwned {
 		dataDir := cfg.DataDir
+		srv.SetDaemonToken(readyToken)
 		srv.SetOnReady(func(addr net.Addr) error {
 			return writeRunReadiness(dataDir, readyFile, readyToken, addr)
 		})

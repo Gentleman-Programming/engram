@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -24,6 +25,16 @@ import (
 // inherited readiness env markers (ENGRAM_RUN_READY_FILE / ENGRAM_RUN_READY_TOKEN)
 // through the onReady hook.
 func init() {
+	if os.Getenv("ENGRAM_RUN_SLEEPY_CHILD") == "1" {
+		// Readiness-timeout fixture: a child that starts, records its pid, and
+		// then never becomes ready (a daemon wedged on a store migration that
+		// outlasts the parent's readiness deadline behaves exactly like this).
+		if pidFile := os.Getenv("ENGRAM_RUN_SLEEPY_PIDFILE"); pidFile != "" {
+			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
 	if os.Getenv("ENGRAM_RUN_TEST_CHILD") != "1" {
 		return
 	}
@@ -265,8 +276,8 @@ func TestWriteRunReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read pidfile: %v", err)
 	}
-	if record.Pid != os.Getpid() || record.Port != 7437 {
-		t.Fatalf("pidfile record = %+v, want pid %d port 7437", record, os.Getpid())
+	if record.Pid != os.Getpid() || record.Port != 7437 || record.Token != "start-token" {
+		t.Fatalf("pidfile record = %+v, want pid %d port 7437 token start-token", record, os.Getpid())
 	}
 	data, err := os.ReadFile(readyPath)
 	if err != nil {
@@ -365,5 +376,199 @@ func TestRunDetachedPortConflict(t *testing.T) {
 			t.Fatalf("failed start left a live daemon pid %d", record.Pid)
 		}
 		_ = daemon.RemovePidfile(daemon.PidfilePath(dataDir))
+	}
+}
+
+// TestRunDetachedTimeoutTerminatesChild pins the readiness-timeout contract:
+// a spawned child that never reports readiness is terminated and reaped by
+// the failing parent, and only this start's records are cleaned up, so a
+// timed-out start can never leave an orphan that later becomes the daemon.
+func TestRunDetachedTimeoutTerminatesChild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a child process")
+	}
+	clearRunEnv(t)
+	cfg, dataDir := newRunTestConfig(t)
+	childPidFile := filepath.Join(dataDir, "sleepy-child.pid")
+	oldArgs, oldEnv := spawnDaemonArgs, spawnDaemonEnv
+	spawnDaemonArgs = func(int) []string { return nil }
+	spawnDaemonEnv = func(readyPath, token string) []string {
+		return append(os.Environ(),
+			"ENGRAM_RUN_SLEEPY_CHILD=1",
+			"ENGRAM_RUN_SLEEPY_PIDFILE="+childPidFile,
+		)
+	}
+	t.Cleanup(func() { spawnDaemonArgs, spawnDaemonEnv = oldArgs, oldEnv })
+	// Even a failing (RED) run must not leak the sleeping child: kill it by
+	// the pid it recorded before the parent's cleanup existed.
+	t.Cleanup(func() {
+		data, err := os.ReadFile(childPidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return
+		}
+		if daemon.ProcessAlive(pid) {
+			if process, perr := os.FindProcess(pid); perr == nil {
+				_ = process.Kill()
+				_, _ = process.Wait()
+			}
+		}
+	})
+	oldTimeout := runReadyTimeout
+	runReadyTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { runReadyTimeout = oldTimeout })
+
+	err := runDetached(cfg, serveOptions{port: 7602})
+	if err == nil || !strings.Contains(err.Error(), "daemon did not start") {
+		t.Fatalf("timeout start error = %v, want daemon did not start", err)
+	}
+	data, err := os.ReadFile(childPidFile)
+	if err != nil {
+		t.Fatalf("child never recorded its pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("child pid record %q: %v", data, err)
+	}
+	if daemon.ProcessAlive(pid) {
+		t.Fatalf("timed-out start left child pid %d alive", pid)
+	}
+	if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+		t.Fatalf("pidfile survived failed start: %v", rerr)
+	}
+	if _, rerr := os.Stat(filepath.Join(dataDir, runReadyName)); !os.IsNotExist(rerr) {
+		t.Fatalf("readiness file survived failed start: %v", rerr)
+	}
+}
+
+// TestAssertDaemonStartableIdentity pins the pid-reuse guard in run
+// admission: a live pidfile pid only blocks a new start when the daemon
+// identity answers; an unconfirmed record is stale and gets cleared so the
+// start proceeds. Legacy token-less records keep the running-probe
+// classification the previous release used.
+func TestAssertDaemonStartableIdentity(t *testing.T) {
+	t.Run("matching token reports already running", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7606, Token: "ours"}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7606, Token: "ours"})
+		err := assertDaemonStartable(dataDir, 7606)
+		if err == nil || !strings.Contains(err.Error(), "already running (pid") {
+			t.Fatalf("confirmed admission error = %v, want already running", err)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); rerr != nil {
+			t.Fatalf("confirmed record was cleared: %v", rerr)
+		}
+	})
+	t.Run("token mismatch clears the unmanaged pidfile", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7606, Token: "ours"}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7606, Token: "foreign"})
+		out := swapStdoutPrinter(t)
+		if err := assertDaemonStartable(dataDir, 7606); err != nil {
+			t.Fatalf("unconfirmed admission: %v", err)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+			t.Fatalf("unconfirmed record survived admission: %v", rerr)
+		}
+		if !strings.Contains(out.String(), "Clearing unmanaged pidfile") {
+			t.Fatalf("unconfirmed admission output = %q, want a clearing note", out.String())
+		}
+	})
+	t.Run("legacy record kept answering stays already running", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7606}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7606})
+		err := assertDaemonStartable(dataDir, 7606)
+		if err == nil || !strings.Contains(err.Error(), "already running (pid") {
+			t.Fatalf("legacy confirmed admission error = %v, want already running", err)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); rerr != nil {
+			t.Fatalf("legacy confirmed record was cleared: %v", rerr)
+		}
+	})
+}
+
+// TestRunCleanupFailedStartRemovesOnlyOwnRecords pins the failed-start
+// cleanup: this start's readiness file and pidfile are removed, while
+// records owned by another start (foreign token or a legacy tokenless
+// pidfile) are left alone.
+func TestRunCleanupFailedStartRemovesOnlyOwnRecords(t *testing.T) {
+	dataDir := t.TempDir()
+	readyPath := filepath.Join(dataDir, runReadyName)
+	writeReadiness := func(token string) {
+		t.Helper()
+		data, err := json.Marshal(runReadiness{Token: token, PID: 111, Port: 2222})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(readyPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeReadiness("foreign")
+	cleanupFailedStart(0, dataDir, readyPath, "ours")
+	if _, rerr := os.Stat(readyPath); os.IsNotExist(rerr) {
+		t.Fatal("cleanup removed a foreign readiness record")
+	}
+	writeReadiness("ours")
+	cleanupFailedStart(0, dataDir, readyPath, "ours")
+	if _, rerr := os.Stat(readyPath); !os.IsNotExist(rerr) {
+		t.Fatalf("own readiness record survived cleanup: %v", rerr)
+	}
+
+	for _, token := range []string{"foreign", ""} {
+		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: 4242, Port: 7437, Token: token}); err != nil {
+			t.Fatal(err)
+		}
+		cleanupFailedStart(0, dataDir, readyPath, "ours")
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); rerr != nil {
+			t.Fatalf("cleanup removed a pidfile with token %q", token)
+		}
+	}
+	if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: 4242, Port: 7437, Token: "ours"}); err != nil {
+		t.Fatal(err)
+	}
+	cleanupFailedStart(0, dataDir, readyPath, "ours")
+	if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+		t.Fatalf("own pidfile survived cleanup: %v", rerr)
+	}
+}
+
+// TestRunDetachedWaitsForStartLock pins the per-data-dir start lock: while
+// another start holds it, `engram run -d` fails cleanly without spawning a
+// child or touching lifecycle records.
+func TestRunDetachedWaitsForStartLock(t *testing.T) {
+	clearRunEnv(t)
+	cfg, dataDir := newRunTestConfig(t)
+	lock, err := daemon.AcquireStartLock(dataDir, 0)
+	if err != nil {
+		t.Fatalf("hold start lock: %v", err)
+	}
+	defer func() { _ = lock.Release() }()
+	spawned := false
+	oldArgs, oldEnv := spawnDaemonArgs, spawnDaemonEnv
+	spawnDaemonArgs = func(int) []string { spawned = true; return nil }
+	spawnDaemonEnv = func(_, _ string) []string { return os.Environ() }
+	t.Cleanup(func() { spawnDaemonArgs, spawnDaemonEnv = oldArgs, oldEnv })
+	oldWait := runStartLockWait
+	runStartLockWait = 100 * time.Millisecond
+	t.Cleanup(func() { runStartLockWait = oldWait })
+
+	err = runDetached(cfg, serveOptions{port: 7607})
+	if err == nil || !strings.Contains(err.Error(), "another start is in progress") {
+		t.Fatalf("locked start error = %v, want the held-lock failure", err)
+	}
+	if spawned {
+		t.Fatal("locked start spawned a child")
 	}
 }
