@@ -1781,6 +1781,11 @@ You can also call `mem_capture_passive(content)` directly, when available, with
 text containing a learning section. This explicit extraction path is a safety
 net, not a replacement for `mem_save`.
 
+Passive observation titles use up to the first 60 UTF-8 bytes of the extracted
+learning, ending at a complete character boundary, with `...` appended when the
+learning exceeds that limit. This title shortening does not shorten the stored
+learning content or repair titles already stored by older versions.
+
 ### AFTER COMPACTION
 
 Follow the host-specific recovery contract when supplied. In OpenCode, persist
