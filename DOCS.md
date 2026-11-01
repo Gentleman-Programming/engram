@@ -1782,6 +1782,13 @@ Claude's SubagentStop hook streams its JSON request body to curl through stdin
 to preserve UTF-8 content when Git for Windows curl converts command-line
 arguments using a legacy code page. Existing corrupted captures are not repaired.
 
+Claude also captures successful `SubagentHandback` reports through an exact-match
+asynchronous `PostToolUse` hook, reading `tool_input.message` instead of the
+subagent's closing text. Both Claude events share the existing `subagent-stop`
+passive source and UTF-8 transport; extraction and project-scoped deduplication
+remain server-side. Empty/non-string handbacks and unrelated/failed tool events
+are ignored. The adapter does not read transcript files or recover older reports.
+
 Automatic capture is adapter-specific: Claude/Codex SubagentStop
 hooks and OpenCode delegated task/subagent tool-output adapters forward eligible
 output for server-side extraction. Other adapters may support eligible tool

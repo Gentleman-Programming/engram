@@ -38,6 +38,7 @@ func TestSubagentStopPreservesUnicodeTransport(t *testing.T) {
 		env["ENGRAM_TEST_CURL"] = bashScriptPath(t, curl)
 	}
 	for _, tc := range []struct{ name, field, content string }{
+		{"handback", "tool_input", "## Key Learnings\n1. Entrega íntegra → 中文 🧠\n"},
 		{"ascii", "last_assistant_message", "## Key Learnings\n1. ordinary text stays unchanged\n"},
 		{"unicode", "last_assistant_message", "## Key Learnings\r\n1. la sesión añade tildes y eñes → 中文 🧠\r\n\"quoted\" $HOME `id` \\path\n"},
 		{"stdout-fallback", "stdout", "## Key Learnings\n1. résumé, ação y eñes permanecen íntegras\n"},
@@ -45,7 +46,13 @@ func TestSubagentStopPreservesUnicodeTransport(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, captured := captureServer(t)
 			env["ENGRAM_PORT"] = serverPort(t, srv)
-			input, err := json.Marshal(map[string]string{"session_id": "unicode-session", "cwd": t.TempDir(), tc.field: tc.content})
+			payload := map[string]any{"session_id": "unicode-session", "cwd": t.TempDir(), tc.field: tc.content}
+			if tc.field == "tool_input" {
+				payload[tc.field] = map[string]string{"message": tc.content}
+				payload["hook_event_name"] = "PostToolUse"
+				payload["tool_name"] = "SubagentHandback"
+			}
+			input, err := json.Marshal(payload)
 			if err != nil {
 				t.Fatal(err)
 			}
