@@ -1258,6 +1258,10 @@ func TestCmdHookWritesTransformedResponse(t *testing.T) {
 	oldStdin, oldOutput := os.Stdin, claudeHookOutput
 	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			hookLocalMockHealth(t, w)
+			return
+		}
 		if r.URL.Path == "/project/current" {
 			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 			return
