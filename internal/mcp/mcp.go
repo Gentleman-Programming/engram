@@ -80,8 +80,11 @@ var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
-var loadContextStats = func(s *store.Store) (*store.Stats, error) {
-	return s.Stats()
+var loadContextStats = func(s *store.Store, project string) (*store.Stats, error) {
+	if project == "" {
+		return s.Stats()
+	}
+	return s.StatsProject(project)
 }
 
 func truncationWarning(metadata store.TruncationMetadata) string {
@@ -2187,7 +2190,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		// so the suffix is rendered FIRST and its bytes are reserved from the
 		// context budget; a final clamp backstops the pathological case where
 		// the suffix alone meets or exceeds the budget.
-		stats, err := loadContextStats(s)
+		stats, err := loadContextStats(s, contextProject)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
 		}

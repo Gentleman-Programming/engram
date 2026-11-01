@@ -137,7 +137,7 @@ func budgetSection(t *testing.T, context, name string) string {
 // the context block (fresh activity produces no nudge in these tests).
 func budgetStatsSuffix(t *testing.T, s *store.Store) string {
 	t.Helper()
-	stats, err := loadContextStats(s)
+	stats, err := loadContextStats(s, "engram")
 	if err != nil {
 		t.Fatalf("loadContextStats: %v", err)
 	}
@@ -359,8 +359,8 @@ func TestMemContextBudgetCompactMistypedIsFalse(t *testing.T) {
 
 // TestMemContextBudgetTotalResultBound pins the CodeRabbit major finding on
 // PR #1074: the byte budget must apply to the COMPLETE mem_context result,
-// including the "Memory stats" suffix that joins every project name in the
-// store and the activity nudge. A store with many long project names must
+// including the "Memory stats" suffix that joins project names for cross-project
+// personal context and the activity nudge. A store with many long project names must
 // never push the tool result past the requested budget.
 func TestMemContextBudgetTotalResultBound(t *testing.T) {
 	s := newMCPTestStore(t)
@@ -371,7 +371,7 @@ func TestMemContextBudgetTotalResultBound(t *testing.T) {
 	}
 	if _, err := s.AddObservation(store.AddObservationParams{
 		SessionID: "s-projects", Type: "note", Title: "tiny", Content: "tiny",
-		Project: "engram",
+		Project: "engram", Scope: "personal",
 	}); err != nil {
 		t.Fatalf("add observation: %v", err)
 	}
@@ -391,8 +391,8 @@ func TestMemContextBudgetTotalResultBound(t *testing.T) {
 	}
 
 	for name, args := range map[string]map[string]any{
-		"default-budget":  {"project": "engram"},
-		"explicit-budget": {"project": "engram", "max_bytes": 2048.0},
+		"default-budget":  {"scope": "personal"},
+		"explicit-budget": {"scope": "personal", "max_bytes": 2048.0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := budgetCallContext(t, s, args)
@@ -430,7 +430,7 @@ func TestMemContextBudgetStatsErrorPropagates(t *testing.T) {
 
 	original := loadContextStats
 	t.Cleanup(func() { loadContextStats = original })
-	loadContextStats = func(*store.Store) (*store.Stats, error) {
+	loadContextStats = func(*store.Store, string) (*store.Stats, error) {
 		return nil, store.ErrDatabaseGenerationChanged
 	}
 
