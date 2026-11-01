@@ -17,6 +17,27 @@ import (
 //go:embed artifact_core.mjs
 var artifactCoreOwner []byte
 
+//go:embed artifact_pi.mjs
+var artifactPiOwner []byte
+
+//go:embed artifact_workflows.mjs
+var artifactPiWorkflows []byte
+
+type artifactPiCheck struct {
+	Name              string   `json:"name"`
+	State             string   `json:"state"`
+	Cleanup           string   `json:"cleanup"`
+	Joined            bool     `json:"joined"`
+	HelperSHA256      string   `json:"helperSha256"`
+	TreeSHA256        string   `json:"treeSha256,omitempty"`
+	TypeBoxVersion    string   `json:"typeBoxVersion,omitempty"`
+	TypeBoxTreeSHA256 string   `json:"typeBoxTreeSha256,omitempty"`
+	Substitutions     []string `json:"substitutions,omitempty"`
+	ExitCode          *int     `json:"exitCode,omitempty"`
+	Retained          bool     `json:"retained,omitempty"`
+	mutated           bool
+}
+
 type artifactCoreCheck struct {
 	Name            string `json:"name"`
 	State           string `json:"state"`
@@ -30,7 +51,12 @@ type artifactCoreCheck struct {
 	HelperSHA256    string `json:"helperSha256"`
 }
 
-func runArtifactCore(ctx context.Context, core []byte, digest, run string) *artifactCoreCheck {
+// materialize uses only the admitted Go archive authority, before any import.
+func runArtifactCoreWithPi(ctx context.Context, core []byte, digest, run string, materialize func(string) bool, pi *artifactPiCheck) *artifactCoreCheck {
+	return runArtifactPiCase(ctx, core, digest, run, materialize, pi, "")
+}
+
+func runArtifactPiCase(ctx context.Context, core []byte, digest, run string, materialize func(string) bool, pi *artifactPiCheck, workflow string) *artifactCoreCheck {
 	r := &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
 	r.HelperSHA256 = fmt.Sprintf("%x", sha256.Sum256(artifactCoreOwner))
 	root, err := os.MkdirTemp("", "engram-core-"+run+"-")
@@ -40,10 +66,16 @@ func runArtifactCore(ctx context.Context, core []byte, digest, run string) *arti
 	defer func() {
 		if !r.Joined {
 			r.Retained = true
+			if pi != nil {
+				pi.State, pi.Joined, pi.Cleanup, pi.Retained = "unavailable", false, "unknown", true
+			}
 			return
 		}
 		if os.RemoveAll(root) != nil {
 			r.State, r.Cleanup, r.Retained = "unavailable", "unknown", true
+			if pi != nil {
+				pi.State, pi.Cleanup, pi.Retained = "unavailable", "unknown", true
+			}
 		}
 	}()
 	// Unknown Git lookup is not proof of isolation. Never start Core inside a
@@ -57,9 +89,53 @@ func runArtifactCore(ctx context.Context, core []byte, digest, run string) *arti
 	if runtime.GOOS == "windows" {
 		executable += ".exe"
 	}
+	piTree := filepath.Join(root, "materialized-pi")
+	var treeBefore, peerBefore [32]byte
+	peerTree := filepath.Join(root, "plugin", "pi", "node_modules", "typebox")
+	peerMeasured := false
+	if pi != nil {
+		helperHash := sha256.New()
+		_, _ = helperHash.Write(artifactPiOwner)
+		_, _ = helperHash.Write([]byte("\x00pi-workflows.mjs\x00"))
+		_, _ = helperHash.Write(artifactPiWorkflows)
+		pi.HelperSHA256 = fmt.Sprintf("%x", helperHash.Sum(nil))
+		if materialize == nil || !materialize(piTree) {
+			return r
+		}
+		treeBefore, err = sourceTreeDigest(piTree)
+		if err != nil {
+			return r
+		}
+		pi.TreeSHA256 = fmt.Sprintf("%x", treeBefore)
+		if _, peerErr := os.Lstat(peerTree); peerErr == nil {
+			peerBefore, err = sourceTreeDigest(peerTree)
+			if err != nil {
+				return r
+			}
+			peerMeasured = true
+		} else if !os.IsNotExist(peerErr) {
+			return r
+		}
+		if os.WriteFile(filepath.Join(root, "pi-owner.mjs"), artifactPiOwner, 0600) != nil || os.WriteFile(filepath.Join(root, "pi-workflows.mjs"), artifactPiWorkflows, 0600) != nil {
+			return r
+		}
+	}
 	helper := filepath.Join(root, "core-owner.mjs")
 	if os.WriteFile(executable, core, 0700) != nil || os.WriteFile(helper, artifactCoreOwner, 0600) != nil {
 		return r
+	}
+	helperBytes := map[string][]byte{helper: artifactCoreOwner}
+	if pi != nil {
+		helperBytes[filepath.Join(root, "pi-owner.mjs")] = artifactPiOwner
+		helperBytes[filepath.Join(root, "pi-workflows.mjs")] = artifactPiWorkflows
+	}
+	helperBefore := make(map[string]string, len(helperBytes))
+	for file, expected := range helperBytes {
+		captured, captureErr := capturePackageArchive(file, "")
+		if captureErr != nil || captured != fmt.Sprintf("%x", sha256.Sum256(expected)) {
+			return r
+		}
+		helperBefore[file] = captured
 	}
 	before, err := capturePackageArchive(executable, "")
 	if err != nil || before != digest {
@@ -70,6 +146,9 @@ func runArtifactCore(ctx context.Context, core []byte, digest, run string) *arti
 		return r
 	}
 	cmd := exec.CommandContext(ctx, node, helper, executable)
+	if pi != nil {
+		cmd.Args = append(cmd.Args, filepath.Join(piTree, "index.ts"), workflow)
+	}
 	cmd.Dir = root
 	cmd.Env = []string{}
 	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"} {
@@ -93,16 +172,54 @@ func runArtifactCore(ctx context.Context, core []byte, digest, run string) *arti
 		}
 		return r
 	}
-	var measured artifactCoreCheck
+	var measured struct {
+		artifactCoreCheck
+		PiBootstrap *artifactPiCheck `json:"piBootstrap"`
+	}
 	if json.Unmarshal(output.buffer.Bytes(), &measured) != nil || measured.Name != r.Name {
 		r.Joined, r.Cleanup = false, "unknown"
 		return r
 	}
 	measured.HelperSHA256 = r.HelperSHA256
-	*r = measured
+	*r = measured.artifactCoreCheck
+	if pi != nil {
+		helperHash := pi.HelperSHA256
+		if measured.PiBootstrap == nil {
+			r.Joined, r.Cleanup = false, "unknown"
+			pi.Joined, pi.Cleanup = false, "unknown"
+		} else {
+			*pi = *measured.PiBootstrap
+		}
+		pi.HelperSHA256, pi.TreeSHA256 = helperHash, fmt.Sprintf("%x", treeBefore)
+		after, treeErr := sourceTreeDigest(piTree)
+		pi.mutated = treeErr != nil || after != treeBefore
+		if peerMeasured {
+			pi.TypeBoxVersion, pi.TypeBoxTreeSHA256 = "1.3.34", fmt.Sprintf("%x", peerBefore)
+			afterPeer, peerErr := sourceTreeDigest(peerTree)
+			pi.mutated = pi.mutated || peerErr != nil || afterPeer != peerBefore
+		}
+		if pi.mutated || !pi.Joined || pi.Cleanup != "passed" || ctx.Err() != nil {
+			pi.State = "unavailable"
+		}
+		if !pi.Joined {
+			r.Joined = false
+		}
+	}
 	after, err := capturePackageArchive(executable, "")
 	if err != nil || after != digest || ctx.Err() != nil || !r.Joined || r.Cleanup != "passed" {
 		r.State = "unavailable"
+		if pi != nil {
+			pi.State = "unavailable"
+		}
+	}
+	for file, expected := range helperBefore {
+		captured, captureErr := capturePackageArchive(file, "")
+		if captureErr != nil || captured != expected {
+			r.State = "unavailable"
+			if pi != nil {
+				pi.State, pi.mutated = "unavailable", true
+			}
+		}
 	}
 	return r
 }
