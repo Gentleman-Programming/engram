@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -96,6 +95,36 @@ func TestTransientHealthFailureDoesNotRequestShutdown(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
 	if rec.Code != 200 {
 		t.Fatalf("recovery = %d", rec.Code)
+	}
+}
+
+// TestHealthReportsDaemonToken pins the daemon identity surface: a server
+// configured with a daemon start token reports it on GET /health, and a
+// non-daemon server omits the field entirely.
+func TestHealthReportsDaemonToken(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	srv.SetDaemonToken("tok-123")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		DaemonToken string `json:"daemon_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode health body: %v", err)
+	}
+	if body.DaemonToken != "tok-123" {
+		t.Fatalf("daemon_token = %q, want tok-123", body.DaemonToken)
+	}
+
+	plain := New(st, 0)
+	plainRec := httptest.NewRecorder()
+	plain.Handler().ServeHTTP(plainRec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if strings.Contains(plainRec.Body.String(), "daemon_token") {
+		t.Fatalf("non-daemon health body reports daemon_token: %s", plainRec.Body.String())
 	}
 }
 
@@ -486,7 +515,7 @@ func TestInstanceIDIsStableDistinctAndAtomic(t *testing.T) {
 	}
 }
 
-func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
+func TestStartRejectsSameInstanceBindLoser(t *testing.T) {
 	owner := newServerTestStore(t)
 	winner := New(owner, 0)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -496,16 +525,12 @@ func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	go func() { _ = http.Serve(ln, winner.Handler()) }()
 	t.Cleanup(func() { _ = ln.Close() })
-	var output bytes.Buffer
-	originalWriter := log.Writer()
-	log.SetOutput(&output)
-	t.Cleanup(func() { log.SetOutput(originalWriter) })
-	if err := New(owner, port).Start(); err != nil {
-		t.Fatalf("same-instance bind loser: %v", err)
+	err = New(owner, port).Start()
+	if !errors.Is(err, ErrPortOwned) {
+		t.Fatalf("same-instance bind loser: %v, want ErrPortOwned", err)
 	}
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], "did not bind") || !strings.Contains(lines[0], "an existing instance owns the port") || !strings.Contains(lines[0], fmt.Sprintf("127.0.0.1:%d", port)) {
-		t.Fatalf("same-instance diagnostic = %q, want one actionable line", output.String())
+	if !strings.Contains(err.Error(), "an existing instance owns the port") || !strings.Contains(err.Error(), fmt.Sprintf("127.0.0.1:%d", port)) {
+		t.Fatalf("same-instance diagnostic = %q, want ownership message with listen address", err.Error())
 	}
 	foreign := newServerTestStore(t)
 	if err := New(foreign, port).Start(); err == nil || !strings.Contains(err.Error(), "different or legacy") {

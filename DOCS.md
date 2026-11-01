@@ -364,7 +364,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true,"root_session_resume":true,"runtime_session_resolution":true}}`; when the server has a daemon token (a daemon started by `engram run -d` carries one), the response also includes `"daemon_token"`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
 
 The Claude native PreToolUse gate verifies the local `/health` instance ID against its configured data directory before sending session or cwd data. Directory resolution uses the same home fallback as `engram serve`. An unrelated, unidentified, redirected, or unhealthy local listener denies the write with an identity error. Explicit `ENGRAM_URL` selects an intentional remote endpoint and retains its existing connection contract. Local instance comparison prevents accidental cross-store routing; it does not authenticate a malicious server. Windows connection-refused recovery remains bounded by the hook confirmation deadline.
 - When a local HTTP request observes permanent database generation invalidation, its existing error response is preserved. After the handler returns, `engram serve` logs one restart diagnostic, stops autosync, drains HTTP requests for up to five seconds (then force-closes remaining connections), releases its listener, and exits nonzero after cleanup. Ordinary transient health failures remain generic `500` responses and do not stop the server. Detection is request-triggered, not a background watchdog; the database is not reopened automatically.
@@ -806,7 +806,7 @@ unchanged.
 | `ENGRAM_MEM_SAVE_TIMING`        | Set to exactly `1` in the MCP server environment to log one privacy-safe stage timing record per `mem_save` invocation to stderr. See [mem_save timing diagnostics](#mem_save-timing-diagnostics). | (unset — disabled) |
 | `ENGRAM_HTTP_WRITE_TIMING`      | Set to exactly `1` in the local HTTP server environment to log one privacy-safe timing record for each session registration, observation save, or passive capture. See [HTTP write timing diagnostics](#http-write-timing-diagnostics). | (unset — disabled) |
 | `ENGRAM_DATA_DIR`               | Engram CLI data directory. Empty or whitespace-only values use the platform default; nonblank values are used as provided.                                                                                                                               | `~/.engram`          |
-| `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
+| `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks. `engram run` honors it when no `-p` port is given, and `engram restart` honors it when neither `-p` nor the stopped daemon's recorded port exists.                                                                                         | `7437`               |
 | `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
 | `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation MUST NOT establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
@@ -2016,6 +2016,26 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 Use a service supervisor to start `engram serve` after reboot and restart it after failures. Replacing the binary alone does not guarantee that an existing process exits. In this version, permanent database generation invalidation observed by an HTTP request triggers autosync cancellation, up to five seconds of HTTP draining, listener release, and a nonzero exit after cleanup. Restart belongs to the supervisor or operator, not Engram itself; already-running older binaries do not gain this behavior. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
 
+### CLI daemon verbs (docker-style)
+
+Engram ships docker-style verbs for the common daemon lifecycle. They manage only the daemon started by `engram run -d` — the one tracked by the pidfile — and never touch session-owned serves that MCP clients spawn per session.
+
+| Concern | Docker equivalent | Engram command |
+| --- | --- | --- |
+| Run in background | `docker run -d` | `engram run -d` — detaches, prints PID and port |
+| Custom port | `docker run -d -p 1234` | `engram run -d -p 1234` — fails loudly if the port is taken |
+| Status | `docker ps` | `engram ps` — running (pid N) on port P / not running / unreachable |
+| Stop | `docker stop` | `engram stop` — graceful stop, then force if needed |
+| Logs | `docker logs` | `engram logs` — `engram logs -f` follows |
+| Restart | `docker restart` | `engram restart [-p PORT]` — stop, then start detached again |
+
+- The daemon records `<dataDir>/serve.pid` (JSON `{"pid": N, "port": P, "token": T}` — the token identifies one daemon start) and writes its stdout/stderr to `<dataDir>/serve.log` (default data dir `~/.engram`). Concurrent starts on one data directory are serialized through `<dataDir>/serve.lock`, so two parents can never overwrite each other's records.
+- A second `engram run -d` against a live daemon reports `already running (pid N)` and exits non-zero.
+- A pidfile pid is only signaled after `/health` confirms it is the recorded daemon (the pidfile token answers). A pid that is alive but not confirmed — the OS reused it after a crash or reboot — is reported as stale/unmanaged and never signaled; `run -d` clears such a record and starts fresh. Pidfiles from older binaries (no token) keep the running-probe check.
+- A port conflict is a startup error with a non-zero exit code, so `KeepAlive`/`Restart` supervisors never hot-loop on a silent exit-0 bind failure.
+- `engram stop` escalates from graceful to forced termination; on Windows, detached children cannot receive console events, so stop terminates the process directly.
+- The verbs complement the supervisor templates below: use a unit for boot persistence and the verbs for day-to-day control.
+
 ### Using systemd (Linux)
 
 1. Move binary to `~/.local/bin` (ensure it's in your `$PATH`)
@@ -2042,7 +2062,7 @@ Environment=ENGRAM_DATA_DIR=%h/.engram
 WantedBy=default.target
 ```
 
-`Restart=on-failure` restarts unexpected failures but not a clean exit when the same Engram instance already owns the port. A different or legacy port owner still causes a startup error. Existing installed units are not changed by this example: manually update `~/.config/systemd/user/engram.service` and run `systemctl --user daemon-reload` to apply the policy.
+`Restart=on-failure` restarts the service after any non-zero exit. Both port-ownership conflicts are startup errors: the same Engram instance already owning the port and a different or legacy owner, so the unit retries at `RestartSec` pace instead of silently looping on a clean exit. Existing installed units are not changed by this example: manually update `~/.config/systemd/user/engram.service` and run `systemctl --user daemon-reload` to apply the policy.
 
 ### Using launchd (macOS)
 
