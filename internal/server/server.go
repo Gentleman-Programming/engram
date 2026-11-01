@@ -36,6 +36,11 @@ var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
+// ErrPortOwned reports that another live serve process of the same engram
+// instance already owns the TCP port. Start returns it instead of exiting
+// cleanly (issue #2228): callers and supervisors must observe the failure.
+var ErrPortOwned = errors.New("an existing instance owns the port")
+
 // SyncStatusProvider returns the current sync status. This is implemented
 // by autosync.Manager and injected from cmd/engram/main.go.
 type SyncStatusProvider interface {
@@ -293,8 +298,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		if s.sessionOwnedToken == "" && socketPath == "" && isAddressInUse(err) {
 			if s.instanceOwnsPort() {
-				log.Printf("[engram] HTTP server did not bind on %s: an existing instance owns the port", addr)
-				return nil
+				return fmt.Errorf("engram server: listen %s: %w", addr, ErrPortOwned)
 			}
 			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)
 		}

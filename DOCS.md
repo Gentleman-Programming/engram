@@ -2042,7 +2042,7 @@ Environment=ENGRAM_DATA_DIR=%h/.engram
 WantedBy=default.target
 ```
 
-`Restart=on-failure` restarts unexpected failures but not a clean exit when the same Engram instance already owns the port. A different or legacy port owner still causes a startup error. Existing installed units are not changed by this example: manually update `~/.config/systemd/user/engram.service` and run `systemctl --user daemon-reload` to apply the policy.
+`Restart=on-failure` restarts the service after any non-zero exit. Both port-ownership conflicts are startup errors: the same Engram instance already owning the port and a different or legacy owner, so the unit retries at `RestartSec` pace instead of silently looping on a clean exit. Existing installed units are not changed by this example: manually update `~/.config/systemd/user/engram.service` and run `systemctl --user daemon-reload` to apply the policy.
 
 ### Using launchd (macOS)
 

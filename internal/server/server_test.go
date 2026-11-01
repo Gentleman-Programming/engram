@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -486,7 +485,7 @@ func TestInstanceIDIsStableDistinctAndAtomic(t *testing.T) {
 	}
 }
 
-func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
+func TestStartRejectsSameInstanceBindLoser(t *testing.T) {
 	owner := newServerTestStore(t)
 	winner := New(owner, 0)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -496,16 +495,12 @@ func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	go func() { _ = http.Serve(ln, winner.Handler()) }()
 	t.Cleanup(func() { _ = ln.Close() })
-	var output bytes.Buffer
-	originalWriter := log.Writer()
-	log.SetOutput(&output)
-	t.Cleanup(func() { log.SetOutput(originalWriter) })
-	if err := New(owner, port).Start(); err != nil {
-		t.Fatalf("same-instance bind loser: %v", err)
+	err = New(owner, port).Start()
+	if !errors.Is(err, ErrPortOwned) {
+		t.Fatalf("same-instance bind loser: %v, want ErrPortOwned", err)
 	}
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], "did not bind") || !strings.Contains(lines[0], "an existing instance owns the port") || !strings.Contains(lines[0], fmt.Sprintf("127.0.0.1:%d", port)) {
-		t.Fatalf("same-instance diagnostic = %q, want one actionable line", output.String())
+	if !strings.Contains(err.Error(), "an existing instance owns the port") || !strings.Contains(err.Error(), fmt.Sprintf("127.0.0.1:%d", port)) {
+		t.Fatalf("same-instance diagnostic = %q, want ownership message with listen address", err.Error())
 	}
 	foreign := newServerTestStore(t)
 	if err := New(foreign, port).Start(); err == nil || !strings.Contains(err.Error(), "different or legacy") {
