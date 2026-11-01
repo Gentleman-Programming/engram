@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -77,6 +80,41 @@ func TestHookRejectsForeignLocalIdentityBeforeSessionTraffic(t *testing.T) {
 				if len(paths) != 1 || paths[0] != "/health" {
 					t.Errorf("private traffic before identity validation: %v", paths)
 				}
+			}
+		})
+	}
+}
+
+func TestHookLocalIdentityMatchesServeHomeFallback(t *testing.T) {
+	for _, mode := range []string{"fallback", "override", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("ENGRAM_DATA_DIR", "")
+			t.Setenv("USERPROFILE", "")
+			t.Setenv("HOME", home)
+			t.Setenv("LOCALAPPDATA", "")
+			oldConfig := storeDefaultConfig
+			storeDefaultConfig = func() (store.Config, error) { return store.Config{}, errors.New("home unavailable") }
+			t.Cleanup(func() { storeDefaultConfig = oldConfig })
+			dir := filepath.Join(home, ".engram")
+			if mode == "override" {
+				dir = filepath.Join(home, "explicit override")
+				t.Setenv("ENGRAM_DATA_DIR", dir)
+			}
+			if mode == "unavailable" {
+				t.Setenv("HOME", "")
+			}
+			expected, err := store.EnsureInstanceID(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "engram", "instance_id": expected})
+			}))
+			defer server.Close()
+			err = confirmHookLocalIdentity(context.Background(), server.Client(), server.URL)
+			if (err == nil) != (mode != "unavailable") {
+				t.Fatalf("identity confirmation in %s: %v", mode, err)
 			}
 		})
 	}

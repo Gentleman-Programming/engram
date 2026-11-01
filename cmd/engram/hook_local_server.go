@@ -49,10 +49,21 @@ func hookLocalRecoveryEligible(platform, base, endpoint string, err error) bool 
 // Test seam for launch admission; production always uses the existing launcher.
 var hookLocalServerLaunch = launchServeBackgroundContext
 
+// Match serve's home fallback without changing best-effort host binding policy.
+func hookLocalDataDir() string {
+	if dir := hostBindingDataDirFromEnvOrConfig(); dir != "" {
+		return dir
+	}
+	if home := resolveHomeFallback(); home != "" {
+		return filepath.Join(home, ".engram")
+	}
+	return ""
+}
+
 // A reachable loopback listener may belong to another data directory or OS
 // account. Confirm identity before disclosing any session or cwd to it.
 func confirmHookLocalIdentity(ctx context.Context, client *http.Client, base string) error {
-	dir := hostBindingDataDirFromEnvOrConfig()
+	dir := hookLocalDataDir()
 	if dir == "" {
 		return &hookDenialError{message: "managed local server identity unconfirmed"}
 	}
@@ -81,7 +92,7 @@ func recoverHookLocalServer(ctx context.Context, client *http.Client, base strin
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	dir := hostBindingDataDirFromEnvOrConfig()
+	dir := hookLocalDataDir()
 	if dir == "" {
 		return errHookSessionUnconfirmed
 	}
