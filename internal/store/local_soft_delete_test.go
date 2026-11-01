@@ -88,20 +88,31 @@ func TestLocalObservationWritesRetainGenerationPrecision(t *testing.T) {
 	if err := s.CreateSession("S", "p", "/p"); err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.AddObservation(AddObservationParams{SessionID: "S", Project: "p", Type: "note", Title: "original", Content: "original"})
+	id, err := s.AddObservation(AddObservationParams{SessionID: "S", Project: "p", Type: "note", Title: "original", Content: "original", TopicKey: "precision"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	beforeUpdate := time.Now().UTC()
-	updated, err := s.UpdateObservation(id, UpdateObservationParams{Title: func() *string { v := "edited"; return &v }()})
+	assertPrecision := func(value string) {
+		t.Helper()
+		if _, err := time.Parse("2006-01-02 15:04:05.000000000", value); err != nil {
+			t.Fatalf("generation loses fractional precision: %q: %v", value, err)
+		}
+	}
+	title := "edited"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Title: &title})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updatedAt, err := parseObservationTime(updated.UpdatedAt)
-	if err != nil || updatedAt.Before(beforeUpdate) {
-		t.Fatalf("update generation predates operation: %s, start=%s, err=%v", updated.UpdatedAt, beforeUpdate, err)
+	assertPrecision(updated.UpdatedAt)
+	topicID, err := s.AddObservation(AddObservationParams{SessionID: "S", Project: "p", Type: "note", Title: "topic edit", Content: "topic edit", TopicKey: "precision"})
+	if err != nil || topicID != id {
+		t.Fatalf("topic update id=%d want=%d err=%v", topicID, id, err)
 	}
-	beforeDelete := time.Now().UTC()
+	topic, err := s.GetObservation(topicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPrecision(topic.UpdatedAt)
 	if err := s.DeleteObservation(id, false); err != nil {
 		t.Fatal(err)
 	}
@@ -109,9 +120,10 @@ func TestLocalObservationWritesRetainGenerationPrecision(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT deleted_at, updated_at FROM observations WHERE id = ?`, id).Scan(&deletedAt, &deletedUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
-	deleted, err := parseObservationTime(deletedAt)
-	if err != nil || deleted.Before(beforeDelete) || deletedAt != deletedUpdatedAt {
-		t.Fatalf("delete generations=%s/%s start=%s err=%v", deletedAt, deletedUpdatedAt, beforeDelete, err)
+	assertPrecision(deletedAt)
+	assertPrecision(deletedUpdatedAt)
+	if deletedAt != deletedUpdatedAt {
+		t.Fatalf("delete generations differ: %s/%s", deletedAt, deletedUpdatedAt)
 	}
 }
 

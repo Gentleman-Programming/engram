@@ -4377,7 +4377,7 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 					     normalized_hash = ?,
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
-					     updated_at = datetime('now')
+					     updated_at = ?
 					 WHERE id = ?`,
 					p.SessionID,
 					p.Type,
@@ -4386,6 +4386,7 @@ func (s *Store) AddObservationWithResult(p AddObservationParams) (AddObservation
 					nullableString(p.ToolName),
 					nullableString(topicKey),
 					normHash,
+					Now(),
 					existingID,
 				); err != nil {
 					return err
