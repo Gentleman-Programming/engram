@@ -836,6 +836,22 @@ func main() {
 		if err := cmdRun(cfg, os.Args[2:]); err != nil {
 			fatal(err)
 		}
+	case "ps":
+		if err := cmdPs(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "stop":
+		if err := cmdStop(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "logs":
+		if err := cmdLogs(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
+	case "restart":
+		if err := cmdRestart(cfg, os.Args[2:]); err != nil {
+			fatal(err)
+		}
 	case "mcp":
 		cmdMCP(cfg)
 	case "tui":
@@ -891,7 +907,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "run", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
+	case "mcp", "serve", "run", "ps", "stop", "logs", "restart", "protocol-mode", "tui", "doctor", "version", "--version", "-v", "help", "--help", "-h", "init", "hook":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -3943,6 +3959,10 @@ Commands:
   run [-d] [-p PORT]  Start the HTTP API daemon; -d detaches to the background, records
                      the pidfile under the data dir and prints PID and port; without -d it
                      serves in the foreground exactly like serve
+  ps                 Report daemon status: running (pid N) on port P / not running / unreachable
+  stop               Stop the daemon tracked by the pidfile (graceful stop, then force)
+  logs [-f]          Print the daemon log; -f follows it (Ctrl+C to exit)
+  restart [-p PORT]  Stop the daemon if running, then start it detached again
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
                         Profiles: agent (%d tools), admin (%d tools), all (default, %d)

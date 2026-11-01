@@ -1,0 +1,457 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/daemon"
+	"github.com/Gentleman-Programming/engram/v3/internal/store"
+)
+
+// ─── Test helpers (seams and fixtures for the daemon control verbs) ─────────
+
+// swapStdoutPrinter redirects the daemon verbs' status-line seam into a
+// buffer and restores it when the test ends.
+func swapStdoutPrinter(t *testing.T) *strings.Builder {
+	t.Helper()
+	captured := &strings.Builder{}
+	saved := stdoutPrinter
+	stdoutPrinter = func(format string, a ...any) (int, error) {
+		return fmt.Fprintf(captured, format, a...)
+	}
+	t.Cleanup(func() { stdoutPrinter = saved })
+	return captured
+}
+
+// swapDaemonStatusProbe stubs the `engram ps` health probe so unit tests can
+// pin status handling without a live daemon; it returns where the probed
+// port is recorded so tests can assert the pidfile port was used.
+func swapDaemonStatusProbe(t *testing.T, result daemon.ProbeResult) *int {
+	t.Helper()
+	probedPort := 0
+	saved := daemonStatusProbe
+	daemonStatusProbe = func(port int) daemon.ProbeResult {
+		probedPort = port
+		return result
+	}
+	t.Cleanup(func() { daemonStatusProbe = saved })
+	return &probedPort
+}
+
+// captureStdoutPipe runs fn with os.Stdout piped and returns everything fn
+// printed directly to stdout (cmdLogs writes with io.Copy, not the seam).
+func captureStdoutPipe(t *testing.T, fn func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	saved := os.Stdout
+	os.Stdout = writer
+	defer func() { os.Stdout = saved }()
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stdout capture writer: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stdout capture reader: %v", err)
+	}
+	return string(data)
+}
+
+// exitedChildPid returns the pid of a real process that already exited and
+// was reaped: the only honest "definitely dead" pid a unit test can obtain.
+func exitedChildPid(t *testing.T) int {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	child := exec.Command(executable, "-test.run=TestDaemonVerbsNoSuchChildTest")
+	if err := child.Run(); err != nil {
+		t.Fatalf("run sacrificial child process: %v", err)
+	}
+	if child.Process == nil || child.Process.Pid <= 0 {
+		t.Fatal("sacrificial child left no pid behind")
+	}
+	return child.Process.Pid
+}
+
+// cleanupPidfileDaemon kills the pidfile-tracked daemon if one survives the
+// test so a failing assertion never leaks a daemon process.
+func cleanupPidfileDaemon(t *testing.T, dataDir string) {
+	t.Helper()
+	t.Cleanup(func() {
+		record, err := daemon.ReadPidfile(daemon.PidfilePath(dataDir))
+		if err != nil {
+			return
+		}
+		if daemon.ProcessAlive(record.Pid) {
+			if process, perr := os.FindProcess(record.Pid); perr == nil {
+				_ = process.Kill()
+				_, _ = process.Wait()
+			}
+		}
+		_ = daemon.RemovePidfile(daemon.PidfilePath(dataDir))
+	})
+}
+
+// ─── Unit tests ─────────────────────────────────────────────────────────────
+
+// TestCmdPsStatuses pins `engram ps` (spec S4): no pidfile, stale pidfile,
+// live-and-answering, live-but-not-answering, and argument rejection.
+func TestCmdPsStatuses(t *testing.T) {
+	t.Run("no pidfile reports not running", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		out := swapStdoutPrinter(t)
+		err := cmdPs(cfg, nil)
+		if err == nil || !strings.Contains(err.Error(), "daemon is not running") {
+			t.Fatalf("no-pidfile error = %v, want daemon is not running", err)
+		}
+		if !strings.Contains(out.String(), "not running") {
+			t.Fatalf("no-pidfile output = %q, want not running", out.String())
+		}
+	})
+	t.Run("stale pidfile reports not running and is removed", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		deadPid := exitedChildPid(t)
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: deadPid, Port: 7437}); err != nil {
+			t.Fatalf("write stale pidfile: %v", err)
+		}
+		out := swapStdoutPrinter(t)
+		err := cmdPs(cfg, nil)
+		if err == nil || !strings.Contains(err.Error(), "daemon is not running") {
+			t.Fatalf("stale-pidfile error = %v, want daemon is not running", err)
+		}
+		if !strings.Contains(out.String(), "not running") {
+			t.Fatalf("stale-pidfile output = %q, want not running", out.String())
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+			t.Fatalf("stale pidfile survived ps: %v", rerr)
+		}
+	})
+	t.Run("live pid with answering probe reports running", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7600}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		probedPort := swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7600})
+		out := swapStdoutPrinter(t)
+		if err := cmdPs(cfg, nil); err != nil {
+			t.Fatalf("ps on running daemon: %v", err)
+		}
+		want := fmt.Sprintf("running (pid %d) on port 7600", os.Getpid())
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("running output = %q, want %q", out.String(), want)
+		}
+		if *probedPort != 7600 {
+			t.Fatalf("probed port = %d, want the pidfile port 7600", *probedPort)
+		}
+	})
+	t.Run("live pid with dead port reports unreachable", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7601}); err != nil {
+			t.Fatalf("write pidfile: %v", err)
+		}
+		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning, Port: 7601})
+		out := swapStdoutPrinter(t)
+		err := cmdPs(cfg, nil)
+		if err == nil || !strings.Contains(err.Error(), "daemon is not answering on port 7601") {
+			t.Fatalf("unreachable error = %v, want daemon is not answering on port 7601", err)
+		}
+		want := fmt.Sprintf("unreachable (pid %d) on port 7601", os.Getpid())
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("unreachable output = %q, want %q", out.String(), want)
+		}
+	})
+	t.Run("unknown argument is rejected", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		err := cmdPs(cfg, []string{"-x"})
+		if err == nil || !strings.Contains(err.Error(), "unknown ps argument: -x") {
+			t.Fatalf("unknown arg error = %v, want unknown ps argument: -x", err)
+		}
+	})
+}
+
+// TestCmdStopCases pins `engram ps`-adjacent `engram stop` (spec S5): a
+// missing pidfile is nothing to stop and a stale one is cleaned, not killed.
+func TestCmdStopCases(t *testing.T) {
+	t.Run("no pidfile is nothing to stop", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		out := swapStdoutPrinter(t)
+		err := cmdStop(cfg, nil)
+		if err == nil || !strings.Contains(err.Error(), "no daemon pidfile; nothing to stop") {
+			t.Fatalf("no-pidfile stop error = %v, want nothing to stop", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("no-pidfile stop printed %q, want silence", out.String())
+		}
+	})
+	t.Run("stale pidfile is removed without stopping", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		deadPid := exitedChildPid(t)
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: deadPid, Port: 7437}); err != nil {
+			t.Fatalf("write stale pidfile: %v", err)
+		}
+		out := swapStdoutPrinter(t)
+		if err := cmdStop(cfg, nil); err != nil {
+			t.Fatalf("stop with stale pidfile: %v", err)
+		}
+		want := fmt.Sprintf("Removed stale pidfile (pid %d was not running)", deadPid)
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("stale stop output = %q, want %q", out.String(), want)
+		}
+		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); !errors.Is(rerr, daemon.ErrNoPidfile) {
+			t.Fatalf("pidfile survived stale stop: %v", rerr)
+		}
+	})
+}
+
+// TestCmdLogsBasics pins `engram logs` (spec S7): replay of the daemon log
+// sink, the missing-log error, follow-flag parsing, and argument rejection.
+func TestCmdLogsBasics(t *testing.T) {
+	t.Run("prints the daemon log", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		file, err := daemon.OpenLog(daemon.LogPath(cfg.DataDir))
+		if err != nil {
+			t.Fatalf("open daemon log: %v", err)
+		}
+		if _, err := file.WriteString("daemon line one\ndaemon line two\n"); err != nil {
+			t.Fatalf("seed daemon log: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("close daemon log: %v", err)
+		}
+		var logsErr error
+		output := captureStdoutPipe(t, func() { logsErr = cmdLogs(cfg, nil) })
+		if logsErr != nil {
+			t.Fatalf("logs: %v", logsErr)
+		}
+		if !strings.Contains(output, "daemon line one") || !strings.Contains(output, "daemon line two") {
+			t.Fatalf("logs output = %q, want both seeded lines", output)
+		}
+	})
+	t.Run("missing log is reported", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		err := cmdLogs(cfg, nil)
+		if err == nil || !strings.Contains(err.Error(), "no daemon log yet at ") {
+			t.Fatalf("missing log error = %v, want no daemon log yet at <path>", err)
+		}
+	})
+	t.Run("follow flags parse before the log is read", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		for _, arg := range []string{"-f", "--follow"} {
+			err := cmdLogs(cfg, []string{arg})
+			if err == nil || !strings.Contains(err.Error(), "no daemon log yet at ") {
+				t.Fatalf("logs %s error = %v, want the missing-log error after parsing", arg, err)
+			}
+		}
+	})
+	t.Run("unknown argument is rejected", func(t *testing.T) {
+		cfg := store.Config{DataDir: t.TempDir()}
+		err := cmdLogs(cfg, []string{"--bogus"})
+		if err == nil || !strings.Contains(err.Error(), "unknown logs argument: --bogus") {
+			t.Fatalf("unknown arg error = %v, want unknown logs argument: --bogus", err)
+		}
+	})
+}
+
+// TestCmdRestartPortResolution pins `engram restart`'s port resolution
+// (spec S8): -p wins, the stopped record's port is the fallback, 7437 is the
+// default, and malformed ports and unknown arguments are rejected.
+func TestCmdRestartPortResolution(t *testing.T) {
+	t.Run("explicit -p wins over the pidfile port", func(t *testing.T) {
+		for _, args := range [][]string{{"-p", "9999"}, {"-p=9999"}} {
+			port, err := resolveRestartPort(args, daemon.PidRecord{Pid: 4242, Port: 1234})
+			if err != nil {
+				t.Fatalf("resolve %v: %v", args, err)
+			}
+			if port != 9999 {
+				t.Fatalf("resolve %v = %d, want 9999", args, port)
+			}
+		}
+	})
+	t.Run("stopped record port is the fallback", func(t *testing.T) {
+		port, err := resolveRestartPort(nil, daemon.PidRecord{Pid: 4242, Port: 1234})
+		if err != nil {
+			t.Fatalf("resolve nil args: %v", err)
+		}
+		if port != 1234 {
+			t.Fatalf("fallback port = %d, want the record port 1234", port)
+		}
+	})
+	t.Run("default is 7437 without a usable record", func(t *testing.T) {
+		for _, record := range []daemon.PidRecord{{}, {Pid: 4242}, {Pid: 4242, Port: 0}} {
+			port, err := resolveRestartPort(nil, record)
+			if err != nil {
+				t.Fatalf("resolve with %+v: %v", record, err)
+			}
+			if port != 7437 {
+				t.Fatalf("default port for %+v = %d, want 7437", record, port)
+			}
+		}
+	})
+	t.Run("bad -p values are rejected", func(t *testing.T) {
+		for _, args := range [][]string{{"-p"}, {"-p", "abc"}, {"-p", "0"}, {"-p=70000"}} {
+			if _, err := resolveRestartPort(args, daemon.PidRecord{Pid: 4242, Port: 1234}); err == nil {
+				t.Fatalf("resolve %v accepted a bad port", args)
+			}
+		}
+	})
+	t.Run("unknown argument is rejected", func(t *testing.T) {
+		if _, err := resolveRestartPort([]string{"bogus"}, daemon.PidRecord{}); err == nil || !strings.Contains(err.Error(), "unknown restart argument: bogus") {
+			t.Fatalf("unknown arg error = %v, want unknown restart argument: bogus", err)
+		}
+	})
+}
+
+// ─── Integration tests (real detached daemon child) ─────────────────────────
+
+// TestDaemonVerbLifecycle exercises the full docker-style loop (specs S4 and
+// S5) against a real detached daemon: run -d, ps, stop, ps again.
+func TestDaemonVerbLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a child process")
+	}
+	clearRunEnv(t)
+	port := freeRunPort(t)
+	cfg, dataDir := newRunTestConfig(t)
+	swapRunDaemonSeams(t, port)
+	cleanupPidfileDaemon(t, dataDir)
+	out := swapStdoutPrinter(t)
+
+	if err := cmdRun(cfg, []string{"-d", "-p", strconv.Itoa(port)}); err != nil {
+		t.Fatalf("detached start: %v", err)
+	}
+	// S4: ps reports the live daemon with pid and port.
+	out.Reset()
+	if err := cmdPs(cfg, nil); err != nil {
+		t.Fatalf("ps on live daemon: %v", err)
+	}
+	if !strings.Contains(out.String(), "running (pid") {
+		t.Fatalf("ps output = %q, want running (pid ...)", out.String())
+	}
+	// S5: stop terminates it and clears the pidfile.
+	out.Reset()
+	if err := cmdStop(cfg, nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !strings.Contains(out.String(), "Stopped engram daemon") {
+		t.Fatalf("stop output = %q, want Stopped engram daemon", out.String())
+	}
+	if _, err := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); !errors.Is(err, daemon.ErrNoPidfile) {
+		t.Fatalf("pidfile survived stop: %v", err)
+	}
+	// After the stop, ps reports not running as an error again.
+	out.Reset()
+	err := cmdPs(cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "daemon is not running") {
+		t.Fatalf("post-stop ps error = %v, want daemon is not running", err)
+	}
+	if !strings.Contains(out.String(), "not running") {
+		t.Fatalf("post-stop ps output = %q, want not running", out.String())
+	}
+}
+
+// TestCmdRestartLifecycle pins `engram restart` (spec S8): a live daemon is
+// stopped and replaced by a fresh one serving the same port.
+func TestCmdRestartLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a child process")
+	}
+	clearRunEnv(t)
+	port := freeRunPort(t)
+	cfg, dataDir := newRunTestConfig(t)
+	swapRunDaemonSeams(t, port)
+	cleanupPidfileDaemon(t, dataDir)
+
+	if err := cmdRun(cfg, []string{"-d", "-p", strconv.Itoa(port)}); err != nil {
+		t.Fatalf("initial detached start: %v", err)
+	}
+	first, err := daemon.ReadPidfile(daemon.PidfilePath(dataDir))
+	if err != nil {
+		t.Fatalf("read pidfile after start: %v", err)
+	}
+	// The stop half goes through the status seam and the start half prints
+	// directly to stdout, so capture the real stdout around the restart.
+	var restartErr error
+	output := captureStdoutPipe(t, func() { restartErr = cmdRestart(cfg, nil) })
+	if restartErr != nil {
+		t.Fatalf("restart: %v", restartErr)
+	}
+	if !strings.Contains(output, "Stopped engram daemon") {
+		t.Fatalf("restart output = %q, want the stop half to report Stopped engram daemon", output)
+	}
+	if !strings.Contains(output, "Started engram daemon") {
+		t.Fatalf("restart output = %q, want the start half to report Started engram daemon", output)
+	}
+	second, err := daemon.ReadPidfile(daemon.PidfilePath(dataDir))
+	if err != nil {
+		t.Fatalf("read pidfile after restart: %v", err)
+	}
+	if second.Pid == first.Pid {
+		t.Fatalf("restart reused pid %d; want a fresh daemon process", first.Pid)
+	}
+	if second.Port != port {
+		t.Fatalf("restarted daemon port = %d, want %d", second.Port, port)
+	}
+	if !daemon.ProcessAlive(second.Pid) {
+		t.Fatalf("restarted daemon pid %d is not alive", second.Pid)
+	}
+	if err := cmdPs(cfg, nil); err != nil {
+		t.Fatalf("ps after restart: %v", err)
+	}
+}
+
+// TestCmdLogsPrintsDaemonLog pins `engram logs` against the real daemon log
+// sink (spec S7): the detached child's startup announcement is replayed.
+func TestCmdLogsPrintsDaemonLog(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a child process")
+	}
+	clearRunEnv(t)
+	port := freeRunPort(t)
+	cfg, dataDir := newRunTestConfig(t)
+	swapRunDaemonSeams(t, port)
+	cleanupPidfileDaemon(t, dataDir)
+
+	if err := cmdRun(cfg, []string{"-d", "-p", strconv.Itoa(port)}); err != nil {
+		t.Fatalf("detached start: %v", err)
+	}
+	// The readiness handshake can complete just before the startup log line
+	// is flushed, so poll the sink until the listener announcement lands.
+	wantLine := "HTTP server listening on"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(daemon.LogPath(dataDir))
+		if err == nil && strings.Contains(string(data), wantLine) {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("daemon log never contained %q (read error: %v)", wantLine, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var logsErr error
+	output := captureStdoutPipe(t, func() { logsErr = cmdLogs(cfg, nil) })
+	if logsErr != nil {
+		t.Fatalf("logs: %v", logsErr)
+	}
+	if !strings.Contains(output, wantLine) {
+		t.Fatalf("logs output = %q, want it to contain %q", output, wantLine)
+	}
+	if err := cmdStop(cfg, nil); err != nil {
+		t.Fatalf("stop after logs: %v", err)
+	}
+}
