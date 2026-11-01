@@ -563,6 +563,9 @@ jobs:
       - name: Run PostgreSQL CI policy tests
         run: node --test .github/scripts/postgres-ci.test.mjs
 
+      - name: Run prerequisite coverage evidence tests
+        run: node --test .github/scripts/prerequisite-coverage.test.mjs
+
       - name: Run scanner policy tests
         run: node --test .github/scripts/ci-scanners.test.mjs
 
@@ -777,6 +780,10 @@ jobs:
           set -euo pipefail
           go test -json -count=1 -timeout=10m ./internal/cloud/cloudstore ./internal/cloud/cloudserver ./cmd/engram | tee "$RUNNER_TEMP/postgres-tests.json"
           node .github/scripts/postgres-ci-evidence.mjs "$RUNNER_TEMP/postgres-tests.json"
+
+      - name: Run owned PostgreSQL measurement regressions
+        shell: bash
+        run: bash .github/scripts/postgres-measurements.sh
 
   e2e-tests:
     name: E2E Tests
