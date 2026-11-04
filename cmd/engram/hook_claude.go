@@ -127,6 +127,21 @@ func guardClaudePreToolUse(input []byte) []byte {
 	if !isClaudeEngramWriteOrSessionTool(tool) {
 		return transformClaudePreToolUse(input)
 	}
+	toolInputRaw, present := payload["tool_input"]
+	if !present {
+		return claudePreToolUseDeny("authoritative Claude tool_input is required")
+	}
+	var toolInput map[string]json.RawMessage
+	if json.Unmarshal(toolInputRaw, &toolInput) != nil || toolInput == nil {
+		return claudePreToolUseDeny("authoritative Claude tool_input must be an object")
+	}
+	isReview := strings.HasSuffix(tool, "__mem_review")
+	if isReview {
+		action, _ := claudeHookRequiredString(toolInput, "action")
+		if strings.TrimSpace(action) == "list" {
+			return []byte("{}")
+		}
+	}
 	id, idOK := claudeHookRequiredString(payload, "session_id")
 	cwd, cwdOK := claudeHookRequiredString(payload, "cwd")
 	if !idOK || !cwdOK {
@@ -135,6 +150,15 @@ func guardClaudePreToolUse(input []byte) []byte {
 	effective, err := confirmHookSession(id, cwd, true)
 	if err != nil {
 		return hookSessionConfirmationDeny("Claude", err)
+	}
+	// mem_review mutations retain confirmation, but its handler has no session
+	// argument to bind. An already-correct binding likewise needs no rewrite.
+	// Check only after confirmation, against the live effective continuation.
+	if isReview {
+		return []byte("{}")
+	}
+	if current, ok := claudeHookRequiredString(toolInput, claudeAuthoritativeSessionField(tool)); ok && current == effective {
+		return []byte("{}")
 	}
 	if effective != id {
 		payload["session_id"], _ = json.Marshal(effective)
