@@ -22,6 +22,11 @@ import (
 
 const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref refs/tags/pi-vSEMVER [-root directory]
 
+Published Core observation (Windows/amd64 only):
+release-candidate -observe-published-core -archive ZIP -checksums FILE -context JSON [-execute]
+This separate mode requires reviewed identity pins and never approves a release.
+Without -execute it admits local bytes only; it never downloads or starts Core.
+
 -core-ref  Required full core tag ref with strict SemVer.
 -pi-ref    Required full Pi tag ref with independent strict SemVer.
 -root      Candidate metadata directory (default: current directory).
@@ -80,6 +85,9 @@ func main() {
 }
 
 func run(args []string, output io.Writer) error {
+	if len(args) > 0 && args[0] == "-observe-published-core" {
+		return runPublishedCore(args[1:], output)
+	}
 	flags := flag.NewFlagSet("release-candidate", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.Usage = func() {}

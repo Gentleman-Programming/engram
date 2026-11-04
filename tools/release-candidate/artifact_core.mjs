@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 
 const result = { name: "production-core-lifecycle", state: "unavailable", cleanup: "not-started", joined: true, nodeVersion: process.versions.node };
-const token = randomBytes(32).toString("hex");
+let token = randomBytes(32).toString("hex");
 let core, exited, parentGone = false;
 process.stdin.on("end", () => { parentGone = true; core?.stdin.end(); });
 process.stdin.resume();
@@ -12,7 +12,7 @@ async function bounded(promise, milliseconds) {
   try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("deadline")), milliseconds); })]); }
   finally { clearTimeout(timer); }
 }
-try {
+async function startCore() {
   if (Number(process.versions.node.split(".")[0]) < 24 || parentGone) throw new Error("prerequisite");
   const keys = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"];
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]));
@@ -25,7 +25,7 @@ try {
     core.on("error", () => {
       if (!core.pid) resolve({ code: null, failedStart: true });
     });
-    core.once("exit", (code, signal) => resolve({ code, signal }));
+    core.once(process.argv[3] ? "close" : "exit", (code, signal) => resolve({ code, signal }));
   });
   const readiness = new Promise((resolve, reject) => {
     let data = "";
@@ -45,6 +45,7 @@ try {
   const endpoint = new URL(ready.endpoint);
   const host = endpoint.hostname.replace(/^\[|\]$/g, "");
   if (ready.protocol !== "engram-session-owned-v1" || ready.pid !== core.pid || typeof ready.instance_id !== "string" || !ready.instance_id || ready.instance_id.length > 256 || endpoint.protocol !== "http:" || !isIP(host) || !(host.startsWith("127.") || host === "::1") || !Number(endpoint.port) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/") throw new Error("identity");
+  endpointForRequest = endpoint;
   const healthURL = new URL("/health", endpoint);
   const unauthorized = await fetch(healthURL, { signal: AbortSignal.timeout(2000), redirect: "error" });
   await unauthorized.body?.cancel();
@@ -59,11 +60,11 @@ try {
   if (response.status !== 200 || health.status !== "ok" || health.service !== "engram" || health.instance_id !== ready.instance_id || typeof health.version !== "string" || !health.version || health.version.length > 256 || parentGone) throw new Error("health identity");
   result.instanceId = health.instance_id;
   result.reportedVersion = health.version; // Observed response, not manifest intent.
-  result.state = "passed";
-} catch { result.state = "unavailable"; }
-finally {
+  return health;
+}
+async function stopCore() {
   if (core) {
-    core.stdin.end();
+    if (!core.stdin.writableEnded) core.stdin.end();
     try {
       const exit = await bounded(exited, 3000);
       result.joined = true;
@@ -79,6 +80,53 @@ finally {
       } catch { result.cleanup = "unknown"; }
     }
   }
+}
+async function request(path, body) {
+  const response = await fetch(new URL(path, endpointForRequest), {
+    method: body === undefined ? "GET" : "POST", redirect: "error",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(2000),
+  });
+  let text = "";
+  for await (const chunk of response.body) {
+    text += Buffer.from(chunk).toString();
+    if (Buffer.byteLength(text) > 65536) throw new Error("response limit");
+  }
+  return { status: response.status, data: JSON.parse(text) };
+}
+let endpointForRequest;
+try {
+  const first = await startCore();
+  if (process.argv[3]) {
+    result.persistence = "unavailable";
+    if (first.version !== process.argv[3]) throw new Error("version");
+    const record = { session_id: `smoke-${randomBytes(12).toString("hex")}`, type: "decision",
+      title: "Published artifact persistence", content: randomBytes(32).toString("hex"),
+      project: "published-artifact-smoke", scope: "project" };
+    if ((await request("/sessions", { id: record.session_id, project: record.project })).status !== 201) throw new Error("session");
+    const saved = await request("/observations", record);
+    if (saved.status !== 201 || !Number.isSafeInteger(saved.data.id) || saved.data.id < 1) throw new Error("save");
+    const verify = async () => {
+      const read = await request(`/observations/${saved.data.id}`);
+      if (read.status !== 200 || !Object.entries(record).every(([k,v]) => read.data[k] === v)) throw new Error("readback");
+    };
+    await verify();
+    await stopCore();
+    if (!result.joined || result.cleanup !== "passed" || parentGone) throw new Error("first shutdown");
+    token = randomBytes(32).toString("hex");
+    const second = await startCore();
+    if (second.instance_id !== first.instance_id || second.version !== process.argv[3]) throw new Error("reopen identity");
+    await verify();
+    result.persistence = "passed";
+  }
+  result.state = "passed";
+} catch { result.state = "unavailable"; }
+finally {
+  await stopCore();
   if (parentGone || result.cleanup !== "passed") result.state = "unavailable";
-  process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(0));
+  if (process.argv[3]) {
+    process.stdin.pause();
+    process.stdin.destroy();
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } else process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(0));
 }

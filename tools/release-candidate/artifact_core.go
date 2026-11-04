@@ -28,9 +28,14 @@ type artifactCoreCheck struct {
 	ExitCode        *int   `json:"exitCode,omitempty"`
 	Retained        bool   `json:"retained,omitempty"`
 	HelperSHA256    string `json:"helperSha256"`
+	Persistence     string `json:"persistence,omitempty"`
 }
 
 func runArtifactCore(ctx context.Context, core []byte, digest, run string) *artifactCoreCheck {
+	return runArtifactCoreObservation(ctx, core, digest, run, "")
+}
+
+func runArtifactCoreObservation(ctx context.Context, core []byte, digest, run, version string) *artifactCoreCheck {
 	r := &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
 	r.HelperSHA256 = fmt.Sprintf("%x", sha256.Sum256(artifactCoreOwner))
 	root, err := os.MkdirTemp("", "engram-core-"+run+"-")
@@ -70,6 +75,9 @@ func runArtifactCore(ctx context.Context, core []byte, digest, run string) *arti
 		return r
 	}
 	cmd := exec.CommandContext(ctx, node, helper, executable)
+	if version != "" {
+		cmd.Args = append(cmd.Args, version)
+	}
 	cmd.Dir = root
 	cmd.Env = []string{}
 	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"} {

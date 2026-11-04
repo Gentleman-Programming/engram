@@ -327,3 +327,69 @@ The OS temporary directory must be outside Git ancestry: use an explicitly autho
 The fixed embedded Node owner starts `serve --session-owned`, generates a private token, uses literal owned home/config/data/temp roots without inherited credentials/cloud/transport, and verifies loopback readiness, owned PID, authenticated health and instance identity. Readiness is bounded to 5s, EOF join to 3s, then owned-child kill/join to 2s.
 `coreRuntime` records lifecycle state, Node version, measured helper hash, actual exit/join/cleanup and raw health `reportedVersion` separately from version intent/build metadata. Unknown termination retains owned state; killed/failed/unknown cleanup cannot pass. Copies and environment containment are not a malicious-code sandbox.
 Pi is not imported in this milestone: `workflows.state` remains `unavailable`, outcome stays `blocked`/exit2, and there is no genuine SDK, semantic parity or release-eligibility claim. The Pi package, original bundle and context are rechecked before starting Core; a failed recheck leaves the runtime not started. Post-execution rechecks remain in place to detect changes during execution. These observations do not prevent hostile concurrent changes or ABA. No publication occurs.
+
+## Published Core persistence observation (Windows/amd64)
+
+This separate, opt-in mode consumes a local **final GoReleaser ZIP**, not the
+staging bundle. It never downloads artifacts or installs prerequisites. Select
+and review the official release, immutable tag source and published asset digests
+before obtaining the ZIP and `checksums.txt`. Review execution permission as well:
+caller-editable pins and matching hashes are consistency checks, not publisher
+authentication or a hostile-code sandbox.
+
+Create a bounded JSON context using the selected, independently reviewed values:
+
+```json
+{
+  "version": "3.6.1",
+  "source": "d33a14a2ed822784752e5678b1673289ee1c0de4",
+  "archive_sha256": "129026b49e51db2453d28a5fbb915893ff7a8f4764b3ebc83e1ed80f72c3dedf",
+  "checksums_sha256": "f8192731617d119a69bbb7df334c4ca1e729f3d835532345fadd04b337e4ea33"
+}
+```
+
+These pins identify the inspected v3.6.1 Windows/amd64 release only; they are not
+defaults or authority for another version. Using the local files on native
+Windows/amd64 with Node24 already installed:
+
+```powershell
+go build -o release-candidate.exe ./tools/release-candidate
+.\release-candidate.exe -observe-published-core -archive .\engram_3.6.1_windows_amd64.zip -checksums .\checksums.txt -context .\reviewed-context.json
+# Add -execute only to execute the admitted artifact in owned temporary state.
+```
+
+`-observe-published-core` must be the first argument and cannot be combined with
+other candidate modes. Without `-execute`, only admission runs. Successful
+admission requires the checksum file and archive hashes, exactly one matching
+checksum entry, the three expected regular ZIP members (`engram.exe` and the two
+`tools/cloud-sync-projects` scripts), and the selected clean Go module/source,
+Windows/amd64 and CGO-disabled build identity. The existing bounded ZIP validator
+is shared with staging; extra, duplicate, missing and nonregular members reject.
+
+With `-execute`, the shared lifecycle owner starts the measured executable with
+`serve --session-owned`, private home/config/temp/data and a fresh token. It
+checks unauthenticated refusal, readiness, PID, loopback endpoint, instance and
+selected version. It registers one synthetic session, saves and reads one
+synthetic observation, observes successful exit, then starts the same bytes on
+the same private data using a new token. It requires the same instance and
+version and the original observation's fields after reopening. Both children
+must be joined and final cleanup must pass. The mode retains the existing
+two-minute outer observation, five-second readiness, two-second HTTP and bounded
+shutdown limits. Unknown termination retains owned state and cannot pass.
+
+JSON distinguishes `admission`, `runtime.state`, `runtime.persistence`, observed
+version/instance, executable hash and cleanup. Missing or mismatched evidence
+remains unavailable. The archive, checksum file, context and executed copy are
+rechecked; these checks do not prevent hostile concurrent changes or ABA.
+
+The command **always** reports `outcome: "blocked"` and exits **2**, including
+when admission, runtime and persistence are individually `passed`. That is a
+non-approving observation, not an execution failure or release eligibility.
+`go run` wraps this with its own nonzero exit and `exit status 2` on stderr; use
+the built command for its native exit code. Syntax/flag errors are separate.
+
+This first slice does not qualify Pi tarballs, installed SDK lifecycle, upgrades
+of an existing user store, other architectures/platforms, Cloud images or release
+promotion. Keep candidate observations (#2055) and these published-byte results
+(#2122) distinct. A failed published smoke calls for explicit inspection and
+fix-forward; it does not retag, roll back or republish anything automatically.
