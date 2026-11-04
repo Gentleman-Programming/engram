@@ -32,6 +32,8 @@ import (
 
 var observedGenerationError = (*store.Store).GenerationError
 
+var checkServerReadiness = (*store.Store).CheckReadiness
+
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
@@ -546,7 +548,7 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if _, err := loadServerStats(s.store); err != nil {
+	if err := checkServerReadiness(s.store); err != nil {
 		jsonError(w, http.StatusInternalServerError, "health check failed")
 		return
 	}
