@@ -36,7 +36,7 @@ Without -execute it admits local bytes only; it never downloads or starts Core.
 -observe-pi-inputs Also capture trusted selected Pi inputs and verify with selected Go.
 -observe-pi-package Bind -pi-tarball bytes to selected Pi source; requires observation.
 -observe-artifact-inputs Admit reviewed staging inputs only; never execute Core/Pi.
--observe-artifact-workflows Execute reviewed owned Core lifecycle; Pi workflows unavailable.
+-observe-artifact-workflows Execute owned Core/Pi bootstrap and five fixed HTTP workflows; observations never approve release.
 -staging-bundle Explicit local #1928 ZIP; requires an artifact observation mode.
 -staging-context Reviewed bounded JSON pins; requires an artifact observation mode.
 -core-source Full lowercase core commit ID for observation (40 or 64 hex digits).
@@ -51,7 +51,8 @@ Only literal package file/directory allowlists are supported, up to 4096 files
 and 64 MiB. Legacy validation never extracts; links/unexpected/missing content reject.
 Artifact-input observation materializes only owned validated Pi bytes, then removes them.
 It requires explicit source commits/refs and reviewed context, not publisher authentication.
-Missing/mismatched inputs remain non-passing; workflow execution stays unavailable.
+Missing/mismatched inputs remain non-passing. Admission alone never executes Core/Pi.
+Workflow opt-in reports observed cases; synthetic tests are not artifact execution proof.
 Export/validator success is not Pi parity or release approval.
 Assessment exits 1 (rejected) or 2 (blocked), with empty stderr.
 -assess cannot be combined with -pi-tarball, including an empty archive argument.
