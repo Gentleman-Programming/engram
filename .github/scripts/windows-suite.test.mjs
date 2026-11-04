@@ -40,7 +40,7 @@ function contract(text) {
     "'GOPATH'", "'GOCACHE'", "'GOMODCACHE'", 'Add-Content $env:GITHUB_ENV',
     '$PSNativeCommandUseErrorActionPreference = $false',
     '$timer = [Diagnostics.Stopwatch]::StartNew()',
-    '& go test -json ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"',
+    '& go test -json -count=1 ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"',
     '$suiteExit = $LASTEXITCODE', '$timer.Stop()', 'exit_code=$suiteExit',
     'elapsed_seconds=$($timer.Elapsed.TotalSeconds)', 'exit $suiteExit',
     'path: ${{ runner.temp }}/windows-suite/evidence']) assert.ok(body.includes(token), token);
@@ -87,9 +87,12 @@ test('installed Git entrypoints resolve to actual usr/bin Bash', {
 });
 
 const mutations = [
-  ['go test -json ./...', 'go test -json ./internal/setup/...'],
-  ['go test -json ./...', 'go test -json -short ./...'],
-  ['go test -json ./...', 'go test -json -p 1 ./...'],
+  ['go test -json -count=1 ./...', 'go test -json ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=0 ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=2 ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=1 ./internal/setup/...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=1 -short ./...'],
+  ['go test -json -count=1 ./...', 'go test -json -count=1 -p 1 ./...'],
   ['exit $suiteExit', 'exit 0'], ['$suiteExit = $LASTEXITCODE', '$suiteExit = 0'],
   ['ENGRAM_PI_SCHEMA_REQUIRE_REAL: "1"', 'ENGRAM_PI_SCHEMA_REQUIRE_REAL: "0"'],
   ['npm ci --ignore-scripts --legacy-peer-deps', 'npm install'],
