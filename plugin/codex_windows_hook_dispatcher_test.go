@@ -159,8 +159,8 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
 		t.Fatalf("create plugin scripts: %v", err)
 	}
-	source = traceCodexDispatcherStages(t, source, filepath.Join(pluginRoot, "dispatcher-stages.log"))
-	if err := os.WriteFile(dispatcherPath, source, 0o644); err != nil {
+	instrumentedSource := traceCodexDispatcherStages(t, source, filepath.Join(pluginRoot, "dispatcher-stages.log"))
+	if err := os.WriteFile(dispatcherPath, instrumentedSource, 0o644); err != nil {
 		t.Fatalf("copy dispatcher: %v", err)
 	}
 	const input = `{"message":"stdin survives EOF"}`
@@ -186,6 +186,10 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 	}
 	if stdout != wantWorkingDir.String()+wantStdout || stderr != wantStderr {
 		t.Fatalf("stdout=%q stderr=%q, want current directory and Unicode hook output preserved", stdout, stderr)
+	}
+	// Later fail-open cases use the original private copy; keep the primary trace isolated.
+	if err := os.WriteFile(dispatcherPath, source, 0o644); err != nil {
+		t.Fatalf("restore dispatcher for fail-open subtests: %v", err)
 	}
 
 	t.Run("missing root fails open", func(t *testing.T) {
@@ -227,10 +231,14 @@ func traceCodexDispatcherStages(t *testing.T, source []byte, tracePath string) [
 		}
 		t.Logf("test-owned dispatcher stages:\n%s", trace)
 		if !t.Failed() {
+			previous := -1
 			for _, stage := range []string{"entry", "validated-hook", "selected-bash", "before-start", "after-start", "stdin-closed", "child-exited", "streams-closed"} {
-				if !bytes.Contains(trace, []byte(" "+stage+" elapsed_ms=")) {
-					t.Errorf("dispatcher trace missing %s", stage)
+				marker := []byte(" " + stage + " elapsed_ms=")
+				position := bytes.Index(trace, marker)
+				if position <= previous || bytes.Count(trace, marker) != 1 {
+					t.Errorf("dispatcher primary trace must contain %s exactly once in order", stage)
 				}
+				previous = position
 			}
 		}
 	})
