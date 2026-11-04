@@ -154,8 +154,14 @@ func invalidatePublishedPair(r *publishedPairObservation) {
 	}
 	if r.Runtime != nil {
 		r.Runtime.State = "unavailable"
+		if r.Runtime.Persistence != "" {
+			r.Runtime.Persistence = "unavailable"
+		}
 	}
 	if r.PiRuntime != nil {
 		r.PiRuntime.State = "unavailable"
+		for i := range r.PiRuntime.Stages {
+			r.PiRuntime.Stages[i].State = "unavailable"
+		}
 	}
 }

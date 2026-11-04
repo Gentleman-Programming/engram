@@ -54,8 +54,13 @@ const publishedPairPiFixture = `export default function(host) {
 
 func TestPublishedPairPersistence(t *testing.T) {
 	requireArtifactNode(t)
-	core, _, _ := stagedProgramFixture(t, publishedPersistenceProgram())
-	for _, mode := range []string{"persisted", "lost", "changed", "writefail", "pi-exit", "pi-mutated", "pi-drain"} {
+	program := strings.Replace(publishedPersistenceProgram(), `w.WriteHeader(201); _,_=w.Write([]byte("{\"id\":1}")); return`, `
+   w.Header().Set("Content-Length", "8")
+   w.WriteHeader(201); _,_=w.Write([]byte("{\"id\":1}"))
+   if strings.Contains(cwd,"-coreexit-") { w.(http.Flusher).Flush(); os.Exit(0) }
+   return`, 1)
+	core, _, _ := stagedProgramFixture(t, program)
+	for _, mode := range []string{"persisted", "lost", "changed", "writefail", "coreexit", "pi-exit", "pi-mutated", "pi-drain"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			defer cancel()
@@ -88,6 +93,14 @@ func TestPublishedPairPersistence(t *testing.T) {
 					if stage.State != "passed" || stage.Cleanup != "passed" || !stage.Joined {
 						t.Fatalf("stage: %+v", stage)
 					}
+				}
+			} else if mode == "coreexit" {
+				if got.State != "unavailable" || pi.State != "unavailable" || pi.Cleanup != "passed" || len(pi.Stages) != 1 {
+					t.Fatalf("Core exit was not reported: core=%+v pi=%+v", got, pi)
+				}
+				stage := pi.Stages[0]
+				if stage.Name != "persistence-save" || stage.State != "unavailable" || stage.Cleanup != "passed" || !stage.Joined {
+					t.Fatalf("Core exit stage: %+v", stage)
 				}
 			} else if pi.State == "passed" || (mode != "pi-mutated" && got.State == "passed") {
 				t.Fatalf("failure became passing: core=%+v pi=%+v", got, pi)
@@ -268,6 +281,16 @@ func TestPublishedPairAdmission(t *testing.T) {
 				}
 			} else if result.Admission != "unavailable" || result.Package.State != "unavailable" || result.Runtime.State != "unavailable" || result.PiRuntime.State != "unavailable" {
 				t.Fatal(out.String())
+			}
+			if mode != "control" {
+				if result.Runtime.Persistence == "passed" {
+					t.Fatal("invalidated persistence still passes")
+				}
+				for _, stage := range result.PiRuntime.Stages {
+					if stage.State == "passed" {
+						t.Fatalf("invalidated stage still passes: %+v", stage)
+					}
+				}
 			}
 		})
 	}
