@@ -17,9 +17,6 @@ import (
 )
 
 func TestPublishedCoreAdmission(t *testing.T) {
-	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
-		t.Skip("published observation supports Windows amd64 only")
-	}
 	core, revision, _ := stagedMetadataFixture(t)
 	root := t.TempDir()
 	archive, sums, pinsFile := filepath.Join(root, "core.zip"), filepath.Join(root, "checksums.txt"), filepath.Join(root, "context.json")
@@ -53,7 +50,7 @@ func TestPublishedCoreAdmission(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, tc := range []string{"valid", "digest", "source", "checksums", "duplicate", "unexpected", "traversal"} {
+	for _, tc := range []string{"valid", "digest", "source", "checksums", "duplicate", "unexpected", "traversal", "missing-line", "duplicate-line", "wrong-line-hash", "bad-version", "bad-source", "bad-archive-hash", "bad-checksums-hash"} {
 		t.Run(tc, func(t *testing.T) {
 			extra := ""
 			if tc == "duplicate" {
@@ -69,6 +66,16 @@ func TestPublishedCoreAdmission(t *testing.T) {
 			write(archive, payload)
 			pins := publishedCoreContext{Version: "1.2.3", Source: revision, ArchiveSHA256: stagedDigest(payload)}
 			checksum := []byte(pins.ArchiveSHA256 + "  engram_1.2.3_windows_amd64.zip\n")
+
+			if tc == "missing-line" {
+				checksum = []byte(pins.ArchiveSHA256 + "  other.zip\n")
+			}
+			if tc == "duplicate-line" {
+				checksum = append(checksum, checksum...)
+			}
+			if tc == "wrong-line-hash" {
+				checksum = []byte(strings.Repeat("0", 64) + "  engram_1.2.3_windows_amd64.zip\n")
+			}
 			write(sums, checksum)
 			pins.ChecksumsSHA256 = stagedDigest(checksum)
 			if tc == "digest" {
@@ -80,6 +87,17 @@ func TestPublishedCoreAdmission(t *testing.T) {
 			if tc == "checksums" {
 				write(sums, []byte("changed"))
 			}
+
+			switch tc {
+			case "bad-version":
+				pins.Version = "../1.2.3"
+			case "bad-source":
+				pins.Source = strings.Repeat("A", 40)
+			case "bad-archive-hash":
+				pins.ArchiveSHA256 = "short"
+			case "bad-checksums-hash":
+				pins.ChecksumsSHA256 = strings.Repeat("A", 64)
+			}
 			got, err := admitPublishedCore(context.Background(), archive, sums, pins)
 			if tc != "valid" {
 				if err == nil {
@@ -89,6 +107,11 @@ func TestPublishedCoreAdmission(t *testing.T) {
 			}
 			if err != nil || !bytes.Equal(got, core) {
 				t.Fatalf("valid admission: %v", err)
+			}
+
+			// Byte admission is portable; only command execution is host-gated.
+			if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
+				return
 			}
 			p, _ := json.Marshal(pins)
 			write(pinsFile, p)
@@ -180,58 +203,105 @@ func TestPublishedCoreContextMutation(t *testing.T) {
 		t.Skip("published observation supports Windows amd64 only")
 	}
 	requireArtifactNode(t)
-	root := t.TempDir()
-	pinsFile := filepath.Join(root, "context.json")
-	source := strings.ReplaceAll(publishedPersistenceProgram(), "fixture-observed", "1.2.3")
-	source = strings.Replace(source, `token:=os.Getenv("ENGRAM_TOKEN")`, fmt.Sprintf(`
+
+	for _, changedInput := range []string{"control", "context", "archive", "checksums"} {
+		t.Run(changedInput, func(t *testing.T) {
+			root := t.TempDir()
+			pinsFile := filepath.Join(root, "context.json")
+			source := strings.ReplaceAll(publishedPersistenceProgram(), "fixture-observed", "1.2.3")
+
+			archive, sums := filepath.Join(root, "core.zip"), filepath.Join(root, "checksums.txt")
+			target := map[string]string{"context": pinsFile, "archive": archive, "checksums": sums}[changedInput]
+			if target != "" {
+				source = strings.Replace(source, `token:=os.Getenv("ENGRAM_TOKEN")`, fmt.Sprintf(`
  b,_:=os.ReadFile(%q); _=os.WriteFile(%q,append(b,' '),0600)
- token:=os.Getenv("ENGRAM_TOKEN")`, pinsFile, pinsFile), 1)
-	core, revision, _ := stagedProgramFixture(t, source)
-	var payload bytes.Buffer
-	z := zip.NewWriter(&payload)
-	for _, name := range []string{"engram.exe", "tools/cloud-sync-projects.sh", "tools/cloud-sync-projects.ps1"} {
-		w, e := z.Create(name)
-		if e != nil {
-			t.Fatal(e)
-		}
-		data := []byte("synthetic")
-		if name == "engram.exe" {
-			data = core
-		}
-		if _, e = w.Write(data); e != nil {
-			t.Fatal(e)
-		}
+ token:=os.Getenv("ENGRAM_TOKEN")`, target, target), 1)
+			}
+			core, revision, _ := stagedProgramFixture(t, source)
+			var payload bytes.Buffer
+			z := zip.NewWriter(&payload)
+			for _, name := range []string{"engram.exe", "tools/cloud-sync-projects.sh", "tools/cloud-sync-projects.ps1"} {
+				w, e := z.Create(name)
+				if e != nil {
+					t.Fatal(e)
+				}
+				data := []byte("synthetic")
+				if name == "engram.exe" {
+					data = core
+				}
+				if _, e = w.Write(data); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if e := z.Close(); e != nil {
+				t.Fatal(e)
+			}
+			checksum := []byte(stagedDigest(payload.Bytes()) + "  engram_1.2.3_windows_amd64.zip\n")
+			pins := publishedCoreContext{Version: "1.2.3", Source: revision, ArchiveSHA256: stagedDigest(payload.Bytes()), ChecksumsSHA256: stagedDigest(checksum)}
+			original, e := json.Marshal(pins)
+			if e != nil {
+				t.Fatal(e)
+			}
+			for name, data := range map[string][]byte{archive: payload.Bytes(), sums: checksum, pinsFile: original} {
+				if e := os.WriteFile(name, data, 0600); e != nil {
+					t.Fatal(e)
+				}
+			}
+			var out bytes.Buffer
+			err := runPublishedCore([]string{"-archive", archive, "-checksums", sums, "-context", pinsFile, "-execute"}, &out)
+			var exit *assessmentExit
+			if !errors.As(err, &exit) {
+				t.Fatalf("observation: %v", err)
+			}
+			var result struct {
+				Admission string            `json:"admission"`
+				Outcome   string            `json:"outcome"`
+				Runtime   artifactCoreCheck `json:"runtime"`
+			}
+			if e := json.Unmarshal(out.Bytes(), &result); e != nil {
+				t.Fatal(e)
+			}
+
+			want := "unavailable"
+			if changedInput == "control" {
+				want = "passed"
+			}
+			if target != "" {
+				changed, e := os.ReadFile(target)
+				before := map[string][]byte{pinsFile: original, archive: payload.Bytes(), sums: checksum}[target]
+				if e != nil || bytes.Equal(changed, before) {
+					t.Fatal("mutation not observed")
+				}
+			}
+			if result.Outcome != "blocked" || result.Admission != want || result.Runtime.State != want || result.Runtime.Persistence != "passed" || !result.Runtime.Joined || result.Runtime.Cleanup != "passed" || result.Runtime.Retained {
+				t.Fatalf("mutated input improperly accepted or runtime incomplete: %+v", result)
+			}
+		})
 	}
-	if e := z.Close(); e != nil {
+}
+
+func TestPublishedCorePinnedFile(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "input")
+	if e := os.WriteFile(file, []byte("123456789"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	archive, sums := filepath.Join(root, "core.zip"), filepath.Join(root, "checksums.txt")
-	checksum := []byte(stagedDigest(payload.Bytes()) + "  engram_1.2.3_windows_amd64.zip\n")
-	pins := publishedCoreContext{Version: "1.2.3", Source: revision, ArchiveSHA256: stagedDigest(payload.Bytes()), ChecksumsSHA256: stagedDigest(checksum)}
-	original, e := json.Marshal(pins)
-	if e != nil {
-		t.Fatal(e)
-	}
-	for name, data := range map[string][]byte{archive: payload.Bytes(), sums: checksum, pinsFile: original} {
-		if e := os.WriteFile(name, data, 0600); e != nil {
-			t.Fatal(e)
-		}
-	}
-	var out bytes.Buffer
-	err := runPublishedCore([]string{"-archive", archive, "-checksums", sums, "-context", pinsFile, "-execute"}, &out)
-	var exit *assessmentExit
-	if !errors.As(err, &exit) {
-		t.Fatalf("observation: %v", err)
-	}
-	var result struct {
-		Admission string            `json:"admission"`
-		Runtime   artifactCoreCheck `json:"runtime"`
-	}
-	if e := json.Unmarshal(out.Bytes(), &result); e != nil {
-		t.Fatal(e)
-	}
-	changed, e := os.ReadFile(pinsFile)
-	if e != nil || bytes.Equal(changed, original) || result.Admission != "unavailable" || result.Runtime.State != "unavailable" || result.Runtime.Persistence != "passed" || !result.Runtime.Joined || result.Runtime.Cleanup != "passed" || result.Runtime.Retained {
-		t.Fatalf("mutated input improperly accepted or runtime incomplete: %+v", result)
+	for _, tc := range []struct {
+		name, path, hash string
+		limit            int64
+		valid            bool
+	}{
+		{"valid", file, stagedDigest([]byte("123456789")), 9, true},
+		{"oversize", file, stagedDigest([]byte("123456789")), 8, false},
+		{"directory", root, strings.Repeat("0", 64), 10, false},
+		{"missing", filepath.Join(root, "absent"), strings.Repeat("0", 64), 10, false},
+		{"digest", file, strings.Repeat("0", 64), 9, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := readPinnedArtifact(tc.path, tc.hash, tc.limit)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%t error=%v", tc.valid, err)
+			}
+		})
 	}
 }
