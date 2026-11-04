@@ -54,10 +54,11 @@ try {
   } });
   const selected = await import(pathToFileURL(process.argv[2]).href);
   const workflow = process.argv[3] || "";
-  if (workflow && !["topics", "consolidation", "batch-errors", "judgments", "finalization"].includes(workflow)) throw new Error("fixed phase");
-  if (workflow) await runArtifactWorkflow(selected.default, workflow);
+  if (workflow && !["topics", "consolidation", "batch-errors", "judgments", "finalization", "persistence-save", "persistence-read"].includes(workflow)) throw new Error("fixed phase");
+  const receipt = workflow ? await runArtifactWorkflow(selected.default, workflow, Number(process.argv[4])) : undefined;
   if (parentGone) throw new Error("parent ended before acknowledgement");
   bootstrapped = true;
   process.send({ protocol: workflow ? `engram-pi-${workflow}-v1` : "engram-pi-bootstrap-v1",
+    ...(receipt === undefined ? {} : { receipt }),
     substitutions: [...(uiUsed ? ["@earendil-works/pi-tui.Text"] : []), ...(workflow ? ["Pi registration host"] : [])] });
 } catch { stop(1); }

@@ -1,17 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Fixed registration substitute, not an installed Pi SDK. Original HTTP assertions
 // come from plugin/pi/test/real-agent-workflows.test.mjs; no fixture server is used.
 const project = "integration-1348";
-export async function runArtifactWorkflow(register, workflow) {
+export async function runArtifactWorkflow(register, workflow, readID) {
   const run = workflow === "topics" ? topicVectors : workflow === "consolidation" ? consolidate
     : workflow === "batch-errors" ? batchErrors : workflow === "judgments" ? judgments
-    : workflow === "finalization" ? finalizeSession : undefined;
+    : workflow === "finalization" ? finalizeSession
+    : workflow === "persistence-save" ? persistSave
+    : workflow === "persistence-read" ? persistRead : undefined;
   assert.ok(run, "fixed workflow phase");
-  mkdirSync(join(process.cwd(), ".engram"), { mode: 0o700 });
-  writeFileSync(join(process.cwd(), ".engram", "config.json"), JSON.stringify({ project_name: project }), { mode: 0o600, flag: "wx" });
+  if (workflow === "persistence-read") {
+    assert.deepEqual(JSON.parse(readFileSync(join(process.cwd(), ".engram", "config.json"), "utf8")), { project_name: project });
+  } else {
+    mkdirSync(join(process.cwd(), ".engram"), { mode: 0o700 });
+    writeFileSync(join(process.cwd(), ".engram", "config.json"), JSON.stringify({ project_name: project }), { mode: 0o600, flag: "wx" });
+  }
   const tools = new Map(), events = new Map(), entries = [];
   register({ registerTool(tool) { tools.set(tool.name, tool); }, on(name, callback) { events.set(name, callback); },
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); } });
@@ -30,7 +36,24 @@ export async function runArtifactWorkflow(register, workflow) {
     const result = await request("/observations?all_projects=true&limit=100");
     assert.equal(result.status, 200); return result.data;
   };
-  await run({ tool, request, rows, events, ctx });
+  return await run({ tool, request, rows, events, ctx, readID });
+}
+
+const persistenceTitle = "Published Pi persistence smoke";
+const persistenceContent = "Synthetic memory retained across published Core restart.";
+async function persistSave({ tool }) {
+  return { observationID: await save(tool, persistenceTitle, persistenceContent) };
+}
+async function persistRead({ tool, readID }) {
+  assert.ok(Number.isSafeInteger(readID) && readID > 0);
+  const result = await tool("mem_get_observation", { id: readID });
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  const row = result.details.data;
+  assert.equal(row.id, readID);
+  assert.equal(row.title, persistenceTitle);
+  assert.equal(row.content, persistenceContent);
+  assert.equal(row.project, project);
+  return { observationID: readID };
 }
 
 async function topicVectors({ tool, request, rows }) {

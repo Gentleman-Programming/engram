@@ -27,17 +27,18 @@ var artifactPiOwner []byte
 var artifactPiWorkflows []byte
 
 type artifactPiCheck struct {
-	Name              string   `json:"name"`
-	State             string   `json:"state"`
-	Cleanup           string   `json:"cleanup"`
-	Joined            bool     `json:"joined"`
-	HelperSHA256      string   `json:"helperSha256"`
-	TreeSHA256        string   `json:"treeSha256,omitempty"`
-	TypeBoxVersion    string   `json:"typeBoxVersion,omitempty"`
-	TypeBoxTreeSHA256 string   `json:"typeBoxTreeSha256,omitempty"`
-	Substitutions     []string `json:"substitutions,omitempty"`
-	ExitCode          *int     `json:"exitCode,omitempty"`
-	Retained          bool     `json:"retained,omitempty"`
+	Name              string            `json:"name"`
+	State             string            `json:"state"`
+	Cleanup           string            `json:"cleanup"`
+	Joined            bool              `json:"joined"`
+	HelperSHA256      string            `json:"helperSha256"`
+	TreeSHA256        string            `json:"treeSha256,omitempty"`
+	TypeBoxVersion    string            `json:"typeBoxVersion,omitempty"`
+	TypeBoxTreeSHA256 string            `json:"typeBoxTreeSha256,omitempty"`
+	Substitutions     []string          `json:"substitutions,omitempty"`
+	ExitCode          *int              `json:"exitCode,omitempty"`
+	Retained          bool              `json:"retained,omitempty"`
+	Stages            []artifactPiCheck `json:"stages,omitempty"`
 	mutated           bool
 }
 
@@ -70,7 +71,7 @@ func runArtifactPiCase(ctx context.Context, core []byte, digest, run string, mat
 
 func runArtifactObservation(ctx context.Context, core []byte, digest, run string, materialize func(string) bool, pi *artifactPiCheck, workflow, version string) *artifactCoreCheck {
 	owner := artifactCoreOwner
-	if pi != nil {
+	if pi != nil && version == "" {
 		owner = artifactPiCoreOwner
 	}
 	r := &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
@@ -162,10 +163,11 @@ func runArtifactObservation(ctx context.Context, core []byte, digest, run string
 		return r
 	}
 	cmd := exec.CommandContext(ctx, node, helper, executable)
+	if version != "" {
+		cmd.Args = append(cmd.Args, version)
+	}
 	if pi != nil {
 		cmd.Args = append(cmd.Args, filepath.Join(piTree, "index.ts"), workflow)
-	} else if version != "" {
-		cmd.Args = append(cmd.Args, version)
 	}
 	cmd.Dir = root
 	cmd.Env = []string{}

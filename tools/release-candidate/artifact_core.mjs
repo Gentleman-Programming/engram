@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
+import { fileURLToPath } from "node:url";
 
 const result = { name: "production-core-lifecycle", state: "unavailable", cleanup: "not-started", joined: true, nodeVersion: process.versions.node };
 let token = randomBytes(32).toString("hex");
 let core, exited, parentGone = false;
-process.stdin.on("end", () => { parentGone = true; core?.stdin.end(); });
+let pi, coreStopRequested = false, coreEndedEarly = false;
+if (process.argv[4]) result.piBootstrap = { name: "published-pi-persistence", state: "unavailable", cleanup: "not-started", joined: true, stages: [] };
+process.stdin.on("end", () => { parentGone = true; if (pi) pi.stdin.end(); else core?.stdin.end(); });
 process.stdin.resume();
 async function bounded(promise, milliseconds) {
   let timer;
@@ -18,6 +21,8 @@ async function startCore() {
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   env.ENGRAM_TOKEN = token; // Never serialize the token or forward child diagnostics.
   core = spawn(process.argv[2], ["serve", "--session-owned"], { cwd: process.cwd(), env, stdio: ["pipe", "pipe", "ignore"] });
+  coreStopRequested = false;
+  core.once("exit", () => { if (process.argv[4] && !coreStopRequested) coreEndedEarly = true; });
   core.stdin.on("error", () => {});
   result.joined = false;
   result.cleanup = "unknown";
@@ -64,6 +69,7 @@ async function startCore() {
 }
 async function stopCore() {
   if (core) {
+    coreStopRequested = true;
     if (!core.stdin.writableEnded) core.stdin.end();
     try {
       const exit = await bounded(exited, 3000);
@@ -80,6 +86,58 @@ async function stopCore() {
       } catch { result.cleanup = "unknown"; }
     }
   }
+}
+async function runPi(phase, id) {
+  const aggregate = result.piBootstrap;
+  const stage = { name: phase, state: "unavailable", cleanup: "unknown", joined: false };
+  aggregate.stages.push(stage);
+  const keys = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR", "ENGRAM_DATA_DIR"];
+  const env = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  Object.assign(env, { ENGRAM_URL: endpointForRequest.href, ENGRAM_TOKEN: token, ENGRAM_HTTP_TOKEN: token,
+    ENGRAM_EXPECTED_INSTANCE: result.instanceId, ENGRAM_STARTUP_POLICY: "allow" });
+  pi = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", fileURLToPath(new URL("./pi-owner.mjs", import.meta.url)), process.argv[4], phase, String(id ?? "")], {
+    cwd: process.cwd(), env, stdio: ["pipe", "ignore", "ignore", "ipc"],
+  });
+  pi.stdin.on("error", () => {});
+  const child = pi;
+  const closed = new Promise(resolve => {
+    child.on("error", () => { if (!child.pid) resolve({ code: null, failedStart: true }); });
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  let receipt;
+  try {
+    receipt = await bounded(new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => reject(new Error("early Pi exit")));
+      child.once("message", message => {
+        if (message?.protocol !== `engram-pi-${phase}-v1` || !Number.isSafeInteger(message.receipt?.observationID) || message.receipt.observationID < 1) return reject(new Error("Pi receipt"));
+        stage.substitutions = ["@earendil-works/pi-tui.Text", "Pi registration host"].filter(value => message.substitutions?.includes(value));
+        resolve(message.receipt);
+      });
+    }), 30000);
+    if (parentGone || coreEndedEarly) throw new Error("owner ended");
+    stage.state = "passed";
+  } finally {
+    child.stdin.end();
+    try {
+      const exit = await bounded(closed, 3000);
+      stage.joined = true; stage.exitCode = exit.code;
+      stage.cleanup = exit.failedStart ? "not-started" : exit.code === 0 ? "passed" : "failed";
+    } catch {
+      child.kill();
+      try {
+        const exit = await bounded(closed, 2000);
+        stage.joined = true; stage.exitCode = exit.code; stage.cleanup = "killed";
+      } catch { stage.cleanup = "unknown"; }
+    }
+    if (stage.cleanup !== "passed" || coreEndedEarly || parentGone) stage.state = "unavailable";
+    aggregate.joined = aggregate.stages.every(s => s.joined);
+    aggregate.cleanup = aggregate.stages.every(s => s.cleanup === "passed") ? "passed" : stage.cleanup;
+    aggregate.substitutions = [...new Set(aggregate.stages.flatMap(s => s.substitutions ?? []))];
+    pi = undefined;
+  }
+  if (stage.state !== "passed") throw new Error("Pi lifecycle");
+  return receipt.observationID;
 }
 async function request(path, body) {
   const response = await fetch(new URL(path, endpointForRequest), {
@@ -100,6 +158,16 @@ try {
   if (process.argv[3]) {
     result.persistence = "unavailable";
     if (first.version !== process.argv[3]) throw new Error("version");
+    if (process.argv[4]) {
+      const id = await runPi("persistence-save");
+      await stopCore();
+      if (!result.joined || result.cleanup !== "passed" || parentGone) throw new Error("first shutdown");
+      token = randomBytes(32).toString("hex");
+      const second = await startCore();
+      if (second.instance_id !== first.instance_id || second.version !== process.argv[3]) throw new Error("reopen identity");
+      if (await runPi("persistence-read", id) !== id) throw new Error("readback identity");
+      result.piBootstrap.state = "passed";
+    } else {
     const record = { session_id: `smoke-${randomBytes(12).toString("hex")}`, type: "decision",
       title: "Published artifact persistence", content: randomBytes(32).toString("hex"),
       project: "published-artifact-smoke", scope: "project" };
@@ -117,6 +185,7 @@ try {
     const second = await startCore();
     if (second.instance_id !== first.instance_id || second.version !== process.argv[3]) throw new Error("reopen identity");
     await verify();
+    }
     result.persistence = "passed";
   }
   result.state = "passed";
@@ -124,6 +193,13 @@ try {
 finally {
   await stopCore();
   if (parentGone || result.cleanup !== "passed") result.state = "unavailable";
+  if (result.piBootstrap) {
+    if (parentGone || coreEndedEarly || result.cleanup !== "passed") {
+      result.piBootstrap.state = "unavailable";
+      result.state = "unavailable";
+    }
+    if (!result.piBootstrap.joined) result.joined = false;
+  }
   if (process.argv[3]) {
     process.stdin.pause();
     process.stdin.destroy();
