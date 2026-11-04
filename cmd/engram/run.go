@@ -123,6 +123,9 @@ func assertDaemonStartable(dataDir string, port int) error {
 		// Stale pidfile from a dead daemon: clear it and start fresh.
 		return daemon.RemovePidfile(pidPath)
 	}
+	if record.Token == "" {
+		return fmt.Errorf("pid %d has a legacy record without a start token; record kept at %s; verify the process and stop it manually only if it is the daemon, or remove the record only if stale: %w", record.Pid, pidPath, errDaemonUnconfirmed)
+	}
 	probePort := record.Port
 	if probePort == 0 {
 		probePort = port

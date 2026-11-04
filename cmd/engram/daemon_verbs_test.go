@@ -146,10 +146,10 @@ func TestCmdPsStatuses(t *testing.T) {
 	})
 	t.Run("live pid with answering probe reports running", func(t *testing.T) {
 		cfg := store.Config{DataDir: t.TempDir()}
-		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7600}); err != nil {
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7600, Token: "ours"}); err != nil {
 			t.Fatalf("write pidfile: %v", err)
 		}
-		probedPort := swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7600})
+		probedPort := swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7600, Token: "ours"})
 		out := swapStdoutPrinter(t)
 		if err := cmdPs(cfg, nil); err != nil {
 			t.Fatalf("ps on running daemon: %v", err)
@@ -164,7 +164,7 @@ func TestCmdPsStatuses(t *testing.T) {
 	})
 	t.Run("live pid with dead port reports unreachable", func(t *testing.T) {
 		cfg := store.Config{DataDir: t.TempDir()}
-		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7601}); err != nil {
+		if err := daemon.WritePidfile(daemon.PidfilePath(cfg.DataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7601, Token: "ours"}); err != nil {
 			t.Fatalf("write pidfile: %v", err)
 		}
 		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusNotRunning, Port: 7601})
@@ -408,8 +408,7 @@ func swapStopDaemonProcess(t *testing.T) *[]int {
 
 // TestStopDaemonIdentityGate pins the pid-reuse guard behind `engram stop`
 // and `engram restart`: a live pidfile pid is only signaled when the daemon
-// identity answers — the recorded start token for token-bearing records, a
-// plain running probe for legacy records. Anything else is reported as
+// identity answers with the recorded nonempty start token. Anything else is reported as
 // unconfirmed and never signaled.
 func TestStopDaemonIdentityGate(t *testing.T) {
 	livePid := os.Getpid()
@@ -471,16 +470,19 @@ func TestStopDaemonIdentityGate(t *testing.T) {
 			t.Fatalf("confirmed stop output = %q, want Stopped engram daemon", out.String())
 		}
 	})
-	t.Run("legacy record with answering probe still signals", func(t *testing.T) {
+	t.Run("legacy record with answering probe never signals", func(t *testing.T) {
 		cfg := store.Config{DataDir: t.TempDir()}
 		writeGatePidfile(t, cfg.DataDir, "")
 		signaled := swapStopDaemonProcess(t)
 		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7603})
-		if _, err := stopDaemon(cfg); err != nil {
-			t.Fatalf("legacy confirmed stop: %v", err)
+		if _, err := stopDaemon(cfg); !errors.Is(err, errDaemonUnconfirmed) {
+			t.Fatalf("legacy stop error = %v, want unconfirmed", err)
 		}
-		if len(*signaled) != 1 || (*signaled)[0] != livePid {
-			t.Fatalf("legacy stop signaled %v, want pid %d once", *signaled, livePid)
+		if len(*signaled) != 0 {
+			t.Fatalf("legacy stop signaled %v, want none", *signaled)
+		}
+		if _, err := daemon.ReadPidfile(daemon.PidfilePath(cfg.DataDir)); err != nil {
+			t.Fatalf("legacy record removed: %v", err)
 		}
 	})
 }

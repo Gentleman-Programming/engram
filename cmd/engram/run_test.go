@@ -447,8 +447,8 @@ func TestRunDetachedTimeoutTerminatesChild(t *testing.T) {
 // TestAssertDaemonStartableIdentity pins the pid-reuse guard in run
 // admission: a live pidfile pid only blocks a new start when the daemon
 // identity answers; an unconfirmed record is stale and gets cleared so the
-// start proceeds. Legacy token-less records keep the running-probe
-// classification the previous release used.
+// start proceeds. Legacy token-less live records remain unmanaged until
+// the operator verifies the process manually.
 func TestAssertDaemonStartableIdentity(t *testing.T) {
 	t.Run("matching token reports already running", func(t *testing.T) {
 		dataDir := t.TempDir()
@@ -481,15 +481,15 @@ func TestAssertDaemonStartableIdentity(t *testing.T) {
 			t.Fatalf("unconfirmed admission output = %q, want a clearing note", out.String())
 		}
 	})
-	t.Run("legacy record kept answering stays already running", func(t *testing.T) {
+	t.Run("legacy record kept answering remains unconfirmed", func(t *testing.T) {
 		dataDir := t.TempDir()
 		if err := daemon.WritePidfile(daemon.PidfilePath(dataDir), daemon.PidRecord{Pid: os.Getpid(), Port: 7606}); err != nil {
 			t.Fatalf("write pidfile: %v", err)
 		}
 		swapDaemonStatusProbe(t, daemon.ProbeResult{Status: daemon.StatusRunning, Port: 7606})
 		err := assertDaemonStartable(dataDir, 7606)
-		if err == nil || !strings.Contains(err.Error(), "already running (pid") {
-			t.Fatalf("legacy confirmed admission error = %v, want already running", err)
+		if !errors.Is(err, errDaemonUnconfirmed) {
+			t.Fatalf("legacy admission error = %v, want unconfirmed", err)
 		}
 		if _, rerr := daemon.ReadPidfile(daemon.PidfilePath(dataDir)); rerr != nil {
 			t.Fatalf("legacy confirmed record was cleared: %v", rerr)

@@ -55,17 +55,13 @@ var errDaemonUnconfirmed = errors.New("daemon pid not confirmed")
 // daemonIdentityConfirmed reports whether a live pidfile pid is confirmed as
 // OUR daemon before anything destructive happens (pid reuse guard): a
 // token-bearing record must be answered by the same start token on /health,
-// and a legacy record without a token (written by an older binary) falls
-// back to a plain running probe, the classification those records always
-// had.
+// and a legacy record without a token cannot establish process identity.
+// HTTP liveness alone never authorizes signaling the recorded pid.
 func daemonIdentityConfirmed(record daemon.PidRecord, res daemon.ProbeResult) bool {
 	if res.Status != daemon.StatusRunning {
 		return false
 	}
-	if record.Token == "" {
-		return true
-	}
-	return res.Token == record.Token
+	return record.Token != "" && res.Token == record.Token
 }
 
 // defaultDaemonStatusProbe probes the daemon's /health endpoint with the
@@ -115,6 +111,10 @@ func cmdPs(cfg store.Config, args []string) error {
 			return err
 		}
 		return fmt.Errorf("daemon is not running")
+	}
+	if record.Token == "" {
+		_, _ = stdoutPrinter("unmanaged legacy record (pid %d) on port %d; daemon identity unavailable\n", record.Pid, record.Port)
+		return fmt.Errorf("legacy daemon record has no start token; verify the process manually: %w", errDaemonUnconfirmed)
 	}
 	if daemonIdentityConfirmed(record, daemonStatusProbe(record.Port)) {
 		_, _ = stdoutPrinter("running (pid %d) on port %d\n", record.Pid, record.Port)
@@ -177,7 +177,7 @@ func stopDaemon(cfg store.Config) (int, error) {
 	}
 	if !daemonIdentityConfirmed(record, daemonStatusProbe(record.Port)) {
 		// Never signal a pid we cannot confirm as this daemon.
-		return record.Pid, fmt.Errorf("pid %d is alive but not confirmed as the engram daemon on port %d; not signaling; inspect `engram logs` or remove %s manually: %w", record.Pid, record.Port, pidPath, errDaemonUnconfirmed)
+		return record.Pid, fmt.Errorf("pid %d is alive but not confirmed as the engram daemon on port %d; not signaling; verify the process and stop it manually only if it is the daemon, or remove %s only if the record is stale: %w", record.Pid, record.Port, pidPath, errDaemonUnconfirmed)
 	}
 	if err := stopDaemonProcessNow(record.Pid); err != nil {
 		// Keep the pidfile: the daemon may still be alive.
@@ -287,7 +287,7 @@ func cmdRestart(cfg store.Config, args []string) error {
 	}
 	if readErr == nil && daemon.ProcessAlive(record.Pid) {
 		if _, err := stopDaemon(cfg); err != nil {
-			if !errors.Is(err, errDaemonUnconfirmed) {
+			if !errors.Is(err, errDaemonUnconfirmed) || record.Token == "" {
 				return fmt.Errorf("stop daemon for restart: %w", err)
 			}
 			// A live pid that is not confirmed as ours is never signaled;
