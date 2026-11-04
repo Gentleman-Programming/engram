@@ -153,7 +153,7 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dispatcher: %v", err)
 	}
-	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces")
+	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces é 中文 'quoted'")
 	dispatcherPath := filepath.Join(pluginRoot, "scripts", "run-bash-hook.ps1")
 	scriptPath := filepath.Join(pluginRoot, "scripts", "session-start.sh")
 	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
@@ -234,9 +234,12 @@ func traceCodexDispatcherStages(t *testing.T, source []byte, tracePath string) [
 			}
 		}
 	})
+	// Windows PowerShell reads a BOM-less script using its ANSI code page.
+	// Keep the injected path ASCII-only and decode its UTF-8 bytes explicitly.
 	prelude := "$engramTestClock = [Diagnostics.Stopwatch]::StartNew()\n" +
-		"function Write-EngramTestStage($stage) { [IO.File]::AppendAllText('" + strings.ReplaceAll(tracePath, "'", "''") +
-		"', ([DateTime]::UtcNow.ToString('o') + ' ' + $stage + ' elapsed_ms=' + $engramTestClock.Elapsed.TotalMilliseconds + [Environment]::NewLine)) }\n" +
+		"$engramTestTracePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.StdEncoding.EncodeToString([]byte(tracePath)) + "'))\n" +
+		"function Write-EngramTestStage($stage) { [IO.File]::AppendAllText($engramTestTracePath, " +
+		"([DateTime]::UtcNow.ToString('o') + ' ' + $stage + ' elapsed_ms=' + $engramTestClock.Elapsed.TotalMilliseconds + [Environment]::NewLine)) }\n" +
 		"Write-EngramTestStage 'entry'\n"
 	text := string(source)
 	for _, point := range []struct{ anchor, stage string }{
