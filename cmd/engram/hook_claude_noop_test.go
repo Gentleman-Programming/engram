@@ -110,6 +110,39 @@ func TestClaudeReviewListDoesNotNeedSessionAndRejectsMalformedInput(t *testing.T
 	}
 }
 
+func TestClaudeMalformedWriteInputDeniesBeforeConfirmation(t *testing.T) {
+	root, _, registrations, requests := claudeConfirmedInputFixture(t)
+	for _, prefix := range claudeEngramToolPrefixes {
+		for _, tc := range []struct {
+			name  string
+			input json.RawMessage
+		}{
+			{"missing", nil},
+			{"non-object", json.RawMessage(`[]`)},
+		} {
+			t.Run(prefix+tc.name, func(t *testing.T) {
+				payload := map[string]any{"session_id": "live-host", "cwd": root, "tool_name": prefix + "mem_save"}
+				if tc.input != nil {
+					payload["tool_input"] = tc.input
+				}
+				input, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeRegistrations, beforeRequests := registrations.Load(), requests.Load()
+				result := claudeGuardResult(t, guardClaudePreToolUse(input))
+				if string(result["permissionDecision"]) != `"deny"` {
+					t.Fatalf("malformed write was not denied: %v", result)
+				}
+				if registrations.Load() != beforeRegistrations || requests.Load() != beforeRequests {
+					t.Fatalf("malformed write contacted server: registrations %d -> %d, requests %d -> %d",
+						beforeRegistrations, registrations.Load(), beforeRequests, requests.Load())
+				}
+			})
+		}
+	}
+}
+
 func claudeGuardResult(t *testing.T, output []byte) map[string]json.RawMessage {
 	t.Helper()
 	var response struct {
