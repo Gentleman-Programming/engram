@@ -212,8 +212,13 @@ proof that the hosted Node22 case executed.
 
 #### Observational Windows full-module baseline (#1891)
 
-`Windows Full Suite (Observational)` independently runs `go test -json ./...`
+`Windows Full Suite (Observational)` independently runs `go test -json -count=1 ./...`
 with default tags on native Windows x64 for PRs, merge groups and main pushes.
+`-count=1` executes fresh tests and avoids Go's test-result cache processing,
+which can continue after the package prints `ok` for SQLite-heavy fixtures.
+Compilation and module caches remain enabled. The bounded local observation in
+[#2192](https://github.com/Gentleman-Programming/engram/issues/2192#issuecomment-6623802296)
+does not establish a full hosted speedup; compare actual job outcomes and timings.
 It does not replace selective Windows jobs, change the six required contexts,
 App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
 observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
