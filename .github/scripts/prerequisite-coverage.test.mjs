@@ -15,7 +15,11 @@ const profiles = {
     ['internal/cloud/cloudserver', 'TestPausePGPullSnapshotPagination'],
     ...[1, 10, 100].map(n => ['internal/cloud/cloudserver', `TestMutationPausePostgresQueryCount/B100/D${n}`]),
   ],
-  'windows-recovery': [['cmd/engram', 'TestHookManagedLocalPublicRecovery']],
+  'windows-recovery': [
+    ['cmd/engram', 'TestHookManagedLocalPublicRecovery'],
+    ...['handback', 'ascii', 'unicode', 'stdout-fallback'].map(name =>
+      ['plugin', `TestSubagentStopPreservesUnicodeTransport/${name}`]),
+  ],
   'unsupported-node': [['tools/release-candidate', 'TestArtifactCoreUnsupportedNode']],
 };
 const checker = new URL('./prerequisite-coverage.mjs', import.meta.url);
@@ -48,6 +52,16 @@ for (const [profile, cases] of Object.entries(profiles)) {
   for (const [pkg, name] of cases) {
     test(`${profile}: rejects missing ${name}`, () => {
       const result = check(profile, passing(profile).filter(e => !(e.Package === prefix + pkg && e.Test === name)));
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, `Coverage evidence rejected: missing required pass: ${pkg}/${name}\n`);
+    });
+  }
+  for (const [pkg, name] of cases) {
+    test(`${profile}: rejects skipped ${name}`, () => {
+      const events = passing(profile);
+      events.find(e => e.Package === prefix + pkg && e.Test === name && e.Action === 'pass').Action = 'skip';
+      const result = check(profile, events);
       assert.equal(result.status, 1);
       assert.equal(result.stdout, '');
       assert.equal(result.stderr, `Coverage evidence rejected: missing required pass: ${pkg}/${name}\n`);

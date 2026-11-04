@@ -9,7 +9,12 @@ const profiles = {
     ['internal/cloud/cloudserver', 'TestPausePGPullSnapshotPagination'],
     ...[1, 10, 100].map(n => ['internal/cloud/cloudserver', `TestMutationPausePostgresQueryCount/B100/D${n}`]),
   ],
-  'windows-recovery': [['cmd/engram', 'TestHookManagedLocalPublicRecovery']],
+  // Preserve the existing profile name; both native Windows boundaries are mandatory.
+  'windows-recovery': [
+    ['cmd/engram', 'TestHookManagedLocalPublicRecovery'],
+    ...['handback', 'ascii', 'unicode', 'stdout-fallback'].map(name =>
+      ['plugin', `TestSubagentStopPreservesUnicodeTransport/${name}`]),
+  ],
   'unsupported-node': [['tools/release-candidate', 'TestArtifactCoreUnsupportedNode']],
 };
 const usage = 'Usage: node .github/scripts/prerequisite-coverage.mjs PROFILE EVENTS.json GO_EXIT';
