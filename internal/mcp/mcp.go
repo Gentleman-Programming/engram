@@ -76,6 +76,10 @@ var suggestTopicKey = store.SuggestTopicKey
 
 var capturePromptForSave = (*store.Store).CapturePromptForSave
 
+var listSaveProjectNames = (*store.Store).ListProjectNames
+
+var hasSaveProjectObservations = (*store.Store).HasObservationsForProject
+
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
@@ -1631,20 +1635,23 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Check for similar existing projects (only when this project has no existing observations)
 		var similarWarning string
 		if project != "" {
-			existingNames, _ := s.ListProjectNames()
-			isNew := true
-			for _, e := range existingNames {
-				if e == project {
-					isNew = false
-					break
+			hasObservations, _ := hasSaveProjectObservations(s, project)
+			if !hasObservations {
+				existingNames, _ := listSaveProjectNames(s)
+				isNew := true
+				for _, e := range existingNames {
+					if e == project {
+						isNew = false
+						break
+					}
 				}
-			}
-			if isNew && len(existingNames) > 0 {
-				matches := projectpkg.FindSimilar(project, existingNames, 3)
-				if len(matches) > 0 {
-					bestMatch := matches[0].Name
-					obsCount, _ := s.CountObservationsForProject(bestMatch)
-					similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+				if isNew && len(existingNames) > 0 {
+					matches := projectpkg.FindSimilar(project, existingNames, 3)
+					if len(matches) > 0 {
+						bestMatch := matches[0].Name
+						obsCount, _ := s.CountObservationsForProject(bestMatch)
+						similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+					}
 				}
 			}
 		}

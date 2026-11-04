@@ -9677,6 +9677,23 @@ func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
 	return results, nil
 }
 
+// HasObservationsForProject checks for a live observation using the exact stored
+// project name, matching membership in ListProjectNames without enumerating it.
+// Sessions, prompts and enrollment alone do not establish this membership.
+func (s *Store) HasObservationsForProject(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM observations WHERE project = ? AND deleted_at IS NULL LIMIT 1
+	)`, name).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // CountObservationsForProject returns the number of non-deleted observations
 // for the given project name. Used by handleSave for the similar-project
 // warning instead of the heavier ListProjectsWithStats.

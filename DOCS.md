@@ -1861,7 +1861,7 @@ Both errors carry a `remedy` field naming the exact command to run: `engram proj
 
 ### Similar-project warnings
 
-When saving to a project that doesn't exist yet, Engram checks for similar existing project names (Levenshtein distance, substring, case-insensitive matching) and warns the agent if a likely variant already exists.
+When saving to a project without live observations, Engram checks for similar existing project names (Levenshtein distance, substring, case-insensitive matching) and warns the agent if a likely variant already exists. MCP saves first check the target project's live observations; established projects skip the full name listing. Sessions, prompts or enrollment alone do not suppress this warning, and soft-deleted observations do not count. The warning is advisory: if its point lookup fails, the existing best-effort name check is still attempted.
 
 ### Retroactive cleanup
 
