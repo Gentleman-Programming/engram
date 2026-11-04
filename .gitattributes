@@ -6,3 +6,4 @@ docs/contracts/agent-contract-v1.json text eol=lf
 plugin/pi/runtime-contract.json text eol=lf
 scripts/deadcode-ratchet.sh text eol=lf
 .deadcode-baseline.txt text eol=lf
+internal/store/testdata/migrate_copy_v3.6.0_catalog.json text eol=lf
