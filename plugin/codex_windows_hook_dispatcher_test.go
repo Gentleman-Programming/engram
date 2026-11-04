@@ -159,6 +159,7 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
 		t.Fatalf("create plugin scripts: %v", err)
 	}
+	source = traceCodexDispatcherStages(t, source, filepath.Join(pluginRoot, "dispatcher-stages.log"))
 	if err := os.WriteFile(dispatcherPath, source, 0o644); err != nil {
 		t.Fatalf("copy dispatcher: %v", err)
 	}
@@ -177,6 +178,7 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 
 	command := codexBashHookWindowsCommand(t, root, `"${PLUGIN_ROOT}/scripts/session-start.sh"`)
 	t.Setenv("PLUGIN_ROOT", pluginRoot)
+	t.Logf("primary manifest start UTC: %s", time.Now().UTC().Format(time.RFC3339Nano))
 	stdout, stderr, code := runCodexWindowsManifestCommand(t, command, input, "")
 	// The fixture sleeps before exiting, so its exit code proves the dispatcher waited for Bash.
 	if code != 23 {
@@ -207,6 +209,56 @@ func TestCodexWindowsBashHookDispatcherRuntime(t *testing.T) {
 			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent fail-open", code, stdout, stderr)
 		}
 	})
+}
+
+// traceCodexDispatcherStages instruments only the test-owned copy. UTC entry time
+// includes PowerShell startup when compared with the Go log; elapsed stages locate
+// discovery, child start, stdin closure, process exit and stream-join delays.
+func traceCodexDispatcherStages(t *testing.T, source []byte, tracePath string) []byte {
+	t.Helper()
+	t.Cleanup(func() {
+		trace, err := os.ReadFile(tracePath)
+		if err != nil {
+			t.Logf("dispatcher stages unavailable (PowerShell may not have entered): %v", err)
+			if !t.Failed() {
+				t.Error("successful dispatcher must retain its stage trace")
+			}
+			return
+		}
+		t.Logf("test-owned dispatcher stages:\n%s", trace)
+		if !t.Failed() {
+			for _, stage := range []string{"entry", "validated-hook", "selected-bash", "before-start", "after-start", "stdin-closed", "child-exited", "streams-closed"} {
+				if !bytes.Contains(trace, []byte(" "+stage+" elapsed_ms=")) {
+					t.Errorf("dispatcher trace missing %s", stage)
+				}
+			}
+		}
+	})
+	prelude := "$engramTestClock = [Diagnostics.Stopwatch]::StartNew()\n" +
+		"function Write-EngramTestStage($stage) { [IO.File]::AppendAllText('" + strings.ReplaceAll(tracePath, "'", "''") +
+		"', ([DateTime]::UtcNow.ToString('o') + ' ' + $stage + ' elapsed_ms=' + $engramTestClock.Elapsed.TotalMilliseconds + [Environment]::NewLine)) }\n" +
+		"Write-EngramTestStage 'entry'\n"
+	text := string(source)
+	for _, point := range []struct{ anchor, stage string }{
+		{"$ProgressPreference = 'SilentlyContinue'", ""},
+		{"    $git = Get-Command", "validated-hook"},
+		{"    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()", "selected-bash"},
+		{"        $process = [System.Diagnostics.Process]::Start($startInfo)", "before-start"},
+		{"            $standardInput = $process.StandardInput", "after-start"},
+		{"    $process.WaitForExit()", "stdin-closed"},
+		{"    [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))", "child-exited"},
+		{"    exit $process.ExitCode", "streams-closed"},
+	} {
+		if strings.Count(text, point.anchor) != 1 {
+			t.Fatalf("dispatcher trace anchor changed: %q", point.anchor)
+		}
+		insert := "    Write-EngramTestStage '" + point.stage + "'\n"
+		if point.stage == "" {
+			insert = prelude
+		}
+		text = strings.Replace(text, point.anchor, insert+point.anchor, 1)
+	}
+	return []byte(text)
 }
 
 func TestCodexWindowsBashHookDispatcherRealSessionContext(t *testing.T) {
