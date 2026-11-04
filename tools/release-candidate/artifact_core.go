@@ -55,10 +55,6 @@ type artifactCoreCheck struct {
 	Persistence     string `json:"persistence,omitempty"`
 }
 
-func runArtifactCore(ctx context.Context, core []byte, digest, run string) *artifactCoreCheck {
-	return runArtifactCoreObservation(ctx, core, digest, run, "")
-}
-
 func runArtifactCoreObservation(ctx context.Context, core []byte, digest, run, version string) *artifactCoreCheck {
 	return runArtifactObservation(ctx, core, digest, run, nil, nil, "", version)
 }
