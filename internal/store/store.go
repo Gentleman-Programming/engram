@@ -6373,12 +6373,18 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		}
 	}
 
-	if opts.Pinned == 0 {
-		if pinned, err = s.PinnedObservations(project, scope); err != nil {
-			return "", err
+	if opts.Pinned >= 0 {
+		limit := opts.Pinned
+		if opts.MaxBytes > 0 {
+			// Even an empty compact bullet ("- [] ****\n") costs 10 bytes.
+			// One extra row guarantees the rendered prefix exceeds the budget
+			// when more rows exist, preserving the final truncation marker.
+			byteLimit := opts.MaxBytes/len("- [] ****\n") + 1
+			if limit == 0 || limit > byteLimit {
+				limit = byteLimit
+			}
 		}
-	} else if opts.Pinned > 0 {
-		if pinned, err = s.pinnedObservationsLimit(project, scope, opts.Pinned); err != nil {
+		if pinned, err = s.pinnedObservationsLimit(project, scope, limit); err != nil {
 			return "", err
 		}
 	}
@@ -6426,6 +6432,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(sessions) > 0 {
 		b.WriteString("### Recent Sessions\n")
 		for _, sess := range sessions {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			summary := ""
 			if sess.Summary != nil {
 				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
@@ -6439,6 +6448,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(prompts) > 0 {
 		b.WriteString("### Recent User Prompts\n")
 		for _, p := range prompts {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
 		}
 		b.WriteString("\n")
@@ -6447,6 +6459,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(pinned) > 0 {
 		b.WriteString("### Pinned\n")
 		for _, obs := range pinned {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			writeObservationBullet(&b, obs, opts.Compact)
 		}
 		b.WriteString("\n")
@@ -6455,6 +6470,9 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(observations) > 0 {
 		b.WriteString("### Recent Observations\n")
 		for _, obs := range observations {
+			if opts.MaxBytes > 0 && b.Len() > opts.MaxBytes {
+				break
+			}
 			writeObservationBullet(&b, obs, opts.Compact)
 		}
 		b.WriteString("\n")
