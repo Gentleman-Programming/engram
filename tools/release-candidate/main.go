@@ -27,6 +27,12 @@ release-candidate -observe-published-core -archive ZIP -checksums FILE -context 
 This separate mode requires reviewed identity pins and never approves a release.
 Without -execute it admits local bytes only; it never downloads or starts Core.
 
+Published Pi/Core persistence observation (Windows/amd64 only):
+release-candidate -observe-published-pair -archive ZIP -checksums FILE -pi-tarball TGZ -context JSON [-root REPO] [-execute]
+Requires independent Core/Pi pins and local Pi Git source. Execution uses Node24,
+fixed local TypeBox1.3.34 and disclosed registration/UI substitutes, not a Pi SDK.
+Without -execute it admits bytes only. Outcome is always blocked, exit 2.
+
 -core-ref  Required full core tag ref with strict SemVer.
 -pi-ref    Required full Pi tag ref with independent strict SemVer.
 -root      Candidate metadata directory (default: current directory).
@@ -86,6 +92,9 @@ func main() {
 }
 
 func run(args []string, output io.Writer) error {
+	if len(args) > 0 && args[0] == "-observe-published-pair" {
+		return runPublishedPair(args[1:], output)
+	}
 	if len(args) > 0 && args[0] == "-observe-published-core" {
 		return runPublishedCore(args[1:], output)
 	}

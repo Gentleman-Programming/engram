@@ -408,3 +408,62 @@ of an existing user store, other architectures/platforms, Cloud images or releas
 promotion. Keep candidate observations (#2055) and these published-byte results
 (#2122) distinct. A failed published smoke calls for explicit inspection and
 fix-forward; it does not retag, roll back or republish anything automatically.
+
+## Published Pi and Core persistence observation (Windows/amd64)
+
+`-observe-published-pair` adds a separate local observation of an independently
+selected final Core ZIP and published Pi tarball. It shares the Core admission
+above and the Go-owned Pi archive/source validator from #2055. It does not
+download artifacts, install dependencies, or change a Core installer's Pi pin.
+In particular, selecting Pi 0.6.0 with Core 3.6.1 does not imply that the older
+Core installer installs Pi 0.6.0.
+
+Use `-observe-published-pair` as the first argument, with `-archive`, `-checksums`,
+`-pi-tarball`, `-context`, and `-root` pointing to the local Git repository that
+contains the reviewed Pi commit. The context nests the Core pins above and
+independent Pi pins:
+
+```json
+{
+  "core": {
+    "version": "3.6.1",
+    "source": "d33a14a2ed822784752e5678b1673289ee1c0de4",
+    "archive_sha256": "129026b49e51db2453d28a5fbb915893ff7a8f4764b3ebc83e1ed80f72c3dedf",
+    "checksums_sha256": "f8192731617d119a69bbb7df334c4ca1e729f3d835532345fadd04b337e4ea33"
+  },
+  "pi": {
+    "version": "0.6.0",
+    "source": "1e4bea1e647e2e8922494bfcbfcc1567f54712ad",
+    "tarball_sha256": "fddc16f50136ade83a77131d8ff87eb1ff0d2ffdf0064036bb3616c52b4a9d57"
+  }
+}
+```
+
+These are selected artifact identities, not defaults or publisher authentication.
+Review their release/registry origin and execution permission independently.
+Without `-execute`, admission verifies both inputs without starting either.
+Execution additionally requires Node24 and reviewed, checkout-local
+`plugin/pi/node_modules/typebox` version 1.3.34; missing prerequisites remain
+unavailable. For example, using the built command:
+
+```powershell
+.\release-candidate.exe -observe-published-pair -archive .\engram_3.6.1_windows_amd64.zip -checksums .\checksums.txt -pi-tarball .\gentle-engram-0.6.0.tgz -context .\reviewed-pair.json -root . -execute
+```
+
+Execution imports the admitted Pi TypeScript bytes, with the existing fixed
+registration host and disclosed `@earendil-works/pi-tui.Text` substitute. It
+invokes `mem_save`, joins Pi, stops Core, restarts the same executable against
+the same private data with a fresh token, and invokes `mem_get_observation`
+through a new Pi process. It checks the original ID, title, content and project,
+the Core version/instance, both Pi stage joins and final Core cleanup. Pi must
+join before Core stops. This is not an installed Pi SDK, interactive UI, upgrade
+or cross-platform qualification.
+
+The output separates `package`, `runtime` and `piRuntime`, including Pi stage
+results and disclosed substitutions. Archive, context, Git source, executable,
+helpers, Pi tree and original/copied TypeBox bytes are rechecked. A mismatch
+invalidates evidence; these checks are not hostile-code isolation or protection
+against concurrent changes that are reverted before rechecking. Unknown joins
+retain owned runtime state. The command always reports `outcome: "blocked"`
+and exits **2**, even when every observed check passes. A failed observation
+requires inspection and fix-forward, with no automatic retry or promotion.
