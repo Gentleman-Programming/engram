@@ -22,6 +22,13 @@ Before upgrading:
 4. Validate compatibility with your environment and integrations.
 5. Retain a known-good installation or artifact until the upgrade is accepted.
 
+After installing the replacement binary, restart any already-running local
+`engram serve` HTTP server through its existing supervisor or launcher. Verify the intended server's
+`/health` version against the installed executable and recheck HTTP integrations;
+a running process or successful local CLI check alone does not confirm that the
+server was upgraded. Follow [After upgrading](./INSTALLATION.md#after-upgrading)
+for endpoint, authentication, and service guidance.
+
 ## Rollback expectations
 
 Rollback means restoring the known-good release and configuration, plus any required backup, using the documented procedure for the affected component. It does not promise an automated rollback path or behavior beyond that component's documentation. Feature or data migrations can constrain rollback; consult the release-specific notes before upgrading.
