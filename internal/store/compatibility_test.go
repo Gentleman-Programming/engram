@@ -82,9 +82,7 @@ func TestCompatibilityOfflineNeverAuthorizes(t *testing.T) {
 				case "ambiguous":
 					write("other.db", nil)
 				case "symlink":
-					if err := os.Symlink("engram.db", filepath.Join(dir, "alias.db")); err != nil {
-						t.Fatal(err)
-					}
+					requireFixtureSymlink(t, "engram.db", filepath.Join(dir, "alias.db"))
 				}
 			}
 			before := compatibilityHash(t, dir)

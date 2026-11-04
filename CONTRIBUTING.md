@@ -199,10 +199,26 @@ current repository; qualified-only links do not expand discovery or rerun routin
 
 All required checks must pass before a PR can be merged. Issue API errors fail closed.
 
+#### Unsupported runtime rejection
+
+`Unsupported Node Runtime Rejection` runs only the existing
+`TestArtifactCoreUnsupportedNode` under Node22 with Go1.26.10. Node24 remains the
+ordinary supported test runtime. The separate ten-minute lane verifies the
+actual major versions and requires a named executed pass and successful package
+completion via `prerequisite-coverage.mjs unsupported-node EVENTS.json GO_EXIT`.
+A skip or nonzero Go exit cannot satisfy it; the original no-spawn/cleanup and
+20-second test-context assertions are unchanged. Local wiring checks are not
+proof that the hosted Node22 case executed.
+
 #### Observational Windows full-module baseline (#1891)
 
-`Windows Full Suite (Observational)` independently runs `go test -json ./...`
+`Windows Full Suite (Observational)` independently runs `go test -json -count=1 ./...`
 with default tags on native Windows x64 for PRs, merge groups and main pushes.
+`-count=1` executes fresh tests and avoids Go's test-result cache processing,
+which can continue after the package prints `ok` for SQLite-heavy fixtures.
+Compilation and module caches remain enabled. The bounded local observation in
+[#2192](https://github.com/Gentleman-Programming/engram/issues/2192#issuecomment-6623802296)
+does not establish a full hosted speedup; compare actual job outcomes and timings.
 It does not replace selective Windows jobs, change the six required contexts,
 App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
 observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
@@ -219,6 +235,18 @@ Missing mandatory tools fail preparation; no substitute tools are installed.
 Test home/profile, app data, Engram data and temp directories are job-local;
 Go caches remain usable. A dedicated hosted job and test-owned child lifecycle
 provide process isolation, not measured proof of cleanup.
+
+The job builds a fresh `cmd/engram` executable into runner-owned temp and exports
+`ENGRAM_RECOVERY_PUBLIC_BINARY` before the unchanged full-suite invocation.
+`prerequisite-coverage.mjs windows-recovery EVENTS.json GO_EXIT` requires
+`TestHookManagedLocalPublicRecovery` and all four
+`TestSubagentStopPreservesUnicodeTransport` cases to execute and pass, not skip.
+The Unicode test selects Git-bundled native curl from either the current
+`ucrt64/bin` or legacy `mingw64/bin` layout, logs the selected executable, and
+preserves exact Unicode readback assertions; system/PATH curl is not a substitute. A nonzero Go
+exit remains authoritative; successful JSON cannot mask it. The original native
+identity, job-object ownership and cleanup assertions remain unchanged. Wiring
+checks alone do not establish the new binary-backed native execution.
 
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
 failure artifacts when available. Cancellation/outer timeout can leave partial
@@ -364,6 +392,40 @@ and unexpected skips fail completeness; only the installed-host opt-in exclusion
 is accepted. Its provisional ceilings are 15 minutes outer, 2 minutes fixture
 build and 5 minutes per adapter step. Source/fixture success is not installed-host,
 artifact, Windows or release qualification. See [commands and finite rollout](docs/ci-macos.md#native-adapter-lane-2150-macos-portion-only).
+
+### Native Windows adapter source suites (initially non-required)
+
+**Native Windows x64 Adapter Tests** adds one independent `windows-2022`
+PowerShell lane for #2150. It requires native Windows/x64 Node 24 and
+Windows/amd64 Go 1.26.10, a full checkout, contract JSON, and locked local
+TypeBox 1.3.34 (`npm ci --ignore-scripts --legacy-peer-deps` in `plugin/pi`).
+It builds the existing Pi server as `$env:RUNNER_TEMP\pi-test-server.exe`;
+the existing prebuilt-server selector enables packaged positive workflows.
+
+From `plugin/pi`, reuse the serial package script with CLI-only TAP:
+`node --test --test-reporter=tap --test-concurrency=1 test/*.test.mjs`.
+The root OpenCode command keeps the same three files as the Mac lane.
+PowerShell pipelines preserve native exit codes and stderr; private HOME,
+USERPROFILE, AppData, TEMP/TMP and stores retain the setup Go cache locations.
+No Bash/jq/curl, installed Pi SDK, Codex fixture change or full Go job is added.
+
+The shared [evidence checker](.github/scripts/adapter-ci-evidence.mjs) takes
+`macos` or `windows`; the existing Mac output/exit contract is unchanged.
+Missing required test names, malformed TAP, inconsistent counters and unexpected
+skips fail. The only accepted skip is the installed-host opt-in journey; the
+checker does not inventory every expected test or detect removal of an otherwise
+unlisted test when the TAP plan and counters remain consistent. Windows-shaped
+spawn mocks and forceful Windows SIGTERM are not real host/graceful-shutdown
+qualification.
+
+Initial ceilings are 20 minutes outer, 2 minutes fixture build and 5 minutes
+per adapter suite, not measured Windows guarantees. Existing fixture deadlines,
+six App15368 contexts, queue, Race, guards and budgets remain unchanged.
+Run the existing Node24 technical-contract command for structure, TAP negatives
+and isolated PowerShell probes; execution-only probes are foreign-OS skips on
+non-Windows hosts, never native evidence. Actual hosted Windows adapter proof
+and one normal PR/merge-group/main observation remain pending until delivery,
+followed by explicit disposition; no automatic promotion or closure of #2150.
 
 ### Go race detection (initially non-required)
 
@@ -741,6 +803,8 @@ The command is a dry run: it prints the canonical label list as JSON and never w
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits
 - Do not include paths prohibited by the [Transient Artifact Policy](#transient-artifact-policy)
+
+The symlink cases in `TestCompatibilityOfflineNeverAuthorizes` and `TestMigrateCopyRejects` skip only when Windows returns `ERROR_PRIVILEGE_NOT_HELD` (1314). Other fixture errors still fail; hosts that support symlinks execute the original rejection assertions.
 
 ### Focused Verification Map
 

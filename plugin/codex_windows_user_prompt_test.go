@@ -242,7 +242,7 @@ func TestCodexWindowsNativeUserPromptTrustedPinForwardsInputAndMeetsTimingBudget
 		t.Skip("builds and executes the native hook command")
 	}
 	root, appData := repoRoot(t), t.TempDir()
-	trusted := buildCodexWindowsEngram(t, root, filepath.Join(t.TempDir(), "trusted binary with spaces", "engram.exe"))
+	trusted := buildCodexWindowsEngram(t, filepath.Join(t.TempDir(), "trusted binary with spaces", "engram.exe"))
 	writeCodexWindowsConfig(t, appData, codexWindowsHookMarker(trusted)+"\n# engram-windows-hook-command-v1: \"C:\\\\later-spoof.exe\"\n[mcp_servers.engram]\ncommand = \"ignored.exe\"\nargs = [\"mcp\"]\n")
 
 	var posts atomic.Int32
@@ -323,7 +323,7 @@ func TestCodexWindowsNativeUserPromptIgnoresInterpreterAndBinaryHijacks(t *testi
 		t.Skip("builds and executes hostile executable fixtures")
 	}
 	root, appData := repoRoot(t), t.TempDir()
-	trusted := buildCodexWindowsEngram(t, root, filepath.Join(t.TempDir(), "trusted binary with spaces", "engram.exe"))
+	trusted := buildCodexWindowsEngram(t, filepath.Join(t.TempDir(), "trusted binary with spaces", "engram.exe"))
 	writeCodexWindowsConfig(t, appData, codexWindowsHookMarker(trusted)+"\n[mcp_servers.engram]\ncommand = \"ignored.exe\"\n")
 
 	marker := filepath.Join(t.TempDir(), "hijack-marker")
@@ -439,16 +439,81 @@ func codexWindowsUserPromptCommand(t *testing.T, root string) string {
 	return ""
 }
 
-func buildCodexWindowsEngram(t *testing.T, root, target string) string {
+func TestCodexWindowsEngramPrivateCopyReused(t *testing.T) {
+	cachedCLI := buildCodexFixtureCLI(t)
+	want, err := os.ReadFile(cachedCLI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := t.TempDir()
+	config, state := filepath.Join(private, "config.toml"), filepath.Join(private, "state")
+	for _, path := range []string{config, state} {
+		if err := os.WriteFile(path, []byte("caller-owned sentinel\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cwd, noGo := t.TempDir(), t.TempDir()
+	t.Chdir(cwd)
+	t.Setenv("PATH", noGo)
+	t.Setenv("CODEX_HOME", private)
+	t.Setenv("ENGRAM_DATA_DIR", private)
+	if _, err := exec.LookPath("go"); err == nil {
+		t.Fatal("empty private PATH unexpectedly resolves go")
+	}
+	var targets []string
+	for _, name := range []string{"first owner", "second owner"} {
+		t.Run(name, func(t *testing.T) {
+			// Parent-owned destinations must outlive each requesting subtest.
+			target := filepath.Join(private, name, "trusted binary with spaces", "engram.exe")
+			got := buildCodexWindowsEngram(t, target)
+			if got != target || !filepath.IsAbs(got) || !strings.Contains(got, " ") || filepath.Ext(got) != ".exe" || got == cachedCLI {
+				t.Fatalf("private executable = %q, want absolute space-containing destination %q distinct from cache %q", got, target, cachedCLI)
+			}
+			targets = append(targets, got)
+		})
+	}
+	if len(targets) != 2 || targets[0] == targets[1] {
+		t.Fatalf("want two distinct private copies, got %q", targets)
+	}
+	for _, path := range append(targets, cachedCLI) {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("executable %q changed or did not survive subtest cleanup: %v", path, err)
+		}
+	}
+	for i, path := range targets {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, other := range append(targets[i+1:], cachedCLI) {
+			otherInfo, err := os.Stat(other)
+			if err != nil || os.SameFile(info, otherInfo) {
+				t.Fatalf("private executable %q aliases %q: %v", path, other, err)
+			}
+		}
+	}
+	if again := buildCodexFixtureCLI(t); again != cachedCLI {
+		t.Fatalf("cached CLI changed: %q != %q", again, cachedCLI)
+	}
+	for _, path := range []string{config, state} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != "caller-owned sentinel\n" {
+			t.Fatalf("caller-owned file %q changed: %q, %v", path, got, err)
+		}
+	}
+	if entries, err := os.ReadDir(cwd); err != nil || len(entries) != 0 {
+		t.Fatalf("private working directory changed: %v, %v", entries, err)
+	}
+}
+
+func buildCodexWindowsEngram(t *testing.T, target string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatalf("create binary directory: %v", err)
 	}
-	build := exec.Command("go", "build", "-o", target, "./cmd/engram")
-	build.Dir = root
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build engram: %v: %s", err, output)
-	}
+	cachedCLI := buildCodexFixtureCLI(t)
+	copyCodexWindowsFile(t, cachedCLI, target)
 	return target
 }
 

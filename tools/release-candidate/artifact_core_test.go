@@ -401,7 +401,7 @@ syncBuiltinESMExports();
 			}
 			write("core.exe", core)
 			preload := "import \"data:text/javascript;base64," + base64.StdEncoding.EncodeToString([]byte(hook)) + "\";\n"
-			write("owner.mjs", append([]byte(preload), artifactCoreOwner...))
+			write("owner.mjs", append([]byte(preload), artifactPiCoreOwner...))
 			write("pi-owner.mjs", artifactPiOwner)
 			write("pi-workflows.mjs", artifactPiWorkflows)
 			write("index.ts", []byte("export const synthetic = true;\n"))

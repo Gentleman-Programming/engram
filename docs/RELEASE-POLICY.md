@@ -63,9 +63,12 @@ For a separately authorized release:
    Missing versions, transport/HTTP/JSON failures and mismatched required `startupPolicy` or
    declared `sessionOwned` metadata stop core publication. There are no retries, redirects,
    private npm config reads or configurable registry endpoints. Startup-only source contracts
-   remain supported when `sessionOwned` is absent. Current source and installer pin select 0.5.1
+   remain supported when `sessionOwned` is absent. Current source and installer pin prepare 0.6.0
    and require owned metadata; public 0.4.2 lacks that contract and is not a compatible substitute.
-   Source preparation does not establish public availability of 0.5.1.
+   This version preparation adds no runtime functionality. The managed 0.5.1 pin joins the older
+   predecessor cleanup while custom/local/object entries and unrelated settings remain intact.
+   Source preparation does not establish public availability of 0.6.0 or change an already
+   published core's installer pin.
    This is rejection-only availability evidence, **not** protocol, source-byte identity,
    published-content integrity or permission approval.
 4. Core GoReleaser still performs its existing release and automatic Homebrew tap behavior.

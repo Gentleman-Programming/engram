@@ -39,6 +39,9 @@ func useLegacyLocalHookEndpoint(t *testing.T, endpoint string) {
 	t.Setenv("USERPROFILE", root)
 	t.Setenv("XDG_CONFIG_HOME", root)
 	t.Setenv("ENGRAM_DATA_DIR", root)
+	if _, err := store.EnsureInstanceID(root); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "engram.db"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +449,7 @@ func TestCodexUnconfirmedCallsDenyWithoutUpdatedInput(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/health" {
-					codexMockHealth(w)
+					hookLocalMockHealth(t, w)
 					return
 				}
 				if r.URL.Path != "/runtime-sessions/resolve" || r.Method != http.MethodPost {
@@ -565,7 +568,7 @@ func TestHookSessionConfirmationLatency(t *testing.T) {
 				endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					delay := tc.project
 					if r.URL.Path == "/health" {
-						codexMockHealth(w)
+						hookLocalMockHealth(t, w)
 						return
 					}
 					switch r.URL.Path {
@@ -691,7 +694,7 @@ func TestHookSessionConfirmationSharedDeadline(t *testing.T) {
 						return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 					}
 					if r.URL.Path == "/health" {
-						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"ok","service":"engram","capabilities":{"runtime_session_resolution":true}}`))}, nil
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(hookLocalMockHealthBody(t)))}, nil
 					}
 					switch r.URL.Path {
 					case "/project/current":
@@ -846,6 +849,7 @@ func TestClaudeWriteGateBindsRegisteredSessionToOwnerProject(t *testing.T) {
 	endpoint := httptest.NewServer(production)
 	defer endpoint.Close()
 	useLegacyLocalHookEndpoint(t, endpoint.URL)
+	t.Setenv("ENGRAM_DATA_DIR", filepath.Join(root, "store"))
 
 	gate := func(t *testing.T, session, cwd string) (decision, reason string, updatedInput map[string]any) {
 		t.Helper()
@@ -1017,6 +1021,8 @@ func TestClaudeConflictDenialNamesSessionProjects(t *testing.T) {
 	// carries the server's session_project_conflict fields instead of the generic text.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/health":
+			hookLocalMockHealth(t, w)
 		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 			_, _ = io.WriteString(w, `{"id":"s9","project":"client","directory":"/w","started_at":"2026-10-10 00:00:00"}`)
 		case r.URL.Path == "/project/current":
@@ -1054,6 +1060,8 @@ func TestClaudeDegradedSessionLookupFailsClosed(t *testing.T) {
 	var derived bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/health":
+			hookLocalMockHealth(t, w)
 		case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = io.WriteString(w, `{"error":"boom"}`)
@@ -1115,10 +1123,24 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var derived, posted bool
+			var derived, posted, lookedUp bool
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.URL.Path == "/health":
+					hookLocalMockHealth(t, w)
 				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
+					lookedUp = true
+					if tc.sessionGet == nil {
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						if err := conn.Close(); err != nil {
+							t.Error(err)
+						}
+						return
+					}
 					tc.sessionGet(w)
 				case r.URL.Path == "/project/current":
 					derived = true
@@ -1133,11 +1155,7 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 				}
 			}))
 			useLegacyLocalHookEndpoint(t, endpoint.URL)
-			if tc.sessionGet == nil {
-				endpoint.Close() // transport failure: connection refused
-			} else {
-				defer endpoint.Close()
-			}
+			defer endpoint.Close()
 			input, _ := json.Marshal(map[string]any{"session_id": "s9", "cwd": "/w/docs", "tool_name": "mcp__engram__mem_save", "tool_input": map[string]any{"title": "t", "content": "c"}})
 			var hook struct {
 				HookSpecificOutput struct {
@@ -1146,7 +1164,12 @@ func TestClaudeSessionLookupOutcomes(t *testing.T) {
 					UpdatedInput             map[string]any `json:"updatedInput"`
 				} `json:"hookSpecificOutput"`
 			}
-			if err := json.Unmarshal(guardClaudePreToolUse(input), &hook); err != nil {
+			result := guardClaudePreToolUse(input)
+			endpoint.Close() // Wait for capture writes before checking fixture state.
+			if !lookedUp {
+				t.Fatal("session lookup was not exercised")
+			}
+			if err := json.Unmarshal(result, &hook); err != nil {
 				t.Fatal(err)
 			}
 			bound := hook.HookSpecificOutput
@@ -1196,6 +1219,8 @@ func TestClaudeLargeSessionLookupStillConfirms(t *testing.T) {
 			var derived bool
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.URL.Path == "/health":
+					hookLocalMockHealth(t, w)
 				case r.Method == http.MethodGet && r.URL.Path == "/sessions/s9":
 					_, _ = io.WriteString(w, tc.session)
 				case r.URL.Path == "/project/current":
@@ -1246,6 +1271,10 @@ func TestCmdHookWritesTransformedResponse(t *testing.T) {
 	oldStdin, oldOutput := os.Stdin, claudeHookOutput
 	t.Cleanup(func() { os.Stdin, claudeHookOutput = oldStdin, oldOutput })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			hookLocalMockHealth(t, w)
+			return
+		}
 		if r.URL.Path == "/project/current" {
 			_, _ = w.Write([]byte(`{"project":"project-a","project_source":"config"}`))
 			return
@@ -1764,7 +1793,7 @@ func TestCodexPreToolUseReadsDoNotRequireSessionOrInput(t *testing.T) {
 func TestCodexPreToolUseCommandWritesAllowAndBoundInput(t *testing.T) {
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
-			codexMockHealth(w)
+			hookLocalMockHealth(t, w)
 			return
 		}
 		if r.URL.Path == "/project/current" {
@@ -2042,4 +2071,21 @@ type claudeGateVerdict struct {
 	PermissionDecision       string         `json:"permissionDecision"`
 	PermissionDecisionReason string         `json:"permissionDecisionReason"`
 	UpdatedInput             map[string]any `json:"updatedInput"`
+}
+
+func hookLocalMockHealthBody(t *testing.T) string {
+	t.Helper()
+	id, err := store.EnsureInstanceID(hostBindingDataDirFromEnvOrConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"status": "ok", "service": "engram", "instance_id": id, "capabilities": map[string]bool{"runtime_session_resolution": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+func hookLocalMockHealth(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	_, _ = io.WriteString(w, hookLocalMockHealthBody(t))
 }

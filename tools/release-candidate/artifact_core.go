@@ -17,6 +17,9 @@ import (
 //go:embed artifact_core.mjs
 var artifactCoreOwner []byte
 
+//go:embed artifact_pi_core.mjs
+var artifactPiCoreOwner []byte
+
 //go:embed artifact_pi.mjs
 var artifactPiOwner []byte
 
@@ -49,6 +52,15 @@ type artifactCoreCheck struct {
 	ExitCode        *int   `json:"exitCode,omitempty"`
 	Retained        bool   `json:"retained,omitempty"`
 	HelperSHA256    string `json:"helperSha256"`
+	Persistence     string `json:"persistence,omitempty"`
+}
+
+func runArtifactCore(ctx context.Context, core []byte, digest, run string) *artifactCoreCheck {
+	return runArtifactCoreObservation(ctx, core, digest, run, "")
+}
+
+func runArtifactCoreObservation(ctx context.Context, core []byte, digest, run, version string) *artifactCoreCheck {
+	return runArtifactObservation(ctx, core, digest, run, nil, nil, "", version)
 }
 
 // materialize uses only the admitted Go archive authority, before any import.
@@ -57,8 +69,16 @@ func runArtifactCoreWithPi(ctx context.Context, core []byte, digest, run string,
 }
 
 func runArtifactPiCase(ctx context.Context, core []byte, digest, run string, materialize func(string) bool, pi *artifactPiCheck, workflow string) *artifactCoreCheck {
+	return runArtifactObservation(ctx, core, digest, run, materialize, pi, workflow, "")
+}
+
+func runArtifactObservation(ctx context.Context, core []byte, digest, run string, materialize func(string) bool, pi *artifactPiCheck, workflow, version string) *artifactCoreCheck {
+	owner := artifactCoreOwner
+	if pi != nil {
+		owner = artifactPiCoreOwner
+	}
 	r := &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
-	r.HelperSHA256 = fmt.Sprintf("%x", sha256.Sum256(artifactCoreOwner))
+	r.HelperSHA256 = fmt.Sprintf("%x", sha256.Sum256(owner))
 	root, err := os.MkdirTemp("", "engram-core-"+run+"-")
 	if err != nil {
 		return r
@@ -121,10 +141,10 @@ func runArtifactPiCase(ctx context.Context, core []byte, digest, run string, mat
 		}
 	}
 	helper := filepath.Join(root, "core-owner.mjs")
-	if os.WriteFile(executable, core, 0700) != nil || os.WriteFile(helper, artifactCoreOwner, 0600) != nil {
+	if os.WriteFile(executable, core, 0700) != nil || os.WriteFile(helper, owner, 0600) != nil {
 		return r
 	}
-	helperBytes := map[string][]byte{helper: artifactCoreOwner}
+	helperBytes := map[string][]byte{helper: owner}
 	if pi != nil {
 		helperBytes[filepath.Join(root, "pi-owner.mjs")] = artifactPiOwner
 		helperBytes[filepath.Join(root, "pi-workflows.mjs")] = artifactPiWorkflows
@@ -148,6 +168,8 @@ func runArtifactPiCase(ctx context.Context, core []byte, digest, run string, mat
 	cmd := exec.CommandContext(ctx, node, helper, executable)
 	if pi != nil {
 		cmd.Args = append(cmd.Args, filepath.Join(piTree, "index.ts"), workflow)
+	} else if version != "" {
+		cmd.Args = append(cmd.Args, version)
 	}
 	cmd.Dir = root
 	cmd.Env = []string{}

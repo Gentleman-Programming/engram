@@ -1,7 +1,11 @@
-# Session-owned core/Pi pair — unreleased preparation
+# Session-owned core/Pi pair — historical preparation
 
 This is **unreleased preparation**, not release approval or a published compatibility claim.
 It addresses the distribution gap in #1921 without implementing the coordinator in #1349.
+
+The proposed versions below record the earlier session-owned preparation. Current source
+prepares the 0.6.0 Pi consolidation tracked by #2113; see the [Pi quick start](../plugin/pi/README.md#quick-start)
+and [release policy](./RELEASE-POLICY.md) for its current pin and publication requirements.
 
 ## Proposed pair
 

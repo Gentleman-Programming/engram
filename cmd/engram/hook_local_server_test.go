@@ -131,6 +131,9 @@ func TestHookManagedRecoveryConfirmation(t *testing.T) {
 			if tc.initialFailure || platform != "windows" {
 				wantLaunches, wantHealth = 0, 0
 			}
+			if tc.initialFailure {
+				wantHealth = 1 // Reachable local listeners are checked before session lookup.
+			}
 			if platform != "windows" {
 				wantOwners = 0
 			}
@@ -190,6 +193,9 @@ func TestHookLocalReadiness(t *testing.T) {
 		want       bool
 	}{
 		{"matching", `{"status":"ok","service":"engram","instance_id":"expected"}`, 200, true},
+		{"trailing whitespace", "{\"status\":\"ok\",\"service\":\"engram\",\"instance_id\":\"expected\"}\n \t", 200, true},
+		{"trailing junk", `{"status":"ok","service":"engram","instance_id":"expected"}junk`, 200, false},
+		{"oversized", `{"status":"ok","service":"engram","instance_id":"expected"}` + strings.Repeat(" ", hookDenialBodyLimit), 200, false},
 		{"foreign", `{"status":"ok","service":"engram","instance_id":"other"}`, 200, false},
 		{"other service", `{"status":"ok","service":"other","instance_id":"expected"}`, 200, false},
 		{"malformed", `{`, 200, false}, {"HTTP", `{}`, 503, false}, {"redirect", `{}`, 302, false},

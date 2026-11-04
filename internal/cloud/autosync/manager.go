@@ -103,7 +103,7 @@ type enrolledProjectRepairEnsurer interface {
 // irreparableSyncMutationQuarantiner prevents malformed legacy rows from
 // repeatedly reaching transport while preserving their local audit evidence.
 type irreparableSyncMutationQuarantiner interface {
-	QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (store.SyncMutationQuarantineReport, error)
+	QuarantineIrreparableSyncMutationsPage(targetKey string, afterSeq int64, limit int) (store.SyncMutationQuarantineReport, int64, error)
 }
 
 // promptPreflightError means this entry was rejected before transport and remains pending.
@@ -257,6 +257,8 @@ type Manager struct {
 	disabled  bool // set by StopForUpgrade, cleared by ResumeAfterUpgrade
 	wg        sync.WaitGroup
 	cancelFn  context.CancelFunc
+	// push runs serially; continue the bounded quarantine scan across cycles.
+	quarantineAfterSeq int64
 
 	// runReady closes once a Run launched via Start has registered with wg
 	// and is ready to serve. It stays nil until the first Start call, so
@@ -660,10 +662,11 @@ func (m *Manager) push(ctx context.Context) error {
 		}
 	}
 	if quarantiner, ok := m.store.(irreparableSyncMutationQuarantiner); ok {
-		report, err := quarantiner.QuarantineIrreparableSyncMutations(m.cfg.TargetKey, "", true)
+		report, nextSeq, err := quarantiner.QuarantineIrreparableSyncMutationsPage(m.cfg.TargetKey, m.quarantineAfterSeq, 100)
 		if err != nil {
 			return fmt.Errorf("quarantine irreparable pending mutations: %w", err)
 		}
+		m.quarantineAfterSeq = nextSeq
 		if len(report.Actions) > 0 {
 			log.Printf("[autosync] quarantined %d irreparable pending mutation(s); inspect with `engram doctor --check sync_mutation_required_fields`", len(report.Actions))
 		}
