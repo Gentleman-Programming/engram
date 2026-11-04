@@ -1313,7 +1313,8 @@ func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData, cloud boo
 // satisfied locally: it exists in the store, or arrives with a manifest chunk
 // still pending in this import run. Its sets are built lazily on the first
 // relation classification, so relation-free imports never pay for extra chunk
-// reads. Already-known chunks may still provide durable delete evidence, but a
+// reads. Known payloads are read only for unresolved endpoints. They may
+// provide durable delete evidence, but a
 // missing or corrupt known chunk is ignored because it cannot invalidate a
 // successful earlier import.
 type importDependencyOracle struct {
@@ -1325,6 +1326,7 @@ type importDependencyOracle struct {
 	deletedObservationIDs map[string]struct{}
 	chunkCache            map[string]ChunkData
 	built                 bool
+	pendingBuilt          bool
 	buildErr              error
 }
 
@@ -1401,7 +1403,7 @@ func (o *importDependencyOracle) endpointPermanentlyMissing(syncID string) (bool
 	if syncID == "" {
 		return false, nil
 	}
-	if err := o.ensureBuilt(); err != nil {
+	if err := o.ensurePendingBuilt(); err != nil {
 		return false, err
 	}
 	if _, pending := o.pendingObservationIDs[syncID]; pending {
@@ -1416,19 +1418,22 @@ func (o *importDependencyOracle) endpointPermanentlyMissing(syncID string) (bool
 	if known {
 		return false, nil
 	}
+	if err := o.ensureBuilt(); err != nil {
+		return false, err
+	}
 	_, deleted := o.deletedObservationIDs[syncID]
 	return deleted, nil
 }
 
-// ensureBuilt builds the manifest observation sets on first use. A pending
+// ensurePendingBuilt freezes the pending observation sets on first use. A pending
 // chunk that cannot be read or parsed fails the import before the first
 // relation-bearing chunk applies, so no edge is ever classified against an
 // incomplete pending set. Known chunks are best-effort delete evidence only.
-func (o *importDependencyOracle) ensureBuilt() error {
-	if o.built {
+func (o *importDependencyOracle) ensurePendingBuilt() error {
+	if o.pendingBuilt {
 		return o.buildErr
 	}
-	o.built = true
+	o.pendingBuilt = true
 	upserts, deletes, err := o.classifyPendingChunks()
 	if err != nil {
 		o.buildErr = err
@@ -1439,44 +1444,68 @@ func (o *importDependencyOracle) ensureBuilt() error {
 	return nil
 }
 
-// classifyPendingChunks collects observation evidence from the manifest. Pending
-// chunks contribute upserts and deletes and remain fail-closed: unreadable or
-// corrupt content aborts classification. Known chunks contribute only delete
-// evidence, because their successful earlier import is already reflected in the
-// local store; an unavailable known chunk therefore cannot newly fail this run.
-// Parsed chunks land in the cache so the apply loop reuses pending chunks instead
-// of re-reading the transport.
+// ensureBuilt supplements the frozen pending sets with historical deletes only
+// for unresolved endpoints. knownChunks grows during apply; cached newly known
+// chunks can contribute deletes again, but never historical upserts.
+func (o *importDependencyOracle) ensureBuilt() error {
+	if err := o.ensurePendingBuilt(); err != nil {
+		return err
+	}
+	if o.built {
+		return nil
+	}
+	o.built = true
+	for _, entry := range o.entries {
+		if !o.knownChunks[entry.ID] {
+			continue
+		}
+		chunk, err := o.chunkForEntry(entry.ID)
+		if err != nil {
+			// Unavailable history cannot invalidate a successful earlier import.
+			continue
+		}
+		addObservationEvidence(chunk, nil, o.deletedObservationIDs)
+	}
+	return nil
+}
+
+// classifyPendingChunks validates pending payloads and collects their upserts
+// and deletes. Parsed chunks are cached for reuse by the apply loop. Historical
+// payloads are optional delete evidence, loaded separately by ensureBuilt.
 func (o *importDependencyOracle) classifyPendingChunks() (upserts, deletes map[string]struct{}, err error) {
 	upserts = make(map[string]struct{})
 	deletes = make(map[string]struct{})
 	for _, entry := range o.entries {
-		known := o.knownChunks[entry.ID]
+		if o.knownChunks[entry.ID] {
+			continue
+		}
 		chunk, err := o.chunkForEntry(entry.ID)
 		if err != nil {
-			if known {
-				continue
-			}
 			return nil, nil, err
 		}
-		for _, mutation := range buildImportMutations(chunk) {
-			if mutation.Entity != store.SyncEntityObservation {
-				continue
-			}
-			obsID := observationMutationSyncID(mutation)
-			if obsID == "" {
-				continue
-			}
-			switch mutation.Op {
-			case store.SyncOpUpsert:
-				if !known {
-					upserts[obsID] = struct{}{}
-				}
-			case store.SyncOpDelete:
-				deletes[obsID] = struct{}{}
-			}
-		}
+		addObservationEvidence(chunk, upserts, deletes)
 	}
 	return upserts, deletes, nil
+}
+
+func addObservationEvidence(chunk ChunkData, upserts, deletes map[string]struct{}) {
+	for _, mutation := range buildImportMutations(chunk) {
+		if mutation.Entity != store.SyncEntityObservation {
+			continue
+		}
+		obsID := observationMutationSyncID(mutation)
+		if obsID == "" {
+			continue
+		}
+		switch mutation.Op {
+		case store.SyncOpUpsert:
+			if upserts != nil {
+				upserts[obsID] = struct{}{}
+			}
+		case store.SyncOpDelete:
+			deletes[obsID] = struct{}{}
+		}
+	}
 }
 
 // observationMutationSyncID resolves an observation mutation identity exactly
