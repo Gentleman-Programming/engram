@@ -93,6 +93,8 @@ The ledger uses a plain insert in the same transaction as the observation and it
 
 Both diagnostics retain the same deferred retry lifecycle: the fifth failed replay marks the row dead. Eligible retry-cap dead relations can rearm only when the original scoped endpoint predicate is satisfied; legacy missing-error rows remain compatible. No project rewriting or automatic ownership repair occurs.
 
+Cloud import validates and decodes all still-pending chunks at the first relation classification, before using pending upserts or local endpoint identities (including soft-deleted observations) to resolve dependencies. Known historical payloads are read for delete evidence only when an endpoint remains unresolved, and at most once per import classification. Unavailable historical payloads remain best-effort evidence; unreadable or corrupt pending payloads still fail before that relation-bearing chunk applies. Imports without relations retain incremental validation. Unresolved endpoints can still require a historical scan; this does not make every import independent of history size.
+
 ## Explicit session identity replacement diagnostics
 
 Without `--replacement-id`, identity repair retains guidance to supply a canonical replacement. Once an explicit replacement attempt selects one source, a blocked plan reports the actual safety or ID-validation blocker instead of repeating that guidance for the selected source. Unselected sources retain their guidance; selection failures and all store repair guards remain unchanged.
