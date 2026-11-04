@@ -234,7 +234,11 @@ provide process isolation, not measured proof of cleanup.
 The job builds a fresh `cmd/engram` executable into runner-owned temp and exports
 `ENGRAM_RECOVERY_PUBLIC_BINARY` before the unchanged full-suite invocation.
 `prerequisite-coverage.mjs windows-recovery EVENTS.json GO_EXIT` requires
-`TestHookManagedLocalPublicRecovery` to execute and pass, not skip. A nonzero Go
+`TestHookManagedLocalPublicRecovery` and all four
+`TestSubagentStopPreservesUnicodeTransport` cases to execute and pass, not skip.
+The Unicode test selects Git-bundled native curl from either the current
+`ucrt64/bin` or legacy `mingw64/bin` layout, logs the selected executable, and
+preserves exact Unicode readback assertions; system/PATH curl is not a substitute. A nonzero Go
 exit remains authoritative; successful JSON cannot mask it. The original native
 identity, job-object ownership and cleanup assertions remain unchanged. Wiring
 checks alone do not establish the new binary-backed native execution.
