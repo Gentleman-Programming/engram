@@ -3175,27 +3175,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			return
 		}
 
-		var sources []string
-		if answer == "all" || answer == "a" {
-			for _, sm := range similar {
-				sources = append(sources, sm.Name)
+		plan := planDetectedProjectConsolidation(canonical, similar, answer)
+		if len(plan.invalidSelections) > 0 {
+			fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", plan.invalidSelections[0], len(similar))
+			if dryRun {
+				exitFunc(1)
 			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
-					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
-					if dryRun {
-						exitFunc(1)
-					}
-					return
-				}
-				sources = append(sources, similar[idx-1].Name)
-			}
+			return
 		}
-
+		sources := plan.sources
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
 			return
@@ -3276,8 +3264,6 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		scanInputLine(&answer)
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
-		canonical := g.Canonical
-
 		if answer == "skip" || answer == "s" || answer == "n" || answer == "" {
 			fmt.Println("  Skipped.")
 			fmt.Println()
@@ -3301,31 +3287,11 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			renameTarget, _ = store.NormalizeProject(input)
 			answer = "all" // after rename, merge everything then migrate
 		}
-		mergeCanonical, _ := store.NormalizeProject(canonical)
-
-		// Determine which sources to merge
-		var sources []string
-		if answer == "all" || answer == "a" || answer == "y" || answer == "yes" {
-			for _, name := range g.Names {
-				if name != mergeCanonical {
-					sources = append(sources, name)
-				}
-			}
-		} else {
-			// Parse comma-separated indices
-			for _, part := range strings.Split(answer, ",") {
-				part = strings.TrimSpace(part)
-				idx := 0
-				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(g.Names) {
-					fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
-					fmt.Println()
-					continue
-				}
-				selected := g.Names[idx-1]
-				if selected != mergeCanonical {
-					sources = append(sources, selected)
-				}
-			}
+		plan := planGroupedProjectConsolidation(g, answer, renameTarget)
+		mergeCanonical, sources := plan.canonical, plan.sources
+		for _, part := range plan.invalidSelections {
+			fmt.Fprintf(os.Stderr, "  Invalid selection: %q (expected 1-%d)\n", part, len(g.Names))
+			fmt.Println()
 		}
 		if len(sources) == 0 {
 			fmt.Println("  Nothing to merge.")
@@ -3348,15 +3314,15 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			reportUnmergedSources(sources, result)
 		}
 
-		if renameTarget != "" && renameTarget != mergeCanonical {
-			migrateResult, err := s.MigrateProject(mergeCanonical, renameTarget)
+		if plan.renameTarget != "" && plan.renameTarget != mergeCanonical {
+			migrateResult, err := s.MigrateProject(mergeCanonical, plan.renameTarget)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, renameTarget, err)
+				fmt.Fprintf(os.Stderr, "  Error renaming %q → %q: %v\n", mergeCanonical, plan.renameTarget, err)
 				fmt.Println()
 				continue
 			}
 			fmt.Printf("  Renamed %q → %q: %d obs, %d sessions, %d prompts\n",
-				mergeCanonical, renameTarget,
+				mergeCanonical, plan.renameTarget,
 				migrateResult.ObservationsUpdated, migrateResult.SessionsUpdated, migrateResult.PromptsUpdated)
 		}
 		fmt.Println()
