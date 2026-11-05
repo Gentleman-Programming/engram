@@ -6259,16 +6259,21 @@ func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, i
 		return nil, 0, err
 	}
 
-	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
+	projectColumns := "project"
+	if maxProjects > 0 {
+		projectColumns += ", MAX(created_at) AS latest_created_at"
+	}
+	projectsQuery := "SELECT " + projectColumns + " FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
 	if project != "" {
 		projectsQuery += " AND LOWER(project) = ?"
 	}
 	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
 	if maxProjects > 0 {
-		// Keep the original ordered query intact, including its tie behavior.
+		// Retain the grouped recency order and explicitly order the outer
+		// result before LIMIT, without adding a tie-breaker.
 		// The window counts all groups before LIMIT, in the same snapshot as
 		// the returned names, without hydrating every group through the driver.
-		projectsQuery = "SELECT project, COUNT(*) OVER () FROM (" + projectsQuery + ") LIMIT ?"
+		projectsQuery = "SELECT project, COUNT(*) OVER () FROM (" + projectsQuery + ") ORDER BY latest_created_at DESC LIMIT ?"
 		args = append(args, maxProjects)
 	}
 	rows, err := s.queryItHook(s.db, projectsQuery, args...)

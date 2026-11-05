@@ -118,6 +118,45 @@ type contextStatsReader interface {
 	ContextStats(string, int) (*Stats, int, error)
 }
 
+func TestContextStatsRecencyOrder(t *testing.T) {
+	for _, dates := range []string{"unique", "mixed", "empty"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reverse=%t", dates, reverse), func(t *testing.T) {
+				s := contextStatsFixture(t, 20)
+				s.db.SetMaxOpenConns(1)
+				dateExpr := "printf('2026-01-%02d', id)"
+				if dates == "mixed" {
+					dateExpr = "CASE WHEN id%3=0 THEN '' WHEN id%3=1 THEN '2026-01-08T00:00:00Z' ELSE '2026-01-09 00:00:00' END"
+				}
+				if dates == "empty" {
+					dateExpr = "''"
+				}
+				if _, err := s.db.Exec("UPDATE observations SET created_at=" + dateExpr); err != nil {
+					t.Fatal(err)
+				}
+				if reverse {
+					if _, err := s.db.Exec("PRAGMA reverse_unordered_selects=ON"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				full, err := s.Stats()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, limit := range []int{1, 8, 50} {
+					got, total, e := s.ContextStats("", limit)
+					if e != nil {
+						t.Fatal(e)
+					}
+					if total != len(full.Projects) || !reflect.DeepEqual(got.Projects, full.Projects[:min(limit, len(full.Projects))]) {
+						t.Fatalf("limit=%d full=%v bounded=%v total=%d", limit, full.Projects, got.Projects, total)
+					}
+				}
+			})
+		}
+	}
+}
+
 func contextStatsFixture(t *testing.T, projects int) *Store {
 	t.Helper()
 	s := newTestStore(t)
