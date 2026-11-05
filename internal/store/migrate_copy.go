@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -409,6 +410,14 @@ func copyValidateDB(db *sql.DB) error {
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}
+	// The immediately preceding catalog differs only by this derived index.
+	// Compare whole catalogs, never admit arbitrary optional objects.
+	withoutEvidence := maps.Clone(current)
+	delete(withoutEvidence, "sync_chunk_delete_evidence")
+	delete(withoutEvidence, "sqlite_autoindex_sync_chunk_delete_evidence_1")
+	if reflect.DeepEqual(actual, withoutEvidence) {
+		return nil
+	}
 	// The digest pins every normalized object (kind, owner and SQL), not merely
 	// object names or a set of independently optional migration differences.
 	// Its complete migration-produced catalog and provenance live in testdata.
@@ -426,6 +435,11 @@ func copyValidateDB(db *sql.DB) error {
 		o.SQL = strings.Replace(o.SQL, "superseded_by_sync_id TEXT,", "", 1)
 		current[name] = o
 	}
+	if reflect.DeepEqual(actual, current) {
+		return nil
+	}
+	delete(current, "sync_chunk_delete_evidence")
+	delete(current, "sqlite_autoindex_sync_chunk_delete_evidence_1")
 	if reflect.DeepEqual(actual, current) {
 		return nil
 	}

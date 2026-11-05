@@ -1164,7 +1164,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 				}
 			}
 
-			if err := sy.importMutationChunk(entry.ID, applyChunk, mode == importModeCloud); err != nil {
+			if err := sy.importChunkWithEvidence(entry.ID, applyChunk, mode, manifestVersion); err != nil {
 				if mode == importModeLocal {
 					recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)
 					if recoveryErr != nil {
@@ -1423,8 +1423,23 @@ func (o *importDependencyOracle) ensureBuilt() error {
 		return nil
 	}
 	o.built = true
+	scope := o.sy.chunkEvidenceScope()
+	var summaries map[string][]string
+	if scope != "" {
+		var err error
+		summaries, err = o.sy.store.GetChunkDeleteEvidence(o.sy.chunkTrackingTargetKey(""), scope, o.manifestVersion)
+		if err != nil {
+			return err
+		}
+	}
 	for _, entry := range o.entries {
 		if !o.knownChunks[entry.ID] {
+			continue
+		}
+		if ids, complete := summaries[entry.ID]; complete {
+			for _, id := range ids {
+				o.deletedObservationIDs[id] = struct{}{}
+			}
 			continue
 		}
 		chunk, err := o.chunkForEntry(entry.ID)
@@ -1433,6 +1448,11 @@ func (o *importDependencyOracle) ensureBuilt() error {
 			continue
 		}
 		addObservationEvidence(chunk, nil, o.deletedObservationIDs)
+		if scope != "" {
+			if err := o.sy.store.RecordChunkDeleteEvidence(o.sy.chunkTrackingTargetKey(""), entry.ID, chunkDeleteEvidence(scope, o.manifestVersion, chunk)); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
