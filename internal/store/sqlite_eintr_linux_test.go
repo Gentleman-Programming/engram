@@ -38,9 +38,15 @@ func TestSQLiteLibcErrnoRead(t *testing.T) {
 	}
 
 	// Exercise a real error so an accidentally constant-zero diagnostic fails.
-	req := libctime.Timespec{Ftv_nsec: -1}
-	rc := libc.Xnanosleep(tls, uintptr(unsafe.Pointer(&req)), 0)
-	runtime.KeepAlive(&req)
+	// The uintptr crosses Go calls in libc, so allocate stable TLS-owned storage
+	// rather than passing an address on the movable goroutine stack.
+	const reqSize = int(unsafe.Sizeof(libctime.Timespec{}))
+	req := tls.Alloc(reqSize)
+	defer tls.Free(reqSize)
+	request := libc.GoBytes(req, reqSize)
+	clear(request)
+	binary.NativeEndian.PutUint64(request[unsafe.Offsetof(libctime.Timespec{}.Ftv_nsec):], ^uint64(0))
+	rc := libc.Xnanosleep(tls, req, 0)
 	runtime.GC()
 	if got := sqliteLibcErrno(tls); rc != -1 || got != int32(syscall.EINVAL) {
 		t.Fatalf("nanosleep rc=%d errno=%d, want -1/EINVAL", rc, got)
