@@ -105,6 +105,16 @@ Cloud import validates and decodes all still-pending chunks at the first relatio
 
 Without `--replacement-id`, identity repair retains guidance to supply a canonical replacement. Once an explicit replacement attempt selects one source, a blocked plan reports the actual safety or ID-validation blocker instead of repeating that guidance for the selected source. Unselected sources retain their guidance; selection failures and all store repair guards remain unchanged.
 
+## Database generation identity checks
+
+The store checks database, WAL and SHM identity before and after driver operations,
+including each row read. Replacement or disappearance of an observed file invalidates
+the store until restart; sidecars can first appear after startup. On Windows, identity
+is captured from a short-lived metadata-only handle to avoid a separate attribute
+lookup followed by deferred identity lookup. Failed fast-path lookups fall back to
+`os.Stat`; other platforms continue using `os.Stat`. Check frequency and replacement
+guards remain unchanged.
+
 ## Local store change checklist
 
 - [ ] The rule really belongs in `internal/store`.

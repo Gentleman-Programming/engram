@@ -29,7 +29,7 @@ func (s *Store) GenerationError() error {
 	return s.generation.err
 }
 
-var statFile = os.Stat
+var statFile = statGenerationFile
 
 type databaseGeneration struct {
 	paths        []string
