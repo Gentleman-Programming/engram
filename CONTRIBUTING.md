@@ -815,6 +815,12 @@ The symlink cases in `TestCompatibilityOfflineNeverAuthorizes` and `TestMigrateC
 
 ### Focused Verification Map
 
+The `cmd/engram` public CLI fixtures build the candidate once per package test
+process and remove that executable after the package finishes. Build inputs are
+captured before individual tests change their environment or working directory;
+each consumer still owns its runtime configuration, data and child processes.
+The executable is never reused across separate test invocations.
+
 Use the row that matches the change, not every row. These are existing entry points,
 not a new required local gate. Run commands from the listed directory; paths are
 relative to the repository root.

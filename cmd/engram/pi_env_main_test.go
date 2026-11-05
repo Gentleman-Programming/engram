@@ -24,6 +24,7 @@ func TestMain(m *testing.M) {
 	// Unrelated CLI subprocesses may deliberately have no writable temp root.
 	// Retain the suite's temp root before individual tests change their env.
 	tempRoot := os.TempDir()
+	compatibilityBinary = newCompatibilityBinaryFixture()
 	var dir string
 	var once sync.Once
 	hostBindingDataDir = func() string {
@@ -38,6 +39,10 @@ func TestMain(m *testing.M) {
 		return dir
 	}
 	code := m.Run()
+	if err := compatibilityBinary.close(); err != nil {
+		fmt.Fprintf(os.Stderr, "remove CLI fixture: %v\n", err)
+		code = 1
+	}
 	if dir != "" {
 		_ = os.RemoveAll(dir)
 	}
