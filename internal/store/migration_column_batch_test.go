@@ -8,6 +8,12 @@ import (
 	"testing"
 )
 
+// Keep the single-column adapter with its test-only callers. Production uses
+// explicit column batches and does not need this compatibility helper.
+func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
+	return s.addColumnsIfNotExists(tableName, migrationColumn{columnName, definition})
+}
+
 func TestMigrationColumnBatchDefaultsOrderAndRetry(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.db.Exec(`CREATE TABLE column_batch(id INTEGER PRIMARY KEY, kept TEXT); INSERT INTO column_batch VALUES(1,'original')`); err != nil {

@@ -13325,10 +13325,6 @@ type migrationColumn struct {
 	definition string
 }
 
-func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
-	return s.addColumnsIfNotExists(tableName, migrationColumn{columnName, definition})
-}
-
 // addColumnsIfNotExists reads schema once per ordered migration batch. The set
 // is invocation-local: later batches re-read schema after intervening rebuilds.
 func (s *Store) addColumnsIfNotExists(tableName string, columns ...migrationColumn) error {
