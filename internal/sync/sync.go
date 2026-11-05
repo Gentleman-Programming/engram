@@ -555,58 +555,26 @@ func (sy *Syncer) ExportWithOptions(createdBy string, project string, opts GitEx
 	if err != nil {
 		return nil, err
 	}
-	chunk := sy.filterNewData(data, lastChunkTime)
-	// Prompt identity history, including deletes, overrides the watermark.
-	// Omitted prompts remain eligible later; shared or tombstoned identities do not.
-	chunk.Prompts = nil
-	if opts.IncludePrompts {
-		for _, prompt := range data.Prompts {
-			if _, shared := historicalPrompts[prompt.SyncID]; !shared {
-				chunk.Prompts = append(chunk.Prompts, prompt)
-			}
-		}
-	}
-	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
-	selected := make(map[string]bool)
-	for _, observation := range chunk.Observations {
-		selected[observation.SyncID] = true
-	}
-	for _, observation := range data.Observations {
-		prior, authoritative := reviewDates[observation.SyncID]
-		if observation.ReviewAfter != nil && authoritative && !prior.deleted && (prior.date == nil || *prior.date != *observation.ReviewAfter) && !selected[observation.SyncID] {
-			chunk.Observations = append(chunk.Observations, observation)
-		}
-	}
-	includeObservationParentSessions(chunk, data.Sessions)
-	chunk.Mutations = append(filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime), filterUnexportedDeleteMutations(localDeletes, exportedDeletes)...)
 	// Store-owned events prove local clear intent even without cloud enrollment.
 	events, err := sy.store.ExportReviewClearEvents()
 	if err != nil {
 		return nil, fmt.Errorf("export review clears: %w", err)
 	}
-	observations := make(map[string]store.Observation)
-	for _, observation := range data.Observations {
-		observations[observation.SyncID] = observation
-	}
-	for _, event := range events {
-		receipt := fmt.Sprintf("%s:%d:%s", event.SyncID, event.ID, event.Key)
-		observation, present := observations[event.SyncID]
-		if !present || exportedClears[receipt] {
-			continue
-		}
-		chunk.ReviewClears = append(chunk.ReviewClears, receipt)
-		mutations := synthesizeMutationsFromChunk(ChunkData{Observations: []store.Observation{observation}})
-		var fields map[string]any
-		if err := json.Unmarshal([]byte(mutations[0].Payload), &fields); err != nil {
-			return nil, fmt.Errorf("encode review reset: %w", err)
-		}
-		fields["review_after"] = nil
-		payload, err := json.Marshal(fields)
-		if err != nil {
-			return nil, fmt.Errorf("encode review reset: %w", err)
-		}
-		mutations[0].Payload = string(payload)
-		chunk.Mutations = append(chunk.Mutations, mutations[0])
+	chunk, err := buildGitExportChunk(data, gitExportInputs{
+		lastChunkTime:          lastChunkTime,
+		includePrompts:         opts.IncludePrompts,
+		historicalPrompts:      historicalPrompts,
+		historicalObservations: historicalObservations,
+		reviewDates:            reviewDates,
+		relationMutations:      relationMutations,
+		exportedRelations:      exportedRelations,
+		localDeletes:           localDeletes,
+		exportedDeletes:        exportedDeletes,
+		events:                 events,
+		exportedClears:         exportedClears,
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
@@ -2272,7 +2240,7 @@ func (sy *Syncer) lastChunkTime(m *Manifest) string {
 
 // filterNewData returns only data created after the given timestamp.
 // If lastChunkTime is empty, returns everything (first sync).
-func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
+func filterNewData(data *store.ExportData, lastChunkTime string) *ChunkData {
 	chunk := &ChunkData{}
 
 	if lastChunkTime == "" {
