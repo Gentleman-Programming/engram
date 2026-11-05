@@ -93,6 +93,14 @@ For a positive `ContextOptions.MaxBytes`, context formatting applies a conservat
 
 For `Compact: true`, pinned and recent observation queries select only type and title. This includes the recent slice inside the existing OlderHistory transaction; aggregate/sample reads keep the same snapshot and grouping. Noncompact context and the public pinned-observation API retain full observation fields. Scope, ordering, section/byte limits, error propagation for queried fields and generation fencing remain unchanged. This reduces hydration and allocations; it does not eliminate SQL scans/sorts or the existing safety checks.
 
+Global `mem_context` requests at most eight project names through `Store.ContextStats`,
+with the exact project total read from the same SQL statement as those names.
+The footer retains its existing ordering and `+N more` text. SQLite still groups
+the matching observations; the bounded read avoids transferring every project
+through the Go driver. `Stats` and `StatsProject` continue returning complete
+project lists; project-scoped context retains its existing statistics query path.
+Session, observation and prompt count queries are unchanged.
+
 ## Deferred relation diagnostics
 
 `referenced observation missing` means at least one endpoint identity is absent locally. `referenced observation effective project mismatch` means both identities exist, but the relation's project-scoped endpoint check fails. An observation's explicit project overrides its session project; blank observation projects inherit the session project. Check the endpoint and relation ownership rather than assuming another pull will supply a missing observation.
