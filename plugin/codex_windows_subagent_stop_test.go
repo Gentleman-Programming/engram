@@ -37,25 +37,14 @@ func TestCodexSubagentStopHook(t *testing.T) {
 	t.Fatalf("SubagentStop hook must declare command %q, commandWindows %q, and timeout 10", wantUnix, wantWindows)
 }
 
-func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("requires native Windows cmd.exe and PowerShell")
-	}
+type codexSubagentCaptureFixture struct {
+	port               string
+	requests           <-chan map[string]any
+	redirectedRequests <-chan string
+}
 
-	root := repoRoot(t)
-	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "subagent-stop.ps1"))
-	if err != nil {
-		t.Fatalf("read adapter: %v", err)
-	}
-	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces")
-	adapterPath := filepath.Join(pluginRoot, "scripts", "subagent-stop.ps1")
-	if err := os.MkdirAll(filepath.Dir(adapterPath), 0o755); err != nil {
-		t.Fatalf("create adapter directory: %v", err)
-	}
-	if err := os.WriteFile(adapterPath, source, 0o644); err != nil {
-		t.Fatalf("copy adapter: %v", err)
-	}
-
+func newCodexSubagentCaptureFixture(t *testing.T, root string) codexSubagentCaptureFixture {
+	t.Helper()
 	requests := make(chan map[string]any, 2)
 	redirectedRequests := make(chan string, 2)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -99,15 +88,116 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	})}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
-	port := strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:")
+	return codexSubagentCaptureFixture{
+		port:               strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:"),
+		requests:           requests,
+		redirectedRequests: redirectedRequests,
+	}
+}
+
+func TestCodexSubagentCaptureFixtureIsolation(t *testing.T) {
+	const root = "fixture-root"
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{}}
+	t.Cleanup(client.CloseIdleConnections)
+	postCapture := func(t *testing.T, fixture codexSubagentCaptureFixture, content string) {
+		t.Helper()
+		payload, err := json.Marshal(map[string]string{"content": content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := client.Post("http://127.0.0.1:"+fixture.port+"/observations/passive", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := response.Body.Close(); err != nil {
+				t.Errorf("close capture response: %v", err)
+			}
+		}()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("capture returned status %d", response.StatusCode)
+		}
+	}
+	// Keep the old owner alive to simulate a capture arriving after its case.
+	abandoned := newCodexSubagentCaptureFixture(t, root)
+	t.Run("abandoned capture", func(t *testing.T) {
+		postCapture(t, abandoned, "abandoned-capture")
+		response, err := client.Get("http://127.0.0.1:" + abandoned.port + "/redirected-capture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := response.Body.Close(); err != nil {
+				t.Errorf("close redirect response: %v", err)
+			}
+		}()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("redirect event returned status %d", response.StatusCode)
+		}
+	})
+	t.Run("new case owns only its captures", func(t *testing.T) {
+		current := newCodexSubagentCaptureFixture(t, root)
+		if current.port == abandoned.port || current.requests == abandoned.requests || current.redirectedRequests == abandoned.redirectedRequests {
+			t.Fatal("separate fixture owners share their endpoint or queues")
+		}
+		postCapture(t, abandoned, "late-for-old-owner")
+		select {
+		case payload := <-current.requests:
+			t.Fatalf("old capture reached new owner: %#v", payload)
+		case redirected := <-current.redirectedRequests:
+			t.Fatalf("old redirect reached new owner: %q", redirected)
+		default:
+		}
+		postCapture(t, current, "current-capture")
+		select {
+		case payload := <-current.requests:
+			if payload["content"] != "current-capture" {
+				t.Fatalf("capture = %#v, want current case", payload)
+			}
+		default:
+			t.Fatal("successful HTTP capture was not queued for its owner")
+		}
+	})
+	var cleaned codexSubagentCaptureFixture
+	t.Run("case cleanup", func(t *testing.T) {
+		cleaned = newCodexSubagentCaptureFixture(t, root)
+	})
+	response, err := client.Get("http://127.0.0.1:" + cleaned.port + "/project/current?cwd=" + root)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("fixture server still accepts requests after its case cleanup")
+	}
+}
+
+func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires native Windows cmd.exe and PowerShell")
+	}
+
+	root := repoRoot(t)
+	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "subagent-stop.ps1"))
+	if err != nil {
+		t.Fatalf("read adapter: %v", err)
+	}
+	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces")
+	adapterPath := filepath.Join(pluginRoot, "scripts", "subagent-stop.ps1")
+	if err := os.MkdirAll(filepath.Dir(adapterPath), 0o755); err != nil {
+		t.Fatalf("create adapter directory: %v", err)
+	}
+	if err := os.WriteFile(adapterPath, source, 0o644); err != nil {
+		t.Fatalf("copy adapter: %v", err)
+	}
 
 	input := `{"session_id":"session-1","cwd":"` + strings.ReplaceAll(root, `\`, `\\`) + `","last_assistant_message":"completed normally"}`
 	t.Run("captures through the manifest command", func(t *testing.T) {
+		fixture := newCodexSubagentCaptureFixture(t, root)
 		command := strings.ReplaceAll(codexSubagentStopWindowsCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
-		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, input, port)
+		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, input, fixture.port)
 		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 		select {
-		case payload := <-requests:
+		case payload := <-fixture.requests:
 			if payload["content"] != "completed normally" || payload["project"] != "codex-test-project" || payload["source"] != "subagent-stop" {
 				t.Fatalf("unexpected passive capture payload: %#v", payload)
 			}
@@ -117,11 +207,12 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	})
 
 	t.Run("captures stdout when last assistant message is omitted", func(t *testing.T) {
+		fixture := newCodexSubagentCaptureFixture(t, root)
 		stdoutFallbackInput := `{"session_id":"session-stdout","cwd":"` + strings.ReplaceAll(root, `\`, `\\`) + `","stdout":"captured from stdout"}`
-		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, stdoutFallbackInput, &port)
+		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, stdoutFallbackInput, &fixture.port)
 		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 		select {
-		case payload := <-requests:
+		case payload := <-fixture.requests:
 			if payload["content"] != "captured from stdout" {
 				t.Fatalf("passive capture content = %#v, want stdout fallback", payload["content"])
 			}
@@ -173,13 +264,14 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 		{name: "capture unavailable", input: strings.Replace(input, "completed normally", "unavailable capture", 1), wantStderr: "passive capture failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, tc.input, &port)
+			fixture := newCodexSubagentCaptureFixture(t, root)
+			stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, tc.input, &fixture.port)
 			assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 			if tc.wantStderr != "" && !strings.Contains(stderr, tc.wantStderr) {
 				t.Fatalf("stderr=%q, want diagnostic containing %q", stderr, tc.wantStderr)
 			}
 			select {
-			case payload := <-requests:
+			case payload := <-fixture.requests:
 				t.Fatalf("unexpected passive capture payload: %#v", payload)
 			default:
 			}
@@ -197,15 +289,16 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 		{name: "rejects padded port", port: " 7437"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCodexSubagentCaptureFixture(t, root)
 			stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, input, &tc.port)
 			assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 			if strings.Count(stderr, "engram:") != 1 || !strings.Contains(stderr, "invalid ENGRAM_PORT") {
 				t.Fatalf("stderr=%q, want one invalid port diagnostic", stderr)
 			}
 			select {
-			case payload := <-requests:
+			case payload := <-fixture.requests:
 				t.Fatalf("unexpected passive capture payload: %#v", payload)
-			case redirected := <-redirectedRequests:
+			case redirected := <-fixture.redirectedRequests:
 				t.Fatalf("unexpected redirected request: %q", redirected)
 			default:
 			}
@@ -213,28 +306,30 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	}
 
 	t.Run("refuses project resolution redirects", func(t *testing.T) {
+		fixture := newCodexSubagentCaptureFixture(t, root)
 		redirectInput := `{"session_id":"session-redirect-project","cwd":"redirect-project","last_assistant_message":"captured"}`
-		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &port)
+		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &fixture.port)
 		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 		if !strings.Contains(stderr, "unable to resolve project") {
 			t.Fatalf("stderr=%q, want project resolution diagnostic", stderr)
 		}
 		select {
-		case redirected := <-redirectedRequests:
+		case redirected := <-fixture.redirectedRequests:
 			t.Fatalf("followed project resolution redirect to %q", redirected)
 		default:
 		}
 	})
 
 	t.Run("refuses passive capture redirects", func(t *testing.T) {
+		fixture := newCodexSubagentCaptureFixture(t, root)
 		redirectInput := strings.Replace(input, "completed normally", "redirect capture", 1)
-		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &port)
+		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &fixture.port)
 		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
 		if !strings.Contains(stderr, "passive capture failed") {
 			t.Fatalf("stderr=%q, want passive capture failure diagnostic", stderr)
 		}
 		select {
-		case redirected := <-redirectedRequests:
+		case redirected := <-fixture.redirectedRequests:
 			t.Fatalf("followed passive capture redirect to %q", redirected)
 		default:
 		}
