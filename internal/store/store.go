@@ -4498,18 +4498,18 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 // ContextOptions.Pinned) use the unexported pinnedObservationsLimit helper,
 // which this delegates to with limit=0 ("no LIMIT clause", i.e. unbounded).
 func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
-	return s.pinnedObservationsLimit(project, scope, 0)
+	return s.pinnedObservationsLimit(project, scope, 0, false)
 }
 
 // pinnedObservationsLimit is the shared query behind PinnedObservations. A
 // limit <= 0 means "no LIMIT clause" (every pinned row, matching
 // PinnedObservations' historical unbounded behavior); a positive limit caps
 // the result via SQL LIMIT.
-func (s *Store) pinnedObservationsLimit(project, scope string, limit int) ([]Observation, error) {
+func (s *Store) pinnedObservationsLimit(project, scope string, limit int, compact bool) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 
 	query := `
-		SELECT ` + observationSelectColumns + `
+		SELECT ` + contextObservationColumns(compact) + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL AND o.pinned = 1
 	`
@@ -4529,7 +4529,7 @@ func (s *Store) pinnedObservationsLimit(project, scope string, limit int) ([]Obs
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	return s.queryObservations(query, args...)
+	return s.queryContextObservations(s.db, query, args, compact)
 }
 
 func (s *Store) PinObservation(id int64) error {
@@ -4559,14 +4559,14 @@ func (s *Store) setObservationPinned(id int64, pinned bool) error {
 	return nil
 }
 
-func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]Observation, error) {
+func (s *Store) recentUnpinnedObservations(project, scope string, limit int, compact bool) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 	if limit <= 0 {
 		limit = s.cfg.MaxContextResults
 	}
 
 	query := `
-		SELECT ` + observationSelectColumns + `
+		SELECT ` + contextObservationColumns(compact) + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL AND o.pinned = 0
 	`
@@ -4581,7 +4581,7 @@ func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]
 	}
 	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
 	args = append(args, limit)
-	return s.queryObservations(query, args...)
+	return s.queryContextObservations(s.db, query, args, compact)
 }
 
 func (s *Store) compactionObservations(sessionID, project string, pinned bool, limit int) ([]Observation, error) {
@@ -6384,7 +6384,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 				limit = byteLimit
 			}
 		}
-		if pinned, err = s.pinnedObservationsLimit(project, scope, limit); err != nil {
+		if pinned, err = s.pinnedObservationsLimit(project, scope, limit, opts.Compact); err != nil {
 			return "", err
 		}
 	}
@@ -6395,7 +6395,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if s.contextHistoryNow != nil {
 			now = s.contextHistoryNow().UTC()
 		}
-		observations, olderGroups, err = s.contextHistory(project, scope, opts.Observations, now)
+		observations, olderGroups, err = s.contextHistory(project, scope, opts.Observations, now, opts.Compact)
 		if err != nil {
 			return "", err
 		}
@@ -6407,7 +6407,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		if limit == 0 {
 			limit = s.cfg.MaxContextResults
 		}
-		if observations, err = s.recentUnpinnedObservations(project, scope, limit); err != nil {
+		if observations, err = s.recentUnpinnedObservations(project, scope, limit, opts.Compact); err != nil {
 			return "", err
 		}
 	}
