@@ -1824,22 +1824,7 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	if _, err := s.execHook(s.db, `UPDATE observations SET scope = 'project' WHERE scope IS NULL OR scope = ''`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET topic_key = NULL WHERE topic_key = ''`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET revision_count = 1 WHERE revision_count IS NULL OR revision_count < 1`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET duplicate_count = 1 WHERE duplicate_count IS NULL OR duplicate_count < 1`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+	if err := s.normalizeLegacyObservations(); err != nil {
 		return err
 	}
 
@@ -2006,6 +1991,47 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_save_op_created
 			ON observation_save_operations(created_at);
 	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// normalizeLegacyObservations preserves the ordered repair statements, while
+// healthy databases need only one check. Keep the guard predicates equivalent
+// to the repairs below; do not cache the result between migration runs.
+func (s *Store) normalizeLegacyObservations() error {
+	var needsNormalization bool
+	if err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM observations
+		WHERE scope IS NULL OR scope = ''
+			OR topic_key = ''
+			OR revision_count IS NULL OR revision_count < 1
+			OR duplicate_count IS NULL OR duplicate_count < 1
+			OR updated_at IS NULL OR updated_at = ''
+			OR sync_id IS NULL OR sync_id = ''
+	)`).Scan(&needsNormalization); err != nil {
+		return fmt.Errorf("inspect legacy observations: %w", err)
+	}
+	if !needsNormalization {
+		return nil
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET scope = 'project' WHERE scope IS NULL OR scope = ''`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET topic_key = NULL WHERE topic_key = ''`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET revision_count = 1 WHERE revision_count IS NULL OR revision_count < 1`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET duplicate_count = 1 WHERE duplicate_count IS NULL OR duplicate_count < 1`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
 		return err
 	}
 
