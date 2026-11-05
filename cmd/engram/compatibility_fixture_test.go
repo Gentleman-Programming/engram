@@ -28,7 +28,7 @@ func TestCompatibilityFixtureSurvivesConsumerCleanup(t *testing.T) {
 }
 
 func TestCompatibilityFixtureConcurrentBuildAndCleanup(t *testing.T) {
-	f := newCompatibilityBinaryFixture()
+	f := newCompatibilityBinaryFixture(os.TempDir())
 	f.tempRoot = t.TempDir()
 	t.Cleanup(func() {
 		if err := f.close(); err != nil {
@@ -80,7 +80,7 @@ func TestCompatibilityFixtureConcurrentBuildAndCleanup(t *testing.T) {
 }
 
 func TestCompatibilityFixtureBuildFailureIsSticky(t *testing.T) {
-	f := newCompatibilityBinaryFixture()
+	f := newCompatibilityBinaryFixture(os.TempDir())
 	f.tempRoot = t.TempDir()
 	sourceDir := f.sourceDir
 	f.sourceDir = filepath.Join(t.TempDir(), "missing-source")
@@ -98,5 +98,41 @@ func TestCompatibilityFixtureBuildFailureIsSticky(t *testing.T) {
 	path, err := f.get()
 	if path != "" || err != firstErr {
 		t.Fatalf("build failure retried or lost: path=%q err=%v want=%v", path, err, firstErr)
+	}
+}
+
+func TestCompatibilityFixtureRelativeTemporaryRoot(t *testing.T) {
+	relative, err := os.MkdirTemp(".", ".cli-relative-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := filepath.Abs(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(absolute); err != nil {
+			t.Error(err)
+		}
+	})
+	f := newCompatibilityBinaryFixture(relative)
+	t.Cleanup(func() {
+		if err := f.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	path, err := f.get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Public CLI consumers execute from their own working directories.
+	command := exec.Command(path, "version")
+	command.Dir = t.TempDir()
+	output, err := command.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), compatibilityFixtureVersion) {
+		t.Fatalf("fixture with relative temp root: %v %s", err, output)
+	}
+	if !filepath.IsAbs(path) || filepath.Dir(filepath.Dir(path)) != absolute {
+		t.Fatalf("fixture path is not rooted at captured absolute directory: %q", path)
 	}
 }

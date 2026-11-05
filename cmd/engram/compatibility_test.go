@@ -56,11 +56,14 @@ type compatibilityBinaryFixture struct {
 	err                           error
 }
 
-func newCompatibilityBinaryFixture() *compatibilityBinaryFixture {
-	f := &compatibilityBinaryFixture{tempRoot: os.TempDir(), env: append(os.Environ(),
+func newCompatibilityBinaryFixture(tempRoot string) *compatibilityBinaryFixture {
+	f := &compatibilityBinaryFixture{tempRoot: tempRoot, env: append(os.Environ(),
 		"GOFLAGS=-mod=readonly", "GOPROXY=off", "GOTOOLCHAIN=local")}
 	// Capture build inputs before a test changes cwd, PATH or its profile.
 	f.sourceDir, f.err = os.Getwd()
+	if f.err == nil {
+		f.tempRoot, f.err = filepath.Abs(tempRoot)
+	}
 	if f.err == nil {
 		f.goBinary, f.err = exec.LookPath("go")
 	}
