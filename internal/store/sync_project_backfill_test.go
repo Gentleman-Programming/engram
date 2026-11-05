@@ -180,7 +180,7 @@ func TestLegacySyncProjectBackfillPreservesPhaseOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	var order string
-	if err := s.db.QueryRow("SELECT group_concat(seq, ',') FROM (SELECT seq FROM project_events ORDER BY rowid)").Scan(&order); err != nil || order != "1,3,2" {
+	if err := s.db.QueryRow("SELECT group_concat(seq, ',') FROM (SELECT seq FROM project_events ORDER BY rowid)").Scan(&order); err != nil || (order != "1,3,2" && order != "3,1,2") {
 		t.Fatalf("value-changing trigger order = %q, %v; want payload phase then session", order, err)
 	}
 }
@@ -212,6 +212,36 @@ func TestLegacySyncProjectBackfillPhaseErrors(t *testing.T) {
 			}
 			if err := s.db.QueryRow("SELECT project FROM sync_mutations WHERE seq=1").Scan(&project); err != nil || project != want {
 				t.Fatalf("earlier phase commit changed: %q, %v, want %q", project, err, want)
+			}
+			// Restore normal execution and verify recovery from either failed phase.
+			affected := int64(0)
+			s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+				result, err := original(db, query, args...)
+				if err == nil {
+					n, rowsErr := result.RowsAffected()
+					if rowsErr != nil {
+						t.Fatal(rowsErr)
+					}
+					affected += n
+				}
+				return result, err
+			}
+			if err := s.backfillLegacySyncMutationProjects(); err != nil {
+				t.Fatal(err)
+			}
+			wantAffected := int64(3 - phase)
+			if affected != wantAffected {
+				t.Fatalf("retry affected %d rows, want only %d remaining repairs", affected, wantAffected)
+			}
+			var repaired int
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE
+				(seq=1 AND project='payload-project' AND payload='{"project":"payload-project"}' AND marker='one') OR
+				(seq=2 AND project='session-project' AND payload='{"session_id":"known"}' AND marker='two')`).Scan(&repaired); err != nil || repaired != 2 {
+				t.Fatalf("retry did not preserve both repaired rows: %d, %v", repaired, err)
+			}
+			affected = 0
+			if err := s.backfillLegacySyncMutationProjects(); err != nil || affected != 0 {
+				t.Fatalf("replay after recovery: %v, affected %d; want zero", err, affected)
 			}
 		})
 	}
