@@ -99,6 +99,16 @@ func TestDatabaseGenerationRecoversFromStatError(t *testing.T) {
 }
 
 func TestGenerationFenceRejectsUnsafeOperations(t *testing.T) {
+	t.Run("rejects before iterating replaced rows", func(t *testing.T) {
+		generation, dbPath := newTestDatabaseGeneration(t, false, false)
+		called := false
+		rows := generationRows{Rows: &testFenceRows{next: func() { called = true }}, generation: generation}
+		replaceTestFile(t, dbPath)
+		assertGenerationChanged(t, rows.Next(make([]driver.Value, 1)))
+		if called {
+			t.Fatal("driver.Next ran after generation replacement")
+		}
+	})
 	t.Run("rejects before operation", func(t *testing.T) {
 		generation, dbPath := newTestDatabaseGeneration(t, false, false)
 		called := false
