@@ -137,12 +137,12 @@ func budgetSection(t *testing.T, context, name string) string {
 // the context block (fresh activity produces no nudge in these tests).
 func budgetStatsSuffix(t *testing.T, s *store.Store) string {
 	t.Helper()
-	stats, err := loadContextStats(s, "engram")
+	stats, totalProjects, err := loadContextStats(s, "engram")
 	if err != nil {
 		t.Fatalf("loadContextStats: %v", err)
 	}
 	return fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-		stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+		stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects, totalProjects))
 }
 
 // budgetWant renders the direct store call the handler output must match.
@@ -431,8 +431,8 @@ func TestMemContextBudgetStatsErrorPropagates(t *testing.T) {
 
 	original := loadContextStats
 	t.Cleanup(func() { loadContextStats = original })
-	loadContextStats = func(*store.Store, string) (*store.Stats, error) {
-		return nil, store.ErrDatabaseGenerationChanged
+	loadContextStats = func(*store.Store, string) (*store.Stats, int, error) {
+		return nil, 0, store.ErrDatabaseGenerationChanged
 	}
 
 	handler := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))

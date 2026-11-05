@@ -6218,6 +6218,26 @@ func (s *Store) StatsProject(project string) (*Stats, error) {
 }
 
 func (s *Store) statsForProject(project string) (*Stats, error) {
+	stats, _, err := s.statsForProjectLimit(project, 0)
+	return stats, err
+}
+
+// ContextStats returns aggregate counts, at most maxProjects project names, and
+// the exact project total. Public Stats and StatsProject retain complete lists.
+func (s *Store) ContextStats(project string, maxProjects int) (*Stats, int, error) {
+	if maxProjects <= 0 {
+		return nil, 0, fmt.Errorf("max projects must be positive")
+	}
+	if project != "" {
+		project, _ = NormalizeProject(project)
+		if strings.TrimSpace(project) == "" {
+			return nil, 0, fmt.Errorf("project is required")
+		}
+	}
+	return s.statsForProjectLimit(project, maxProjects)
+}
+
+func (s *Store) statsForProjectLimit(project string, maxProjects int) (*Stats, int, error) {
 	stats := &Stats{}
 	args := []any{}
 	where := ""
@@ -6226,47 +6246,66 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 		args = append(args, project)
 	}
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
-		if project == "" {
-			return ""
-		}
-		return " AND LOWER(project) = ?"
-	}(), args...).Scan(&stats.TotalObservations); err != nil {
-		return nil, err
+	observationsFilter := ""
+	if project != "" {
+		observationsFilter = " AND LOWER(project) = ?"
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+observationsFilter, args...).Scan(&stats.TotalObservations); err != nil {
+		return nil, 0, err
 	}
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
+	projectColumns := "project"
+	if maxProjects > 0 {
+		projectColumns += ", MAX(created_at) AS latest_created_at"
+	}
+	projectsQuery := "SELECT " + projectColumns + " FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
 	if project != "" {
 		projectsQuery += " AND LOWER(project) = ?"
 	}
 	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
+	if maxProjects > 0 {
+		// Retain the grouped recency order and explicitly order the outer
+		// result before LIMIT, without adding a tie-breaker.
+		// The window counts all groups before LIMIT, in the same snapshot as
+		// the returned names, without hydrating every group through the driver.
+		projectsQuery = "SELECT project, COUNT(*) OVER () FROM (" + projectsQuery + ") ORDER BY latest_created_at DESC LIMIT ?"
+		args = append(args, maxProjects)
+	}
 	rows, err := s.queryItHook(s.db, projectsQuery, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
+	totalProjects := 0
 	for rows.Next() {
 		var projectName string
-		if err := rows.Scan(&projectName); err != nil {
+		var scanErr error
+		if maxProjects > 0 {
+			scanErr = rows.Scan(&projectName, &totalProjects)
+		} else {
+			scanErr = rows.Scan(&projectName)
+			totalProjects++
+		}
+		if scanErr != nil {
 			_ = rows.Close()
-			return nil, err
+			return nil, 0, scanErr
 		}
 		stats.Projects = append(stats.Projects, projectName)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, err
+		return nil, 0, err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return stats, nil
+	return stats, totalProjects, nil
 }
 
 // ─── Project Existence ───────────────────────────────────────────────────────
