@@ -248,6 +248,13 @@ exit remains authoritative; successful JSON cannot mask it. The original native
 identity, job-object ownership and cleanup assertions remain unchanged. Wiring
 checks alone do not establish the new binary-backed native execution.
 
+The native Codex Windows test runners report command-context cancellation
+separately from ordinary child exit codes, retaining elapsed time and partial
+streams for direct PowerShell calls. The default command deadlines remain five
+seconds for manifest commands and eight seconds for PowerShell files. These
+diagnostics identify a canceled invocation; they do not explain why a hosted
+runner exceeded its deadline.
+
 JSON, stderr, suite exit code and elapsed seconds are retained in logs, with
 failure artifacts when available. Cancellation/outer timeout can leave partial
 output without a completed exit/timing record. Wiring and structural tests do
