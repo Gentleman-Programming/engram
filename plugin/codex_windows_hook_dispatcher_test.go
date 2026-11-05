@@ -720,6 +720,12 @@ func runCodexWindowsPowerShellFile(t *testing.T, scriptPath, input string, envOv
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	return runCodexWindowsPowerShellFileContext(t, ctx, scriptPath, input, envOverrides, arguments...)
+}
+
+func runCodexWindowsPowerShellFileContext(t *testing.T, ctx context.Context, scriptPath, input string, envOverrides []string, arguments ...string) ([]byte, []byte, int) {
+	t.Helper()
+	started := time.Now()
 	args := append([]string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath}, arguments...)
 	run := exec.CommandContext(ctx, "powershell.exe", args...)
 	run.Env = append([]string{}, os.Environ()...)
@@ -738,6 +744,9 @@ func runCodexWindowsPowerShellFile(t *testing.T, scriptPath, input string, envOv
 	var stdout, stderr bytes.Buffer
 	run.Stdout, run.Stderr = &stdout, &stderr
 	err := run.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("run PowerShell command canceled: %v (elapsed: %s, process error: %v), stdout=%q stderr=%q", ctx.Err(), time.Since(started), err, stdout.Bytes(), stderr.Bytes())
+	}
 	if err == nil {
 		return stdout.Bytes(), stderr.Bytes(), 0
 	}
