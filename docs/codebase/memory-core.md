@@ -91,6 +91,8 @@ The ledger uses a plain insert in the same transaction as the observation and it
 
 For a positive `ContextOptions.MaxBytes`, context formatting applies a conservative SQL cap to pinned observations using the minimum rendered bullet size, retaining a smaller explicit pinned cap when supplied. It stops rendering entries after the byte budget is exceeded and uses the existing UTF-8-safe final clipping and truncation marker. Section query ordering and history reservations remain unchanged. Zero or negative byte budgets retain legacy unbounded behavior; the MCP pinned default remains unchanged. This bounds pinned row hydration and discarded formatting work, but SQLite can still scan and sort matching rows.
 
+For `Compact: true`, pinned and recent observation queries select only type and title. This includes the recent slice inside the existing OlderHistory transaction; aggregate/sample reads keep the same snapshot and grouping. Noncompact context and the public pinned-observation API retain full observation fields. Scope, ordering, section/byte limits, error propagation for queried fields and generation fencing remain unchanged. This reduces hydration and allocations; it does not eliminate SQL scans/sorts or the existing safety checks.
+
 ## Deferred relation diagnostics
 
 `referenced observation missing` means at least one endpoint identity is absent locally. `referenced observation effective project mismatch` means both identities exist, but the relation's project-scoped endpoint check fails. An observation's explicit project overrides its session project; blank observation projects inherit the session project. Check the endpoint and relation ownership rather than assuming another pull will supply a missing observation.
