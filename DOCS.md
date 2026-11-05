@@ -364,7 +364,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` checks the local store with live aggregate queries. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
+- Local runtime (`engram serve`): `GET /health` checks readability of the core sessions, observations and prompts tables with one bounded read through the generation-fenced Store connection. It does not calculate statistics or perform a full integrity or writeability audit. On success it returns `200` with `{"status":"ok","service":"engram","version":"<release version>","instance_id":"<store instance ID>","capabilities":{"isolated_session_registration":true,"root_session_resume":true,"runtime_session_resolution":true}}`; a failed store returns `500` with `{"error":"health check failed"}` instead of reporting healthy.
 
 The Claude native PreToolUse gate omits a rewrite when the caller already supplies the exact confirmed effective session ID; confirmation remains mandatory. `mem_review` list needs no session confirmation, while mutating review calls keep confirmation without injecting an unused session field. Required binding changes can still be denied by interactive auto mode; see [the plugin integration limitation](docs/PLUGINS.md#how-it-works).
 
