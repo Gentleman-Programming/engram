@@ -30,6 +30,13 @@ type RemoteTransport struct {
 	writeHTTPClient *http.Client
 }
 
+// ChunkEvidenceScope identifies immutable cloud chunks without persisting the
+// bearer token. Cloud assigns content-derived IDs and never overwrites an
+// existing (project, chunk ID) payload.
+func (rt *RemoteTransport) ChunkEvidenceScope() string {
+	return rt.baseURL + "\n" + rt.project
+}
+
 type HTTPStatusError struct {
 	Operation  string
 	StatusCode int

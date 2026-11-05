@@ -1597,6 +1597,17 @@ func (s *Store) migrate() error {
 				PRIMARY KEY (target_key, chunk_id)
 			);
 
+			-- Local derived evidence, never exported as memory or sync data.
+			CREATE TABLE IF NOT EXISTS sync_chunk_delete_evidence (
+				target_key TEXT NOT NULL,
+				scope TEXT NOT NULL,
+				manifest_version INTEGER NOT NULL,
+				chunk_id TEXT NOT NULL,
+				deleted_ids TEXT NOT NULL,
+				PRIMARY KEY (target_key, scope, manifest_version, chunk_id),
+				FOREIGN KEY (target_key, chunk_id) REFERENCES sync_chunks(target_key, chunk_id) ON DELETE CASCADE
+			);
+
 			CREATE TABLE IF NOT EXISTS sync_state (
 				target_key           TEXT PRIMARY KEY,
 				lifecycle            TEXT NOT NULL DEFAULT 'idle',
@@ -8897,6 +8908,10 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 // blank directories are accepted and the skip-plus-evidence quarantine ladder
 // behaves exactly as before.
 func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations []SyncMutation, cloud bool) error {
+	return s.applyPulledChunkForDomain(targetKey, chunkID, mutations, cloud, nil)
+}
+
+func (s *Store) applyPulledChunkForDomain(targetKey, chunkID string, mutations []SyncMutation, cloud bool, evidence *ChunkDeleteEvidence) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	chunkTargetKey := normalizeChunkTargetKey(targetKey)
 	chunkID = strings.TrimSpace(chunkID)
@@ -8914,6 +8929,9 @@ func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations [
 			return err
 		}
 		if alreadyImported > 0 {
+			if evidence != nil {
+				return s.recordChunkDeleteEvidenceTx(tx, chunkTargetKey, chunkID, *evidence)
+			}
 			return nil
 		}
 
@@ -8952,6 +8970,11 @@ func (s *Store) ApplyPulledChunkForDomain(targetKey, chunkID string, mutations [
 			chunkTargetKey, chunkID,
 		); err != nil {
 			return err
+		}
+		if evidence != nil {
+			if err := s.recordChunkDeleteEvidenceTx(tx, chunkTargetKey, chunkID, *evidence); err != nil {
+				return err
+			}
 		}
 
 		_, err = s.execHook(tx,

@@ -203,7 +203,16 @@ func TestMigrateCopyV360CompleteCatalog(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = migrated.Close() }()
-			if !reflect.DeepEqual(state, copyLogicalState(t, migrated)) {
+			after := copyLogicalState(t, migrated)
+			// Current startup adds only an empty derived-evidence table to
+			// this frozen historical catalog. Never synthesize evidence for
+			// pre-index imports or relax preservation of existing tables.
+			const emptyEvidence = `{"Columns":["target_key","scope","manifest_version","chunk_id","deleted_ids"],"Rows":null}`
+			if after["sync_chunk_delete_evidence"] != emptyEvidence {
+				t.Fatalf("unexpected migrated delete evidence: %s", after["sync_chunk_delete_evidence"])
+			}
+			delete(after, "sync_chunk_delete_evidence")
+			if !reflect.DeepEqual(state, after) {
 				t.Fatal("logical state changed during migration")
 			}
 			for _, name := range []string{"idx_prompts_project_lower", "idx_sessions_project_lower"} {
