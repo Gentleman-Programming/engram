@@ -1400,6 +1400,44 @@ func (s *Store) backfillLegacySessionOwnershipModes() error {
 	return nil
 }
 
+// backfillLegacySyncMutationProjects preserves payload-first recovery followed
+// by session fallback, without updating rows whose project would remain blank.
+// CASE keeps added JSON evaluation inside the original eligibility conditions.
+func (s *Store) backfillLegacySyncMutationProjects() error {
+	// Backfill: extract project from JSON payload for existing rows with empty project.
+	if _, err := s.execHook(s.db, `
+		UPDATE sync_mutations
+		SET project = COALESCE(json_extract(payload, '$.project'), '')
+		WHERE project = '' AND payload != ''
+		  AND CASE WHEN project = '' AND payload != ''
+		      THEN COALESCE(json_extract(payload, '$.project'), '') != ''
+		      ELSE 0 END
+	`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		UPDATE sync_mutations
+		SET project = COALESCE((
+			SELECT sessions.project
+			FROM sessions
+			WHERE sessions.id = json_extract(sync_mutations.payload, '$.session_id')
+		), '')
+		WHERE project = ''
+		  AND payload != ''
+		  AND ifnull(json_extract(payload, '$.session_id'), '') != ''
+		  AND CASE WHEN project = '' AND payload != ''
+		      THEN COALESCE((
+		          SELECT sessions.project FROM sessions
+		          WHERE sessions.id = json_extract(sync_mutations.payload, '$.session_id')
+		      ), '') != ''
+		      ELSE 0 END
+	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *Store) migrate() error {
 	// Existing and partially migrated schemas can have triggers that need FTS
 	// before the legacy data migrations run. Only an empty schema can defer
@@ -1802,25 +1840,7 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	// Backfill: extract project from JSON payload for existing rows with empty project.
-	if _, err := s.execHook(s.db, `
-		UPDATE sync_mutations
-		SET project = COALESCE(json_extract(payload, '$.project'), '')
-		WHERE project = '' AND payload != ''
-	`); err != nil {
-		return err
-	}
-	if _, err := s.execHook(s.db, `
-		UPDATE sync_mutations
-		SET project = COALESCE((
-			SELECT sessions.project
-			FROM sessions
-			WHERE sessions.id = json_extract(sync_mutations.payload, '$.session_id')
-		), '')
-		WHERE project = ''
-		  AND payload != ''
-		  AND ifnull(json_extract(payload, '$.session_id'), '') != ''
-	`); err != nil {
+	if err := s.backfillLegacySyncMutationProjects(); err != nil {
 		return err
 	}
 
