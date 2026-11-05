@@ -1401,7 +1401,14 @@ func (s *Store) backfillLegacySessionOwnershipModes() error {
 }
 
 func (s *Store) migrate() error {
-	schema := `
+	// Existing and partially migrated schemas can have triggers that need FTS
+	// before the legacy data migrations run. Only an empty schema can defer
+	// creation to migrateFTS, which installs tables and triggers together.
+	var existingSchema bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master)`).Scan(&existingSchema); err != nil {
+		return fmt.Errorf("inspect initial schema: %w", err)
+	}
+	const baseSchema = `
 		CREATE TABLE IF NOT EXISTS project_aliases (
 			kind TEXT NOT NULL CHECK (kind IN ('key', 'cwd')),
 			alias_key TEXT NOT NULL,
@@ -1462,18 +1469,6 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_type     ON observations(type);
 		CREATE INDEX IF NOT EXISTS idx_obs_project  ON observations(project);
 		CREATE INDEX IF NOT EXISTS idx_obs_created  ON observations(created_at DESC);
-
-		CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-			title,
-			content,
-			tool_name,
-			type,
-			project,
-			topic_key,
-			tokenize='trigram remove_diacritics 1',
-			content='observations',
-			content_rowid='id'
-		);
 
 		CREATE TABLE IF NOT EXISTS observation_versions (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1549,14 +1544,6 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_prompts_project ON user_prompts(project);
 		CREATE INDEX IF NOT EXISTS idx_prompts_created ON user_prompts(created_at DESC);
 
-		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
-			content,
-			project,
-			tokenize='trigram remove_diacritics 1',
-			content='user_prompts',
-			content_rowid='id'
-		);
-
 			-- Local Git clear intent is independent of enrollment and cloud acks.
 			-- Retain events; manifest history owns export deduplication.
 			CREATE TABLE IF NOT EXISTS review_clear_events (
@@ -1616,6 +1603,31 @@ func (s *Store) migrate() error {
 				updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 			);
 		`
+	schema := baseSchema
+	if existingSchema {
+		schema = baseSchema + `
+		CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+			title,
+			content,
+			tool_name,
+			type,
+			project,
+			topic_key,
+			tokenize='trigram remove_diacritics 1',
+			content='observations',
+			content_rowid='id'
+		);
+
+		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
+			content,
+			project,
+			tokenize='trigram remove_diacritics 1',
+			content='user_prompts',
+			content_rowid='id'
+		);
+		`
+	}
+
 	if _, err := s.execHook(s.db, schema); err != nil {
 		return err
 	}
