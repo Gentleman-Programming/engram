@@ -6464,26 +6464,24 @@ func TestAmbiguousRecoveryConcurrentSameChoiceBootstrap(t *testing.T) {
 }
 
 func TestAmbiguousRecoveryReadHintKeepsSameReadTool(t *testing.T) {
-	parent := t.TempDir()
-	for _, name := range []string{"read-a", "read-b"} {
-		child := filepath.Join(parent, name)
-		if err := os.MkdirAll(child, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		initTestGitRepo(t, child)
+	// This tests recovery formatting, not whether the bounded child scan
+	// finishes under CI load. Detector integration has separate coverage.
+	res := project.DetectionResult{
+		Source:            project.SourceAmbiguous,
+		Path:              t.TempDir(),
+		Error:             project.ErrAmbiguousProject,
+		AvailableProjects: []string{"read-a", "read-b"},
 	}
-	t.Chdir(parent)
-	res, err := resolveWriteProject(newMCPTestStore(t))
-	if !errors.Is(err, project.ErrAmbiguousProject) {
-		t.Fatalf("expected ambiguity, got %v", err)
-	}
-	body := callResultJSON(t, readProjectErrorResult(NewSessionActivity(time.Minute), res, err))
+	body := callResultJSON(t, readProjectErrorResult(NewSessionActivity(time.Minute), res, res.Error))
 	hint, ok := body["hint"].(string)
 	if !ok || !strings.Contains(hint, "retry the same read tool") || strings.Contains(hint, "mem_save") {
 		t.Fatalf("incorrect read guidance: %v", body)
 	}
 	if body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil || body["project_source"] != "ambiguous" {
 		t.Fatalf("missing compatible structured ambiguity: %v", body)
+	}
+	if !reflect.DeepEqual(body["available_projects"], []any{"read-a", "read-b"}) || body["project_path"] != res.Path {
+		t.Fatalf("lost ambiguity context: %v", body)
 	}
 }
 
