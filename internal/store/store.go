@@ -3210,13 +3210,14 @@ func (s *Store) migrateFTS() error {
 			return fmt.Errorf("inspect prompts fts: %w", err)
 		}
 
-		observationsRebuild := !observationsOK || !ftsTriggersMatch(tx, map[string][]string{
+		triggerDefinitions := s.readFTSTriggerDefinitions(tx)
+		observationsRebuild := !observationsOK || !ftsTriggersMatch(triggerDefinitions, map[string][]string{
 			"obs_fts_insert":        {"afterinsertonobservations", "whennew.deleted_atisnull"},
 			"obs_fts_delete":        {"beforedeleteonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
 			"obs_fts_update":        {"beforeupdateonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
 			"obs_fts_update_insert": {"afterupdateonobservations", "whennew.deleted_atisnull"},
 		})
-		promptsRebuild := !promptsOK || !ftsTriggersMatch(tx, map[string][]string{
+		promptsRebuild := !promptsOK || !ftsTriggersMatch(triggerDefinitions, map[string][]string{
 			"prompt_fts_insert":        {"afterinsertonuser_prompts"},
 			"prompt_fts_delete":        {"beforedeleteonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
 			"prompt_fts_update":        {"beforeupdateonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
@@ -3295,10 +3296,34 @@ func ftsTableMatches(tx *sql.Tx, table string, expectedColumns []string, content
 		strings.Contains(normalized, "content_rowid='id'"), nil
 }
 
-func ftsTriggersMatch(tx *sql.Tx, expected map[string][]string) bool {
+// readFTSTriggerDefinitions snapshots both trigger groups in the migration
+// transaction. An unreadable or partial snapshot is invalid, retaining the
+// existing mismatch-and-repair behavior for trigger inspection failures.
+func (s *Store) readFTSTriggerDefinitions(tx *sql.Tx) map[string]string {
+	rows, err := s.queryItHook(tx, `SELECT name, sql FROM sqlite_master
+		WHERE type = 'trigger' AND (name GLOB 'obs_fts_*' OR name GLOB 'prompt_fts_*')`)
+	if err != nil {
+		return nil
+	}
+	definitions := make(map[string]string, 8)
+	for rows.Next() {
+		var name, ddl string
+		if err := rows.Scan(&name, &ddl); err != nil {
+			_ = rows.Close()
+			return nil
+		}
+		definitions[name] = ddl
+	}
+	if err := closeRowsWithError(rows, rows.Err()); err != nil {
+		return nil
+	}
+	return definitions
+}
+
+func ftsTriggersMatch(definitions map[string]string, expected map[string][]string) bool {
 	for name, fragments := range expected {
-		var ddl string
-		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&ddl); err != nil {
+		ddl, ok := definitions[name]
+		if !ok {
 			return false
 		}
 		normalized := normalizeFTSSQL(ddl)
