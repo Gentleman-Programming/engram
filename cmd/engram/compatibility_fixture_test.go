@@ -102,20 +102,23 @@ func TestCompatibilityFixtureBuildFailureIsSticky(t *testing.T) {
 }
 
 func TestCompatibilityFixtureRelativeTemporaryRoot(t *testing.T) {
-	relative, err := os.MkdirTemp(".", ".cli-relative-test-")
+	sourceDir, err := os.Getwd()
 	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	relative := "relative-root"
+	if err := os.Mkdir(relative, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	absolute, err := filepath.Abs(relative)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(absolute); err != nil {
-			t.Error(err)
-		}
-	})
 	f := newCompatibilityBinaryFixture(relative)
+	// The relative temp root belongs to a writable test directory, while the
+	// candidate source remains the original (potentially read-only) package.
+	f.sourceDir = sourceDir
 	t.Cleanup(func() {
 		if err := f.close(); err != nil {
 			t.Error(err)
