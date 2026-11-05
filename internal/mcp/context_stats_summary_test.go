@@ -33,7 +33,8 @@ func TestMemContextProjectSummaryMatchesFullStats(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for i := 0; i < 100; i++ {
-		if _, err = tx.Exec(`INSERT INTO observations(session_id,project,scope,type,title,content,created_at) VALUES('summary',?,'personal','decision','title 界','body 🧠',?)`, fmt.Sprintf("p%03d", i), fmt.Sprintf("2026-01-%02d", 1+i%4)); err != nil {
+		created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Hour).Format("2006-01-02 15:04:05")
+		if _, err = tx.Exec(`INSERT INTO observations(session_id,project,scope,type,title,content,created_at) VALUES('summary',?,'personal','decision','title 界','body 🧠',?)`, fmt.Sprintf("p%03d", i), created); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
+	"time"
 )
 
 type contextStatsRows struct {
@@ -148,12 +150,61 @@ func TestContextStatsRecencyOrder(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					if total != len(full.Projects) || !reflect.DeepEqual(got.Projects, full.Projects[:min(limit, len(full.Projects))]) {
+					if total != len(full.Projects) || len(got.Projects) != min(limit, len(full.Projects)) {
 						t.Fatalf("limit=%d full=%v bounded=%v total=%d", limit, full.Projects, got.Projects, total)
+					}
+					if dates == "unique" {
+						if !reflect.DeepEqual(got.Projects, full.Projects[:len(got.Projects)]) {
+							t.Fatalf("unique-date head differs: full=%v bounded=%v", full.Projects, got.Projects)
+						}
+					} else {
+						assertContextStatsRecencyGroups(t, s, got.Projects, full.Projects)
 					}
 				}
 			})
 		}
+	}
+}
+
+func assertContextStatsRecencyGroups(t *testing.T, s *Store, names, fullNames []string) {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT project, MAX(created_at) FROM observations
+WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	latest := make(map[string]string)
+	for rows.Next() {
+		var name, created string
+		if err = rows.Scan(&name, &created); err != nil {
+			t.Fatal(err)
+		}
+		latest[name] = created
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	expected := make([]string, len(fullNames))
+	for i, name := range fullNames {
+		expected[i] = latest[name]
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(expected)))
+	actual := make([]string, len(names))
+	seen := make(map[string]bool)
+	for i, name := range names {
+		created, ok := latest[name]
+		if !ok || seen[name] {
+			t.Fatalf("unknown or duplicated project %q", name)
+		}
+		seen[name] = true
+		actual[i] = created
+	}
+	if !reflect.DeepEqual(actual, expected[:len(names)]) {
+		t.Fatalf("wrong recency groups: got=%v want=%v", actual, expected[:len(names)])
 	}
 }
 
@@ -172,7 +223,8 @@ func contextStatsFixture(t *testing.T, projects int) *Store {
 		t.Fatal(err)
 	}
 	for i := 0; i < projects; i++ {
-		if _, err = tx.Exec(`INSERT INTO observations(session_id,project,type,title,content,created_at) VALUES('summary',?,'decision','title','content',?)`, fmt.Sprintf("p%03d", i), fmt.Sprintf("2026-01-%02d", 1+i%4)); err != nil {
+		created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Hour).Format("2006-01-02 15:04:05")
+		if _, err = tx.Exec(`INSERT INTO observations(session_id,project,type,title,content,created_at) VALUES('summary',?,'decision','title','content',?)`, fmt.Sprintf("p%03d", i), created); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -180,7 +232,7 @@ func contextStatsFixture(t *testing.T, projects int) *Store {
 		if _, err = tx.Exec(`INSERT INTO observations(session_id,project,type,title,content,created_at,deleted_at) VALUES
 ('summary',NULL,'decision','null','content','2026-02-01',NULL),
 ('summary','','decision','empty','content','2026-02-01',NULL),
-('summary','P000','decision','legacy','content','2026-02-01',NULL),
+('summary','P000','decision','legacy','content','2026-02-02',NULL),
 ('summary','deleted-only','decision','deleted','content','2026-02-01','2026-02-02')`); err != nil {
 			t.Fatal(err)
 		}
