@@ -8813,6 +8813,7 @@ func TestMigrationInternalErrorAndNoopBranches(t *testing.T) {
 
 	t.Run("migrate returns deterministic exec hook errors", func(t *testing.T) {
 		s := newTestStore(t)
+		seedDirtyObservationForMigrationTest(t, s)
 
 		origExec := s.hooks.exec
 		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
@@ -9341,6 +9342,9 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 		for _, needle := range failCases {
 			t.Run(needle, func(t *testing.T) {
 				s := newTestStore(t)
+				if strings.Contains(needle, "UPDATE observations") {
+					seedDirtyObservationForMigrationTest(t, s)
+				}
 				if strings.Contains(needle, "CREATE TRIGGER prompt_fts_insert") {
 					if _, err := s.db.Exec(`
 						DROP TRIGGER IF EXISTS prompt_fts_insert;
