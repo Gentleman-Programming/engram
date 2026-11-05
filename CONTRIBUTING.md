@@ -212,8 +212,13 @@ proof that the hosted Node22 case executed.
 
 #### Observational Windows full-module baseline (#1891)
 
-`Windows Full Suite (Observational)` independently runs `go test -json ./...`
+`Windows Full Suite (Observational)` independently runs `go test -json -count=1 ./...`
 with default tags on native Windows x64 for PRs, merge groups and main pushes.
+`-count=1` executes fresh tests and avoids Go's test-result cache processing,
+which can continue after the package prints `ok` for SQLite-heavy fixtures.
+Compilation and module caches remain enabled. The bounded local observation in
+[#2192](https://github.com/Gentleman-Programming/engram/issues/2192#issuecomment-6623802296)
+does not establish a full hosted speedup; compare actual job outcomes and timings.
 It does not replace selective Windows jobs, change the six required contexts,
 App15368, or the queue. Its initial 30-minute outer ceiling is a new bounded
 observation policy, not the #2020 setup/wrapper budgets or a measured SLO;
@@ -234,7 +239,11 @@ provide process isolation, not measured proof of cleanup.
 The job builds a fresh `cmd/engram` executable into runner-owned temp and exports
 `ENGRAM_RECOVERY_PUBLIC_BINARY` before the unchanged full-suite invocation.
 `prerequisite-coverage.mjs windows-recovery EVENTS.json GO_EXIT` requires
-`TestHookManagedLocalPublicRecovery` to execute and pass, not skip. A nonzero Go
+`TestHookManagedLocalPublicRecovery` and all four
+`TestSubagentStopPreservesUnicodeTransport` cases to execute and pass, not skip.
+The Unicode test selects Git-bundled native curl from either the current
+`ucrt64/bin` or legacy `mingw64/bin` layout, logs the selected executable, and
+preserves exact Unicode readback assertions; system/PATH curl is not a substitute. A nonzero Go
 exit remains authoritative; successful JSON cannot mask it. The original native
 identity, job-object ownership and cleanup assertions remain unchanged. Wiring
 checks alone do not establish the new binary-backed native execution.

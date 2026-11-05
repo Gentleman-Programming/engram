@@ -1,0 +1,17 @@
+{
+  "base": "03b82237e5d2a894e97d78addacf2f35e5fd933a",
+  "historical_tag": "v3.6.0",
+  "historical_commit": "98912f811c90428e83a6aac99fa439bedb4b268f",
+  "archive_sha256": "15366a48baca61761b087c38a9714a771907ff18afbeab2b37516f89a3d91790",
+  "store_go_sha256": "7d2cd0092b170f415b1ba4dd7c68fe941963720c71b806ace9ae76c25e6b3d9f",
+  "go_mod_sha256": "7918717f81d0f8ab50ba1f25d49d230b84123c545b207fe546bda16d7eea7d40",
+  "go_sum_sha256": "2d03b0a8fcdcf47c3fcbd84e17540501a51e2697a0c851f1365301c33e94db60",
+  "dependency_files_match_current": true,
+  "toolchain": "go1.26.10 windows/amd64",
+  "sqlite_module": "modernc.org/sqlite v1.58.0",
+  "sqlite_runtime": "3.53.4",
+  "helper_sha256": "6ac2f39e181cceb8f277772173e352973354f71f3430ac2f820df2269b55b729",
+  "raw_catalog_sha256": "7eeef253728d505221a2cd38ddd579f4b1e66d4eab50b6433fb0bae756d55535",
+  "normalized_full_catalog_sha256": "1f217c73a6f4949a5e84e92a5e79c5096e3e18e1c4e8f97b0af9067d6d1abf95",
+  "generation": "Exact-tag source archive; added helper calls historical Store.New/Close on fresh synthetic data, queries all sqlite_schema objects, and serializes name -> Kind/Table/SQL. No existing database or catalog DDL was edited. Original go.mod/go.sum unchanged; offline dependencies. This is old migration source execution, not an official old release binary or a reported user store."
+}

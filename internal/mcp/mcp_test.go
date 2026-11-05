@@ -4435,6 +4435,14 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 		"content": "Memory content",
 	}}})
 
+	previousList := listSaveProjectNames
+	enumerations := 0
+	listSaveProjectNames = func(st *store.Store) ([]string, error) {
+		enumerations++
+		return previousList(st)
+	}
+	t.Cleanup(func() { listSaveProjectNames = previousList })
+
 	req2 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Second memory",
 		"content": "Another memory content",
@@ -4447,6 +4455,9 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 	text := callResultText(t, res2)
 	if strings.Contains(text, "Similar project") {
 		t.Fatalf("unexpected similar project warning on existing project, got %q", text)
+	}
+	if enumerations != 0 {
+		t.Errorf("established project save enumerated all project names %d times, want zero", enumerations)
 	}
 }
 

@@ -22,6 +22,8 @@ func runCodexWindowsManifestCommand(t *testing.T, command, input, port string) (
 func runCodexWindowsManifestCommandContext(t *testing.T, ctx context.Context, command, input, port string) (string, string, int) {
 	t.Helper()
 	run := exec.CommandContext(ctx, "cmd.exe")
+	// Bound inherited-pipe draining after cancellation as well as the command process.
+	run.WaitDelay = time.Second
 	run.SysProcAttr = &syscall.SysProcAttr{CmdLine: "/D /S /C " + command}
 	run.Env = append(os.Environ(), "ENGRAM_PORT="+port)
 	run.Stdin = strings.NewReader(input)

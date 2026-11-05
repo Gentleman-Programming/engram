@@ -22,6 +22,17 @@ import (
 
 const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref refs/tags/pi-vSEMVER [-root directory]
 
+Published Core observation (Windows/amd64 only):
+release-candidate -observe-published-core -archive ZIP -checksums FILE -context JSON [-execute]
+This separate mode requires reviewed identity pins and never approves a release.
+Without -execute it admits local bytes only; it never downloads or starts Core.
+
+Published Pi/Core persistence observation (Windows/amd64 only):
+release-candidate -observe-published-pair -archive ZIP -checksums FILE -pi-tarball TGZ -context JSON [-root REPO] [-execute]
+Requires independent Core/Pi pins and local Pi Git source. Execution uses Node24,
+fixed local TypeBox1.3.34 and disclosed registration/UI substitutes, not a Pi SDK.
+Without -execute it admits bytes only. Outcome is always blocked, exit 2.
+
 -core-ref  Required full core tag ref with strict SemVer.
 -pi-ref    Required full Pi tag ref with independent strict SemVer.
 -root      Candidate metadata directory (default: current directory).
@@ -31,7 +42,7 @@ const helpText = `Usage: release-candidate -core-ref refs/tags/vSEMVER -pi-ref r
 -observe-pi-inputs Also capture trusted selected Pi inputs and verify with selected Go.
 -observe-pi-package Bind -pi-tarball bytes to selected Pi source; requires observation.
 -observe-artifact-inputs Admit reviewed staging inputs only; never execute Core/Pi.
--observe-artifact-workflows Execute reviewed owned Core lifecycle; Pi workflows unavailable.
+-observe-artifact-workflows Execute owned Core/Pi bootstrap and five fixed HTTP workflows; observations never approve release.
 -staging-bundle Explicit local #1928 ZIP; requires an artifact observation mode.
 -staging-context Reviewed bounded JSON pins; requires an artifact observation mode.
 -core-source Full lowercase core commit ID for observation (40 or 64 hex digits).
@@ -46,7 +57,8 @@ Only literal package file/directory allowlists are supported, up to 4096 files
 and 64 MiB. Legacy validation never extracts; links/unexpected/missing content reject.
 Artifact-input observation materializes only owned validated Pi bytes, then removes them.
 It requires explicit source commits/refs and reviewed context, not publisher authentication.
-Missing/mismatched inputs remain non-passing; workflow execution stays unavailable.
+Missing/mismatched inputs remain non-passing. Admission alone never executes Core/Pi.
+Workflow opt-in reports observed cases; synthetic tests are not artifact execution proof.
 Export/validator success is not Pi parity or release approval.
 Assessment exits 1 (rejected) or 2 (blocked), with empty stderr.
 -assess cannot be combined with -pi-tarball, including an empty archive argument.
@@ -80,6 +92,12 @@ func main() {
 }
 
 func run(args []string, output io.Writer) error {
+	if len(args) > 0 && args[0] == "-observe-published-pair" {
+		return runPublishedPair(args[1:], output)
+	}
+	if len(args) > 0 && args[0] == "-observe-published-core" {
+		return runPublishedCore(args[1:], output)
+	}
 	flags := flag.NewFlagSet("release-candidate", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.Usage = func() {}

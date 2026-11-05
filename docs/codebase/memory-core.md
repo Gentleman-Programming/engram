@@ -87,11 +87,17 @@ save gate. No new user setting or schema migration is required.
 
 The ledger uses a plain insert in the same transaction as the observation and its sync mutation. Soft-deleted observations are not replayable or recoverable by lookup, but retain their ledger binding and fingerprint so changed payloads still conflict. Hard deletion preserves the operation as a tombstone through nullable `observation_id` and `ON DELETE SET NULL`; identical tombstone replays and unsupported fingerprint versions return `ErrObservationOperationExpired`. Committed-result lookup returns that same error for a soft-deleted or tombstoned operation, while a never-recorded operation remains a distinct zero-result lookup. Saves without an operation ID retain existing behavior and write no ledger row. The HTTP and Pi recovery contract built on this store behavior is described in [Replay-Safe Observation Saves](replay-safe-observation-saves.md).
 
+## Bounded context work
+
+For a positive `ContextOptions.MaxBytes`, context formatting applies a conservative SQL cap to pinned observations using the minimum rendered bullet size, retaining a smaller explicit pinned cap when supplied. It stops rendering entries after the byte budget is exceeded and uses the existing UTF-8-safe final clipping and truncation marker. Section query ordering and history reservations remain unchanged. Zero or negative byte budgets retain legacy unbounded behavior; the MCP pinned default remains unchanged. This bounds pinned row hydration and discarded formatting work, but SQLite can still scan and sort matching rows.
+
 ## Deferred relation diagnostics
 
 `referenced observation missing` means at least one endpoint identity is absent locally. `referenced observation effective project mismatch` means both identities exist, but the relation's project-scoped endpoint check fails. An observation's explicit project overrides its session project; blank observation projects inherit the session project. Check the endpoint and relation ownership rather than assuming another pull will supply a missing observation.
 
 Both diagnostics retain the same deferred retry lifecycle: the fifth failed replay marks the row dead. Eligible retry-cap dead relations can rearm only when the original scoped endpoint predicate is satisfied; legacy missing-error rows remain compatible. No project rewriting or automatic ownership repair occurs.
+
+Cloud import validates and decodes all still-pending chunks at the first relation classification, before using pending upserts or local endpoint identities (including soft-deleted observations) to resolve dependencies. Known historical payloads are read for delete evidence only when an endpoint remains unresolved, and at most once per import classification. Unavailable historical payloads remain best-effort evidence; unreadable or corrupt pending payloads still fail before that relation-bearing chunk applies. Imports without relations retain incremental validation. Unresolved endpoints can still require a historical scan; this does not make every import independent of history size.
 
 ## Explicit session identity replacement diagnostics
 

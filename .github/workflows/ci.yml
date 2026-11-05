@@ -245,6 +245,9 @@ jobs:
               const reason = outputs.get(key) ?? '';
               let classification = 'incomplete';
               if (!e.Test && reason.includes('[no test files]')) classification = 'no-test-files';
+              else if (e.Package === 'github.com/Gentleman-Programming/engram/v3/tools/release-candidate'
+                && e.Test === 'TestPublishedCoreContextMutation'
+                && reason.includes('published observation supports Windows amd64 only')) classification = 'foreign-os';
               else if (foreign.some(x => reason.includes(x))) classification = 'foreign-os';
               else if (capability.some(x => reason.includes(x))) classification = 'filesystem-capability';
               else if (['CLOUDSTORE_TEST_DSN not set', 'requires URL-style CLOUDSTORE_TEST_DSN and disposable PostgreSQL',
@@ -996,7 +999,8 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           $evidence = Join-Path $env:RUNNER_TEMP 'windows-suite/evidence'
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & go test -json ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"
+          # Keep build caches, but avoid expensive test-result input hashing after PASS.
+          & go test -json -count=1 ./... 1> "$evidence/suite.json" 2> "$evidence/stderr.txt"
           $suiteExit = $LASTEXITCODE
           $timer.Stop()
           @("exit_code=$suiteExit", "elapsed_seconds=$($timer.Elapsed.TotalSeconds)") |

@@ -2,6 +2,7 @@ package plugin_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,17 +18,11 @@ func TestSubagentStopPreservesUnicodeTransport(t *testing.T) {
 		if err != nil {
 			t.Skip("Git for Windows is required for its native curl regression")
 		}
-		var curl string
-		for _, root := range []string{filepath.Join(filepath.Dir(git), ".."), filepath.Join(filepath.Dir(git), "..", "..")} {
-			candidate := filepath.Join(root, "mingw64", "bin", "curl.exe")
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				curl = candidate
-				break
-			}
+		curl, err := gitNativeCurl(git)
+		if err != nil {
+			t.Skip(err)
 		}
-		if curl == "" {
-			t.Skip("Git's mingw64/bin/curl.exe is unavailable")
-		}
+		t.Logf("Git native curl: %s", curl)
 		// Exercise Git's actual Windows argv conversion, not a curl mock or
 		// whichever Unicode-capable curl happens to precede it in PATH.
 		bootstrap := filepath.Join(t.TempDir(), "curl.sh")
@@ -64,4 +59,49 @@ func TestSubagentStopPreservesUnicodeTransport(t *testing.T) {
 			}
 		})
 	}
+}
+
+// gitNativeCurl resolves only Git-bundled native curl, never a PATH/system substitute.
+func gitNativeCurl(git string) (string, error) {
+	for _, root := range []string{filepath.Join(filepath.Dir(git), ".."), filepath.Join(filepath.Dir(git), "..", "..")} {
+		for _, layout := range []string{"ucrt64", "mingw64"} {
+			candidate := filepath.Join(root, layout, "bin", "curl.exe")
+			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+				return filepath.Clean(candidate), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("Git native curl unavailable near %s", git)
+}
+
+func TestGitNativeCurlLayouts(t *testing.T) {
+	for _, gitDir := range []string{"cmd", "bin", "usr/bin", "mingw64/bin", "ucrt64/bin"} {
+		for _, layout := range []string{"mingw64", "ucrt64"} {
+			t.Run(gitDir+"/"+layout, func(t *testing.T) {
+				root := t.TempDir()
+				want := filepath.Join(root, layout, "bin", "curl.exe")
+				if err := os.MkdirAll(filepath.Dir(want), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(want, []byte("fixture, never executed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				got, err := gitNativeCurl(filepath.Join(root, filepath.FromSlash(gitDir), "git.exe"))
+				if err != nil || got != want {
+					t.Fatalf("curl = %q, %v; want %q", got, err, want)
+				}
+			})
+		}
+	}
+	t.Run("reject missing and directory without PATH fallback", func(t *testing.T) {
+		root := t.TempDir()
+		for _, layout := range []string{"mingw64", "ucrt64", "System32"} {
+			if err := os.MkdirAll(filepath.Join(root, layout, "bin", "curl.exe"), 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, err := gitNativeCurl(filepath.Join(root, "cmd", "git.exe")); err == nil || got != "" {
+			t.Fatalf("unexpected curl %q, %v", got, err)
+		}
+	})
 }

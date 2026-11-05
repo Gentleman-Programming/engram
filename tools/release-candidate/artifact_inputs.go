@@ -16,9 +16,10 @@ import (
 
 type artifactInputObservation struct {
 	sourceObservation
-	ArtifactInputs *artifactInputCheck `json:"artifactInputs,omitempty"`
-	Workflows      *sourceCheck        `json:"workflows"`
-	CoreRuntime    *artifactCoreCheck  `json:"coreRuntime,omitempty"`
+	ArtifactInputs *artifactInputCheck          `json:"artifactInputs,omitempty"`
+	Workflows      *artifactWorkflowObservation `json:"workflows"`
+	CoreRuntime    *artifactCoreCheck           `json:"coreRuntime,omitempty"`
+	PiBootstrap    *artifactPiCheck             `json:"piBootstrap,omitempty"`
 	runCore        bool
 }
 
@@ -60,9 +61,10 @@ func observeArtifactInputs(root, coreRef, piRef, version, piVersion, core, pi, b
 		Core:  sourceIdentity{VersionIntent: version, RefIntent: coreRef, RequestedCommit: core},
 		Pi:    sourceIdentity{VersionIntent: piVersion, RefIntent: piRef, RequestedCommit: pi},
 		Check: sourceCheck{Name: "staged-artifact-admission", State: "unavailable"}},
-		Workflows: &sourceCheck{Name: "artifact-workflows", State: "unavailable"}}
+		Workflows: &artifactWorkflowObservation{Name: "artifact-workflows", State: "unavailable"}}
 	r.runCore = execute
 	if execute {
+		r.PiBootstrap = &artifactPiCheck{Name: "pi-module-bootstrap-only", State: "unavailable", Cleanup: "not-started", Joined: true}
 		r.CoreRuntime = &artifactCoreCheck{Name: "production-core-lifecycle", State: "unavailable", Cleanup: "not-started", Joined: true}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -118,6 +120,10 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 			if r.PiPackage != nil {
 				r.PiPackage.State, r.PiPackage.Files = "unavailable", 0
 			}
+			if r.PiBootstrap != nil {
+				r.PiBootstrap.State = "unavailable"
+			}
+			r.invalidateWorkflowCases()
 		}
 	}()
 	input := filepath.Join(workspace, "bundle-pi.tgz")
@@ -139,11 +145,62 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 			return
 		}
 		before, beforeErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
-		r.CoreRuntime = runArtifactCore(ctx, measured.Core, measured.CoreSHA256, want.RunID)
+		peerSource := filepath.Join(root, "plugin", "pi", "node_modules", "typebox")
+		var peerBefore [32]byte
+		peerObserved, peerPresent, peerMeasured := false, false, false
+		peerUnchanged := func() bool {
+			_, err := os.Lstat(peerSource)
+			if err != nil && !os.IsNotExist(err) {
+				return false
+			}
+			present := err == nil
+			if !peerObserved {
+				peerObserved, peerPresent = true, present
+			} else if present != peerPresent {
+				return false
+			}
+			if !present {
+				return true
+			}
+			current, err := sourceTreeDigest(peerSource)
+			if err != nil || (peerMeasured && current != peerBefore) {
+				return false
+			}
+			if !peerMeasured {
+				peerBefore, peerMeasured = current, true
+			}
+			return true
+		}
+		materialize := func(destination string) bool {
+			if pkg.verifyInto(ctx, r.Pi.VersionIntent, destination).State != "passed" || !peerUnchanged() {
+				return false
+			}
+			return !peerPresent || copyPinnedTypeBox(root, filepath.Dir(destination)) == nil
+		}
+		r.CoreRuntime = runArtifactCoreWithPi(ctx, measured.Core, measured.CoreSHA256, want.RunID, materialize, r.PiBootstrap)
+		r.PiBootstrap.mutated = r.PiBootstrap.mutated || !peerUnchanged()
+		if r.PiBootstrap.mutated {
+			r.Check.State, r.PiPackage.State = "unavailable", "unavailable"
+			r.PiBootstrap.State = "unavailable"
+		}
+		if r.Check.State == "passed" && r.CoreRuntime.State == "passed" && r.PiBootstrap.State == "passed" {
+			r.Workflows = observeArtifactWorkflows(ctx, measured.Core, measured.CoreSHA256, want.RunID, materialize)
+			mutated := false
+			for _, c := range r.Workflows.Cases {
+				mutated = mutated || (c.PiRuntime != nil && c.PiRuntime.mutated)
+			}
+			mutated = mutated || !peerUnchanged()
+			if mutated {
+				r.Check.State, r.PiPackage.State, r.PiBootstrap.State = "unavailable", "unavailable", "unavailable"
+				r.invalidateWorkflowCases()
+			}
+		}
 		verified = pkg.verify(ctx, r.Pi.VersionIntent)
 		after, afterErr := sourceTreeDigest(filepath.Join(workspace, "materialized-pi"))
-		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" {
+		if beforeErr != nil || afterErr != nil || before != after || verified.State != "passed" || !peerUnchanged() {
 			r.Check.State, r.PiPackage.State, r.CoreRuntime.State = "unavailable", "unavailable", "unavailable"
+			r.PiBootstrap.State = "unavailable"
+			r.invalidateWorkflowCases()
 		}
 	}
 	// Recheck original measured inputs after source binding/materialization. This
@@ -155,5 +212,9 @@ func admitArtifactInputs(ctx context.Context, root, bundle, contextFile string, 
 		if r.CoreRuntime != nil {
 			r.CoreRuntime.State = "unavailable"
 		}
+		if r.PiBootstrap != nil {
+			r.PiBootstrap.State = "unavailable"
+		}
+		r.invalidateWorkflowCases()
 	}
 }
