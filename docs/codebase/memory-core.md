@@ -51,6 +51,15 @@ For schema details, use [DOCS.md — Database Schema](../../DOCS.md#database-sch
 - New-record write tools resolve the project from cwd/config or a bound session; do not invent a project when there is ambiguity. Update/delete assertions do not change save/session recovery rules.
 - Search is progressive: compact results first, `mem_get_observation` only when full content is needed.
 
+## Startup schema batches
+
+Startup reads column metadata once per explicit additive-column batch, then adds
+missing columns in their original order. The column set is local to that call;
+later batches re-read the schema, including after a legacy table rebuild. Every-open
+repairs, schema-version decisions and migration locks remain unchanged. A metadata
+read or close error stops the batch before any column is added; an ALTER failure
+stops later additions, and a retry discovers the actual partially updated schema.
+
 ## Save conflict candidate relevance
 
 `mem_save` keeps the original OR-based FTS query and raw BM25 scores, then applies

@@ -9387,17 +9387,20 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			s := newTestStore(t)
 			origQueryIt := s.hooks.queryIt
 			called := 0
+			legacyErr := errors.New("forced legacy call failure")
 			s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
 				if strings.Contains(query, "PRAGMA table_info(observations)") {
 					called++
-					if called == 9 {
-						return nil, errors.New("forced legacy call failure")
+					// The first read covers the additive batch; the second
+					// belongs to migrateLegacyObservationsTable.
+					if called == 2 {
+						return nil, legacyErr
 					}
 				}
 				return origQueryIt(db, query, args...)
 			}
-			if err := s.migrate(); err == nil {
-				t.Fatalf("expected migrate to propagate legacy migrate failure")
+			if err := s.migrate(); !errors.Is(err, legacyErr) || called != 2 {
+				t.Fatalf("legacy failure: err=%v reads=%d, want %v after 2 reads", err, called, legacyErr)
 			}
 		})
 	})

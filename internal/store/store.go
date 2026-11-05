@@ -1623,10 +1623,7 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	observationColumns := []struct {
-		name       string
-		definition string
-	}{
+	observationColumns := []migrationColumn{
 		{name: "sync_id", definition: "TEXT"},
 		{name: "scope", definition: "TEXT NOT NULL DEFAULT 'project'"},
 		{name: "topic_key", definition: "TEXT"},
@@ -1638,22 +1635,18 @@ func (s *Store) migrate() error {
 		{name: "updated_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "deleted_at", definition: "TEXT"},
 	}
-	for _, c := range observationColumns {
-		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
-			return err
-		}
+	if err := s.addColumnsIfNotExists("observations", observationColumns...); err != nil {
+		return err
 	}
 
 	if err := s.migrateLegacyObservationsTable(); err != nil {
 		return err
 	}
-	if err := s.addColumnIfNotExists("sessions", "ownership_mode", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sessions", "runtime_lease_expires_at", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sessions", "local_creation_project", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("sessions",
+		migrationColumn{"ownership_mode", "TEXT"},
+		migrationColumn{"runtime_lease_expires_at", "TEXT"},
+		migrationColumn{"local_creation_project", "TEXT"},
+	); err != nil {
 		return err
 	}
 	// Legacy rows remain unclassified unless their persisted identity proves a
@@ -1662,29 +1655,27 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("user_prompts",
+		migrationColumn{"sync_id", "TEXT"},
+		migrationColumn{"source_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_session_id", "TEXT"},
+		migrationColumn{"local_creation_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_project", "TEXT"},
+	); err != nil {
 		return err
 	}
-	if err := s.addColumnIfNotExists("user_prompts", "source_inbox_id", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("prompt_tombstones",
+		migrationColumn{"source_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_session_id", "TEXT"},
+		migrationColumn{"local_creation_inbox_id", "TEXT"},
+		migrationColumn{"local_creation_project", "TEXT"},
+	); err != nil {
 		return err
 	}
-	for _, column := range []string{"local_creation_session_id", "local_creation_inbox_id", "local_creation_project"} {
-		if err := s.addColumnIfNotExists("user_prompts", column, "TEXT"); err != nil {
-			return err
-		}
-	}
-	if err := s.addColumnIfNotExists("prompt_tombstones", "source_inbox_id", "TEXT"); err != nil {
-		return err
-	}
-	for _, column := range []string{"local_creation_session_id", "local_creation_inbox_id", "local_creation_project"} {
-		if err := s.addColumnIfNotExists("prompt_tombstones", column, "TEXT"); err != nil {
-			return err
-		}
-	}
-	if err := s.addColumnIfNotExists("sync_delete_tombstones", "superseded_by_sync_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sync_delete_tombstones", "last_remote_mutation_seq", "INTEGER"); err != nil {
+	if err := s.addColumnsIfNotExists("sync_delete_tombstones",
+		migrationColumn{"superseded_by_sync_id", "TEXT"},
+		migrationColumn{"last_remote_mutation_seq", "INTEGER"},
+	); err != nil {
 		return err
 	}
 	if err := s.migrateFTS(); err != nil {
@@ -1712,29 +1703,23 @@ func (s *Store) migrate() error {
 	}
 
 	// Project-scoped sync: add project column to sync_mutations and enrollment table.
-	if err := s.addColumnIfNotExists("sync_mutations", "project", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	for _, c := range []struct{ name, definition string }{
+	if err := s.addColumnsIfNotExists("sync_mutations", []migrationColumn{
+		{"project", "TEXT NOT NULL DEFAULT ''"},
 		{"disposition", "TEXT NOT NULL DEFAULT 'pending'"},
 		{"disposition_reason", "TEXT"},
 		{"disposition_evidence", "TEXT"},
 		{"disposition_at", "TEXT"},
-	} {
-		if err := s.addColumnIfNotExists("sync_mutations", c.name, c.definition); err != nil {
-			return err
-		}
+	}...); err != nil {
+		return err
 	}
 	if _, err := s.execHook(s.db, `UPDATE sync_mutations SET disposition = 'pending' WHERE disposition IS NULL OR disposition = ''`); err != nil {
 		return err
 	}
-	if err := s.addColumnIfNotExists("sync_state", "reason_code", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sync_state", "reason_message", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.addColumnIfNotExists("sync_state", "last_success_at", "TEXT"); err != nil {
+	if err := s.addColumnsIfNotExists("sync_state",
+		migrationColumn{"reason_code", "TEXT"},
+		migrationColumn{"reason_message", "TEXT"},
+		migrationColumn{"last_success_at", "TEXT"},
+	); err != nil {
 		return err
 	}
 	if err := s.migrateSyncChunksTable(); err != nil {
@@ -1743,13 +1728,10 @@ func (s *Store) migrate() error {
 
 	// ── Phase: memory-conflict-surfacing — B.1 ──────────────────────────────
 	// Additive nullable columns on observations for conflict surfacing, decay,
-	// and embedding reservation.  All applied via addColumnIfNotExists so that
+	// and embedding reservation. Applied as a fresh schema batch so that
 	// running migrate() on a fresh DB (where CREATE TABLE already added these
 	// columns) is a no-op.
-	memConflictObsCols := []struct {
-		name       string
-		definition string
-	}{
+	memConflictObsCols := []migrationColumn{
 		{name: "review_after", definition: "TEXT"},
 		{name: "superseded_by_sync_id", definition: "TEXT"},
 		{name: "expires_at", definition: "TEXT"},
@@ -1757,10 +1739,8 @@ func (s *Store) migrate() error {
 		{name: "embedding_model", definition: "TEXT"},
 		{name: "embedding_created_at", definition: "TEXT"},
 	}
-	for _, c := range memConflictObsCols {
-		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
-			return err
-		}
+	if err := s.addColumnsIfNotExists("observations", memConflictObsCols...); err != nil {
+		return err
 	}
 
 	// ── Phase: memory-conflict-surfacing — B.2 ──────────────────────────────
@@ -1920,10 +1900,7 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	deferredColumns := []struct {
-		name       string
-		definition string
-	}{
+	deferredColumns := []migrationColumn{
 		{name: "target_key", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "remote_seq", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{name: "entity_key", definition: "TEXT NOT NULL DEFAULT ''"},
@@ -1940,10 +1917,8 @@ func (s *Store) migrate() error {
 		// at all, which is itself one of the reasons its row is dead.
 		{name: "payload_sync_id", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
-	for _, c := range deferredColumns {
-		if err := s.addColumnIfNotExists("sync_apply_deferred", c.name, c.definition); err != nil {
-			return err
-		}
+	if err := s.addColumnsIfNotExists("sync_apply_deferred", deferredColumns...); err != nil {
+		return err
 	}
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_sad_scope_status_seen
@@ -13384,12 +13359,23 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 	return results, rows.Err()
 }
 
-func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
+type migrationColumn struct {
+	name       string
+	definition string
+}
+
+// addColumnsIfNotExists reads schema once per ordered migration batch. The set
+// is invocation-local: later batches re-read schema after intervening rebuilds.
+func (s *Store) addColumnsIfNotExists(tableName string, columns ...migrationColumn) error {
+	if len(columns) == 0 {
+		return nil
+	}
 	rows, err := s.queryItHook(s.db, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
 		return err
 	}
 
+	existing := make(map[string]bool)
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -13399,10 +13385,7 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
 			return closeRowsWithError(rows, err)
 		}
-		if name == columnName {
-			rows.Close()
-			return nil
-		}
+		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -13412,8 +13395,16 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 		return err
 	}
 
-	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, definition))
-	return err
+	for _, column := range columns {
+		if existing[column.name] {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, column.name, column.definition)); err != nil {
+			return err
+		}
+		existing[column.name] = true
+	}
+	return nil
 }
 
 func (s *Store) migrateSyncChunksTable() error {
