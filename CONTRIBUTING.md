@@ -250,7 +250,7 @@ checks alone do not establish the new binary-backed native execution.
 
 The native Codex Windows test runners report command-context cancellation
 separately from ordinary child exit codes, retaining elapsed time and partial
-streams for direct PowerShell calls. The default command deadlines remain five
+streams for PowerShell-file helper calls. The default command deadlines remain five
 seconds for manifest commands and eight seconds for PowerShell files. These
 diagnostics identify a canceled invocation; they do not explain why a hosted
 runner exceeded its deadline.
