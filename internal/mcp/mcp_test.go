@@ -6472,13 +6472,26 @@ func TestAmbiguousRecoveryReadHintKeepsSameReadTool(t *testing.T) {
 		Error:             project.ErrAmbiguousProject,
 		AvailableProjects: []string{"read-a", "read-b"},
 	}
-	body := callResultJSON(t, readProjectErrorResult(NewSessionActivity(time.Minute), res, res.Error))
+	for _, name := range res.AvailableProjects {
+		if err := os.MkdirAll(filepath.Join(res.Path, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	activity := NewSessionActivity(time.Minute)
+	body := callResultJSON(t, readProjectErrorResult(activity, res, res.Error))
 	hint, ok := body["hint"].(string)
 	if !ok || !strings.Contains(hint, "retry the same read tool") || strings.Contains(hint, "mem_save") {
 		t.Fatalf("incorrect read guidance: %v", body)
 	}
 	if body["error_code"] != "ambiguous_project" || body["recovery_token"] == nil || body["project_source"] != "ambiguous" {
 		t.Fatalf("missing compatible structured ambiguity: %v", body)
+	}
+	token, ok := body["recovery_token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("missing usable recovery token: %v", body)
+	}
+	if !activity.ValidateAmbiguousProjectRecoveryToken(defaultSessionID(""), token, "read-a", res.AvailableProjects, res.Path) {
+		t.Fatal("issued recovery token did not validate for its candidate and context")
 	}
 	if !reflect.DeepEqual(body["available_projects"], []any{"read-a", "read-b"}) || body["project_path"] != res.Path {
 		t.Fatalf("lost ambiguity context: %v", body)
