@@ -119,12 +119,13 @@ var (
 	checkForUpdates         = versioncheck.CheckLatest
 	migrateOrphanedDatabase = migrateOrphanedDB
 
-	setupSupportedAgents         = setup.SupportedAgents
-	setupInstallAgent            = setup.Install
-	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
-	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
-	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
-	scanInputLine                = fmt.Scanln
+	setupSupportedAgents                   = setup.SupportedAgents
+	setupInstallAgent                      = setup.Install
+	setupAddClaudeCodeAllowlist            = setup.AddClaudeCodeAllowlist
+	setupAddClaudeCodeMemoryWriteAllowlist = setup.AddClaudeCodeMemoryWriteAllowlist
+	setupEnsureClaudeCodeUserMCP           = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim              = setup.VerifyClaudeCodeSlimCapability
+	scanInputLine                          = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -3558,14 +3559,15 @@ func cmdSetup(cfg store.Config) {
 	args := os.Args[2:]
 
 	var (
-		helpSeen        bool
-		protocolRaw     string
-		protocolFlag    bool
-		mcpOnly         bool
-		slug            string
-		slugSeen        bool
-		extraBareSeen   bool
-		unknownFlagSeen bool
+		helpSeen          bool
+		protocolRaw       string
+		protocolFlag      bool
+		mcpOnly           bool
+		allowMemoryWrites bool
+		slug              string
+		slugSeen          bool
+		extraBareSeen     bool
+		unknownFlagSeen   bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -3589,6 +3591,8 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--allow-memory-writes":
+			allowMemoryWrites = true
 		case token == "--mcp-only":
 			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
@@ -3609,6 +3613,9 @@ func cmdSetup(cfg store.Config) {
 	switch {
 	case helpSeen:
 		printSetupUsage()
+		return
+	case allowMemoryWrites && (!slugSeen || slug != "claude-code" || mcpOnly || extraBareSeen || unknownFlagSeen):
+		fatal(fmt.Errorf("--allow-memory-writes requires claude-code and cannot be combined with --mcp-only, unknown flags or extra arguments"))
 		return
 	case extraBareSeen:
 		fmt.Fprintln(os.Stderr, "usage: engram setup [<agent>] [--protocol=slim|full]")
@@ -3638,6 +3645,17 @@ func cmdSetup(cfg store.Config) {
 		result, err := setupInstallAgent(slug)
 		if err != nil {
 			fatal(err)
+			return
+		}
+		if allowMemoryWrites {
+			if !result.MCPConfigured {
+				fatal(fmt.Errorf("--allow-memory-writes requires successful Claude Code MCP registration; no permissions added"))
+				return
+			}
+			if err := setupAddClaudeCodeMemoryWriteAllowlist(); err != nil {
+				fatal(err)
+				return
+			}
 		}
 		if protocolFlag {
 			mode := resolveProtocolModeFlag(protocolRaw)
@@ -3646,7 +3664,7 @@ func cmdSetup(cfg store.Config) {
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
-		printPostInstall(result)
+		printPostInstallWithMemoryWrites(result, allowMemoryWrites)
 	default:
 		// No slug: interactive menu. Mode (if any) applies to whichever
 		// slug the user selects.
@@ -3719,6 +3737,11 @@ func printSetupUsage() {
 	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
 	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
 	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
+	fmt.Println("  --allow-memory-writes  Claude Code only: explicitly allow the finite memory-write")
+	fmt.Println("                          tool set for both MCP prefixes, without reading stdin.")
+	fmt.Println("                          Bypasses prompts and auto-mode classification for these tools;")
+	fmt.Println("                          excludes mem_delete and mem_merge_projects. Session checks remain.")
+	fmt.Println("                          Cannot be combined with --mcp-only.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -3848,6 +3871,11 @@ func meetsProtocolVersionFloor(v string) bool {
 // printPostInstall prints the agent-specific next steps after a successful
 // setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
+	printPostInstallWithMemoryWrites(result, false)
+}
+
+// memoryWritesAllowed means the explicit, bounded settings write already succeeded.
+func printPostInstallWithMemoryWrites(result *setup.Result, memoryWritesAllowed bool) {
 	switch result.Agent {
 	case "opencode":
 		fmt.Println("\nNext steps:")
@@ -3868,22 +3896,29 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Pi so packages and MCP config are reloaded")
 		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
-		// Offer to add engram tools to the permissions allowlist
-		fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
-		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
-		fmt.Print("Add to allowlist? (y/N): ")
-		var answer string
-		scanInputLine(&answer)
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		if answer == "y" || answer == "yes" {
-			if err := setupAddClaudeCodeAllowlist(); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
-				fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
-			} else {
-				fmt.Println("  ✓ Engram tools added to allowlist")
-			}
+		if memoryWritesAllowed {
+			fmt.Println("  Claude Code memory-write permissions added for both Engram MCP prefixes.")
+			fmt.Println("  These tools bypass permission prompts and the auto-mode classifier; session checks still apply.")
+			fmt.Println("  mem_delete and mem_merge_projects were not added; existing permissions remain unchanged.")
 		} else {
-			fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+			// Offer to add engram tools to the permissions allowlist
+			fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
+			fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
+			fmt.Print("Add to allowlist? (y/N): ")
+			var answer string
+			// EOF or unreadable input leaves the default decision as no consent.
+			_, _ = scanInputLine(&answer)
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer == "y" || answer == "yes" {
+				if err := setupAddClaudeCodeAllowlist(); err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
+					fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+				} else {
+					fmt.Println("  ✓ Engram tools added to allowlist")
+				}
+			} else {
+				fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
+			}
 		}
 
 		fmt.Println("\nNext steps:")
